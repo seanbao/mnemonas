@@ -1,6 +1,5 @@
-import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { Card, CardBody, CardHeader, Skeleton, Button, Checkbox, Chip, addToast } from '@heroui/react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Card, CardBody, CardHeader, Skeleton, Button, Chip, addToast } from '@heroui/react'
 import { 
   HardDrive, 
   FileBox, 
@@ -25,21 +24,20 @@ import {
   Database,
   Archive,
   RefreshCw,
-  CheckCircle2,
-  ChevronDown,
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { ApiError as FilesApiError, getAppVersion, getHealth, getStorageStats, listBackupJobs, type BackupJob } from '@/api/files'
 import { ApiError as ActivityApiError, listActivity, getActionLabel, getActionColor, type ActionType, type ActivityEntry } from '@/api/activity'
-import { acknowledgeSetup, getSetupStatus, type SetupStatusResponse } from '@/api/setup'
+import { acknowledgeSetup, deferSetup, getSetupReadiness, SetupError as SetupApiError, type DeferSetupRequest, type SetupReadinessAction } from '@/api/setup'
 import { formatBytes, cn, formatRelativeTime, formatUptimeSeconds } from '@/lib/utils'
 import { areDiskStatsAvailable, clampUsagePercent, formatUsagePercent, getDiskSpaceStatus } from '@/lib/storageStats'
 import { backupJobNeedsAttention, getBackupAttentionNextStepSummary, getBackupAttentionReasonSummary } from '@/lib/backupAttention'
 import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
 import { getUserFacingErrorDescription } from '@/lib/apiMessages'
-import { getRedactedDiagnosticMessage } from '@/lib/diagnosticMessages'
+import { getSetupReadinessRefetchInterval } from '@/lib/setupReadinessPolling'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { StatCard } from '@/components/ui/StatCard'
+import { SetupReadinessCard } from '@/components/dashboard'
 import { useIsAdmin, useUser } from '@/stores/auth'
 
 interface QuickActionProps {
@@ -128,7 +126,8 @@ function getRecentActivityErrorPresentation(error: unknown): { title: string; de
 function isUnavailableRefreshError(error: unknown): boolean {
   return (
     (error instanceof FilesApiError && error.isUnavailable) ||
-    (error instanceof ActivityApiError && error.isUnavailable)
+    (error instanceof ActivityApiError && error.isUnavailable) ||
+    (error instanceof SetupApiError && error.isUnavailable)
   )
 }
 
@@ -162,96 +161,6 @@ function getDashboardRefreshErrorToast(errors: Array<unknown>): { title: string;
 function getBackupIssueCount(jobs: BackupJob[]): number {
   return jobs.filter(backupJobNeedsAttention).length
 }
-
-type SetupSafetyTone = 'default' | 'success' | 'warning'
-
-function formatWebDAVAuthType(authType: string): string {
-  switch (authType) {
-    case 'users':
-      return '用户认证'
-    case 'basic':
-      return 'Basic Auth'
-    case 'none':
-      return '匿名'
-    default:
-      return '未知认证方式'
-  }
-}
-
-function getSetupSafetyHighlights(status: SetupStatusResponse): Array<{ label: string; value: string; tone: SetupSafetyTone }> {
-  const webdavAuthType = formatWebDAVAuthType(status.webdav_auth_type)
-  const highlights: Array<{ label: string; value: string; tone: SetupSafetyTone }> = [
-    { label: '认证', value: status.auth_enabled ? '已启用' : '需启用', tone: status.auth_enabled ? 'success' : 'warning' },
-    { label: '分享', value: status.share_enabled === false ? '未启用' : '可用', tone: 'default' },
-    {
-      label: 'WebDAV',
-      value: status.webdav_enabled ? webdavAuthType : '未启用',
-      tone: status.webdav_enabled && status.webdav_auth_type === 'none' ? 'warning' : 'default',
-    },
-  ]
-
-  if (status.allow_unsafe_no_auth !== undefined) {
-    highlights.push({
-      label: '无认证例外',
-      value: status.allow_unsafe_no_auth ? '已开启' : '关闭',
-      tone: status.allow_unsafe_no_auth ? 'warning' : 'default',
-    })
-  }
-
-  return highlights
-}
-
-function getSetupSafetyWarning(status: SetupStatusResponse): string | null {
-  const warnings: string[] = []
-  if (!status.auth_enabled) {
-    warnings.push('Web UI/API 认证未启用')
-  }
-  if (!status.auth_enabled && status.share_enabled !== false) {
-    warnings.push('分享在无认证保护下可访问')
-  }
-  if (status.webdav_enabled && status.webdav_auth_type === 'none') {
-    warnings.push('WebDAV 匿名访问已启用')
-  }
-  if (status.allow_unsafe_no_auth === true) {
-    warnings.push('无认证暴露例外已开启')
-  }
-  if (warnings.length === 0) {
-    return null
-  }
-  return `${warnings.join('，')}；仅适合受控内网或外层访问控制，公网部署前应先处理。`
-}
-
-function getSetupChecklistProgressText(remainingItems: number): string {
-  if (remainingItems === 0) {
-    return '首次部署检查已完成，可以关闭首次运行提示。'
-  }
-  return `还需确认 ${remainingItems} 项后才能关闭首次运行提示。`
-}
-
-const getNonBlankToastDescription = getRedactedDiagnosticMessage
-
-const setupChecklistItems = [
-  {
-    id: 'initial-password',
-    label: '初始登录凭据已处理',
-    description: '确认已完成首次登录，并已修改密码或妥善处理 initial-password.txt。',
-  },
-  {
-    id: 'admin-redundancy',
-    label: '至少保留一个可用管理员',
-    description: '确认管理员账号可登录，生产环境建议准备第二个管理员。',
-  },
-  {
-    id: 'backup-plan',
-    label: '备份位置与恢复演练已规划',
-    description: '外置盘或远端备份不应位于同一个数据目录内。',
-  },
-  {
-    id: 'public-entry',
-    label: '公网访问仅通过 HTTPS 反向代理',
-    description: '不要把 8080、9090 或 9091 后端端口直接暴露到公网。',
-  },
-] as const
 
 function getBackupOverview(
   isAdmin: boolean,
@@ -366,12 +275,11 @@ function RecentActivityItem({ entry }: { entry: ActivityEntry }) {
 
 export function DashboardPage() {
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const isAdmin = useIsAdmin()
   const user = useUser()
-  const [isAcknowledgingSetup, setIsAcknowledgingSetup] = useState(false)
-  const [setupChecklist, setSetupChecklist] = useState<Record<string, boolean>>({})
-  const [isSetupExpanded, setIsSetupExpanded] = useState(false)
   const authScopeKey = user?.id ?? 'anonymous'
+  const setupReadinessQueryKey = ['setup-readiness', authScopeKey] as const
   const { rootPath, hasInvalidHomeDir } = resolveUserHomeScope(user)
   const homeScopeKey = hasInvalidHomeDir ? '__invalid__' : (rootPath ?? '/')
   
@@ -406,15 +314,40 @@ export function DashboardPage() {
     enabled: isAdmin,
     refetchInterval: 60000,
   })
-  const { data: setupStatus, error: setupStatusError, refetch: refetchSetupStatus } = useQuery({
-    queryKey: ['setup-status', authScopeKey],
-    queryFn: ({ signal }) => getSetupStatus({ signal }),
+  const { data: setupReadiness, error: setupReadinessError, refetch: refetchSetupReadiness, isFetching: setupReadinessFetching } = useQuery({
+    queryKey: setupReadinessQueryKey,
+    queryFn: ({ signal }) => getSetupReadiness({ signal }),
     enabled: isAdmin,
     staleTime: 30000,
+    refetchInterval: (query) => getSetupReadinessRefetchInterval(query.state.data),
+  })
+
+  const completeSetupMutation = useMutation({
+    mutationFn: () => acknowledgeSetup(),
+    onSuccess: async (readiness) => {
+      queryClient.setQueryData(setupReadinessQueryKey, readiness)
+      await refetchSetupReadiness()
+      addToast({ title: '首次设置已完成', color: 'success' })
+    },
+    onError: async () => {
+      await refetchSetupReadiness()
+    },
+  })
+
+  const deferSetupMutation = useMutation({
+    mutationFn: (request: DeferSetupRequest) => deferSetup(request),
+    onSuccess: async (readiness) => {
+      queryClient.setQueryData(setupReadinessQueryKey, readiness)
+      await refetchSetupReadiness()
+      addToast({ title: '首次设置提醒已延期', color: 'success' })
+    },
+    onError: async () => {
+      await refetchSetupReadiness()
+    },
   })
 
   const isLoading = healthLoading || statsLoading || versionLoading
-  const hasPartialError = Boolean(healthError || statsError || versionError || recentActivityError || backupError || setupStatusError)
+  const hasPartialError = Boolean(healthError || statsError || versionError || recentActivityError || backupError || setupReadinessError)
   const recentActivityErrorPresentation = recentActivityError
     ? getRecentActivityErrorPresentation(recentActivityError)
     : null
@@ -426,7 +359,7 @@ export function DashboardPage() {
       refetchVersion(),
       hasInvalidHomeDir ? Promise.resolve({ error: null }) : refetchRecentActivity(),
       isAdmin ? refetchBackupJobs() : Promise.resolve({ error: null }),
-      isAdmin ? refetchSetupStatus() : Promise.resolve({ error: null }),
+      isAdmin ? refetchSetupReadiness() : Promise.resolve({ error: null }),
     ])
     const refreshErrors = [
       healthResult.error,
@@ -445,35 +378,23 @@ export function DashboardPage() {
     addToast({ title: '首页已刷新', color: 'success' })
   }
 
-  const handleAcknowledgeSetup = async () => {
-    const isSetupChecklistComplete = setupChecklistItems.every((item) => setupChecklist[item.id])
-    if (!isSetupChecklistComplete) {
-      addToast({
-        title: '请先完成首次部署检查',
-        description: '逐项确认后再关闭首次运行提示。',
-        color: 'warning',
-      })
-      return
-    }
-
-    setIsAcknowledgingSetup(true)
-    try {
-      const result = await acknowledgeSetup()
-      await refetchSetupStatus()
-      setSetupChecklist({})
-      addToast({
-        title: result.warning ? '首次部署检查已确认，但存在警告' : '首次部署检查已确认',
-        description: result.warning ? getNonBlankToastDescription(result.message) : undefined,
-        color: result.warning ? 'warning' : 'success',
-      })
-    } catch (error) {
-      addToast({
-        title: '确认初始化失败',
-        description: getUserFacingErrorDescription(error),
-        color: 'danger',
-      })
-    } finally {
-      setIsAcknowledgingSetup(false)
+  const handleSetupAction = (action: SetupReadinessAction) => {
+    switch (action) {
+      case 'change_password':
+        navigate(setupReadiness?.summary.password_change_required_admin_count
+          ? '/users?filter=password-change-required'
+          : '/settings')
+        return
+      case 'manage_users':
+        navigate('/users')
+        return
+      case 'create_backup':
+      case 'run_backup':
+      case 'run_restore_drill':
+        navigate('/maintenance')
+        return
+      case 'review_security':
+        navigate('/settings')
     }
   }
 
@@ -535,9 +456,6 @@ export function DashboardPage() {
     ? `${formatUsagePercent(stats?.diskUsageRatio)} 已用`
     : hasStorageData ? `已用 ${storageUsageValue}，磁盘容量统计不可用` : '统计不可用'
   const backupOverview = getBackupOverview(isAdmin, backupJobs, backupLoading, backupError)
-  const isSetupChecklistComplete = setupChecklistItems.every((item) => setupChecklist[item.id])
-  const remainingSetupChecklistItems = setupChecklistItems.filter((item) => !setupChecklist[item.id]).length
-  const setupSafetyWarning = setupStatus ? getSetupSafetyWarning(setupStatus) : null
 
   const statsCards = [
     {
@@ -786,111 +704,47 @@ export function DashboardPage() {
         </CardBody>
       </Card>
 
-      {setupStatus?.is_first_run && (
-        <Card className="border-accent-primary/25 bg-accent-primary/5 shadow-none">
-          <CardBody className="gap-0 p-0">
-            <button
-              type="button"
-              aria-expanded={isSetupExpanded}
-              aria-controls="first-setup-tasks"
-              aria-label={`${isSetupExpanded ? '收起' : '展开'}首次设置任务`}
-              className="flex w-full min-w-0 items-center justify-between gap-3 rounded-xl px-4 py-3 text-left outline-none transition-colors hover:bg-accent-primary/5 focus-visible:ring-2 focus-visible:ring-primary/40 sm:px-5 sm:py-4"
-              onClick={() => setIsSetupExpanded((current) => !current)}
-            >
-              <span className="flex min-w-0 items-start gap-3">
-                <CheckCircle2 size={18} className="mt-0.5 shrink-0 text-accent-primary" aria-hidden={true} />
-                <span className="min-w-0">
-                  <span className="block text-sm font-medium text-foreground">首次设置</span>
-                  <span className="block text-xs text-default-600">
-                    已完成 {setupChecklistItems.length - remainingSetupChecklistItems}/{setupChecklistItems.length} 项
-                    <span aria-hidden={true}> · </span>
-                    {setupSafetyWarning ? '安全状态需要处理' : '安全状态可继续确认'}
-                  </span>
-                </span>
-              </span>
-              <span className="flex shrink-0 items-center gap-2">
-                <Chip
-                  size="sm"
-                  variant="flat"
-                  color={isSetupChecklistComplete ? 'success' : 'primary'}
-                  className="hidden rounded-lg sm:inline-flex"
-                >
-                  {isSetupChecklistComplete ? '可关闭提示' : `${remainingSetupChecklistItems} 项待完成`}
-                </Chip>
-                <ChevronDown
-                  size={18}
-                  aria-hidden={true}
-                  className={cn('text-default-500 transition-transform', isSetupExpanded && 'rotate-180')}
-                />
-              </span>
-            </button>
+      {isAdmin && setupReadiness && setupReadiness.lifecycle !== 'completed' && (
+        <SetupReadinessCard
+          readiness={setupReadiness}
+          isRetrying={setupReadinessFetching}
+          isCompleting={completeSetupMutation.isPending}
+          isDeferring={deferSetupMutation.isPending}
+          mutationError={completeSetupMutation.error
+            ? getUserFacingErrorDescription(completeSetupMutation.error)
+            : deferSetupMutation.error
+              ? getUserFacingErrorDescription(deferSetupMutation.error)
+              : null}
+          onRetry={() => {
+            void refetchSetupReadiness()
+          }}
+          onAction={handleSetupAction}
+          onComplete={() => completeSetupMutation.mutate()}
+          onDefer={(request) => deferSetupMutation.mutate(request)}
+        />
+      )}
 
-            {isSetupExpanded && (
-              <div id="first-setup-tasks" className="space-y-3 border-t border-divider px-4 py-4 sm:space-y-4 sm:px-5">
-                <div className="flex flex-wrap gap-2" aria-label="首次设置安全状态">
-                  <Chip
-                    size="sm"
-                    variant="flat"
-                    color={isSetupChecklistComplete ? 'success' : 'primary'}
-                    className="rounded-lg"
-                  >
-                    {isSetupChecklistComplete ? '可关闭提示' : `${remainingSetupChecklistItems} 项待确认`}
-                  </Chip>
-                  {getSetupSafetyHighlights(setupStatus).map((item) => (
-                    <Chip key={item.label} size="sm" variant="flat" color={item.tone} className="rounded-lg">
-                      {item.label}：{item.value}
-                    </Chip>
-                  ))}
-                </div>
-                {setupSafetyWarning && (
-                  <div className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-default-700">
-                    {setupSafetyWarning}
-                  </div>
-                )}
-                <div className="grid grid-cols-1 gap-1.5 sm:gap-2 md:grid-cols-2">
-                  {setupChecklistItems.map((item) => (
-                    <Checkbox
-                      key={item.id}
-                      aria-label={`${item.label}。${item.description}`}
-                      isSelected={setupChecklist[item.id] === true}
-                      onValueChange={(selected) => {
-                        setSetupChecklist((current) => ({ ...current, [item.id]: selected }))
-                      }}
-                      className="m-0 min-h-0 rounded-lg bg-content1/60 px-2.5 py-2 sm:px-3"
-                      classNames={{
-                        label: 'w-full',
-                      }}
-                    >
-                      <span className="block text-xs font-medium text-foreground">{item.label}</span>
-                      <span className="hidden text-xs text-default-500 sm:block">{item.description}</span>
-                    </Checkbox>
-                  ))}
-                </div>
-                <p className="hidden text-xs text-default-600 sm:block">
-                  {getSetupChecklistProgressText(remainingSetupChecklistItems)}
-                </p>
-                <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-row sm:flex-wrap sm:items-center">
-                  <Button size="sm" variant="flat" className="w-full rounded-lg sm:w-auto" onPress={() => navigate('/users')}>
-                    用户
-                  </Button>
-                  <Button size="sm" variant="flat" className="w-full rounded-lg sm:w-auto" onPress={() => navigate('/maintenance')}>
-                    备份
-                  </Button>
-                  <Button size="sm" variant="flat" className="w-full rounded-lg sm:w-auto" onPress={() => navigate('/settings')}>
-                    公网设置
-                  </Button>
-                  <Button
-                    size="sm"
-                    className="w-full rounded-lg bg-accent-primary text-white sm:w-auto"
-                    isDisabled={!isSetupChecklistComplete}
-                    isLoading={isAcknowledgingSetup}
-                    onPress={handleAcknowledgeSetup}
-                  >
-                    {isSetupChecklistComplete ? '已确认' : `还需确认 ${remainingSetupChecklistItems} 项`}
-                  </Button>
-                </div>
+      {isAdmin && setupReadinessError && !setupReadiness && (
+        <Card className="border-warning/30 bg-warning/5 shadow-none" role="region" aria-label="首次设置检查加载失败">
+          <CardBody className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-start gap-3">
+              <AlertCircle size={18} className="mt-0.5 shrink-0 text-warning" aria-hidden="true" />
+              <div>
+                <p className="text-sm font-medium text-foreground">首次设置检查加载失败</p>
+                <p className="text-xs text-default-600">无法读取自动检测结果，请重新检查。</p>
               </div>
-            )}
+            </div>
+            <Button
+              size="sm"
+              variant="flat"
+              className="min-h-11 rounded-lg"
+              isLoading={setupReadinessFetching}
+              onPress={() => {
+                void refetchSetupReadiness()
+              }}
+            >
+              重新检查
+            </Button>
           </CardBody>
         </Card>
       )}

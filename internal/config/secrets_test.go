@@ -6,7 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestLoadOrCreateSecrets(t *testing.T) {
@@ -83,7 +85,7 @@ func TestLoadOrCreateSecrets(t *testing.T) {
 		tmpDir := t.TempDir()
 		secretsPath := filepath.Join(tmpDir, SecretsFile)
 
-		if err := os.WriteFile(secretsPath, []byte(`{"jwt_secret":"jwt","webdav_password":"webdav","web_password":"web-admin","setup_shown":false}`), 0o600); err != nil {
+		if err := os.WriteFile(secretsPath, []byte(`{"jwt_secret":"jwt","webdav_password":"webdav","web_password":"web-admin"}`), 0o600); err != nil {
 			t.Fatalf("failed to write legacy secrets: %v", err)
 		}
 
@@ -110,8 +112,20 @@ func TestLoadOrCreateSecrets(t *testing.T) {
 	t.Run("repairs missing generated secrets in existing secrets file", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		secretsPath := filepath.Join(tmpDir, SecretsFile)
+		completedAt := time.Date(2026, 7, 10, 9, 30, 0, 0, time.UTC)
+		deferredAt := time.Date(2026, 7, 9, 9, 30, 0, 0, time.UTC)
+		deferredUntil := time.Date(2026, 7, 12, 9, 30, 0, 0, time.UTC)
 
-		if err := os.WriteFile(secretsPath, []byte(`{"setup_shown":true}`), 0o600); err != nil {
+		incomplete := Secrets{SetupLifecycle: SetupLifecycleState{
+			CompletedAt:   &completedAt,
+			DeferredAt:    &deferredAt,
+			DeferredUntil: &deferredUntil,
+		}}
+		data, err := json.Marshal(incomplete)
+		if err != nil {
+			t.Fatalf("failed to marshal incomplete secrets: %v", err)
+		}
+		if err := os.WriteFile(secretsPath, data, 0o600); err != nil {
 			t.Fatalf("failed to write incomplete secrets: %v", err)
 		}
 
@@ -129,8 +143,14 @@ func TestLoadOrCreateSecrets(t *testing.T) {
 			t.Fatal("expected missing WebDAV password to be repaired")
 		}
 		assertReadablePasswordFormat(t, secrets.WebDAVPassword)
-		if !secrets.SetupShown {
-			t.Fatal("expected unrelated secrets fields to be preserved")
+		if secrets.SetupLifecycle.CompletedAt == nil || !secrets.SetupLifecycle.CompletedAt.Equal(completedAt) {
+			t.Fatalf("expected completed_at to be preserved, got %+v", secrets.SetupLifecycle)
+		}
+		if secrets.SetupLifecycle.DeferredAt == nil || !secrets.SetupLifecycle.DeferredAt.Equal(deferredAt) {
+			t.Fatalf("expected deferred_at to be preserved, got %+v", secrets.SetupLifecycle)
+		}
+		if secrets.SetupLifecycle.DeferredUntil == nil || !secrets.SetupLifecycle.DeferredUntil.Equal(deferredUntil) {
+			t.Fatalf("expected deferred_until to be preserved, got %+v", secrets.SetupLifecycle)
 		}
 
 		reloaded, isNewReloaded, err := LoadOrCreateSecrets(tmpDir)
@@ -143,6 +163,7 @@ func TestLoadOrCreateSecrets(t *testing.T) {
 		if reloaded.JWTSecret != secrets.JWTSecret || reloaded.WebDAVPassword != secrets.WebDAVPassword {
 			t.Fatalf("expected repaired secrets to persist, got %+v want %+v", reloaded, secrets)
 		}
+		assertSetupLifecycleEqual(t, reloaded.SetupLifecycle, secrets.SetupLifecycle)
 	})
 
 	t.Run("load existing secrets", func(t *testing.T) {
@@ -372,12 +393,158 @@ func TestLoadSecrets_TightensExistingFilePermissions(t *testing.T) {
 	}
 }
 
-func TestMarkSetupShown_WithoutSecretsFileReturnsErrSecretsNotFound(t *testing.T) {
-	tmpDir := t.TempDir()
+func TestSetupLifecycleUpdatesRequireSecretsFile(t *testing.T) {
+	t.Run("complete", func(t *testing.T) {
+		_, err := CompleteSetup(t.TempDir(), time.Now())
+		if !errors.Is(err, ErrSecretsNotFound) {
+			t.Fatalf("expected ErrSecretsNotFound, got %v", err)
+		}
+	})
 
-	err := MarkSetupShown(tmpDir)
-	if !errors.Is(err, ErrSecretsNotFound) {
-		t.Fatalf("expected ErrSecretsNotFound, got %v", err)
+	t.Run("defer", func(t *testing.T) {
+		now := time.Now()
+		_, err := DeferSetup(t.TempDir(), now, now.Add(24*time.Hour))
+		if !errors.Is(err, ErrSecretsNotFound) {
+			t.Fatalf("expected ErrSecretsNotFound, got %v", err)
+		}
+	})
+}
+
+func TestSetupLifecyclePersistence(t *testing.T) {
+	tmpDir := t.TempDir()
+	if _, _, err := LoadOrCreateSecrets(tmpDir); err != nil {
+		t.Fatalf("LoadOrCreateSecrets() error: %v", err)
+	}
+
+	firstDeferredAt := time.Date(2026, 7, 13, 8, 0, 0, 0, time.UTC)
+	firstDeferredUntil := firstDeferredAt.Add(72 * time.Hour)
+	deferred, err := DeferSetup(tmpDir, firstDeferredAt, firstDeferredUntil)
+	if err != nil {
+		t.Fatalf("DeferSetup() error: %v", err)
+	}
+	assertSetupLifecycleEqual(t, deferred, SetupLifecycleState{
+		DeferredAt:    &firstDeferredAt,
+		DeferredUntil: &firstDeferredUntil,
+	})
+
+	// Mutating the returned state must not alter the persisted lifecycle.
+	*deferred.DeferredAt = deferred.DeferredAt.Add(time.Hour)
+	loaded, err := LoadSecrets(tmpDir)
+	if err != nil {
+		t.Fatalf("LoadSecrets() after defer error: %v", err)
+	}
+	assertSetupLifecycleEqual(t, loaded.SetupLifecycle, SetupLifecycleState{
+		DeferredAt:    &firstDeferredAt,
+		DeferredUntil: &firstDeferredUntil,
+	})
+
+	secondDeferredAt := firstDeferredAt.Add(24 * time.Hour)
+	secondDeferredUntil := secondDeferredAt.Add(7 * 24 * time.Hour)
+	deferred, err = DeferSetup(tmpDir, secondDeferredAt, secondDeferredUntil)
+	if err != nil {
+		t.Fatalf("second DeferSetup() error: %v", err)
+	}
+	assertSetupLifecycleEqual(t, deferred, SetupLifecycleState{
+		DeferredAt:    &secondDeferredAt,
+		DeferredUntil: &secondDeferredUntil,
+	})
+
+	completedAt := secondDeferredAt.Add(time.Hour)
+	completed, err := CompleteSetup(tmpDir, completedAt)
+	if err != nil {
+		t.Fatalf("CompleteSetup() error: %v", err)
+	}
+	assertSetupLifecycleEqual(t, completed, SetupLifecycleState{CompletedAt: &completedAt})
+
+	laterCompletion := completedAt.Add(24 * time.Hour)
+	completedAgain, err := CompleteSetup(tmpDir, laterCompletion)
+	if err != nil {
+		t.Fatalf("second CompleteSetup() error: %v", err)
+	}
+	assertSetupLifecycleEqual(t, completedAgain, SetupLifecycleState{CompletedAt: &completedAt})
+
+	deferredAfterCompletion, err := DeferSetup(tmpDir, laterCompletion, laterCompletion.Add(24*time.Hour))
+	if err != nil {
+		t.Fatalf("DeferSetup() after completion error: %v", err)
+	}
+	assertSetupLifecycleEqual(t, deferredAfterCompletion, SetupLifecycleState{CompletedAt: &completedAt})
+
+	reloaded, err := LoadSecrets(tmpDir)
+	if err != nil {
+		t.Fatalf("LoadSecrets() after completion error: %v", err)
+	}
+	assertSetupLifecycleEqual(t, reloaded.SetupLifecycle, SetupLifecycleState{CompletedAt: &completedAt})
+}
+
+func TestConcurrentLegacyScrubAndSetupCompletionPreservesLifecycle(t *testing.T) {
+	tmpDir := t.TempDir()
+	secretsPath := filepath.Join(tmpDir, SecretsFile)
+	if err := os.WriteFile(secretsPath, []byte(`{"jwt_secret":"jwt","webdav_password":"webdav","web_password":"legacy"}`), 0o600); err != nil {
+		t.Fatalf("WriteFile(secrets) error: %v", err)
+	}
+
+	completedAt := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	start := make(chan struct{})
+	errorsCh := make(chan error, 17)
+	var wg sync.WaitGroup
+	wg.Add(17)
+	go func() {
+		defer wg.Done()
+		<-start
+		_, err := CompleteSetup(tmpDir, completedAt)
+		errorsCh <- err
+	}()
+	for range 16 {
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := LoadSecrets(tmpDir)
+			errorsCh <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errorsCh)
+	for err := range errorsCh {
+		if err != nil {
+			t.Fatalf("concurrent secrets operation error: %v", err)
+		}
+	}
+
+	loaded, err := LoadSecrets(tmpDir)
+	if err != nil {
+		t.Fatalf("LoadSecrets() error: %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("LoadSecrets() returned nil")
+	}
+	assertSetupLifecycleEqual(t, loaded.SetupLifecycle, SetupLifecycleState{CompletedAt: &completedAt})
+	raw, err := os.ReadFile(secretsPath)
+	if err != nil {
+		t.Fatalf("ReadFile(secrets) error: %v", err)
+	}
+	if strings.Contains(string(raw), `"web_password"`) {
+		t.Fatalf("legacy web password was not scrubbed: %s", raw)
+	}
+}
+
+func assertSetupLifecycleEqual(t *testing.T, got, want SetupLifecycleState) {
+	t.Helper()
+	assertOptionalTimeEqual(t, "completed_at", got.CompletedAt, want.CompletedAt)
+	assertOptionalTimeEqual(t, "deferred_at", got.DeferredAt, want.DeferredAt)
+	assertOptionalTimeEqual(t, "deferred_until", got.DeferredUntil, want.DeferredUntil)
+}
+
+func assertOptionalTimeEqual(t *testing.T, field string, got, want *time.Time) {
+	t.Helper()
+	if got == nil || want == nil {
+		if got != nil || want != nil {
+			t.Fatalf("%s = %v, want %v", field, got, want)
+		}
+		return
+	}
+	if !got.Equal(*want) {
+		t.Fatalf("%s = %v, want %v", field, got, want)
 	}
 }
 

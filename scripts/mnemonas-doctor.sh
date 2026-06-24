@@ -1970,9 +1970,11 @@ check_public_session_token_ttl() {
   local access_ns
   local refresh_ns
   local parse_status
+  local minimum_access_ns
   local recommended_access_ns
   local recommended_refresh_ns
 
+  minimum_access_ns=$((30 * 1000000000))
   recommended_access_ns=$((60 * 60 * 1000000000))
   recommended_refresh_ns=$((30 * 24 * 60 * 60 * 1000000000))
 
@@ -2022,6 +2024,8 @@ check_public_session_token_ttl() {
 
   if (( access_ns <= 0 )); then
     fail "public auth.access_token_ttl must be a positive duration: ${access_ttl:-<empty>}"
+  elif (( access_ns < minimum_access_ns )); then
+    fail "public auth.access_token_ttl must be at least 30s: $access_ttl"
   elif (( access_ns > recommended_access_ns )); then
     warn "public auth.access_token_ttl is longer than 1h: $access_ttl"
   else
@@ -2220,13 +2224,24 @@ import sys
 path = sys.argv[1]
 try:
     with open(path, "r", encoding="utf-8") as handle:
-        users = json.load(handle)
+        document = json.load(handle)
 except Exception as exc:
     print(str(exc), file=sys.stderr)
     sys.exit(2)
 
+if not isinstance(document, dict):
+    print("users file root is not a versioned object", file=sys.stderr)
+    sys.exit(2)
+schema_version = document.get("schema_version")
+if type(schema_version) is not int:
+    print("users file schema_version is missing or is not an integer", file=sys.stderr)
+    sys.exit(2)
+if schema_version != 1:
+    print(f"users file schema_version {schema_version} is unsupported; expected 1", file=sys.stderr)
+    sys.exit(2)
+users = document.get("users")
 if not isinstance(users, list):
-    print("users file root is not a list", file=sys.stderr)
+    print("users file users field is not an array", file=sys.stderr)
     sys.exit(2)
 
 count = 0
@@ -2261,6 +2276,14 @@ for index, user in enumerate(users):
     disabled = user.get("disabled", False)
     if not isinstance(disabled, bool):
         print(f"users file contains invalid disabled flag for user {username!r}", file=sys.stderr)
+        sys.exit(2)
+    must_change_password = user.get("must_change_password")
+    if not isinstance(must_change_password, bool):
+        print(f"users file contains missing or invalid must_change_password for user {username!r}", file=sys.stderr)
+        sys.exit(2)
+    credential_version = user.get("credential_version")
+    if type(credential_version) is not int or credential_version <= 0:
+        print(f"users file contains missing or invalid credential_version for user {username!r}", file=sys.stderr)
         sys.exit(2)
     if role == "admin" and not disabled:
         password_hash = user.get("password_hash")

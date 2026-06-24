@@ -17,9 +17,11 @@ Notes:
 - The initial administrator password is not stored permanently in `secrets.json`.
 - The setup API does not return the initial username or password.
 - The password is not printed in clear text by default. For controlled local debugging only, set `MNEMONAS_PRINT_INITIAL_PASSWORD=1` before first startup.
-- After the first successful login for the administrator, `initial-password.txt` is removed.
-- Change the administrator password after first login.
-- The administrator Dashboard first-run checklist shows Web UI/API authentication, sharing, and WebDAV status. If authentication is disabled or WebDAV anonymous access is enabled, it indicates that the configuration is suitable only for a controlled LAN or an outer access-control layer. This notice does not replace the pre-deployment security self-check or `mnemonas-doctor`.
+- Login, session refresh, and service restart retain `initial-password.txt`. The file is removed only after the corresponding administrator's password is successfully changed or reset.
+- Change the administrator password after first login. Until the bootstrap administrator changes it, the authenticated session can access only current-user information, password change, and logout endpoints; other product APIs remain unavailable.
+- New passwords must contain 8 through 72 UTF-8 bytes and must not consist only of whitespace.
+- WebDAV `auth_type = "users"` also rejects accounts that still require a password change; mounts become available after self-service password change succeeds.
+- The administrator Dashboard first-run check uses server-side account, initial-password-file, security-self-check, backup, and restore-verification evidence. It does not use browser-local checkboxes and does not replace pre-deployment `mnemonas-doctor` or cloud-firewall review.
 
 Systemd default path:
 
@@ -231,7 +233,7 @@ cloudflared tunnel run mnemonas
 - [ ] WebDAV uses `auth_type = "users"`, or global Basic Auth credentials are recorded and changed to a strong custom or generated password, without placeholder values.
 - [ ] `webdav.auth_type` is not `none` unless the server is loopback-only.
 - [ ] Public deployments use `server.host = "127.0.0.1"` and are reachable only through the HTTPS reverse proxy.
-- [ ] The administrator Dashboard first-run checklist has no authentication-disabled or anonymous-WebDAV warning. If a warning is present, the corresponding configuration or outer access-control layer has been handled.
+- [ ] The administrator Dashboard first-run requirements are complete according to server-side evidence. If backup requirements were deferred, an explicit reminder deadline is recorded.
 - [ ] Dataplane gRPC/HTTP ports are loopback-only or private.
 - [ ] The Web UI security self-check has no `block` items; public deployments should resolve all `warning` items before exposure.
 - [ ] The security self-check covers `allow_unsafe_no_auth`, session-token lifetimes, login throttling, browser session-cookie boundaries, public-share cookie/cache boundaries, config-file permissions, generated WebDAV credentials-file permissions, users-file permissions, reverse-proxy headers, dataplane ports, local backup destinations, share base URL, share default policy, and spare-administrator warnings.
@@ -287,7 +289,7 @@ WebDAV `users` mode carries application user identity and enforces role, group, 
 
 ### Rate Limiting
 
-MnemoNAS includes a built-in concurrent request limit. Finer per-IP or per-user rate limits should be added at the reverse proxy.
+MnemoNAS includes a built-in concurrent request limit, with 100 requests allowed by default. Web UI login also limits password-credential checks by client IP before bcrypt runs: each fixed 10-second window permits at most 12 checks. Excess requests return `429 LOGIN_RATE_LIMITED`. Requests admitted by that window are still tracked by normalized username and client IP, with a short lockout after the consecutive-failure threshold. Other APIs do not provide a general per-IP or per-user rate limiter; add site-wide limits at the reverse proxy when required.
 
 Nginx example:
 
@@ -303,13 +305,25 @@ location /api/ {
 
 File downloads, version previews, media previews, thumbnails, and external-open flows use a short-lived `HttpOnly`, `SameSite=Strict` download-session cookie. Long-lived access tokens are not passed through URL query parameters.
 
-The `Secure` cookie flag is enabled when the request is actually HTTPS, or when `trusted_proxy_hops > 0` and the direct peer is loopback or a proxy address listed in `trusted_proxy_cidrs` forwarding `X-Forwarded-Proto=https`.
+HTTPS mode uses `__Host-mnemonas_download_access` with `Secure`, `Path=/`, and no `Domain` attribute. Local HTTP mode uses `mnemonas_download_access` with the `/api/v1` path.
+
+HTTPS mode is enabled only when the request uses TLS, or when `trusted_proxy_hops > 0` and the direct peer is loopback or a proxy address listed in `trusted_proxy_cidrs` forwarding `X-Forwarded-Proto=https`.
 
 ### Web UI Session Tokens
 
-The Web UI stores the primary access and refresh session in `HttpOnly`, `SameSite=Lax` cookies. It no longer writes bearer access or refresh tokens to `localStorage`; REST API calls, uploads, refresh, and logout use same-origin cookies sent by the browser. Legacy tokens left by older versions are cleared during initialization, refresh, logout, and related auth paths.
+The Web UI stores the primary access and refresh session in `HttpOnly`, `SameSite=Lax` cookies and does not write bearer access or refresh tokens to `localStorage`.
 
-For public deployments, keep `auth.access_token_ttl` at or below `1h` and `auth.refresh_token_ttl` at or below `720h` (30 days). The security self-check reports longer values as warnings.
+HTTPS mode uses `__Host-mnemonas_access` and `__Host-mnemonas_refresh`; both cookies use `Secure`, `Path=/`, and no `Domain` attribute. Local HTTP mode uses `mnemonas_access` with `/api/v1` and `mnemonas_refresh` with `/api/v1/auth`.
+
+HTTPS requests parse only `__Host-` names, and HTTP requests parse only unprefixed names. The server rejects authentication when one request contains different values for the same cookie name, or when access and download cookies belong to different accounts.
+
+`auth.access_token_ttl` must be at least `30s`. For public deployments, keep it at or below `1h` and keep `auth.refresh_token_ttl` at or below `720h` (30 days). The security self-check reports longer values as warnings.
+
+Each login creates and durably registers an independent active session before the first tokens are issued. MnemoNAS retains at most 64 active sessions per user and 4096 active sessions globally. Exceeding either limit returns `429 REFRESH_SESSION_LIMIT`; logout or expiry releases capacity.
+
+Refresh-token rotation does not extend the absolute session expiry established at login. A session can rotate at most once every 30 seconds, and a refresh token can succeed only once. Replaying a rotated token revokes the same session family. The refresh cookie still permits logout after the access token expires.
+
+REST API calls, uploads, refresh, and logout use same-origin cookies sent by the browser. The Web UI uses a `storage` signal and `BroadcastChannel` to synchronize session changes across tabs, and Web Locks to serialize cross-tab refresh. These channels carry only session-change signals, not token values. Legacy tokens left in `localStorage` by older versions are cleared by authentication flows.
 
 For REST mutations and WebDAV write methods (`POST`, `PUT`, `PATCH`, `DELETE`, `MKCOL`, `COPY`, `MOVE`, `PROPPATCH`, `LOCK`, `UNLOCK`) that carry browser `Origin`, `Referer`, or `Sec-Fetch-Site` metadata, the server rejects requests whose source scheme, host, or port does not match the current request. It also rejects browser requests explicitly marked `cross-site` or `same-site` when they do not use an `Authorization` header. Script clients without browser origin metadata and explicit `Authorization` API clients continue to work.
 
@@ -323,6 +337,18 @@ For public deployments:
 - Sign out on shared computers.
 
 Signing out, changing a user's password, deleting the user, disabling the user, or manually revoking that user's active sessions clears the relevant sessions.
+
+`auth-sessions.json` is the authoritative, bounded active-session registry. It uses schema v3 and has a 2 MiB file limit. A signed JWT is rejected when its session ID is absent from the registry. Logout deletes the record instead of retaining a tombstone, so repeated login and logout do not grow the file linearly.
+
+The service persists a 60-second restart-time lease in `auth-sessions.json` and attempts renewal with 15 seconds remaining. A hard renewal failure still permits validation while the existing lease remains valid. If renewal continues to fail after the lease expires, the server fails closed with `503 TOKEN_STATE_UNAVAILABLE` so a wall-clock rollback cannot restore an invalid session.
+
+The current version supports only one control-plane process as the sole writer of `auth-sessions.json`. Multiple `nasd` instances must not share the same authentication-state file; doing so cannot preserve the ordering or integrity of the session registry.
+
+At startup, the service advances logical validation time to the lower bound of a new 60-second lease. Rapid consecutive crash restarts therefore advance logical time by approximately 60 seconds per start and can expire active sessions earlier than wall-clock time.
+
+If authentication-state persistence fails before the atomic rename, login and refresh do not publish new cookies, and logout does not clear existing cookies. If the rename has committed but the parent-directory sync is uncertain, the operation remains successful and returns an HTTP `Warning` header.
+
+`auth-sessions.json` and `users.json` use strict, explicitly versioned formats. Authentication initialization fails when either file is corrupt, omits required fields, contains unknown fields, omits its version, or declares an unsupported version. Authentication also rejects invalid bcrypt password hashes, role and `home_dir` combinations, or `quota_bytes` invariants in `users.json`.
 
 ### Public Share Passwords
 

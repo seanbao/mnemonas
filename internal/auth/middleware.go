@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 )
@@ -16,10 +17,15 @@ const (
 )
 
 const (
-	AccessSessionCookieName   = "mnemonas_access"
-	RefreshSessionCookieName  = "mnemonas_refresh"
-	DownloadSessionCookieName = "mnemonas_download_access"
+	AccessSessionCookieName        = "mnemonas_access"
+	RefreshSessionCookieName       = "mnemonas_refresh"
+	DownloadSessionCookieName      = "mnemonas_download_access"
+	HTTPSAccessSessionCookieName   = "__Host-mnemonas_access"
+	HTTPSRefreshSessionCookieName  = "__Host-mnemonas_refresh"
+	HTTPSDownloadSessionCookieName = "__Host-mnemonas_download_access"
 )
+
+var errAmbiguousSessionCookies = errors.New("ambiguous session cookies")
 
 // Middleware provides authentication middleware
 type Middleware struct {
@@ -67,8 +73,12 @@ func (m *Middleware) RequireAuth(next http.Handler) http.Handler {
 			}
 		}
 
-		tokenCandidates, invalidAuthHeader := tokenCandidatesFromRequest(r, true)
-		if invalidAuthHeader {
+		tokenCandidates, candidateErr := tokenCandidatesFromRequest(r, true)
+		if candidateErr != nil {
+			if errors.Is(candidateErr, errAmbiguousSessionCookies) {
+				writeError(w, http.StatusUnauthorized, "ambiguous session cookies", "INVALID_TOKEN")
+				return
+			}
 			writeError(w, http.StatusUnauthorized, "invalid authorization header format", "INVALID_AUTH_HEADER")
 			return
 		}
@@ -80,10 +90,12 @@ func (m *Middleware) RequireAuth(next http.Handler) http.Handler {
 		// Validate token
 		tokenString, claims, tokenErr := m.validateAccessTokenCandidates(tokenCandidates)
 		if tokenErr != nil {
-			switch tokenErr {
-			case ErrTokenExpired:
+			switch {
+			case errors.Is(tokenErr, ErrTokenStateUnavailable):
+				writeError(w, http.StatusServiceUnavailable, "token session state unavailable", "TOKEN_STATE_UNAVAILABLE")
+			case errors.Is(tokenErr, ErrTokenExpired):
 				writeError(w, http.StatusUnauthorized, "token expired", "TOKEN_EXPIRED")
-			case ErrTokenRevoked:
+			case errors.Is(tokenErr, ErrTokenRevoked):
 				writeError(w, http.StatusUnauthorized, "token has been revoked", "TOKEN_REVOKED")
 			default:
 				writeError(w, http.StatusUnauthorized, "invalid token", "INVALID_TOKEN")
@@ -102,6 +114,14 @@ func (m *Middleware) RequireAuth(next http.Handler) http.Handler {
 			writeError(w, http.StatusForbidden, "user account is disabled", "USER_DISABLED")
 			return
 		}
+		if claims.CredentialVersion != user.CredentialVersion {
+			writeError(w, http.StatusUnauthorized, "token has been revoked", "TOKEN_REVOKED")
+			return
+		}
+		if user.MustChangePassword && !allowsRequiredPasswordChange(r) {
+			writeError(w, http.StatusForbidden, "password change required", "PASSWORD_CHANGE_REQUIRED")
+			return
+		}
 
 		// Add user and claims to context
 		ctx := context.WithValue(r.Context(), ContextKeyUser, user)
@@ -112,16 +132,42 @@ func (m *Middleware) RequireAuth(next http.Handler) http.Handler {
 	})
 }
 
+func allowsRequiredPasswordChange(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	switch r.URL.Path {
+	case "/api/v1/auth/me":
+		return r.Method == http.MethodGet
+	case "/api/v1/auth/password":
+		return r.Method == http.MethodPost
+	default:
+		return false
+	}
+}
+
 func (m *Middleware) validateAccessTokenCandidates(candidates []string) (string, *TokenClaims, error) {
 	var firstErr error
+	var selectedToken string
+	var selectedClaims *TokenClaims
 	for _, tokenString := range candidates {
 		claims, err := m.tokenManager.ValidateAccessToken(tokenString)
 		if err == nil {
-			return tokenString, claims, nil
+			if selectedClaims != nil && selectedClaims.UserID != claims.UserID {
+				return "", nil, errAmbiguousSessionCookies
+			}
+			if selectedClaims == nil {
+				selectedToken = tokenString
+				selectedClaims = claims
+			}
+			continue
 		}
 		if firstErr == nil {
 			firstErr = err
 		}
+	}
+	if selectedClaims != nil {
+		return selectedToken, selectedClaims, nil
 	}
 	if firstErr == nil {
 		firstErr = ErrInvalidToken
@@ -129,24 +175,36 @@ func (m *Middleware) validateAccessTokenCandidates(candidates []string) (string,
 	return "", nil, firstErr
 }
 
-func tokenCandidatesFromRequest(r *http.Request, allowScopedDownloadCookie bool) ([]string, bool) {
+func tokenCandidatesFromRequest(r *http.Request, allowScopedDownloadCookie bool) ([]string, error) {
 	authHeader := r.Header.Get("Authorization")
 	if authHeader != "" {
 		parts := strings.SplitN(authHeader, " ", 2)
 		if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
-			return nil, true
+			return nil, errors.New("invalid authorization header")
 		}
-		return []string{parts[1]}, false
+		return []string{parts[1]}, nil
 	}
 
-	candidates := cookieValuesFromRequest(r, AccessSessionCookieName)
-	if allowScopedDownloadCookie && allowDownloadSessionCookie(r) {
-		candidates = append(candidates, cookieValuesFromRequest(r, DownloadSessionCookieName)...)
+	candidates, err := cookieValuesFromRequest(r, AccessSessionCookieName)
+	if err != nil {
+		return nil, err
 	}
-	return candidates, false
+	if allowScopedDownloadCookie && allowDownloadSessionCookie(r) {
+		downloadCandidates, err := cookieValuesFromRequest(r, DownloadSessionCookieName)
+		if err != nil {
+			return nil, err
+		}
+		for _, candidate := range downloadCandidates {
+			if !containsCookieValue(candidates, candidate) {
+				candidates = append(candidates, candidate)
+			}
+		}
+	}
+	return candidates, nil
 }
 
-func cookieValuesFromRequest(r *http.Request, name string) []string {
+func cookieValuesFromRequest(r *http.Request, name string) ([]string, error) {
+	name = cookieNameForRequest(r, name)
 	values := make([]string, 0, 1)
 	for _, cookie := range r.Cookies() {
 		if cookie.Name != name {
@@ -156,9 +214,44 @@ func cookieValuesFromRequest(r *http.Request, name string) []string {
 		if value == "" {
 			continue
 		}
+		if containsCookieValue(values, value) {
+			continue
+		}
 		values = append(values, value)
+		if len(values) > 1 {
+			return nil, errAmbiguousSessionCookies
+		}
 	}
-	return values
+	return values, nil
+}
+
+func containsCookieValue(values []string, candidate string) bool {
+	for _, value := range values {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func cookieNameForRequest(r *http.Request, name string) string {
+	return cookieNameForHTTPSMode(name, requestIsHTTPS(r))
+}
+
+func cookieNameForHTTPSMode(name string, secure bool) string {
+	if !secure {
+		return name
+	}
+	switch name {
+	case AccessSessionCookieName:
+		return HTTPSAccessSessionCookieName
+	case RefreshSessionCookieName:
+		return HTTPSRefreshSessionCookieName
+	case DownloadSessionCookieName:
+		return HTTPSDownloadSessionCookieName
+	default:
+		return name
+	}
 }
 
 func allowDownloadSessionCookie(r *http.Request) bool {
@@ -218,20 +311,24 @@ func (m *Middleware) RequireRole(roles ...Role) func(http.Handler) http.Handler 
 // OptionalAuth middleware that adds user to context if token is present
 func (m *Middleware) OptionalAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		tokenCandidates, invalidAuthHeader := tokenCandidatesFromRequest(r, false)
-		if invalidAuthHeader || len(tokenCandidates) == 0 {
+		tokenCandidates, candidateErr := tokenCandidatesFromRequest(r, false)
+		if candidateErr != nil || len(tokenCandidates) == 0 {
 			next.ServeHTTP(w, r)
 			return
 		}
 
 		tokenString, claims, err := m.validateAccessTokenCandidates(tokenCandidates)
 		if err != nil {
+			if errors.Is(err, ErrTokenStateUnavailable) {
+				writeError(w, http.StatusServiceUnavailable, "token session state unavailable", "TOKEN_STATE_UNAVAILABLE")
+				return
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
 
 		user, err := m.userStore.GetByID(claims.UserID)
-		if err != nil || user.Disabled {
+		if err != nil || user.Disabled || claims.CredentialVersion != user.CredentialVersion {
 			next.ServeHTTP(w, r)
 			return
 		}

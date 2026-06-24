@@ -200,7 +200,7 @@ The report also lists detectable renewal paths.
 Nginx/certbot deployments should pass `sudo certbot renew --dry-run`.
 Caddy deployments should have clean ACME logs from `sudo journalctl -u caddy --since '24 hours ago'`.
 
-For public deployments, `mnemonas-doctor --public-domain` checks `auth.access_token_ttl` and `auth.refresh_token_ttl`.
+For public deployments, `mnemonas-doctor --public-domain` checks `auth.access_token_ttl` and `auth.refresh_token_ttl`. Configuration validation rejects access-token lifetimes below `30s` and non-positive token lifetimes.
 Access tokens longer than `1h` or refresh tokens longer than `720h` (30 days) produce warnings.
 Empty, `0`, or negative values fail.
 

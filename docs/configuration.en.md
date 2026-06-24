@@ -462,12 +462,12 @@ The Maintenance page can create a `local` full-storage backup job whose source i
 | `type` | string | `"local"` | `local`, `restic`, or `rclone`; blank values are normalized to `local` |
 | `source` | string | `storage.root` | Backup source directory; must be absolute. Blank values use `storage.root` |
 | `destination` | string | `""` | Local destination for `local` jobs; must be absolute and must not be inside the source or `storage.root` |
-| `repository` | string | `""` | Restic repository; required for `restic` jobs |
-| `remote` | string | `""` | Rclone remote path; required for `rclone` jobs |
+| `repository` | string | `""` | Restic repository; required for `restic` jobs and limited to an absolute local path outside the source and `storage.root`, or an explicit `rest:http://` or `rest:https://` REST server URL |
+| `remote` | string | `""` | Rclone remote path; required for `rclone` jobs and must use `<named remote in config_file>:<path>` |
 | `command` | string | job type | `restic` or `rclone` executable; blank values use the job type name. Non-blank values must be a bare executable name or absolute path without whitespace or control characters |
-| `password_file` | string | `""` | Restic password file; required for `restic` jobs, must be an existing non-symlink regular file, and must be outside the source and `storage.root` |
-| `config_file` | string | `""` | Rclone config file; optional, must be an existing non-symlink regular file, and must be outside the source and `storage.root` |
-| `extra_args` | string[] | `[]` | Additional argv entries appended to backup commands; empty entries and control characters are rejected. Restore commands do not reuse these arguments |
+| `password_file` | string | `""` | Restic password file; required for `restic` jobs, must be an existing non-symlink regular file outside the source and `storage.root`, and is limited to 4 MiB |
+| `config_file` | string | `""` | Plaintext rclone config file; required for `rclone` jobs, must be an existing non-symlink regular file outside the source and `storage.root`, and is limited to 4 MiB |
+| `extra_args` | string[] | `[]` | Additional argv entries appended to backup commands; empty entries, control characters, and options that override repository or credential identity are rejected. Rclone jobs currently accept only `--fast-list`; restore commands do not reuse these arguments |
 | `disabled` | bool | `false` | Disable the job; disabled jobs are not scheduled and cannot be run manually |
 | `schedule_interval` | duration | `"0"` | Automatic schedule interval; `0` or blank means manual only |
 | `schedule_window_start` | string | `""` | Automatic schedule window start, using `HH:MM` |
@@ -485,6 +485,10 @@ Runtime behavior:
 
 - `local` jobs create snapshots under `destination/<job-id>/snapshots/<run-id>/`. The destination must be outside `storage.root` and the backup source, and path components must not cross boundaries through symlinks.
 - `restic` and `rclone` jobs invoke external commands as argv without shell command construction. `command`, credential files, `extra_args`, `exclude`, and remote locations are handled according to config validation rules.
+- Remote jobs create a mode-0700 private directory under the resolved system temporary directory and copy each validated credential file into a mode-0600 snapshot. The temporary directory must remain outside the backup source and `storage.root`, and commands read only the snapshot.
+- An rclone config must define the named section referenced by `remote` and its `type`, and it must remain static and self-contained. It cannot enable `env_auth`, contain `${...}` expansion, or use a non-empty option whose name contains `_file`, `_path`, `command`, `agent`, `ssh`, or `token`. Encrypted rclone configs and automatic token write-back are not currently supported.
+- Child processes do not inherit cloud-provider credentials, proxy settings, SSH agents, or `RESTIC_*` and `RCLONE_*` variables that can override the job identity. Execution identity comes only from the explicitly configured repository, remote, and credential file. Restic repository forms that depend on cloud SDK, SSH, or rclone credential discovery are not accepted.
+- Local restore, preview, and restore-drill operations accept only the manifest path, size, and digest evidence stored in `status.json.last_successful_run`; they do not scan unbound snapshot directories. A new successful local backup is required when that evidence is absent.
 - `schedule_window_start` and `schedule_window_end` constrain only automatic scheduling. Manual runs from the Maintenance page or API are not constrained by the window. The window uses server local time.
 - `restore_drill_stale_after` controls missing or stale restore-drill reminders. Blank, `"0"`, or omitted values are treated as 30 days at runtime.
 - Local retention cleanup always keeps the current snapshot. Actual retention for `restic` and `rclone` is managed by the external tool or cloud lifecycle rules, and `retention_policy` records that the deployment-side policy has been confirmed.
@@ -518,11 +522,11 @@ exclude = [".mnemonas/thumbnails"]
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | Enable Web UI/API authentication |
 | `jwt_secret` | string | generated | JWT signing secret. Leave empty to use the persistent generated secret in `secrets.json`; explicit values must be at least 32 bytes |
-| `access_token_ttl` | duration | `"15m"` | Access-token lifetime; public deployments should keep this at or below `1h` |
+| `access_token_ttl` | duration | `"15m"` | Access-token lifetime; must be at least `30s`, and public deployments should keep it at or below `1h` |
 | `refresh_token_ttl` | duration | `"168h"` | Refresh-token lifetime; public deployments should keep this at or below `720h` (30 days) |
 | `users_file` | string | `<storage.root>/.mnemonas/users.json` | User data file |
 
-On first startup without a `users_file`, or when the file has no enabled administrator, MnemoNAS creates a default or recovery administrator and writes the initial password to `initial-password.txt` in the same directory as `users_file`. The default path is `<storage.root>/.mnemonas/initial-password.txt`. The file is removed after first successful login for that administrator. When authentication is enabled, `mnemonas-doctor` parses this user file and reports whether a usable administrator exists.
+On first startup without a `users_file`, or when the file has no enabled administrator, MnemoNAS creates a default or recovery administrator and writes the initial password to `initial-password.txt` in the same directory as `users_file`. The default path is `<storage.root>/.mnemonas/initial-password.txt`. Login and session refresh retain the file; it is removed only after the corresponding administrator's password is successfully changed or reset. `users_file` uses a `schema_version: 1` object and requires every user to persist `must_change_password` and a positive `credential_version` explicitly. Loading also validates the bcrypt password hash, the role and `home_dir` combination, and non-negative `quota_bytes`. The legacy array format, a missing version or required security field, an invalid user invariant, and unknown versions all cause authentication initialization to fail. When authentication is enabled, `mnemonas-doctor` checks the versioned format and the security fields needed to report whether a usable administrator exists.
 
 ## `[share]`
 

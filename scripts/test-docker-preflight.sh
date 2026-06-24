@@ -288,7 +288,7 @@ run_sensitive_files_private_test() {
 	make_fake_bin "$fake_bin"
 	mkdir -p "$case_dir/home/.mnemonas/.mnemonas"
 	chmod 700 "$case_dir/home/.mnemonas/.mnemonas"
-	printf '[]\n' > "$case_dir/home/.mnemonas/.mnemonas/users.json"
+	printf '{"schema_version":1,"users":[]}\n' > "$case_dir/home/.mnemonas/.mnemonas/users.json"
 	printf 'Password: test-password\n' > "$case_dir/home/.mnemonas/.mnemonas/initial-password.txt"
 	printf '{"jwt_secret":"secret","webdav_password":"password"}\n' > "$case_dir/home/.mnemonas/secrets.json"
 	cat > "$case_dir/home/.mnemonas/config.toml" <<'TOML'
@@ -348,7 +348,7 @@ root = "/data"
 [auth]
 users_file = "~/custom-auth/users.json"
 TOML
-	printf '[]\n' > "$case_dir/home/.mnemonas/custom-auth/users.json"
+	printf '{"schema_version":1,"users":[]}\n' > "$case_dir/home/.mnemonas/custom-auth/users.json"
 	printf 'Password: test-password\n' > "$case_dir/home/.mnemonas/custom-auth/initial-password.txt"
 	chmod 0600 "$case_dir/home/.mnemonas/config.toml"
 	chmod 0600 "$case_dir/home/.mnemonas/custom-auth/users.json"

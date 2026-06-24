@@ -14,17 +14,31 @@ import {
 const loginMock = vi.fn()
 const logoutMock = vi.fn()
 const getCurrentUserMock = vi.fn()
-const getStoredUserMock = vi.fn()
+const invalidateAuthSessionRequestsMock = vi.fn()
 const acknowledgeSetupMock = vi.fn()
 const getSetupStatusMock = vi.fn()
 const clearQueryClientMock = vi.fn()
 
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
 vi.mock('@/api/auth', () => ({
   AUTH_CLEARED_EVENT: 'mnemonas:auth-cleared',
+  AUTH_CROSS_TAB_CHANNEL_NAME: 'mnemonas:auth-session',
+  AUTH_CROSS_TAB_SOURCE_ID: 'current-tab',
+  AUTH_CROSS_TAB_SYNC_KEY: 'mnemonas:auth-cross-tab-sync',
+  AUTH_SESSION_UPDATED_EVENT: 'mnemonas:auth-session-updated',
   login: (...args: unknown[]) => loginMock(...args),
   logout: (...args: unknown[]) => logoutMock(...args),
   getCurrentUser: (...args: unknown[]) => getCurrentUserMock(...args),
-  getStoredUser: (...args: unknown[]) => getStoredUserMock(...args),
+  invalidateAuthSessionRequests: (...args: unknown[]) => invalidateAuthSessionRequestsMock(...args),
 }))
 
 vi.mock('@/api/setup', () => ({
@@ -41,6 +55,7 @@ vi.mock('@/lib/queryClient', () => ({
 describe('authStore', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    localStorage.clear()
     useAuthStore.setState({
       user: null,
       isAuthenticated: false,
@@ -52,7 +67,6 @@ describe('authStore', () => {
 
     logoutMock.mockResolvedValue({ warning: false, message: undefined })
     getCurrentUserMock.mockResolvedValue(null)
-    getStoredUserMock.mockReturnValue(null)
     acknowledgeSetupMock.mockResolvedValue({ success: true, message: 'ok' })
     getSetupStatusMock.mockResolvedValue({
       success: true,
@@ -212,6 +226,64 @@ describe('authStore', () => {
     expect(acknowledgeSetupMock).not.toHaveBeenCalled()
   })
 
+  it('does not start admin setup synchronization while a password change is required', async () => {
+    loginMock.mockResolvedValue({
+      user: {
+        id: 'admin-1',
+        username: 'admin',
+        role: 'admin',
+        email: '',
+        homeDir: '/',
+        mustChangePassword: true,
+      },
+      warning: false,
+      message: undefined,
+    })
+
+    await expect(useAuthStore.getState().login('admin', 'initial-password')).resolves.toMatchObject({ warning: false })
+
+    expect(useAuthStore.getState().user?.mustChangePassword).toBe(true)
+    expect(useAuthStore.getState().isAuthenticated).toBe(true)
+    expect(getSetupStatusMock).not.toHaveBeenCalled()
+  })
+
+  it('replaces the active user when a refresh requires a password change', () => {
+    useAuthStore.setState({
+      user: {
+        id: 'user-1',
+        username: 'user',
+        role: 'user',
+        email: '',
+        homeDir: '/',
+        mustChangePassword: false,
+      },
+      isAuthenticated: true,
+      isLoading: false,
+      error: 'stale error',
+      authEnabled: true,
+    })
+
+    window.dispatchEvent(new CustomEvent('mnemonas:auth-session-updated', {
+      detail: {
+        user: {
+          id: 'user-1',
+          username: 'user',
+          role: 'user',
+          email: '',
+          homeDir: '/',
+          mustChangePassword: true,
+        },
+      },
+    }))
+
+    const state = useAuthStore.getState()
+    expect(state.user?.mustChangePassword).toBe(true)
+    expect(state.isAuthenticated).toBe(true)
+    expect(state.isLoading).toBe(false)
+    expect(state.error).toBeNull()
+    expect(clearQueryClientMock).toHaveBeenCalledTimes(1)
+  })
+
   it('resets auth state when auth is cleared externally', () => {
     useAuthStore.setState({
       user: {
@@ -265,6 +337,381 @@ describe('authStore', () => {
     expect(state.isAuthenticated).toBe(false)
     expect(state.isLoading).toBe(false)
     expect(state.error).toBe('账户已被禁用，请联系管理员')
+  })
+
+  it.each([
+    ['logging out', 'logout'],
+    ['changing the password', 'password_changed'],
+  ])('clears authentication without an expiry error after %s', (_label, reason) => {
+    useAuthStore.setState({
+      user: {
+        id: 'user-1',
+        username: 'user',
+        role: 'user',
+        email: '',
+        homeDir: '/',
+        mustChangePassword: true,
+      },
+      isAuthenticated: true,
+      isLoading: false,
+      error: null,
+      authEnabled: true,
+    })
+
+    window.dispatchEvent(new CustomEvent('mnemonas:auth-cleared', {
+      detail: { reason },
+    }))
+
+    const state = useAuthStore.getState()
+    expect(state.user).toBeNull()
+    expect(state.isAuthenticated).toBe(false)
+    expect(state.error).toBeNull()
+    expect(clearQueryClientMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('clears cached queries when another tab clears an already-hidden session', () => {
+    useAuthStore.setState({
+      user: null,
+      isAuthenticated: false,
+      isLoading: false,
+      error: null,
+      authEnabled: true,
+      shareEnabled: null,
+    })
+
+    window.dispatchEvent(new StorageEvent('storage', {
+      key: 'mnemonas:auth-cross-tab-sync',
+      newValue: JSON.stringify({
+        version: 1,
+        type: 'cleared',
+        reason: 'logout',
+        nonce: 'other-tab-logout',
+      }),
+    }))
+
+    const state = useAuthStore.getState()
+    expect(clearQueryClientMock).toHaveBeenCalledTimes(1)
+    expect(state.user).toBeNull()
+    expect(state.isAuthenticated).toBe(false)
+    expect(state.error).toBeNull()
+  })
+
+  it('isolates cached queries and validates another tab session against the server', async () => {
+    useAuthStore.setState({
+      user: {
+        id: 'user-1',
+        username: 'first-user',
+        role: 'user',
+        email: '',
+        homeDir: '/users/first-user',
+        mustChangePassword: false,
+      },
+      isAuthenticated: true,
+      isLoading: false,
+      error: null,
+      authEnabled: true,
+      shareEnabled: true,
+    })
+    getCurrentUserMock.mockResolvedValueOnce({
+      id: 'admin-2',
+      username: 'second-admin',
+      role: 'admin',
+      email: '',
+      homeDir: '/',
+      mustChangePassword: false,
+    })
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'forged-admin',
+      username: 'forged-admin',
+      role: 'admin',
+      homeDir: '/',
+      mustChangePassword: false,
+    }))
+
+    window.dispatchEvent(new StorageEvent('storage', {
+      key: 'mnemonas:auth-cross-tab-sync',
+      newValue: JSON.stringify({
+        version: 1,
+        type: 'session_updated',
+        nonce: 'other-tab-login',
+      }),
+    }))
+
+    expect(clearQueryClientMock).toHaveBeenCalledTimes(1)
+    expect(useAuthStore.getState()).toMatchObject({
+      user: null,
+      isAuthenticated: false,
+      isLoading: true,
+    })
+    await vi.waitFor(() => {
+      expect(useAuthStore.getState()).toMatchObject({
+        user: expect.objectContaining({ id: 'admin-2' }),
+        isAuthenticated: true,
+        isLoading: false,
+        error: null,
+      })
+    })
+    expect(getCurrentUserMock).toHaveBeenCalledWith({ signal: expect.any(AbortSignal) })
+  })
+
+  it('validates another tab session through BroadcastChannel when browser storage is blocked', async () => {
+    useAuthStore.setState({
+      user: {
+        id: 'user-1',
+        username: 'first-user',
+        role: 'user',
+        email: '',
+        homeDir: '/users/first-user',
+        mustChangePassword: false,
+      },
+      isAuthenticated: true,
+      isLoading: false,
+      error: null,
+      authEnabled: true,
+      shareEnabled: true,
+    })
+    getCurrentUserMock.mockResolvedValueOnce({
+      id: 'admin-2',
+      username: 'second-admin',
+      role: 'admin',
+      email: '',
+      homeDir: '/',
+      mustChangePassword: false,
+    })
+    const storageError = new DOMException('localStorage is blocked', 'SecurityError')
+    const getItemSpy = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw storageError
+    })
+    const setItemSpy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw storageError
+    })
+    const removeItemSpy = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => {
+      throw storageError
+    })
+    const channel = new window.BroadcastChannel('mnemonas:auth-session')
+
+    try {
+      channel.postMessage({
+        version: 1,
+        type: 'session_updated',
+        nonce: 'broadcast-login-storage-blocked',
+        source_id: 'other-tab',
+      })
+
+      await vi.waitFor(() => {
+        expect(useAuthStore.getState()).toMatchObject({
+          user: expect.objectContaining({ id: 'admin-2' }),
+          isAuthenticated: true,
+          isLoading: false,
+          error: null,
+        })
+      })
+      expect(clearQueryClientMock).toHaveBeenCalledTimes(1)
+      expect(getCurrentUserMock).toHaveBeenCalledWith({ signal: expect.any(AbortSignal) })
+    } finally {
+      channel.close()
+      getItemSpy.mockRestore()
+      setItemSpy.mockRestore()
+      removeItemSpy.mockRestore()
+    }
+  })
+
+  it('deduplicates the same cross-tab signal delivered by storage and BroadcastChannel', async () => {
+    const validation = createDeferred<{
+      id: string
+      username: string
+      role: 'admin'
+      email: string
+      homeDir: string
+      mustChangePassword: boolean
+    }>()
+    getCurrentUserMock.mockReturnValueOnce(validation.promise)
+    const signal = {
+      version: 1,
+      type: 'session_updated',
+      nonce: 'duplicate-transport-signal',
+      source_id: 'other-tab',
+    }
+    const channel = new window.BroadcastChannel('mnemonas:auth-session')
+
+    window.dispatchEvent(new StorageEvent('storage', {
+      key: 'mnemonas:auth-cross-tab-sync',
+      newValue: JSON.stringify(signal),
+    }))
+    channel.postMessage(signal)
+
+    await vi.waitFor(() => expect(getCurrentUserMock).toHaveBeenCalledTimes(1))
+    validation.resolve({
+      id: 'admin-2',
+      username: 'second-admin',
+      role: 'admin',
+      email: '',
+      homeDir: '/',
+      mustChangePassword: false,
+    })
+    await vi.waitFor(() => expect(useAuthStore.getState().user?.id).toBe('admin-2'))
+    channel.close()
+  })
+
+  it('clears a visible session from another tab through BroadcastChannel', async () => {
+    useAuthStore.setState({
+      user: {
+        id: 'user-1',
+        username: 'first-user',
+        role: 'user',
+        email: '',
+        homeDir: '/users/first-user',
+        mustChangePassword: false,
+      },
+      isAuthenticated: true,
+      isLoading: false,
+      error: null,
+      authEnabled: true,
+      shareEnabled: true,
+    })
+    const channel = new window.BroadcastChannel('mnemonas:auth-session')
+
+    channel.postMessage({
+      version: 1,
+      type: 'cleared',
+      reason: 'logout',
+      nonce: 'broadcast-logout',
+      source_id: 'other-tab',
+    })
+
+    await vi.waitFor(() => {
+      expect(useAuthStore.getState()).toMatchObject({
+        user: null,
+        isAuthenticated: false,
+        isLoading: false,
+        error: null,
+      })
+    })
+    expect(clearQueryClientMock).toHaveBeenCalledTimes(1)
+    channel.close()
+  })
+
+  it('fails closed when another tab session signal cannot be verified', async () => {
+    useAuthStore.setState({
+      user: {
+        id: 'user-1',
+        username: 'first-user',
+        role: 'user',
+        email: '',
+        homeDir: '/users/first-user',
+        mustChangePassword: false,
+      },
+      isAuthenticated: true,
+      isLoading: false,
+      error: null,
+      authEnabled: true,
+    })
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'forged-admin',
+      username: 'forged-admin',
+      role: 'admin',
+      homeDir: '/',
+      mustChangePassword: false,
+    }))
+    getCurrentUserMock.mockRejectedValueOnce(new Error('network down'))
+
+    window.dispatchEvent(new StorageEvent('storage', {
+      key: 'mnemonas:auth-cross-tab-sync',
+      newValue: JSON.stringify({
+        version: 1,
+        type: 'session_updated',
+        nonce: 'forged-session-update',
+      }),
+    }))
+
+    await vi.waitFor(() => {
+      expect(useAuthStore.getState()).toMatchObject({
+        user: null,
+        isAuthenticated: false,
+        isLoading: false,
+        error: '无法验证登录会话，请检查网络后重试',
+      })
+    })
+  })
+
+  it('does not adopt a session validation result after a later clear signal', async () => {
+    const validation = createDeferred<{
+      id: string
+      username: string
+      role: 'admin'
+      email: string
+      homeDir: string
+      mustChangePassword: boolean
+    }>()
+    let validationSignal: AbortSignal | undefined
+    getCurrentUserMock.mockImplementationOnce((options?: { signal?: AbortSignal }) => {
+      validationSignal = options?.signal
+      return validation.promise
+    })
+
+    window.dispatchEvent(new StorageEvent('storage', {
+      key: 'mnemonas:auth-cross-tab-sync',
+      newValue: JSON.stringify({ version: 1, type: 'session_updated', nonce: 'login-first' }),
+    }))
+    window.dispatchEvent(new StorageEvent('storage', {
+      key: 'mnemonas:auth-cross-tab-sync',
+      newValue: JSON.stringify({ version: 1, type: 'cleared', reason: 'logout', nonce: 'logout-later' }),
+    }))
+    expect(validationSignal?.aborted).toBe(true)
+
+    validation.resolve({
+      id: 'stale-admin',
+      username: 'stale-admin',
+      role: 'admin',
+      email: '',
+      homeDir: '/',
+      mustChangePassword: false,
+    })
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(useAuthStore.getState()).toMatchObject({
+      user: null,
+      isAuthenticated: false,
+      isLoading: false,
+      error: null,
+    })
+  })
+
+  it('clears cached queries when the same user security scope changes', () => {
+    useAuthStore.setState({
+      user: {
+        id: 'user-1',
+        username: 'user',
+        role: 'admin',
+        email: '',
+        homeDir: '/',
+        mustChangePassword: false,
+      },
+      isAuthenticated: true,
+      isLoading: false,
+      error: null,
+      authEnabled: true,
+    })
+
+    window.dispatchEvent(new CustomEvent('mnemonas:auth-session-updated', {
+      detail: {
+        user: {
+          id: 'user-1',
+          username: 'user',
+          role: 'user',
+          email: '',
+          homeDir: '/users/user',
+          mustChangePassword: false,
+        },
+      },
+    }))
+
+    expect(clearQueryClientMock).toHaveBeenCalledTimes(1)
+    expect(useAuthStore.getState().user).toMatchObject({
+      role: 'user',
+      homeDir: '/users/user',
+    })
   })
 
   it('redacts secrets from explicit auth-cleared messages', () => {
@@ -326,28 +773,17 @@ describe('authStore', () => {
     expect(state.error).toBe('登录已过期，请重新登录')
   })
 
-  it('preserves cached auth state when current user validation is temporarily unavailable', async () => {
-    getStoredUserMock.mockReturnValue({
-      id: 'cached-1',
-      username: 'cached-admin',
-      role: 'admin',
-      email: '',
-      homeDir: '/',
-    })
+  it('fails closed when current user validation is temporarily unavailable', async () => {
     getCurrentUserMock.mockRejectedValue(new Error('network down'))
 
     await expect(useAuthStore.getState().initialize()).resolves.toBeUndefined()
 
     const state = useAuthStore.getState()
-    expect(state.user).toEqual({
-      id: 'cached-1',
-      username: 'cached-admin',
-      role: 'admin',
-      email: '',
-      homeDir: '/',
-    })
-    expect(state.isAuthenticated).toBe(true)
+    expect(state.user).toBeNull()
+    expect(state.isAuthenticated).toBe(false)
     expect(state.isLoading).toBe(false)
+    expect(state.error).toBe('无法验证登录会话，请检查网络后重试')
+    expect(clearQueryClientMock).toHaveBeenCalled()
   })
 
   it('tracks share availability from setup status', async () => {
@@ -544,6 +980,7 @@ describe('authStore', () => {
       role: 'admin',
       email: '',
       homeDir: '/',
+      mustChangePassword: false,
     })
   })
 
@@ -555,7 +992,6 @@ describe('authStore', () => {
       email: '',
       homeDir: '/',
     }
-    getStoredUserMock.mockReturnValue(user)
     getCurrentUserMock.mockResolvedValue(user)
 
     await expect(useAuthStore.getState().initialize()).resolves.toBeUndefined()
@@ -574,8 +1010,6 @@ describe('authStore', () => {
   })
 
   it('can skip session validation for public entry routes without cached auth state', async () => {
-    getStoredUserMock.mockReturnValue(null)
-
     await expect(useAuthStore.getState().initialize({ validateSession: false })).resolves.toBeUndefined()
 
     expect(getSetupStatusMock).toHaveBeenCalledWith({
@@ -598,7 +1032,7 @@ describe('authStore', () => {
       email: '',
       homeDir: '/',
     }
-    getStoredUserMock.mockReturnValue(user)
+    useAuthStore.setState({ user, isAuthenticated: true, isLoading: false })
     getCurrentUserMock.mockResolvedValue(user)
 
     await expect(useAuthStore.getState().initialize({ validateSession: false })).resolves.toBeUndefined()
@@ -612,12 +1046,17 @@ describe('authStore', () => {
   })
 
   it('clears auth state when the cookie session is invalid', async () => {
-    getStoredUserMock.mockReturnValue({
-      id: 'cached-1',
-      username: 'cached-admin',
-      role: 'admin',
-      email: '',
-      homeDir: '/',
+    useAuthStore.setState({
+      user: {
+        id: 'cached-1',
+        username: 'cached-admin',
+        role: 'admin',
+        email: '',
+        homeDir: '/',
+        mustChangePassword: false,
+      },
+      isAuthenticated: true,
+      isLoading: false,
     })
     getCurrentUserMock.mockResolvedValue(null)
 
@@ -630,7 +1069,6 @@ describe('authStore', () => {
   })
 
   it('clears auth state when current user validation fails without a cached session', async () => {
-    getStoredUserMock.mockReturnValue(null)
     getCurrentUserMock.mockRejectedValue(new Error('network down'))
 
     await expect(useAuthStore.getState().initialize()).resolves.toBeUndefined()
@@ -639,6 +1077,7 @@ describe('authStore', () => {
     expect(state.user).toBeNull()
     expect(state.isAuthenticated).toBe(false)
     expect(state.isLoading).toBe(false)
+    expect(state.error).toBe('无法验证登录会话，请检查网络后重试')
   })
 
   it('stores localized login errors and rethrows the original failure', async () => {
@@ -757,7 +1196,7 @@ describe('authStore', () => {
     expect(state.authEnabled).toBe(false)
   })
 
-  it('ignores auth-cleared events when the store is already anonymous and idle', () => {
+  it('clears cached queries without adding an error when the store is already anonymous and idle', () => {
     useAuthStore.setState({
       user: null,
       isAuthenticated: false,
@@ -768,7 +1207,7 @@ describe('authStore', () => {
 
     window.dispatchEvent(new Event('mnemonas:auth-cleared'))
 
-    expect(clearQueryClientMock).not.toHaveBeenCalled()
+    expect(clearQueryClientMock).toHaveBeenCalledTimes(1)
     expect(useAuthStore.getState().error).toBeNull()
   })
 

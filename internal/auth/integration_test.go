@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -11,6 +12,8 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 )
+
+const testValidPasswordHash = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
 
 func parseBootstrapCredentials(t *testing.T, passwordFile string) (string, string) {
 	t.Helper()
@@ -39,6 +42,18 @@ func parseBootstrapCredentials(t *testing.T, passwordFile string) (string, strin
 	}
 
 	return username, password
+}
+
+func marshalPersistedUsersFixture(t *testing.T, users []*User) []byte {
+	t.Helper()
+	data, err := json.Marshal(persistedUserStore{
+		SchemaVersion: userStoreSchemaVersion,
+		Users:         users,
+	})
+	if err != nil {
+		t.Fatalf("Marshal(persisted users fixture) error: %v", err)
+	}
+	return data
 }
 
 // TestConfigMatrix_AuthInitialization tests authentication behavior under different configurations
@@ -74,7 +89,7 @@ func TestConfigMatrix_AuthInitialization(t *testing.T) {
 
 			// Setup: create existing users file if needed
 			if tc.setupUsers {
-				existingData := `[{"id":"existing-admin","username":"admin","password_hash":"$2a$10$dummy","role":"admin","created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-01T00:00:00Z","home_dir":"/"}]`
+				existingData := `{"schema_version":1,"users":[{"id":"existing-admin","username":"admin","password_hash":"` + testValidPasswordHash + `","role":"admin","created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-01T00:00:00Z","must_change_password":false,"credential_version":1,"home_dir":"/"}]}`
 				if err := os.WriteFile(usersFile, []byte(existingData), 0600); err != nil {
 					t.Fatalf("failed to setup existing users: %v", err)
 				}
@@ -116,118 +131,65 @@ func TestPasswordFileLifecycle(t *testing.T) {
 	usersFile := filepath.Join(dir, "users.json")
 	passwordFile := filepath.Join(dir, "initial-password.txt")
 
-	// Step 1: Fresh install - password file should be created
-	store, _, err := NewUserStore(usersFile)
-	if err != nil {
-		t.Fatalf("failed to create user store: %v", err)
-	}
-
-	// Verify password file exists
-	if _, err := os.Stat(passwordFile); os.IsNotExist(err) {
-		t.Fatal("password file should exist after fresh install")
-	}
-
-	// Step 2: Read password from file
-	content, err := os.ReadFile(passwordFile)
-	if err != nil {
-		t.Fatalf("failed to read password file: %v", err)
-	}
-
-	// Extract password from file content
-	lines := strings.Split(string(content), "\n")
-	var password string
-	for _, line := range lines {
-		if strings.HasPrefix(line, "Password: ") {
-			password = strings.TrimPrefix(line, "Password: ")
-			break
-		}
-	}
-
-	if password == "" {
-		t.Fatal("could not extract password from password file")
-	}
-
-	// Step 3: Login with extracted password
-	user, err := store.Authenticate("admin", password)
-	if err != nil {
-		t.Fatalf("failed to authenticate with password from file: %v", err)
-	}
-
-	if user.Username != "admin" {
-		t.Errorf("expected admin, got %s", user.Username)
-	}
-
-	// Step 4: Verify password file is deleted after login
-	if _, err := os.Stat(passwordFile); !os.IsNotExist(err) {
-		t.Error("password file should be deleted after successful login")
-	}
-
-	// Step 5: Subsequent logins should still work
-	user, err = store.Authenticate("admin", password)
-	if err != nil {
-		t.Fatalf("subsequent login failed: %v", err)
-	}
-
-	if user.Username != "admin" {
-		t.Errorf("expected admin, got %s", user.Username)
-	}
-}
-
-func TestAuthenticate_FailsWhenInitialPasswordFileCannotBeRemoved(t *testing.T) {
-	dir := t.TempDir()
-	usersFile := filepath.Join(dir, "users.json")
-	passwordFile := filepath.Join(dir, "initial-password.txt")
-
 	store, password, err := NewUserStore(usersFile)
 	if err != nil {
 		t.Fatalf("failed to create user store: %v", err)
 	}
 	if password == "" {
-		t.Fatal("expected initial admin password")
+		t.Fatal("expected generated bootstrap password")
 	}
-
-	if err := os.Remove(passwordFile); err != nil {
-		t.Fatalf("failed to remove initial password file: %v", err)
-	}
-	if err := os.Mkdir(passwordFile, 0700); err != nil {
-		t.Fatalf("failed to replace password file with directory: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(passwordFile, "blocker"), []byte("x"), 0600); err != nil {
-		t.Fatalf("failed to make password directory non-empty: %v", err)
+	if _, err := os.Stat(passwordFile); err != nil {
+		t.Fatalf("password file should exist after fresh install: %v", err)
 	}
 
 	user, err := store.Authenticate("admin", password)
-	if err == nil {
-		t.Fatal("expected Authenticate to fail when initial password file removal fails")
-	}
-	if !strings.Contains(err.Error(), "failed to remove initial password file") {
-		t.Fatalf("expected initial password file removal error, got %v", err)
-	}
-	if user != nil {
-		t.Fatalf("expected no authenticated user on cleanup failure, got %+v", user)
-	}
-
-	admin, err := store.GetByUsername("admin")
 	if err != nil {
-		t.Fatalf("failed to reload admin after cleanup failure: %v", err)
+		t.Fatalf("failed to authenticate with bootstrap password: %v", err)
 	}
-	if admin.LastLoginAt != nil {
-		t.Fatalf("expected failed cleanup to leave LastLoginAt unset, got %v", admin.LastLoginAt)
+	if user.Username != "admin" || !user.MustChangePassword {
+		t.Fatalf("unexpected bootstrap user after login: %+v", user)
 	}
-
-	if err := os.Remove(filepath.Join(passwordFile, "blocker")); err != nil {
-		t.Fatalf("failed to remove blocker file: %v", err)
-	}
-	if err := os.Remove(passwordFile); err != nil {
-		t.Fatalf("failed to remove blocker directory: %v", err)
+	if _, err := os.Stat(passwordFile); err != nil {
+		t.Fatalf("password file should remain after successful login: %v", err)
 	}
 
-	user, err = store.Authenticate("admin", password)
+	reloaded, generatedPassword, err := NewUserStore(usersFile)
 	if err != nil {
-		t.Fatalf("Authenticate after cleanup recovery failed: %v", err)
+		t.Fatalf("failed to reload user store: %v", err)
 	}
-	if user == nil || user.Username != "admin" {
-		t.Fatalf("expected recovered admin login, got %+v", user)
+	if generatedPassword != "" {
+		t.Fatalf("reload generated unexpected bootstrap password %q", generatedPassword)
+	}
+	user, err = reloaded.Authenticate("admin", password)
+	if err != nil {
+		t.Fatalf("bootstrap login after restart failed: %v", err)
+	}
+	if !user.MustChangePassword {
+		t.Fatalf("restart cleared must_change_password: %+v", user)
+	}
+	if _, err := os.Stat(passwordFile); err != nil {
+		t.Fatalf("password file should remain after restart login: %v", err)
+	}
+
+	if err := reloaded.ChangePassword(user.ID, password, "        "); !errors.Is(err, ErrPasswordTooShort) {
+		t.Fatalf("whitespace-only ChangePassword() error = %v, want ErrPasswordTooShort", err)
+	}
+	unchanged, err := reloaded.GetByID(user.ID)
+	if err != nil {
+		t.Fatalf("GetByID() after rejected password change: %v", err)
+	}
+	if !unchanged.MustChangePassword {
+		t.Fatal("rejected whitespace-only password cleared must_change_password")
+	}
+	if _, err := os.Stat(passwordFile); err != nil {
+		t.Fatalf("rejected whitespace-only password removed the initial password file: %v", err)
+	}
+
+	if err := reloaded.ChangePassword(user.ID, password, "changed-password-123"); err != nil {
+		t.Fatalf("ChangePassword() error: %v", err)
+	}
+	if _, err := os.Stat(passwordFile); !os.IsNotExist(err) {
+		t.Fatalf("password file should be removed after successful password change: %v", err)
 	}
 }
 
@@ -315,7 +277,7 @@ func TestPasswordFileContent(t *testing.T) {
 		"Username: admin",
 		"Password:",
 		"change this password",
-		"automatically deleted",
+		"deleted after you change this password",
 	}
 
 	for _, s := range requiredStrings {
@@ -325,8 +287,9 @@ func TestPasswordFileContent(t *testing.T) {
 	}
 }
 
-// TestReloadPreservesNoPasswordFile tests that reloading existing UserStore doesn't create new password file
-func TestReloadPreservesNoPasswordFile(t *testing.T) {
+// TestReloadPreservesInitialPasswordFileUntilPasswordChange verifies that a
+// restart cannot remove the only durable copy of an unchanged bootstrap secret.
+func TestReloadPreservesInitialPasswordFileUntilPasswordChange(t *testing.T) {
 	dir := t.TempDir()
 	usersFile := filepath.Join(dir, "users.json")
 	passwordFile := filepath.Join(dir, "initial-password.txt")
@@ -337,7 +300,7 @@ func TestReloadPreservesNoPasswordFile(t *testing.T) {
 		t.Fatalf("failed to create user store: %v", err)
 	}
 
-	// Read password and login to delete the file
+	// Read the password and login without changing it.
 	content, _ := os.ReadFile(passwordFile)
 	lines := strings.Split(string(content), "\n")
 	var password string
@@ -349,19 +312,20 @@ func TestReloadPreservesNoPasswordFile(t *testing.T) {
 	}
 	store1.Authenticate("admin", password)
 
-	// Verify file is deleted
-	if _, err := os.Stat(passwordFile); !os.IsNotExist(err) {
-		t.Fatal("password file should be deleted after login")
+	if _, err := os.Stat(passwordFile); err != nil {
+		t.Fatalf("password file should remain after login: %v", err)
 	}
 
-	// Second load: should NOT create new password file
-	_, _, err = NewUserStore(usersFile)
+	// Reloading should retain the existing file and not generate a new secret.
+	_, generatedPassword, err := NewUserStore(usersFile)
 	if err != nil {
 		t.Fatalf("failed to reload user store: %v", err)
 	}
-
-	if _, err := os.Stat(passwordFile); !os.IsNotExist(err) {
-		t.Error("password file should NOT be created on reload of existing users")
+	if generatedPassword != "" {
+		t.Fatalf("reload generated unexpected bootstrap password %q", generatedPassword)
+	}
+	if _, err := os.Stat(passwordFile); err != nil {
+		t.Fatalf("password file should remain after reload: %v", err)
 	}
 }
 
@@ -373,26 +337,28 @@ func TestNewUserStore_BootstrapsRecoveryAdminWhenNoEnabledAdminExists(t *testing
 		{
 			name: "only regular user exists",
 			existingUser: &User{
-				ID:           "user-1",
-				Username:     "member",
-				PasswordHash: "hash-1",
-				Role:         RoleUser,
-				CreatedAt:    time.Now(),
-				UpdatedAt:    time.Now(),
-				HomeDir:      "/member",
+				ID:                "user-1",
+				Username:          "member",
+				PasswordHash:      testValidPasswordHash,
+				Role:              RoleUser,
+				CredentialVersion: 1,
+				CreatedAt:         time.Now(),
+				UpdatedAt:         time.Now(),
+				HomeDir:           "/member",
 			},
 		},
 		{
 			name: "only disabled admin exists",
 			existingUser: &User{
-				ID:           "user-2",
-				Username:     "disabled-admin",
-				PasswordHash: "hash-2",
-				Role:         RoleAdmin,
-				Disabled:     true,
-				CreatedAt:    time.Now(),
-				UpdatedAt:    time.Now(),
-				HomeDir:      "/",
+				ID:                "user-2",
+				Username:          "disabled-admin",
+				PasswordHash:      testValidPasswordHash,
+				Role:              RoleAdmin,
+				Disabled:          true,
+				CredentialVersion: 1,
+				CreatedAt:         time.Now(),
+				UpdatedAt:         time.Now(),
+				HomeDir:           "/",
 			},
 		},
 	}
@@ -403,10 +369,7 @@ func TestNewUserStore_BootstrapsRecoveryAdminWhenNoEnabledAdminExists(t *testing
 			usersFile := filepath.Join(dir, "users.json")
 			passwordFile := filepath.Join(dir, "initial-password.txt")
 
-			data, err := json.Marshal([]*User{tc.existingUser})
-			if err != nil {
-				t.Fatalf("Marshal(users) error: %v", err)
-			}
+			data := marshalPersistedUsersFixture(t, []*User{tc.existingUser})
 			if err := os.WriteFile(usersFile, data, 0600); err != nil {
 				t.Fatalf("WriteFile(users.json) error: %v", err)
 			}
@@ -456,8 +419,8 @@ func TestNewUserStore_BootstrapsRecoveryAdminWhenNoEnabledAdminExists(t *testing
 				t.Fatalf("expected authenticated recovery admin, got %+v", authenticated)
 			}
 
-			if _, err := os.Stat(passwordFile); !os.IsNotExist(err) {
-				t.Fatal("password file should be deleted after successful recovery admin login")
+			if _, err := os.Stat(passwordFile); err != nil {
+				t.Fatalf("password file should remain until the recovery admin changes it: %v", err)
 			}
 		})
 	}
@@ -469,19 +432,17 @@ func TestNewUserStore_BootstrapsUniqueRecoveryAdminWhenAdminUsernameOccupied(t *
 	passwordFile := filepath.Join(dir, "initial-password.txt")
 	users := []*User{
 		{
-			ID:           "user-1",
-			Username:     "admin",
-			PasswordHash: "hash-1",
-			Role:         RoleUser,
-			CreatedAt:    time.Now(),
-			UpdatedAt:    time.Now(),
-			HomeDir:      "/admin",
+			ID:                "user-1",
+			Username:          "admin",
+			PasswordHash:      testValidPasswordHash,
+			Role:              RoleUser,
+			CredentialVersion: 1,
+			CreatedAt:         time.Now(),
+			UpdatedAt:         time.Now(),
+			HomeDir:           "/admin",
 		},
 	}
-	data, err := json.Marshal(users)
-	if err != nil {
-		t.Fatalf("Marshal(users) error: %v", err)
-	}
+	data := marshalPersistedUsersFixture(t, users)
 	if err := os.WriteFile(usersFile, data, 0600); err != nil {
 		t.Fatalf("WriteFile(users.json) error: %v", err)
 	}
@@ -538,19 +499,17 @@ func TestAuthenticate_NonBootstrapUserDoesNotDeleteRecoveryPasswordFile(t *testi
 	}
 	users := []*User{
 		{
-			ID:           "user-1",
-			Username:     "member",
-			PasswordHash: string(memberHash),
-			Role:         RoleUser,
-			CreatedAt:    time.Now(),
-			UpdatedAt:    time.Now(),
-			HomeDir:      "/member",
+			ID:                "user-1",
+			Username:          "member",
+			PasswordHash:      string(memberHash),
+			Role:              RoleUser,
+			CredentialVersion: 1,
+			CreatedAt:         time.Now(),
+			UpdatedAt:         time.Now(),
+			HomeDir:           "/member",
 		},
 	}
-	data, err := json.Marshal(users)
-	if err != nil {
-		t.Fatalf("Marshal(users) error: %v", err)
-	}
+	data := marshalPersistedUsersFixture(t, users)
 	if err := os.WriteFile(usersFile, data, 0600); err != nil {
 		t.Fatalf("WriteFile(users.json) error: %v", err)
 	}
@@ -585,8 +544,8 @@ func TestAuthenticate_NonBootstrapUserDoesNotDeleteRecoveryPasswordFile(t *testi
 		t.Fatalf("expected authenticated bootstrap admin, got %+v", recoveryAdmin)
 	}
 
-	if _, err := os.Stat(passwordFile); !os.IsNotExist(err) {
-		t.Fatal("expected recovery password file to be deleted after bootstrap admin login")
+	if _, err := os.Stat(passwordFile); err != nil {
+		t.Fatalf("expected recovery password file to remain until password change, got %v", err)
 	}
 }
 
@@ -601,19 +560,17 @@ func TestAuthenticate_PrefixUsernameDoesNotDeleteRecoveryPasswordFile(t *testing
 	}
 	users := []*User{
 		{
-			ID:           "user-1",
-			Username:     "admin",
-			PasswordHash: string(adminHash),
-			Role:         RoleUser,
-			CreatedAt:    time.Now(),
-			UpdatedAt:    time.Now(),
-			HomeDir:      "/admin",
+			ID:                "user-1",
+			Username:          "admin",
+			PasswordHash:      string(adminHash),
+			Role:              RoleUser,
+			CredentialVersion: 1,
+			CreatedAt:         time.Now(),
+			UpdatedAt:         time.Now(),
+			HomeDir:           "/admin",
 		},
 	}
-	data, err := json.Marshal(users)
-	if err != nil {
-		t.Fatalf("Marshal(users) error: %v", err)
-	}
+	data := marshalPersistedUsersFixture(t, users)
 	if err := os.WriteFile(usersFile, data, 0600); err != nil {
 		t.Fatalf("WriteFile(users.json) error: %v", err)
 	}
@@ -648,99 +605,112 @@ func TestAuthenticate_PrefixUsernameDoesNotDeleteRecoveryPasswordFile(t *testing
 		t.Fatalf("expected authenticated recovery admin, got %+v", recoveryAdmin)
 	}
 
-	if _, err := os.Stat(passwordFile); !os.IsNotExist(err) {
-		t.Fatal("expected recovery password file to be deleted after recovery admin login")
+	if _, err := os.Stat(passwordFile); err != nil {
+		t.Fatalf("expected recovery password file to remain until password change, got %v", err)
 	}
 }
 
-func TestNewUserStore_RecoversFromCorruptUsersFile(t *testing.T) {
+func TestNewUserStore_RejectsCorruptUsersFileWithoutMutation(t *testing.T) {
 	dir := t.TempDir()
 	usersFile := filepath.Join(dir, "users.json")
 	passwordFile := filepath.Join(dir, "initial-password.txt")
-	if err := os.WriteFile(usersFile, []byte("{invalid json"), 0600); err != nil {
+	corruptData := []byte("{invalid json")
+	if err := os.WriteFile(usersFile, corruptData, 0600); err != nil {
 		t.Fatalf("WriteFile(users.json) error: %v", err)
 	}
-
-	store, password, err := NewUserStore(usersFile)
-	if err != nil {
-		t.Fatalf("NewUserStore() error: %v", err)
-	}
-	if password == "" {
-		t.Fatal("expected recovered user store to bootstrap a new admin password")
-	}
-	if _, err := store.Authenticate("admin", password); err != nil {
-		t.Fatalf("Authenticate(admin) after recovery error: %v", err)
-	}
-	if _, err := os.Stat(passwordFile); !os.IsNotExist(err) {
-		t.Fatal("password file should be deleted after successful login")
-	}
-
-	entries, readErr := os.ReadDir(dir)
-	if readErr != nil {
-		t.Fatalf("ReadDir() error: %v", readErr)
-	}
-	foundBackup := false
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), "users.json.corrupt.") {
-			foundBackup = true
-			break
-		}
-	}
-	if !foundBackup {
-		t.Fatal("expected corrupt users backup to be created")
-	}
-}
-
-func TestNewUserStore_ReturnsErrorWhenCorruptUsersBackupSyncFails(t *testing.T) {
-	dir := t.TempDir()
-	usersFile := filepath.Join(dir, "users.json")
-	passwordFile := filepath.Join(dir, "initial-password.txt")
-	if err := os.WriteFile(usersFile, []byte("{invalid json"), 0600); err != nil {
-		t.Fatalf("WriteFile(users.json) error: %v", err)
-	}
-
-	originalSyncAuthFileDir := syncAuthFileDir
-	originalSyncAuthRootDir := syncAuthRootDir
-	syncFailed := false
-	syncAuthFileDir = func(dir string) error {
-		if !syncFailed {
-			syncFailed = true
-			return errors.New("directory fsync failed")
-		}
-		return nil
-	}
-	syncAuthRootDir = func(root *os.Root) error {
-		if !syncFailed {
-			syncFailed = true
-			return errors.New("directory fsync failed")
-		}
-		return nil
-	}
-	defer func() {
-		syncAuthFileDir = originalSyncAuthFileDir
-		syncAuthRootDir = originalSyncAuthRootDir
-	}()
 
 	if _, _, err := NewUserStore(usersFile); err == nil {
-		t.Fatal("expected NewUserStore() to fail when corrupt users backup sync fails")
-	} else if !strings.Contains(err.Error(), "sync corrupt users directory") {
-		t.Fatalf("expected corrupt users sync failure in error, got %v", err)
+		t.Fatal("expected NewUserStore() to reject corrupt users file")
 	}
-
-	if _, statErr := os.Stat(usersFile); statErr != nil {
-		t.Fatalf("expected original corrupt users file to remain after rollback, got %v", statErr)
+	data, err := os.ReadFile(usersFile)
+	if err != nil {
+		t.Fatalf("ReadFile(users.json) error: %v", err)
+	}
+	if !bytes.Equal(data, corruptData) {
+		t.Fatalf("corrupt users file changed to %q", string(data))
 	}
 	if _, statErr := os.Stat(passwordFile); !os.IsNotExist(statErr) {
-		t.Fatal("expected no password file when corrupt users recovery fails")
+		t.Fatal("expected no initial password file after fail-closed load")
 	}
-	entries, readErr := os.ReadDir(dir)
-	if readErr != nil {
-		t.Fatalf("ReadDir() error: %v", readErr)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir() error: %v", err)
 	}
 	for _, entry := range entries {
 		if strings.HasPrefix(entry.Name(), "users.json.corrupt.") {
-			t.Fatalf("expected no corrupt backup after rollback, found %s", entry.Name())
+			t.Fatalf("unexpected corrupt users backup %q", entry.Name())
 		}
+	}
+}
+
+func TestNewUserStore_RejectsInvalidPersistedUserInvariants(t *testing.T) {
+	tests := []struct {
+		name        string
+		mutate      func(*User)
+		messagePart string
+	}{
+		{
+			name: "non-admin root home",
+			mutate: func(user *User) {
+				user.Role = RoleUser
+				user.HomeDir = "/"
+			},
+			messagePart: "role/home_dir combination",
+		},
+		{
+			name: "negative quota",
+			mutate: func(user *User) {
+				user.QuotaBytes = -1
+			},
+			messagePart: "invalid quota_bytes",
+		},
+		{
+			name: "malformed password hash",
+			mutate: func(user *User) {
+				user.PasswordHash = "not-a-bcrypt-hash"
+			},
+			messagePart: "invalid password_hash",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			usersFile := filepath.Join(dir, "users.json")
+			user := &User{
+				ID:                "admin-1",
+				Username:          "admin",
+				PasswordHash:      testValidPasswordHash,
+				Role:              RoleAdmin,
+				CreatedAt:         time.Now(),
+				UpdatedAt:         time.Now(),
+				CredentialVersion: 1,
+				HomeDir:           "/",
+			}
+			test.mutate(user)
+			payload := marshalPersistedUsersFixture(t, []*User{user})
+			if err := os.WriteFile(usersFile, payload, 0600); err != nil {
+				t.Fatalf("WriteFile(users.json) error: %v", err)
+			}
+
+			store, password, err := NewUserStore(usersFile)
+			if err == nil || !strings.Contains(err.Error(), test.messagePart) {
+				t.Fatalf("NewUserStore() error = %v, want %q", err, test.messagePart)
+			}
+			if store != nil || password != "" {
+				t.Fatalf("NewUserStore() = (%+v, %q), want fail-closed result", store, password)
+			}
+			persisted, readErr := os.ReadFile(usersFile)
+			if readErr != nil {
+				t.Fatalf("ReadFile(users.json) error: %v", readErr)
+			}
+			if !bytes.Equal(persisted, payload) {
+				t.Fatal("rejected users file was modified")
+			}
+			if _, statErr := os.Stat(filepath.Join(dir, "initial-password.txt")); !os.IsNotExist(statErr) {
+				t.Fatalf("rejected users file created an initial password file: %v", statErr)
+			}
+		})
 	}
 }
 
@@ -748,7 +718,7 @@ func TestNewUserStore_RejectsNullUserEntry(t *testing.T) {
 	dir := t.TempDir()
 	usersFile := filepath.Join(dir, "users.json")
 	passwordFile := filepath.Join(dir, "initial-password.txt")
-	if err := os.WriteFile(usersFile, []byte("[null]"), 0600); err != nil {
+	if err := os.WriteFile(usersFile, []byte(`{"schema_version":1,"users":[null]}`), 0600); err != nil {
 		t.Fatalf("WriteFile(users.json) error: %v", err)
 	}
 
@@ -770,28 +740,27 @@ func TestNewUserStore_RejectsDuplicateNormalizedUsername(t *testing.T) {
 	now := time.Now()
 	users := []*User{
 		{
-			ID:           "user-1",
-			Username:     "Admin",
-			PasswordHash: "hash-1",
-			Role:         RoleAdmin,
-			CreatedAt:    now,
-			UpdatedAt:    now,
-			HomeDir:      "/",
+			ID:                "user-1",
+			Username:          "Admin",
+			PasswordHash:      testValidPasswordHash,
+			Role:              RoleAdmin,
+			CredentialVersion: 1,
+			CreatedAt:         now,
+			UpdatedAt:         now,
+			HomeDir:           "/",
 		},
 		{
-			ID:           "user-2",
-			Username:     "admin",
-			PasswordHash: "hash-2",
-			Role:         RoleUser,
-			CreatedAt:    now,
-			UpdatedAt:    now,
-			HomeDir:      "/admin",
+			ID:                "user-2",
+			Username:          "admin",
+			PasswordHash:      testValidPasswordHash,
+			Role:              RoleUser,
+			CredentialVersion: 1,
+			CreatedAt:         now,
+			UpdatedAt:         now,
+			HomeDir:           "/admin",
 		},
 	}
-	data, err := json.Marshal(users)
-	if err != nil {
-		t.Fatalf("Marshal(users) error: %v", err)
-	}
+	data := marshalPersistedUsersFixture(t, users)
 	if err := os.WriteFile(usersFile, data, 0600); err != nil {
 		t.Fatalf("WriteFile(users.json) error: %v", err)
 	}
@@ -886,7 +855,9 @@ func TestBoundaryConditions_Password(t *testing.T) {
 		{"empty password", "", ErrPasswordTooShort},
 		{"1 char", "a", ErrPasswordTooShort},
 		{"7 chars", "1234567", ErrPasswordTooShort},
-		{"8 chars (min)", "12345678", nil},
+		{"whitespace only", "        ", ErrPasswordTooShort},
+		{"8 bytes (min)", "12345678", nil},
+		{"9 UTF-8 bytes", "密码密", nil},
 		{"16 chars", "1234567890123456", nil},
 		{"72 chars (bcrypt max)", strings.Repeat("a", 72), nil},
 		{"73 chars (above bcrypt max)", strings.Repeat("a", 73), ErrPasswordTooLong},

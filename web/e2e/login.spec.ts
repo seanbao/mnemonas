@@ -86,7 +86,7 @@ test.describe('登录页面', () => {
     const downloadCookie = cookies.find((cookie) => cookie.name === 'mnemonas_download_access')
 
     expect(accessCookie).toMatchObject({ httpOnly: true, path: '/api/v1' })
-    expect(refreshCookie).toMatchObject({ httpOnly: true, path: '/api/v1/auth/refresh' })
+    expect(refreshCookie).toMatchObject({ httpOnly: true, path: '/api/v1/auth' })
     expect(downloadCookie).toMatchObject({ httpOnly: true, path: '/api/v1', sameSite: 'Strict' })
   })
 

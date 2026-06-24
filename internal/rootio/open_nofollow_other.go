@@ -19,6 +19,34 @@ func OpenFileNoFollow(root *os.Root, name string, flag int, perm os.FileMode) (*
 	return root.OpenFile(name, flag, perm)
 }
 
+// OpenRegularFileNoFollow opens a regular file for reading. Platforms without
+// openat and non-blocking file flags retain a best-effort precheck.
+func OpenRegularFileNoFollow(root *os.Root, name string) (*os.File, error) {
+	if err := checkPathNoFollow(root, name, false, false); err != nil {
+		return nil, err
+	}
+	info, err := root.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, rootPathError("open", name, syscall.EINVAL)
+	}
+	file, err := root.OpenFile(name, os.O_RDONLY, 0)
+	if err != nil {
+		return nil, err
+	}
+	openedInfo, err := file.Stat()
+	if err != nil || !openedInfo.Mode().IsRegular() {
+		_ = file.Close()
+		if err != nil {
+			return nil, err
+		}
+		return nil, rootPathError("open", name, syscall.EINVAL)
+	}
+	return file, nil
+}
+
 // OpenDirNoFollow opens name as a directory relative to root without following
 // a symlink observed at the final component.
 func OpenDirNoFollow(root *os.Root, name string) (*os.File, error) {

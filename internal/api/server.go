@@ -4,6 +4,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -105,31 +106,32 @@ type prependReadCloser struct {
 
 // Server is the API server
 type Server struct {
-	router                    *chi.Mux
-	logger                    zerolog.Logger
-	dataplane                 *dataplane.Client
-	fs                        *storage.FileSystem
-	thumbnail                 *thumbnail.Service
-	maintenance               *maintenance.HistoryStore
-	backupManager             *backup.Manager
-	activity                  *activity.Store
-	thumbnailConfigured       bool
-	maintenanceConfigured     bool
-	backupConfigured          bool
-	activityConfigured        bool
-	scrubSchedulerMu          sync.Mutex
-	scrubSchedulerCancel      context.CancelFunc
-	scrubLastFailureID        string
-	scrubFailureRetries       int
-	quotaMu                   sync.Mutex
-	loginAlertMu              sync.Mutex
-	loginRateLimitAlerts      map[string]time.Time
-	shareExpiryReminderMu     sync.Mutex
-	shareExpiryReminderSent   map[string]time.Time
-	shareExpiryReminderCancel context.CancelFunc
-	startTime                 time.Time
-	appVersion                string
-	buildTime                 string
+	router                           *chi.Mux
+	logger                           zerolog.Logger
+	dataplane                        *dataplane.Client
+	fs                               *storage.FileSystem
+	thumbnail                        *thumbnail.Service
+	maintenance                      *maintenance.HistoryStore
+	backupManager                    *backup.Manager
+	activity                         *activity.Store
+	thumbnailConfigured              bool
+	maintenanceConfigured            bool
+	backupConfigured                 bool
+	activityConfigured               bool
+	scrubSchedulerMu                 sync.Mutex
+	scrubSchedulerCancel             context.CancelFunc
+	scrubLastFailureID               string
+	scrubFailureRetries              int
+	quotaMu                          sync.Mutex
+	loginAlertMu                     sync.Mutex
+	loginRateLimitAlerts             map[[sha256.Size]byte]time.Time
+	loginRateLimitAlertsLastPrunedAt time.Time
+	shareExpiryReminderMu            sync.Mutex
+	shareExpiryReminderSent          map[string]time.Time
+	shareExpiryReminderCancel        context.CancelFunc
+	startTime                        time.Time
+	appVersion                       string
+	buildTime                        string
 	// Auth components
 	userStore     *auth.UserStore
 	tokenManager  *auth.TokenManager
@@ -151,6 +153,7 @@ type Server struct {
 	config              *config.Config
 	configMu            sync.RWMutex
 	settingsMu          sync.Mutex
+	setupMu             sync.Mutex
 	configPath          string
 	activeWebDAV        WebDAVRuntimeConfig
 	webdavMu            sync.RWMutex
@@ -855,6 +858,8 @@ const (
 
 	defaultScrubSchedulerPollInterval = time.Minute
 	loginRateLimitAlertCooldown       = 15 * time.Minute
+	loginRateLimitAlertPruneInterval  = time.Minute
+	loginRateLimitAlertMaxEntries     = 4096
 	maxLoginAlertUsernameRunes        = 255
 )
 
@@ -1608,9 +1613,13 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 			refreshTTL = 7 * 24 * time.Hour
 		}
 		s.tokenManager = auth.NewTokenManager(cfg.AuthJWTSecret, accessTTL, refreshTTL)
-		tokenRevocationStoreFile := filepath.Join(filepath.Dir(s.authUsersFile), "token-revocations.json")
-		if err := s.tokenManager.EnablePersistence(tokenRevocationStoreFile); err != nil {
-			return nil, fmt.Errorf("failed to initialize token revocation store: %w", err)
+		authSessionStoreFile := filepath.Join(filepath.Dir(s.authUsersFile), "auth-sessions.json")
+		if err := s.tokenManager.EnableSessionPersistence(authSessionStoreFile); err != nil {
+			if auth.IsPersistenceWarning(err) {
+				logger.Warn().Err(err).Msg("auth session store initialized with a persistence warning")
+			} else {
+				return nil, fmt.Errorf("failed to initialize auth session store: %w", err)
+			}
 		}
 
 		// Initialize auth handler and middleware
@@ -1800,12 +1809,16 @@ func (s *Server) setupRoutes() {
 
 	// Setup status (public, for first-run guidance without exposing passwords)
 	s.router.Route("/api/v1/setup", func(r chi.Router) {
-		r.Get("/", s.handleGetSetupStatus)
+		r.With(withSetupReadResponseHeaders).Get("/", s.handleGetSetupStatus)
 		if s.authEnabled {
+			r.With(withSetupReadResponseHeaders, s.authMw.RequireAuth, s.authMw.RequireRole(auth.RoleAdmin)).Get("/readiness", s.handleGetSetupReadiness)
 			r.With(s.authMw.RequireAuth, s.authMw.RequireRole(auth.RoleAdmin)).Post("/acknowledge", s.handleAcknowledgeSetup)
+			r.With(s.authMw.RequireAuth, s.authMw.RequireRole(auth.RoleAdmin)).Post("/defer", s.handleDeferSetup)
 			return
 		}
+		r.With(withSetupReadResponseHeaders).Get("/readiness", s.handleGetSetupReadiness)
 		r.Post("/acknowledge", s.handleAcknowledgeSetup)
+		r.Post("/defer", s.handleDeferSetup)
 	})
 
 	// Auth endpoints (public)
@@ -7056,7 +7069,7 @@ func (s *Server) handleLoginWithActivity(w http.ResponseWriter, r *http.Request)
 	rec := newBufferedResponseRecorder()
 	s.authHandler.HandleLogin(rec, r)
 
-	if rec.statusCode == http.StatusTooManyRequests {
+	if rec.statusCode == http.StatusTooManyRequests && bufferedAuthErrorCode(rec) == "LOGIN_RATE_LIMITED" {
 		s.sendLoginRateLimitAlert(user, requestip.ClientIP(r))
 	}
 
@@ -7069,6 +7082,17 @@ func (s *Server) handleLoginWithActivity(w http.ResponseWriter, r *http.Request)
 	}
 
 	rec.FlushTo(w)
+}
+
+func bufferedAuthErrorCode(rec *bufferedResponseRecorder) string {
+	if rec == nil {
+		return ""
+	}
+	var envelope auth.ResponseEnvelope
+	if err := json.Unmarshal(rec.body.Bytes(), &envelope); err != nil || envelope.Error == nil {
+		return ""
+	}
+	return envelope.Error.Code
 }
 
 func (s *Server) sendLoginRateLimitAlert(username, clientIP string) {
@@ -7170,24 +7194,34 @@ func loginRateLimitAlertClientIPScope(clientIP string) string {
 
 func (s *Server) reserveLoginRateLimitAlert(username, clientIP string) bool {
 	now := apiTimeNow()
-	key := strings.ToLower(username) + "\x00" + clientIP
+	key := loginRateLimitAlertKey(username, clientIP)
 
 	s.loginAlertMu.Lock()
 	defer s.loginAlertMu.Unlock()
 
 	if s.loginRateLimitAlerts == nil {
-		s.loginRateLimitAlerts = make(map[string]time.Time)
+		s.loginRateLimitAlerts = make(map[[sha256.Size]byte]time.Time)
 	}
 	if last, ok := s.loginRateLimitAlerts[key]; ok && now.Sub(last) < loginRateLimitAlertCooldown {
 		return false
 	}
-	for existingKey, last := range s.loginRateLimitAlerts {
-		if now.Sub(last) >= loginRateLimitAlertCooldown {
-			delete(s.loginRateLimitAlerts, existingKey)
+	if s.loginRateLimitAlertsLastPrunedAt.IsZero() || now.Before(s.loginRateLimitAlertsLastPrunedAt) || now.Sub(s.loginRateLimitAlertsLastPrunedAt) >= loginRateLimitAlertPruneInterval {
+		for existingKey, last := range s.loginRateLimitAlerts {
+			if now.Sub(last) >= loginRateLimitAlertCooldown {
+				delete(s.loginRateLimitAlerts, existingKey)
+			}
 		}
+		s.loginRateLimitAlertsLastPrunedAt = now
+	}
+	if len(s.loginRateLimitAlerts) >= loginRateLimitAlertMaxEntries {
+		return false
 	}
 	s.loginRateLimitAlerts[key] = now
 	return true
+}
+
+func loginRateLimitAlertKey(username, clientIP string) [sha256.Size]byte {
+	return sha256.Sum256([]byte(strings.ToLower(username) + "\x00" + clientIP))
 }
 
 func readLoginUsername(r *http.Request) (string, error) {
@@ -8594,18 +8628,22 @@ func securityLoginRateLimitCheck(authEnabled bool, handler *auth.Handler) securi
 		policy = handler.LoginRateLimitPolicy()
 	}
 	details := map[string]interface{}{
-		"auth_enabled":                 authEnabled,
-		"enabled":                      policy.Enabled,
-		"failure_limit":                policy.FailureLimit,
-		"failure_window":               policy.FailureWindow.String(),
-		"failure_window_seconds":       securityDurationSeconds(policy.FailureWindow),
-		"lock_duration":                policy.LockDuration.String(),
-		"lock_duration_seconds":        securityDurationSeconds(policy.LockDuration),
-		"alert_event":                  "login_rate_limited",
-		"alert_cooldown":               loginRateLimitAlertCooldown.String(),
-		"alert_cooldown_seconds":       securityDurationSeconds(loginRateLimitAlertCooldown),
-		"key_scope":                    "username_and_client_ip",
-		"invalid_credentials_response": "generic",
+		"auth_enabled":                    authEnabled,
+		"enabled":                         policy.Enabled,
+		"failure_limit":                   policy.FailureLimit,
+		"failure_window":                  policy.FailureWindow.String(),
+		"failure_window_seconds":          securityDurationSeconds(policy.FailureWindow),
+		"lock_duration":                   policy.LockDuration.String(),
+		"lock_duration_seconds":           securityDurationSeconds(policy.LockDuration),
+		"credential_check_limit":          policy.CredentialCheckLimit,
+		"credential_check_window":         policy.CredentialCheckWindow.String(),
+		"credential_check_window_seconds": securityDurationSeconds(policy.CredentialCheckWindow),
+		"credential_check_scope":          "client_ip",
+		"alert_event":                     "login_rate_limited",
+		"alert_cooldown":                  loginRateLimitAlertCooldown.String(),
+		"alert_cooldown_seconds":          securityDurationSeconds(loginRateLimitAlertCooldown),
+		"key_scope":                       "username_and_client_ip",
+		"invalid_credentials_response":    "generic",
 	}
 
 	if !authEnabled {
@@ -8632,7 +8670,7 @@ func securityLoginRateLimitCheck(authEnabled bool, handler *auth.Handler) securi
 		ID:      checkID,
 		Status:  securityCheckPass,
 		Title:   "登录失败限速已启用",
-		Message: "连续失败登录会按用户名和客户端 IP 触发短期锁定，并产生登录限速提醒事件。",
+		Message: "连续失败登录会按用户名和客户端 IP 触发短期锁定；每个客户端 IP 的凭据检查另受短窗口限制，并产生登录限速提醒事件。",
 		Details: details,
 	}
 }
@@ -8731,9 +8769,20 @@ func securityBrowserSessionBoundaryCheck(r *http.Request, cfg *config.Config, au
 	const checkID = "browser_session_boundary"
 
 	secureCookie := requestSchemeValue == "https"
+	cookieNamePrefix := ""
+	cookiePath := "endpoint_scoped"
+	if secureCookie {
+		cookieNamePrefix = "__Host-"
+		cookiePath = "/"
+	}
 	details := map[string]interface{}{
 		"auth_enabled":                                authEnabled,
 		"session_cookie_secure":                       secureCookie,
+		"session_cookie_host_prefix":                  secureCookie,
+		"session_cookie_name_prefix":                  cookieNamePrefix,
+		"session_cookie_path":                         cookiePath,
+		"session_cookie_domain_set":                   false,
+		"request_mode_cookie_name_isolation":          true,
 		"primary_session_cookie_http_only":            true,
 		"primary_session_cookie_same_site":            "Lax",
 		"download_session_cookie_http_only":           true,
@@ -8773,7 +8822,7 @@ func securityBrowserSessionBoundaryCheck(r *http.Request, cfg *config.Config, au
 		ID:      checkID,
 		Status:  securityCheckPass,
 		Title:   "浏览器会话边界符合公网建议",
-		Message: "当前访问会为 Web UI 会话和下载 cookie 设置 Secure 标记，且浏览器写请求会经过同源元数据校验。",
+		Message: "当前访问会为 Web UI 会话和下载 cookie 设置 Secure、__Host- 前缀和 Path=/，且浏览器写请求会经过同源元数据校验。",
 		Details: details,
 	}
 }
@@ -8864,11 +8913,10 @@ func securityShareDefaultPolicyCheck(cfg *config.Config) securityCheckItem {
 	}
 }
 
-func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) {
+func (s *Server) buildSecurityCheck(r *http.Request) (*securityCheckResponse, error) {
 	cfg := s.currentConfig()
 	if cfg == nil {
-		ServiceUnavailable(w, "settings not available")
-		return
+		return nil, errors.New("settings not available")
 	}
 
 	requestSchemeValue := requestScheme(r)
@@ -9467,6 +9515,15 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 		},
 	}
 
+	return &resp, nil
+}
+
+func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) {
+	resp, err := s.buildSecurityCheck(r)
+	if err != nil {
+		ServiceUnavailable(w, "settings not available")
+		return
+	}
 	NewAPIResponse(resp).Write(w, http.StatusOK)
 }
 
@@ -11279,6 +11336,7 @@ type SetupStatusResponse struct {
 // handleGetSetupStatus returns setup status for first run.
 // Initial credentials are intentionally only exposed through server-side logs.
 func (s *Server) handleGetSetupStatus(w http.ResponseWriter, r *http.Request) {
+	setSetupReadResponseHeaders(w)
 	cfg := s.currentConfig()
 	if cfg == nil {
 		ServiceUnavailable(w, "configuration not available")
@@ -11301,7 +11359,7 @@ func (s *Server) handleGetSetupStatus(w http.ResponseWriter, r *http.Request) {
 
 	resp := SetupStatusResponse{
 		Success:           true,
-		IsFirstRun:        !secrets.SetupShown,
+		IsFirstRun:        secrets.SetupLifecycle.CompletedAt == nil && (secrets.SetupLifecycle.DeferredUntil == nil || !apiTimeNow().Before(*secrets.SetupLifecycle.DeferredUntil)),
 		AuthEnabled:       s.authEnabled,
 		ShareEnabled:      cfg.Share.Enabled,
 		WebDAVEnabled:     cfg.WebDAV.Enabled,
@@ -11310,29 +11368,6 @@ func (s *Server) handleGetSetupStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.json(w, http.StatusOK, resp)
-}
-
-// handleAcknowledgeSetup marks the setup as shown
-func (s *Server) handleAcknowledgeSetup(w http.ResponseWriter, r *http.Request) {
-	cfg := s.currentConfig()
-	if cfg == nil {
-		ServiceUnavailable(w, "configuration not available")
-		return
-	}
-	if err := config.MarkSetupShown(cfg.Storage.Root); err != nil {
-		if errors.Is(err, config.ErrSecretsNotFound) {
-			s.logger.Error().Err(err).Msg("failed to acknowledge setup")
-			ServiceUnavailable(w, "setup acknowledge unavailable")
-			return
-		}
-		s.respondInternalError(w, "acknowledge setup", err)
-		return
-	}
-
-	s.json(w, http.StatusOK, map[string]interface{}{
-		"success": true,
-		"message": "setup acknowledged",
-	})
 }
 
 // bufferedResponseRecorder captures the response until callers decide to flush it.

@@ -5,6 +5,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -975,9 +976,16 @@ func setupAuthServer(t *testing.T) (*Server, *storage.FileSystem, string, string
 	}
 
 	usersFile := path.Join(tmpDir, "users.json")
-	userStore, _, err := auth.NewUserStore(usersFile)
+	userStore, bootstrapPassword, err := auth.NewUserStore(usersFile)
 	if err != nil {
 		t.Fatalf("NewUserStore() error: %v", err)
+	}
+	bootstrapAdmin, err := userStore.GetByUsername("admin")
+	if err != nil {
+		t.Fatalf("GetByUsername(admin) error: %v", err)
+	}
+	if err := userStore.ResetOwnPassword(bootstrapAdmin.ID, bootstrapPassword); err != nil {
+		t.Fatalf("ResetOwnPassword(admin) error: %v", err)
 	}
 	username := "tester"
 	password := "password123"
@@ -1016,9 +1024,16 @@ func setupAuthSettingsServer(t *testing.T) (*Server, string) {
 
 	tmpDir := t.TempDir()
 	usersFile := path.Join(tmpDir, "users.json")
-	userStore, _, err := auth.NewUserStore(usersFile)
+	userStore, bootstrapPassword, err := auth.NewUserStore(usersFile)
 	if err != nil {
 		t.Fatalf("NewUserStore() error: %v", err)
+	}
+	bootstrapAdmin, err := userStore.GetByUsername("admin")
+	if err != nil {
+		t.Fatalf("GetByUsername(admin) error: %v", err)
+	}
+	if err := userStore.ResetOwnPassword(bootstrapAdmin.ID, bootstrapPassword); err != nil {
+		t.Fatalf("ResetOwnPassword(admin) error: %v", err)
 	}
 
 	settings := config.Default()
@@ -1162,6 +1177,14 @@ func setupAuthServerWithFeatures(t *testing.T, shareEnabled, favoritesEnabled bo
 
 func loginAndGetAccessToken(t *testing.T, server *Server, username, password string) string {
 	t.Helper()
+	if server.userStore != nil {
+		user, err := server.userStore.GetByUsername(username)
+		if err == nil && user.MustChangePassword {
+			if err := server.userStore.ResetOwnPassword(user.ID, password); err != nil {
+				t.Fatalf("ResetOwnPassword(%q) error: %v", username, err)
+			}
+		}
+	}
 
 	body := fmt.Sprintf(`{"username":"%s","password":"%s"}`, username, password)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(body))
@@ -4799,6 +4822,51 @@ func TestServer_Logout_ClearsCookiesWithoutValidAuth(t *testing.T) {
 	}
 }
 
+func TestServer_Logout_AllowsPasswordChangeRequiredSession(t *testing.T) {
+	server, _ := setupAuthSettingsServer(t)
+	admin, err := server.userStore.GetByUsername("admin")
+	if err != nil {
+		t.Fatalf("GetByUsername(admin) error: %v", err)
+	}
+	const temporaryPassword = "temporary-password"
+	if err := server.userStore.ResetPassword(admin.ID, temporaryPassword); err != nil {
+		t.Fatalf("ResetPassword(admin) error: %v", err)
+	}
+
+	loginRequest := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/auth/login",
+		strings.NewReader(`{"username":"admin","password":"temporary-password"}`),
+	)
+	loginRequest.Header.Set("Content-Type", "application/json")
+	loginResponse := httptest.NewRecorder()
+	server.Router().ServeHTTP(loginResponse, loginRequest)
+	if loginResponse.Code != http.StatusOK {
+		t.Fatalf("login status = %d, want %d; body=%s", loginResponse.Code, http.StatusOK, loginResponse.Body.String())
+	}
+
+	var loginPayload struct {
+		Data auth.LoginResponse `json:"data"`
+	}
+	if err := json.Unmarshal(loginResponse.Body.Bytes(), &loginPayload); err != nil {
+		t.Fatalf("decode login response: %v", err)
+	}
+	if !loginPayload.Data.User.MustChangePassword {
+		t.Fatal("login response did not require password change")
+	}
+
+	logoutRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
+	logoutRequest.Header.Set("Authorization", "Bearer "+loginPayload.Data.AccessToken)
+	logoutResponse := httptest.NewRecorder()
+	server.Router().ServeHTTP(logoutResponse, logoutRequest)
+	if logoutResponse.Code != http.StatusOK {
+		t.Fatalf("logout status = %d, want %d; body=%s", logoutResponse.Code, http.StatusOK, logoutResponse.Body.String())
+	}
+	if _, err := server.tokenManager.ValidateAccessToken(loginPayload.Data.AccessToken); !errors.Is(err, auth.ErrTokenRevoked) {
+		t.Fatalf("access token validation after logout = %v, want %v", err, auth.ErrTokenRevoked)
+	}
+}
+
 func TestServer_LogoutActivityUsesUserContextWhenClaimsAreMissing(t *testing.T) {
 	server, _, _, username, _ := setupAuthServer(t)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
@@ -5145,36 +5213,59 @@ func TestServer_LoginRateLimitSendsThrottledAlertEvent(t *testing.T) {
 	}
 }
 
-func TestServer_LoginRateLimitAlertSanitizesInvalidUsername(t *testing.T) {
-	server, _, _, _, _ := setupAuthServer(t)
+func TestServer_LoginSessionLimitDoesNotSendRateLimitAlert(t *testing.T) {
+	server, _, _, username, password := setupAuthServer(t)
 	monitor := &fakeAlertMonitor{}
 	server.alertMonitor = monitor
 
+	user, err := server.userStore.GetByUsername(username)
+	if err != nil {
+		t.Fatalf("GetByUsername(%q) error: %v", username, err)
+	}
+	for index := 0; index < 64; index++ {
+		if _, err := server.tokenManager.GenerateTokenPair(user); err != nil {
+			t.Fatalf("GenerateTokenPair(%d) error: %v", index, err)
+		}
+	}
+
+	body := fmt.Sprintf(`{"username":%q,"password":%q}`, username, password)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(body))
+	req.RemoteAddr = "203.0.113.10:4123"
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("login status = %d, want %d; body=%s", rec.Code, http.StatusTooManyRequests, rec.Body.String())
+	}
+	var envelope auth.ResponseEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode login response: %v", err)
+	}
+	if envelope.Error == nil || envelope.Error.Code != "REFRESH_SESSION_LIMIT" {
+		t.Fatalf("error = %+v, want REFRESH_SESSION_LIMIT", envelope.Error)
+	}
+	if got := len(server.loginRateLimitAlerts); got != 0 {
+		t.Fatalf("login rate-limit alert reservations = %d, want 0", got)
+	}
+	if got := fakeAlertEventCount(monitor); got != 0 {
+		t.Fatalf("login rate-limit alert events = %d, want 0", got)
+	}
+}
+
+func TestServer_LoginRateLimitAlertSanitizesInvalidUsername(t *testing.T) {
 	invalidUsername := "/admin/SECRET_TOKEN\n" + strings.Repeat("A", 300)
-	body := fmt.Sprintf(`{"username":%q,"password":"wrong-password"}`, invalidUsername)
-	for attempt := 1; attempt <= 5; attempt++ {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(body))
-		req.RemoteAddr = "203.0.113.10:4123"
-		w := httptest.NewRecorder()
-
-		server.Router().ServeHTTP(w, req)
-
-		if attempt < 5 && w.Code != http.StatusUnauthorized {
-			t.Fatalf("attempt %d status = %d, want %d", attempt, w.Code, http.StatusUnauthorized)
-		}
-		if attempt == 5 && w.Code != http.StatusTooManyRequests {
-			t.Fatalf("attempt %d status = %d, want %d", attempt, w.Code, http.StatusTooManyRequests)
-		}
+	username := loginRateLimitAlertUsernameLabel(invalidUsername)
+	if username != "invalid username" {
+		t.Fatalf("username label = %q, want invalid username", username)
 	}
-
-	event := waitForFakeAlertEvent(t, monitor, "login_rate_limited")
-	if _, ok := event.Details["username"]; ok {
-		t.Fatalf("login alert details exposed username: %+v", event.Details)
+	details := loginRateLimitAlertDetails(username, "203.0.113.10")
+	if _, ok := details["username"]; ok {
+		t.Fatalf("login alert details exposed username: %+v", details)
 	}
-	if event.Details["username_status"] != "invalid" {
-		t.Fatalf("login alert username_status = %#v, want invalid", event.Details["username_status"])
+	if details["username_status"] != "invalid" {
+		t.Fatalf("login alert username_status = %#v, want invalid", details["username_status"])
 	}
-	detailsJSON, err := json.Marshal(event.Details)
+	detailsJSON, err := json.Marshal(details)
 	if err != nil {
 		t.Fatalf("marshal login alert details: %v", err)
 	}
@@ -5183,6 +5274,112 @@ func TestServer_LoginRateLimitAlertSanitizesInvalidUsername(t *testing.T) {
 		strings.Contains(string(detailsJSON), "\n") ||
 		strings.Contains(string(detailsJSON), "203.0.113.10") {
 		t.Fatalf("login alert leaked raw login metadata: %s", detailsJSON)
+	}
+}
+
+func TestServer_LoginRejectsInvalidUsernameWithoutRetainingRawUsername(t *testing.T) {
+	server, _, _, _, _ := setupAuthServer(t)
+	monitor := &fakeAlertMonitor{}
+	server.alertMonitor = monitor
+
+	invalidUsername := "/admin/SECRET_TOKEN\n" + strings.Repeat("A", 300)
+	body := fmt.Sprintf(`{"username":%q,"password":"wrong-password"}`, invalidUsername)
+	for attempt := 1; attempt <= 10; attempt++ {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(body))
+		req.RemoteAddr = "203.0.113.10:4123"
+		w := httptest.NewRecorder()
+
+		server.Router().ServeHTTP(w, req)
+
+		wantStatus := http.StatusUnauthorized
+		wantCode := "INVALID_CREDENTIALS"
+		if attempt >= 5 {
+			wantStatus = http.StatusTooManyRequests
+			wantCode = "LOGIN_RATE_LIMITED"
+		}
+		if w.Code != wantStatus {
+			t.Fatalf("attempt %d status = %d, want %d", attempt, w.Code, wantStatus)
+		}
+		var envelope struct {
+			Error *struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("attempt %d failed to decode response: %v", attempt, err)
+		}
+		if envelope.Error == nil || envelope.Error.Code != wantCode {
+			t.Fatalf("attempt %d error = %+v, want %s", attempt, envelope.Error, wantCode)
+		}
+	}
+
+	event := waitForFakeAlertEvent(t, monitor, "login_rate_limited")
+	if event.Details["username_status"] != "invalid" {
+		t.Fatalf("login alert username_status = %#v, want invalid", event.Details["username_status"])
+	}
+	if got := fakeAlertEventCount(monitor); got != 1 {
+		t.Fatalf("alert event count = %d, want 1", got)
+	}
+	if got := len(server.loginRateLimitAlerts); got != 1 {
+		t.Fatalf("alert reservation count = %d, want 1", got)
+	}
+}
+
+func TestServer_LoginRateLimitAlertReservationsAreHashedAndBounded(t *testing.T) {
+	originalNow := apiTimeNow
+	now := time.Date(2026, 7, 13, 10, 0, 0, 0, time.UTC)
+	apiTimeNow = func() time.Time { return now }
+	t.Cleanup(func() { apiTimeNow = originalNow })
+
+	server := &Server{}
+	for i := 0; i < loginRateLimitAlertMaxEntries; i++ {
+		if reserved := server.reserveLoginRateLimitAlert(fmt.Sprintf("user-%d", i), fmt.Sprintf("203.0.113.%d", i)); !reserved {
+			t.Fatalf("reservation %d was unexpectedly rejected", i)
+		}
+	}
+	if reserved := server.reserveLoginRateLimitAlert("over-limit-user", "198.51.100.1"); reserved {
+		t.Fatal("expected reservation beyond global limit to be rejected")
+	}
+	if got := len(server.loginRateLimitAlerts); got != loginRateLimitAlertMaxEntries {
+		t.Fatalf("reservation count = %d, want %d", got, loginRateLimitAlertMaxEntries)
+	}
+
+	lowerKey := loginRateLimitAlertKey("example-user", "203.0.113.1")
+	upperKey := loginRateLimitAlertKey("EXAMPLE-USER", "203.0.113.1")
+	if lowerKey != upperKey {
+		t.Fatal("expected alert reservation key to normalize username casing")
+	}
+	if len(lowerKey) != sha256.Size {
+		t.Fatalf("alert reservation key length = %d, want %d", len(lowerKey), sha256.Size)
+	}
+}
+
+func TestServer_LoginRateLimitAlertPruningIsPeriodic(t *testing.T) {
+	originalNow := apiTimeNow
+	now := time.Date(2026, 7, 13, 10, 0, 0, 0, time.UTC)
+	apiTimeNow = func() time.Time { return now }
+	t.Cleanup(func() { apiTimeNow = originalNow })
+
+	staleKey := loginRateLimitAlertKey("stale-user", "203.0.113.1")
+	server := &Server{
+		loginRateLimitAlerts: map[[sha256.Size]byte]time.Time{
+			staleKey: now.Add(-loginRateLimitAlertCooldown),
+		},
+		loginRateLimitAlertsLastPrunedAt: now,
+	}
+	if reserved := server.reserveLoginRateLimitAlert("fresh-user", "203.0.113.2"); !reserved {
+		t.Fatal("expected fresh reservation to succeed")
+	}
+	if _, ok := server.loginRateLimitAlerts[staleKey]; !ok {
+		t.Fatal("expected cleanup scan to be deferred before prune interval")
+	}
+
+	now = now.Add(loginRateLimitAlertPruneInterval)
+	if reserved := server.reserveLoginRateLimitAlert("later-user", "203.0.113.3"); !reserved {
+		t.Fatal("expected later reservation to succeed")
+	}
+	if _, ok := server.loginRateLimitAlerts[staleKey]; ok {
+		t.Fatal("expected stale reservation to be removed at prune interval")
 	}
 }
 
@@ -21445,6 +21642,11 @@ func TestServer_UpdateSettings_InvalidAuthTokenTTLRejected(t *testing.T) {
 			wantError: "invalid auth.access_token_ttl",
 		},
 		{
+			name:      "access ttl below refresh rotation floor",
+			body:      `{"auth":{"access_token_ttl":"29s"}}`,
+			wantError: "invalid configuration",
+		},
+		{
 			name:      "zero refresh ttl",
 			body:      `{"auth":{"refresh_token_ttl":"0"}}`,
 			wantError: "invalid auth.refresh_token_ttl",
@@ -22002,7 +22204,7 @@ func TestServer_SetupStatus_DoesNotExposeCredentials(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
 
 	secretsPath := filepath.Join(tmpDir, config.SecretsFile)
-	if err := os.WriteFile(secretsPath, []byte(`{"web_password":"web-pass","webdav_password":"auto-pass","setup_shown":false}`), 0o600); err != nil {
+	if err := os.WriteFile(secretsPath, []byte(`{"web_password":"web-pass","webdav_password":"auto-pass","setup_lifecycle":{}}`), 0o600); err != nil {
 		t.Fatalf("failed to save legacy secrets: %v", err)
 	}
 
@@ -24460,139 +24662,6 @@ func TestBuildActivityStats_IncludesRiskSummary(t *testing.T) {
 	}
 	if riskSummary["max_10m_started_at"] != "2026-04-07T09:00:00+08:00" || riskSummary["max_10m_ended_at"] != "2026-04-07T09:09:00+08:00" {
 		t.Fatalf("unexpected risk window bounds: %#v", riskSummary)
-	}
-}
-
-func TestServer_AcknowledgeSetup_WithoutAuthMarksSetupShown(t *testing.T) {
-	server, _, tmpDir := setupTestServer(t)
-
-	secrets := &config.Secrets{SetupShown: false}
-	if err := config.SaveSecrets(tmpDir, secrets); err != nil {
-		t.Fatalf("failed to save secrets: %v", err)
-	}
-	server.config.Storage.Root = tmpDir
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/setup/acknowledge", nil)
-	w := httptest.NewRecorder()
-
-	server.Router().ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("acknowledge setup without auth status = %d, want %d", w.Code, http.StatusOK)
-	}
-
-	updatedSecrets, err := config.LoadSecrets(tmpDir)
-	if err != nil {
-		t.Fatalf("failed to reload secrets: %v", err)
-	}
-	if updatedSecrets == nil || !updatedSecrets.SetupShown {
-		t.Fatalf("expected setup to be marked shown after acknowledge without auth")
-	}
-}
-
-func TestServer_AcknowledgeSetup_WithoutSecretsReturnsServiceUnavailable(t *testing.T) {
-	server, _, tmpDir := setupTestServer(t)
-	server.config.Storage.Root = tmpDir
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/setup/acknowledge", nil)
-	w := httptest.NewRecorder()
-
-	server.Router().ServeHTTP(w, req)
-
-	if w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("acknowledge setup without secrets status = %d, want %d: %s", w.Code, http.StatusServiceUnavailable, w.Body.String())
-	}
-
-	var payload APIError
-	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("failed to parse response JSON: %v", err)
-	}
-	if payload.Code != ErrCodeServiceUnavail {
-		t.Fatalf("expected error code %q, got %q", ErrCodeServiceUnavail, payload.Code)
-	}
-	if payload.Message != "setup acknowledge unavailable" {
-		t.Fatalf("expected setup acknowledge unavailable message, got %q", payload.Message)
-	}
-}
-
-func TestServer_AcknowledgeSetup_InternalErrorUsesStructuredAPIError(t *testing.T) {
-	server, _, tmpDir, username, password := setupAuthServer(t)
-
-	secrets := &config.Secrets{SetupShown: false}
-	if err := config.SaveSecrets(tmpDir, secrets); err != nil {
-		t.Fatalf("failed to save secrets: %v", err)
-	}
-	secretsPath := path.Join(tmpDir, config.SecretsFile)
-	targetSecretsPath := path.Join(tmpDir, "target-secrets.json")
-	secretsData, err := os.ReadFile(secretsPath)
-	if err != nil {
-		t.Fatalf("failed to read saved secrets: %v", err)
-	}
-	if err := os.WriteFile(targetSecretsPath, secretsData, 0600); err != nil {
-		t.Fatalf("failed to write target secrets file: %v", err)
-	}
-	if err := os.Remove(secretsPath); err != nil {
-		t.Fatalf("failed to remove original secrets file: %v", err)
-	}
-	if err := os.Symlink(targetSecretsPath, secretsPath); err != nil {
-		t.Fatalf("failed to create secrets symlink: %v", err)
-	}
-
-	loginBody := fmt.Sprintf(`{"username":"%s","password":"%s"}`, username, password)
-	loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(loginBody))
-	loginRec := httptest.NewRecorder()
-	server.Router().ServeHTTP(loginRec, loginReq)
-
-	if loginRec.Code != http.StatusOK {
-		t.Fatalf("login status = %d, want %d", loginRec.Code, http.StatusOK)
-	}
-
-	adminUsername := "admin-tester"
-	adminPassword := "adminpass123"
-	if _, err := server.userStore.Create(adminUsername, adminPassword, "", auth.RoleAdmin); err != nil {
-		t.Fatalf("create admin user error: %v", err)
-	}
-
-	adminLoginBody := fmt.Sprintf(`{"username":"%s","password":"%s"}`, adminUsername, adminPassword)
-	adminLoginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(adminLoginBody))
-	adminLoginRec := httptest.NewRecorder()
-	server.Router().ServeHTTP(adminLoginRec, adminLoginReq)
-
-	if adminLoginRec.Code != http.StatusOK {
-		t.Fatalf("admin login status = %d, want %d", adminLoginRec.Code, http.StatusOK)
-	}
-
-	var loginResp auth.LoginResponse
-	var loginPayload struct {
-		Data auth.LoginResponse `json:"data"`
-	}
-	if err := json.Unmarshal(adminLoginRec.Body.Bytes(), &loginPayload); err != nil {
-		t.Fatalf("failed to parse login response: %v", err)
-	}
-	loginResp = loginPayload.Data
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/setup/acknowledge", nil)
-	req.Header.Set("Authorization", "Bearer "+loginResp.AccessToken)
-	w := httptest.NewRecorder()
-
-	server.Router().ServeHTTP(w, req)
-
-	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("acknowledge setup status = %d, want %d", w.Code, http.StatusInternalServerError)
-	}
-
-	var payload APIError
-	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("failed to parse response JSON: %v", err)
-	}
-	if payload.Code != ErrCodeInternal {
-		t.Fatalf("expected error code %q, got %q", ErrCodeInternal, payload.Code)
-	}
-	if payload.Message != "internal server error" {
-		t.Fatalf("expected sanitized message, got %q", payload.Message)
-	}
-	if strings.Contains(strings.ToLower(w.Body.String()), "permission denied") {
-		t.Fatalf("expected internal file error details to stay hidden, got %s", w.Body.String())
 	}
 }
 

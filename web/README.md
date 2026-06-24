@@ -60,16 +60,18 @@ npx playwright install
 
 # Playwright 会自动启动隔离的后端，并构建前端后通过 Vite preview 提供页面
 
-# 复用已有环境运行受保护页面测试时，显式提供服务地址和管理员凭据
+# 复用已有环境运行受保护页面测试时，显式提供服务地址和已完成初始密码更换的管理员凭据
 export MNEMONAS_E2E_REUSE_EXISTING=1
 export MNEMONAS_E2E_BACKEND_URL=http://127.0.0.1:8080
 export MNEMONAS_E2E_FRONTEND_URL=http://127.0.0.1:5173
 export E2E_USERNAME=admin
-export E2E_PASSWORD_FILE="$HOME/.mnemonas/.mnemonas/initial-password.txt"
-# 如果 auth.users_file 位于 storage.root 根目录，可改用：
+export E2E_PASSWORD="<current-admin-password>"
+
+# 仅在复用环境仍使用初始密码时，改为提供初始密码文件和一次性替换密码：
+# export E2E_PASSWORD_FILE="$HOME/.mnemonas/.mnemonas/initial-password.txt"
+# export E2E_PASSWORD_CHANGE_TO="<replacement-admin-password>"
+# 如果 auth.users_file 位于 storage.root 根目录，密码文件路径改为：
 # export E2E_PASSWORD_FILE="$HOME/.mnemonas/initial-password.txt"
-# 已修改管理员密码且不使用密码文件时，可改用：
-# export E2E_PASSWORD="<admin-password>"
 
 # 运行所有 E2E 测试
 npm run test:e2e
@@ -86,8 +88,9 @@ npm run test:e2e:update
 
 说明：
 
-- 受保护页面测试会优先读取 `E2E_PASSWORD`，也支持通过 `E2E_PASSWORD_FILE` 指向初始密码文件。
-- 默认配置会启动隔离的测试后端，构建前端并通过 Vite preview 提供页面，自动生成初始密码并写入 `MNEMONAS_E2E_ROOT` 下的 password file。
+- 受保护页面测试会优先读取 `E2E_PASSWORD`，也支持通过 `E2E_PASSWORD_FILE` 读取当前密码。复用环境中的账号如进入强制密码变更门禁，还必须设置 `E2E_PASSWORD_CHANGE_TO`；认证 setup 会完成修改并使用新密码重新登录。该门禁不会因 `MNEMONAS_E2E_ALLOW_AUTH_SKIP=1` 而被记为跳过。
+- `E2E_PASSWORD_CHANGE_TO` 必须不同于当前密码，包含 8 至 72 个 UTF-8 字节，且不能只包含空白字符。初始密码成功更换后，服务会删除初始密码文件；后续运行应改用 `E2E_PASSWORD=<replacement-admin-password>`，不应继续引用已删除的文件。
+- 默认配置会启动隔离的测试后端，构建前端并通过 Vite preview 提供页面。后端 seed 会在浏览器测试前更换 bootstrap 密码，并把实际管理员密码写入 `MNEMONAS_E2E_ROOT/backend/e2e-password.txt`。`password-change-gate.spec.ts` 使用专用用户和管理员重置流程覆盖真实门禁，不依赖 bootstrap 门禁状态。
 - 默认隔离测试环境会把认证 setup 失败视为测试失败，避免受保护页面回归被误记为跳过。
 - 隔离测试后端的 Access Token 有效期为 2 小时，Refresh Token 有效期为 168 小时，用于降低长时间并行测试中的共享 storageState 过期风险。
 - `MNEMONAS_E2E_ROOT` 必须位于 `/tmp` 或当前 checkout 下，且不能包含 `..` 或符号链接路径组件。

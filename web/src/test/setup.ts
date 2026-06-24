@@ -16,6 +16,58 @@ if (!globalThis.crypto || typeof globalThis.crypto.getRandomValues !== 'function
   global.crypto = webcrypto as Crypto
 }
 
+// jsdom does not implement BroadcastChannel. Keep the test implementation close
+// to browser delivery semantics so cross-tab session tests exercise real events.
+class TestBroadcastChannel extends EventTarget implements BroadcastChannel {
+  static readonly channels = new Map<string, Set<TestBroadcastChannel>>()
+
+  readonly name: string
+  onmessage: ((this: BroadcastChannel, ev: MessageEvent) => unknown) | null = null
+  onmessageerror: ((this: BroadcastChannel, ev: MessageEvent) => unknown) | null = null
+
+  constructor(name: string) {
+    super()
+    this.name = name
+    const subscribers = TestBroadcastChannel.channels.get(name) ?? new Set<TestBroadcastChannel>()
+    subscribers.add(this)
+    TestBroadcastChannel.channels.set(name, subscribers)
+    this.addEventListener('message', (event) => {
+      this.onmessage?.call(this, event as MessageEvent)
+    })
+    this.addEventListener('messageerror', (event) => {
+      this.onmessageerror?.call(this, event as MessageEvent)
+    })
+  }
+
+  postMessage(message: unknown): void {
+    const subscribers = TestBroadcastChannel.channels.get(this.name)
+    if (!subscribers) {
+      return
+    }
+    for (const subscriber of subscribers) {
+      if (subscriber === this) {
+        continue
+      }
+      queueMicrotask(() => {
+        subscriber.dispatchEvent(new MessageEvent('message', { data: structuredClone(message) }))
+      })
+    }
+  }
+
+  close(): void {
+    const subscribers = TestBroadcastChannel.channels.get(this.name)
+    subscribers?.delete(this)
+    if (subscribers?.size === 0) {
+      TestBroadcastChannel.channels.delete(this.name)
+    }
+  }
+}
+
+Object.defineProperty(window, 'BroadcastChannel', {
+  configurable: true,
+  value: TestBroadcastChannel,
+})
+
 // Cleanup after each test
 afterEach(() => {
   cleanup()

@@ -834,6 +834,16 @@ func TestConfig_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "Invalid auth access token ttl below refresh rotation floor",
+			modify:  func(c *Config) { c.Auth.AccessTokenTTL = minimumAuthAccessTokenTTL - time.Second },
+			wantErr: true,
+		},
+		{
+			name:    "Valid auth access token ttl at refresh rotation floor",
+			modify:  func(c *Config) { c.Auth.AccessTokenTTL = minimumAuthAccessTokenTTL },
+			wantErr: false,
+		},
+		{
 			name:    "Invalid auth refresh token ttl",
 			modify:  func(c *Config) { c.Auth.RefreshTokenTTL = 0 },
 			wantErr: true,
@@ -1279,7 +1289,7 @@ func TestConfig_ValidateBackupJobs(t *testing.T) {
 	if err := os.WriteFile(resticPasswordFile, []byte("test-password"), 0600); err != nil {
 		t.Fatalf("WriteFile(resticPasswordFile) error: %v", err)
 	}
-	if err := os.WriteFile(rcloneConfigFile, []byte("[remote]\ntype = local\n"), 0600); err != nil {
+	if err := os.WriteFile(rcloneConfigFile, []byte("[b2]\ntype = local\n"), 0600); err != nil {
 		t.Fatalf("WriteFile(rcloneConfigFile) error: %v", err)
 	}
 	if err := os.Mkdir(realCredentialDir, 0700); err != nil {
@@ -1618,6 +1628,163 @@ func TestConfig_ValidateBackupJobs(t *testing.T) {
 			err := cfg.Validate()
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateRcloneConfigEvidenceFileRequiresStaticNamedRemote(t *testing.T) {
+	tests := []struct {
+		name        string
+		remote      string
+		content     string
+		wantErrText string
+	}{
+		{
+			name:        "connection string remote",
+			remote:      ":s3,provider=AWS:mnemonas/backups",
+			content:     "[backup]\ntype = s3\n",
+			wantErrText: "named config_file section",
+		},
+		{
+			name:        "undefined named section",
+			remote:      "missing:mnemonas/backups",
+			content:     "[backup]\ntype = s3\n",
+			wantErrText: "is not defined",
+		},
+		{
+			name:        "empty type",
+			remote:      "backup:mnemonas/backups",
+			content:     "[backup]\ntype =\nprovider = AWS\n",
+			wantErrText: "has no type",
+		},
+		{
+			name:        "token",
+			remote:      "backup:mnemonas/backups",
+			content:     "[backup]\ntype = drive\ntoken = static-token\n",
+			wantErrText: "token-refreshing",
+		},
+		{
+			name:        "environment authentication",
+			remote:      "backup:mnemonas/backups",
+			content:     "[backup]\ntype = s3\nenv_auth = true\n",
+			wantErrText: "cannot enable env_auth",
+		},
+		{
+			name:        "environment expansion",
+			remote:      "backup:mnemonas/backups",
+			content:     "[backup]\ntype = local\nremote = ${BACKUP_ROOT}\n",
+			wantErrText: "cannot expand environment-dependent paths",
+		},
+		{
+			name:        "external file",
+			remote:      "backup:mnemonas/backups",
+			content:     "[backup]\ntype = s3\nservice_account_file = /run/secrets/account.json\n",
+			wantErrText: "external runtime input",
+		},
+		{
+			name:        "external path",
+			remote:      "backup:mnemonas/backups",
+			content:     "[backup]\ntype = local\nroot_path = /srv/archive\n",
+			wantErrText: "external runtime input",
+		},
+		{
+			name:        "password command",
+			remote:      "backup:mnemonas/backups",
+			content:     "[backup]\ntype = sftp\npassword_command = secret-tool lookup backup mnemonas\n",
+			wantErrText: "external runtime input",
+		},
+		{
+			name:        "ssh agent",
+			remote:      "backup:mnemonas/backups",
+			content:     "[backup]\ntype = sftp\nssh_agent = true\n",
+			wantErrText: "external runtime input",
+		},
+		{
+			name:        "ssh helper",
+			remote:      "backup:mnemonas/backups",
+			content:     "[backup]\ntype = sftp\nssh = /usr/bin/ssh\n",
+			wantErrText: "external runtime input",
+		},
+		{
+			name:    "static named remote",
+			remote:  "backup:mnemonas/backups",
+			content: "[backup]\ntype = s3\nprovider = AWS\naccess_key_id = static-id\nsecret_access_key = static-secret\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "rclone.conf")
+			if err := os.WriteFile(configPath, []byte(tt.content), 0o600); err != nil {
+				t.Fatalf("WriteFile(config) error: %v", err)
+			}
+
+			err := validateRcloneConfigEvidenceFile(configPath, "remote", tt.remote)
+			if tt.wantErrText == "" {
+				if err != nil {
+					t.Fatalf("validateRcloneConfigEvidenceFile() error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErrText) {
+				t.Fatalf("validateRcloneConfigEvidenceFile() error = %v, want text %q", err, tt.wantErrText)
+			}
+		})
+	}
+}
+
+func TestValidateBackupIdentityOverrideArgAllowsOnlyRcloneFastList(t *testing.T) {
+	tests := []struct {
+		arg     string
+		wantErr bool
+	}{
+		{arg: "--fast-list"},
+		{arg: " --fast-list "},
+		{arg: "--fast-list=true", wantErr: true},
+		{arg: "--transfers=4", wantErr: true},
+		{arg: "--config=/tmp/rclone.conf", wantErr: true},
+		{arg: "--password-command=secret-tool", wantErr: true},
+		{arg: "", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.arg, func(t *testing.T) {
+			err := validateBackupIdentityOverrideArg("rclone", tt.arg, "rclone extra_args")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateBackupIdentityOverrideArg(%q) error = %v, wantErr %v", tt.arg, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateResticRepositoryBoundaryAllowsOnlyExplicitCredentialModels(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	storageRoot := filepath.Join(root, "storage")
+	tests := []struct {
+		name       string
+		repository string
+		wantErr    bool
+	}{
+		{name: "absolute local", repository: filepath.Join(root, "repository")},
+		{name: "rest https", repository: "rest:https://backup.example/repository"},
+		{name: "rest http", repository: "rest:http://backup.example/repository"},
+		{name: "rest missing host", repository: "rest:https:///repository", wantErr: true},
+		{name: "rest unsupported scheme", repository: "rest:ftp://backup.example/repository", wantErr: true},
+		{name: "inside source", repository: filepath.Join(source, "repository"), wantErr: true},
+		{name: "inside storage root", repository: filepath.Join(storageRoot, "repository"), wantErr: true},
+		{name: "relative local", repository: "backups/repository", wantErr: true},
+		{name: "s3 environment credentials", repository: "s3:s3.example/bucket", wantErr: true},
+		{name: "sftp agent credentials", repository: "sftp:user@backup.example:/repository", wantErr: true},
+		{name: "rclone external config", repository: "rclone:backup:repository", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateResticRepositoryBoundary(tt.repository, "restic", source, storageRoot)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateResticRepositoryBoundary(%q) error = %v, wantErr %v", tt.repository, err, tt.wantErr)
 			}
 		})
 	}

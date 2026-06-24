@@ -138,7 +138,7 @@ const securityChecklistContracts = [
       'WebDAV 使用 `auth_type = "users"`',
       '`auth_type` 不是 `none`',
       'server.host = "127.0.0.1"',
-      '管理员首页的首次部署检查',
+      '管理员首页的首次设置必需项',
       'dataplane gRPC/HTTP 端口',
       'Web UI “安全自检”没有 `block` 项',
       '`allow_unsafe_no_auth`',
@@ -168,7 +168,7 @@ const securityChecklistContracts = [
       'WebDAV uses `auth_type = "users"`',
       '`webdav.auth_type` is not `none`',
       'server.host = "127.0.0.1"',
-      'administrator Dashboard first-run checklist',
+      'administrator Dashboard first-run requirements',
       'Dataplane gRPC/HTTP ports',
       'Web UI security self-check has no `block` items',
       '`allow_unsafe_no_auth`',
@@ -1611,7 +1611,7 @@ func securityCheckIDsFromServer(path string) ([]string, error) {
 		if !ok || fn.Body == nil {
 			continue
 		}
-		if fn.Name.Name != "handleGetSecurityCheck" && !strings.HasPrefix(fn.Name.Name, "security") {
+		if fn.Name.Name != "handleGetSecurityCheck" && fn.Name.Name != "buildSecurityCheck" && !strings.HasPrefix(fn.Name.Name, "security") {
 			continue
 		}
 

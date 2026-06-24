@@ -2,6 +2,7 @@ package backup
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -486,6 +487,85 @@ func TestWriteJSONFileRejectsFinalSymlink(t *testing.T) {
 	assertFileContent(t, outsideState, "original")
 	if _, statErr := os.Lstat(filePath + ".tmp"); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("temp state file stat error = %v, want not exist", statErr)
+	}
+}
+
+func TestWriteJSONFileReturnsParentDirectorySyncFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "state", stateFileName)
+	originalSyncBackupJSONDir := syncBackupJSONDir
+	t.Cleanup(func() { syncBackupJSONDir = originalSyncBackupJSONDir })
+	syncErr := errors.New("injected directory sync failure")
+	var syncedDir string
+	syncBackupJSONDir = func(dir string) error {
+		syncedDir = dir
+		return syncErr
+	}
+
+	err := writeJSONFile(filePath, map[string]string{"status": "updated"}, 0o600)
+	if !errors.Is(err, syncErr) {
+		t.Fatalf("writeJSONFile() error = %v, want %v", err, syncErr)
+	}
+	if syncedDir != filepath.Dir(filePath) {
+		t.Fatalf("synced directory = %q, want %q", syncedDir, filepath.Dir(filePath))
+	}
+	data, readErr := os.ReadFile(filePath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(replaced state) error: %v", readErr)
+	}
+	if !strings.Contains(string(data), `"status": "updated"`) {
+		t.Fatalf("replaced state content = %q, want updated JSON", data)
+	}
+	if _, statErr := os.Lstat(filePath + ".tmp"); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("temp state file stat error = %v, want not exist", statErr)
+	}
+}
+
+func TestJobConfigEvidenceBindingPersistsButIsOmittedFromAPIResults(t *testing.T) {
+	binding := strings.Repeat("a", 64)
+	manifestDigest := "sha256:" + strings.Repeat("b", 64)
+	state := persistedState{Jobs: map[string]JobState{
+		"job": {
+			LastRun:          &RunResult{JobConfigBinding: binding, ManifestSize: 1234, ManifestDigest: manifestDigest},
+			LastRestoreDrill: &RestoreDrillResult{JobConfigBinding: binding},
+			LastRestore:      &RestoreResult{JobConfigBinding: binding},
+			LastRestoreVerify: &RestoreVerifyResult{
+				JobConfigBinding: binding,
+			},
+		},
+	}}
+	persistedPayload, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("Marshal(persisted state) error: %v", err)
+	}
+	if got := strings.Count(string(persistedPayload), `"job_config_binding"`); got != 4 {
+		t.Fatalf("persisted binding count = %d, want 4; payload=%s", got, persistedPayload)
+	}
+	if !strings.Contains(string(persistedPayload), `"manifest_size":1234`) {
+		t.Fatalf("persisted payload omitted manifest size: %s", persistedPayload)
+	}
+	if !strings.Contains(string(persistedPayload), `"manifest_digest":"`+manifestDigest+`"`) {
+		t.Fatalf("persisted payload omitted manifest digest: %s", persistedPayload)
+	}
+
+	apiPayload, err := json.Marshal(struct {
+		Run     *RunResult           `json:"run"`
+		Drill   *RestoreDrillResult  `json:"drill"`
+		Restore *RestoreResult       `json:"restore"`
+		Verify  *RestoreVerifyResult `json:"verify"`
+	}{
+		Run:     cloneRunResult(state.Jobs["job"].LastRun),
+		Drill:   cloneRestoreDrillResult(state.Jobs["job"].LastRestoreDrill),
+		Restore: cloneRestoreResult(state.Jobs["job"].LastRestore),
+		Verify:  cloneRestoreVerifyResult(state.Jobs["job"].LastRestoreVerify),
+	})
+	if err != nil {
+		t.Fatalf("Marshal(API results) error: %v", err)
+	}
+	if strings.Contains(string(apiPayload), "job_config_binding") || strings.Contains(string(apiPayload), "manifest_size") ||
+		strings.Contains(string(apiPayload), "manifest_digest") || strings.Contains(string(apiPayload), binding) ||
+		strings.Contains(string(apiPayload), manifestDigest) {
+		t.Fatalf("API payload exposed job config binding: %s", apiPayload)
 	}
 }
 
@@ -1314,6 +1394,38 @@ func TestManager_RunJobAndRestoreDrill(t *testing.T) {
 		t.Fatalf("RunRestoreVerify should not classify this test source as a storage root: %+v", verify)
 	}
 	assertWarningsNotContain(t, verify.Warnings, "恢复目标根目录权限不匹配")
+	if result.JobConfigBinding != "" || result.ManifestSize != 0 || result.ManifestDigest != "" ||
+		drill.JobConfigBinding != "" || restore.JobConfigBinding != "" || verify.JobConfigBinding != "" {
+		t.Fatalf("public backup results exposed internal readiness evidence")
+	}
+	expectedBinding, err := jobConfigEvidenceBinding(manager.jobs["home"], manager.storageRoot, manager.configPath)
+	if err != nil {
+		t.Fatalf("jobConfigEvidenceBinding() error: %v", err)
+	}
+	manager.mu.Lock()
+	persistedEvidence := []struct {
+		name    string
+		binding string
+	}{
+		{name: "backup run", binding: manager.state.Jobs["home"].LastRun.JobConfigBinding},
+		{name: "restore drill", binding: manager.state.Jobs["home"].LastRestoreDrill.JobConfigBinding},
+		{name: "explicit restore", binding: manager.state.Jobs["home"].LastRestore.JobConfigBinding},
+		{name: "restore verify", binding: manager.state.Jobs["home"].LastRestoreVerify.JobConfigBinding},
+	}
+	persistedManifestSize := manager.state.Jobs["home"].LastRun.ManifestSize
+	persistedManifestDigest := manager.state.Jobs["home"].LastRun.ManifestDigest
+	manager.mu.Unlock()
+	if persistedManifestSize <= 0 {
+		t.Fatal("persisted backup run omitted manifest size")
+	}
+	if persistedManifestDigest == "" {
+		t.Fatal("persisted backup run omitted manifest digest")
+	}
+	for _, evidence := range persistedEvidence {
+		if evidence.binding != expectedBinding {
+			t.Fatalf("%s binding = %q, want %q", evidence.name, evidence.binding, expectedBinding)
+		}
+	}
 
 	reloaded, err := NewManager(ManagerConfig{
 		Root:        stateRoot,
@@ -1333,6 +1445,9 @@ func TestManager_RunJobAndRestoreDrill(t *testing.T) {
 	jobs := reloaded.ListJobs()
 	if len(jobs) != 1 || jobs[0].LastRun == nil || jobs[0].LastRestoreDrill == nil || jobs[0].LastRestore == nil || jobs[0].LastRestoreVerify == nil {
 		t.Fatalf("reloaded jobs missing persisted status: %+v", jobs)
+	}
+	if jobs[0].LastRun.ManifestSize != 0 || jobs[0].LastRun.ManifestDigest != "" {
+		t.Fatalf("reloaded public job exposed manifest evidence: %+v", jobs[0].LastRun)
 	}
 	if len(jobs[0].RestoreDrillHistory) != 1 || jobs[0].RestoreDrillHistory[0].ID != drill.ID {
 		t.Fatalf("reloaded restore drill history = %+v, want drill %s", jobs[0].RestoreDrillHistory, drill.ID)
@@ -2495,8 +2610,8 @@ func TestManager_RunRestorePreviewRejectsStateManifestOutsideDestination(t *test
 
 	manager.mu.Lock()
 	state := manager.state.Jobs["home"]
-	state.LastRun.SnapshotPath = outsideSnapshot
-	state.LastRun.ManifestPath = outsideManifest
+	state.LastSuccessfulRun.SnapshotPath = outsideSnapshot
+	state.LastSuccessfulRun.ManifestPath = outsideManifest
 	manager.state.Jobs["home"] = state
 	manager.mu.Unlock()
 
@@ -2653,7 +2768,7 @@ func TestManager_RunRestorePreviewRejectsUnmanifestedSnapshotFile(t *testing.T) 
 	}
 }
 
-func TestManager_RunRestorePreviewRejectsUnexpectedSnapshotRootEntry(t *testing.T) {
+func TestManager_RunRestorePreviewIgnoresUntrustedSnapshotRootEntry(t *testing.T) {
 	tmpDir := t.TempDir()
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
@@ -2679,16 +2794,15 @@ func TestManager_RunRestorePreviewRejectsUnexpectedSnapshotRootEntry(t *testing.
 	mustWriteFile(t, filepath.Join(destination, "home", "snapshots", "unexpected.txt"), "unexpected")
 
 	restoreTarget := filepath.Join(tmpDir, "restore-target")
-	_, err = manager.RunRestorePreview(context.Background(), "home", RestorePreviewOptions{TargetPath: restoreTarget})
-	if !errors.Is(err, ErrUnsafePath) {
-		t.Fatalf("RunRestorePreview() error = %v, want ErrUnsafePath", err)
+	if _, err = manager.RunRestorePreview(context.Background(), "home", RestorePreviewOptions{TargetPath: restoreTarget}); err != nil {
+		t.Fatalf("RunRestorePreview() error: %v", err)
 	}
 	if _, statErr := os.Stat(restoreTarget); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("restore target stat error = %v, want not exist", statErr)
 	}
 }
 
-func TestManager_RunRestorePreviewRejectsInvalidSnapshotRootDirectory(t *testing.T) {
+func TestManager_RunRestorePreviewIgnoresUntrustedSnapshotRootDirectory(t *testing.T) {
 	tmpDir := t.TempDir()
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
@@ -2716,9 +2830,8 @@ func TestManager_RunRestorePreviewRejectsInvalidSnapshotRootDirectory(t *testing
 	}
 
 	restoreTarget := filepath.Join(tmpDir, "restore-target")
-	_, err = manager.RunRestorePreview(context.Background(), "home", RestorePreviewOptions{TargetPath: restoreTarget})
-	if !errors.Is(err, ErrUnsafePath) {
-		t.Fatalf("RunRestorePreview() error = %v, want ErrUnsafePath", err)
+	if _, err = manager.RunRestorePreview(context.Background(), "home", RestorePreviewOptions{TargetPath: restoreTarget}); err != nil {
+		t.Fatalf("RunRestorePreview() error: %v", err)
 	}
 	if _, statErr := os.Stat(restoreTarget); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("restore target stat error = %v, want not exist", statErr)
@@ -4633,8 +4746,10 @@ func TestManager_RunRemoteBackupRejectsSourceSymlink(t *testing.T) {
 	tmpDir := t.TempDir()
 	source := filepath.Join(tmpDir, "source")
 	passwordFile := filepath.Join(tmpDir, "restic.pass")
+	rcloneConfigFile := filepath.Join(tmpDir, "rclone.conf")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "backup")
 	mustWriteFile(t, passwordFile, "secret")
+	mustWriteFile(t, rcloneConfigFile, "[backup]\ntype = local\n")
 	if err := os.Symlink("/etc/passwd", filepath.Join(source, "passwd-link")); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
 	}
@@ -4659,12 +4774,13 @@ func TestManager_RunRemoteBackupRejectsSourceSymlink(t *testing.T) {
 		{
 			name: "rclone",
 			job: config.BackupJobConfig{
-				ID:      "rclone-remote",
-				Name:    "Rclone remote",
-				Type:    JobTypeRclone,
-				Source:  source,
-				Remote:  "backup:mnemonas/source",
-				Command: commandPath,
+				ID:         "rclone-remote",
+				Name:       "Rclone remote",
+				Type:       JobTypeRclone,
+				Source:     source,
+				Remote:     "backup:mnemonas/source",
+				Command:    commandPath,
+				ConfigFile: rcloneConfigFile,
 			},
 		},
 	}
@@ -5598,7 +5714,7 @@ func TestManager_RunRetentionCheckRcloneParsesRemoteFiles(t *testing.T) {
 	configFile := filepath.Join(tmpDir, "rclone.conf")
 	commandPath, _ := newRecordingRcloneCommand(t)
 	mustWriteFile(t, filepath.Join(source, "docs", "note.txt"), "rclone")
-	mustWriteFile(t, configFile, "[remote]\ntype = local\n")
+	mustWriteFile(t, configFile, "[backup]\ntype = local\n")
 
 	manager, err := NewManager(ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
@@ -5782,7 +5898,7 @@ func TestManager_RunRcloneBackupUsesExternalCommand(t *testing.T) {
 	configFile := filepath.Join(tmpDir, "rclone.conf")
 	commandPath, logPath := newRecordingRcloneCommand(t)
 	mustWriteFile(t, filepath.Join(source, "docs", "note.txt"), "rclone")
-	mustWriteFile(t, configFile, "[remote]\ntype = local\n")
+	mustWriteFile(t, configFile, "[backup]\ntype = local\n")
 
 	manager, err := NewManager(ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
@@ -6054,6 +6170,437 @@ func TestValidateRemoteCredentialFileRejectsUnicodeControlCharacters(t *testing.
 	err := validateRemoteCredentialFile(credentialPath, "password_file", source, storageRoot)
 	if !errors.Is(err, ErrUnsafePath) {
 		t.Fatalf("validateRemoteCredentialFile() error = %v, want %v", err, ErrUnsafePath)
+	}
+}
+
+func TestValidateRcloneConfigEvidenceDataRequiresStaticNamedRemote(t *testing.T) {
+	tests := []struct {
+		name        string
+		remote      string
+		content     string
+		wantErrText string
+	}{
+		{
+			name:        "connection string remote",
+			remote:      ":s3,provider=AWS:mnemonas/backups",
+			content:     "[backup]\ntype = s3\n",
+			wantErrText: "named config_file section",
+		},
+		{
+			name:        "undefined named section",
+			remote:      "missing:mnemonas/backups",
+			content:     "[backup]\ntype = s3\n",
+			wantErrText: "is not defined",
+		},
+		{
+			name:        "empty type",
+			remote:      "backup:mnemonas/backups",
+			content:     "[backup]\ntype =\nprovider = AWS\n",
+			wantErrText: "has no type",
+		},
+		{
+			name:        "token",
+			remote:      "backup:mnemonas/backups",
+			content:     "[backup]\ntype = drive\ntoken = static-token\n",
+			wantErrText: "token-refreshing",
+		},
+		{
+			name:        "environment authentication",
+			remote:      "backup:mnemonas/backups",
+			content:     "[backup]\ntype = s3\nenv_auth = true\n",
+			wantErrText: "cannot enable env_auth",
+		},
+		{
+			name:        "environment expansion",
+			remote:      "backup:mnemonas/backups",
+			content:     "[backup]\ntype = local\nremote = ${BACKUP_ROOT}\n",
+			wantErrText: "cannot expand environment-dependent paths",
+		},
+		{
+			name:        "external file",
+			remote:      "backup:mnemonas/backups",
+			content:     "[backup]\ntype = s3\nservice_account_file = /run/secrets/account.json\n",
+			wantErrText: "external runtime input",
+		},
+		{
+			name:        "external path",
+			remote:      "backup:mnemonas/backups",
+			content:     "[backup]\ntype = local\nroot_path = /srv/archive\n",
+			wantErrText: "external runtime input",
+		},
+		{
+			name:        "password command",
+			remote:      "backup:mnemonas/backups",
+			content:     "[backup]\ntype = sftp\npassword_command = secret-tool lookup backup mnemonas\n",
+			wantErrText: "external runtime input",
+		},
+		{
+			name:        "ssh agent",
+			remote:      "backup:mnemonas/backups",
+			content:     "[backup]\ntype = sftp\nssh_agent = true\n",
+			wantErrText: "external runtime input",
+		},
+		{
+			name:        "ssh helper",
+			remote:      "backup:mnemonas/backups",
+			content:     "[backup]\ntype = sftp\nssh = /usr/bin/ssh\n",
+			wantErrText: "external runtime input",
+		},
+		{
+			name:    "static named remote",
+			remote:  "backup:mnemonas/backups",
+			content: "[backup]\ntype = s3\nprovider = AWS\naccess_key_id = static-id\nsecret_access_key = static-secret\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateRcloneConfigEvidenceData([]byte(tt.content), tt.remote)
+			if tt.wantErrText == "" {
+				if err != nil {
+					t.Fatalf("validateRcloneConfigEvidenceData() error: %v", err)
+				}
+				return
+			}
+			if err == nil || !errors.Is(err, ErrUnsafePath) || !strings.Contains(err.Error(), tt.wantErrText) {
+				t.Fatalf("validateRcloneConfigEvidenceData() error = %v, want ErrUnsafePath with text %q", err, tt.wantErrText)
+			}
+		})
+	}
+}
+
+func TestValidateJobEvidenceInputsAllowsOnlyRcloneFastList(t *testing.T) {
+	tests := []struct {
+		arg     string
+		wantErr bool
+	}{
+		{arg: "--fast-list"},
+		{arg: " --fast-list "},
+		{arg: "--fast-list=true", wantErr: true},
+		{arg: "--transfers=4", wantErr: true},
+		{arg: "--config=/tmp/rclone.conf", wantErr: true},
+		{arg: "--password-command=secret-tool", wantErr: true},
+		{arg: "", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.arg, func(t *testing.T) {
+			err := validateJobEvidenceInputs(config.BackupJobConfig{
+				Type:       JobTypeRclone,
+				Remote:     "backup:mnemonas/backups",
+				ConfigFile: "/tmp/rclone.conf",
+				ExtraArgs:  []string{tt.arg},
+			})
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateJobEvidenceInputs(%q) error = %v, wantErr %v", tt.arg, err, tt.wantErr)
+			}
+			if tt.wantErr && !errors.Is(err, ErrUnsafePath) {
+				t.Fatalf("validateJobEvidenceInputs(%q) error = %v, want ErrUnsafePath", tt.arg, err)
+			}
+		})
+	}
+}
+
+func TestSanitizedRemoteCommandEnvironmentUsesPrivateAllowlist(t *testing.T) {
+	privateDir := filepath.Join(t.TempDir(), "private")
+	environment := []string{
+		"PATH=/usr/bin:/bin",
+		"LANG=en_US.UTF-8",
+		"LC_ALL=C",
+		"TZ=UTC",
+		"HOME=/home/operator",
+		"TMPDIR=/tmp/shared",
+		"TMP=/tmp/shared",
+		"TEMP=/tmp/shared",
+		"AWS_SECRET_ACCESS_KEY=aws-secret",
+		"AZURE_STORAGE_KEY=azure-secret",
+		"B2_ACCOUNT_KEY=b2-secret",
+		"RESTIC_PASSWORD=restic-secret",
+		"RCLONE_CONFIG_BACKUP_PASS=rclone-secret",
+		"SSH_AUTH_SOCK=/run/user/1000/ssh-agent",
+		"HTTP_PROXY=http://proxy.example",
+		"HTTPS_PROXY=https://proxy.example",
+		"ALL_PROXY=socks5://proxy.example",
+		"NO_PROXY=localhost",
+	}
+
+	for _, jobType := range []string{JobTypeRestic, JobTypeRclone} {
+		t.Run(jobType, func(t *testing.T) {
+			got := sanitizedRemoteCommandEnvironment(jobType, environment, privateDir)
+			values := make(map[string]string, len(got))
+			for _, entry := range got {
+				name, value, found := strings.Cut(entry, "=")
+				if !found {
+					t.Fatalf("environment entry has no separator: %q", entry)
+				}
+				if _, exists := values[name]; exists {
+					t.Fatalf("environment contains duplicate key %q: %#v", name, got)
+				}
+				values[name] = value
+			}
+
+			want := map[string]string{
+				"PATH":   "/usr/bin:/bin",
+				"LANG":   "en_US.UTF-8",
+				"LC_ALL": "C",
+				"TZ":     "UTC",
+				"HOME":   privateDir,
+				"TMPDIR": privateDir,
+				"TMP":    privateDir,
+				"TEMP":   privateDir,
+			}
+			if !reflect.DeepEqual(values, want) {
+				t.Fatalf("sanitized environment = %#v, want %#v", values, want)
+			}
+		})
+	}
+}
+
+func TestManager_RemoteChildProcessDoesNotReceiveCredentialEnvironment(t *testing.T) {
+	for name, value := range map[string]string{
+		"AWS_SECRET_ACCESS_KEY":         "aws-secret",
+		"AZURE_STORAGE_KEY":             "azure-secret",
+		"B2_ACCOUNT_KEY":                "b2-secret",
+		"RESTIC_PASSWORD":               "restic-secret",
+		"RESTIC_REPOSITORY":             "restic-repository",
+		"RCLONE_CONFIG":                 "/tmp/untrusted-rclone.conf",
+		"RCLONE_CONFIG_BACKUP_PASS":     "rclone-secret",
+		"SSH_AUTH_SOCK":                 "/run/user/1000/ssh-agent",
+		"HTTP_PROXY":                    "http://proxy.example",
+		"HTTPS_PROXY":                   "https://proxy.example",
+		"ALL_PROXY":                     "socks5://proxy.example",
+		"NO_PROXY":                      "localhost",
+		"aws_access_key_id":             "lower-aws-secret",
+		"https_proxy":                   "http://lower-proxy.example",
+		"rclone_config_backup_password": "lower-rclone-secret",
+	} {
+		t.Setenv(name, value)
+	}
+
+	baseDir := t.TempDir()
+	source := filepath.Join(baseDir, "source")
+	if err := os.Mkdir(source, 0o700); err != nil {
+		t.Fatalf("Mkdir(source) error: %v", err)
+	}
+	commandPath := filepath.Join(baseDir, "record-environment")
+	if err := os.WriteFile(commandPath, []byte("#!/bin/sh\nenv > \"$1\"\n"), 0o700); err != nil {
+		t.Fatalf("WriteFile(command) error: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		job        config.BackupJobConfig
+		credential string
+		content    string
+	}{
+		{
+			name: "restic",
+			job: config.BackupJobConfig{
+				ID: "restic", Type: JobTypeRestic, Source: source,
+				Repository: "rest:http://backup.example/repo",
+			},
+			credential: filepath.Join(baseDir, "restic.pass"),
+			content:    "restic-file-secret",
+		},
+		{
+			name: "rclone",
+			job: config.BackupJobConfig{
+				ID: "rclone", Type: JobTypeRclone, Source: source,
+				Remote: "backup:mnemonas/backups",
+			},
+			credential: filepath.Join(baseDir, "rclone.conf"),
+			content:    "[backup]\ntype = s3\naccess_key_id = static-id\nsecret_access_key = static-secret\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := os.WriteFile(tt.credential, []byte(tt.content), 0o600); err != nil {
+				t.Fatalf("WriteFile(credential) error: %v", err)
+			}
+			job := tt.job
+			if job.Type == JobTypeRestic {
+				job.PasswordFile = tt.credential
+			} else {
+				job.ConfigFile = tt.credential
+			}
+			manager := &Manager{storageRoot: source}
+			environmentLog := filepath.Join(baseDir, tt.name+"-environment.log")
+			privateDir := ""
+
+			_, err := manager.withJobCredentialSnapshot(context.Background(), job, "", func(commandCtx context.Context, executionJob config.BackupJobConfig) error {
+				if executionJob.Type == JobTypeRestic {
+					privateDir = filepath.Dir(executionJob.PasswordFile)
+				} else {
+					privateDir = filepath.Dir(executionJob.ConfigFile)
+				}
+				return runExternalCommand(commandCtx, commandPath, environmentLog)
+			})
+			if err != nil {
+				t.Fatalf("withJobCredentialSnapshot() error: %v", err)
+			}
+			data, err := os.ReadFile(environmentLog)
+			if err != nil {
+				t.Fatalf("ReadFile(environment log) error: %v", err)
+			}
+			childEnvironment := string(data)
+			for _, forbidden := range []string{
+				"AWS_", "AZURE_", "B2_", "RESTIC_", "RCLONE_", "SSH_AUTH_SOCK=", "HTTP_PROXY=", "HTTPS_PROXY=", "ALL_PROXY=", "NO_PROXY=",
+				"aws_", "https_proxy=", "rclone_",
+			} {
+				if strings.Contains(childEnvironment, forbidden) {
+					t.Fatalf("child environment exposed %q: %s", forbidden, childEnvironment)
+				}
+			}
+			for _, name := range []string{"HOME", "TMPDIR", "TMP", "TEMP"} {
+				if !strings.Contains(childEnvironment, name+"="+privateDir+"\n") {
+					t.Fatalf("child environment omitted private %s: %s", name, childEnvironment)
+				}
+			}
+			if _, err := os.Stat(privateDir); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("private credential directory stat error = %v, want not exist", err)
+			}
+		})
+	}
+}
+
+func TestManager_RemoteCommandCannotModifyCredentialSnapshot(t *testing.T) {
+	baseDir := t.TempDir()
+	source := filepath.Join(baseDir, "source")
+	if err := os.Mkdir(source, 0o700); err != nil {
+		t.Fatalf("Mkdir(source) error: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		job        config.BackupJobConfig
+		credential string
+		original   string
+		mutated    string
+	}{
+		{
+			name: "restic",
+			job: config.BackupJobConfig{
+				ID: "restic", Type: JobTypeRestic, Source: source,
+				Repository: "rest:http://backup.example/repo",
+			},
+			credential: filepath.Join(baseDir, "restic.pass"),
+			original:   "restic-file-secret",
+			mutated:    "changed-restic-secret",
+		},
+		{
+			name: "rclone",
+			job: config.BackupJobConfig{
+				ID: "rclone", Type: JobTypeRclone, Source: source,
+				Remote: "backup:mnemonas/backups",
+			},
+			credential: filepath.Join(baseDir, "rclone.conf"),
+			original:   "[backup]\ntype = local\n",
+			mutated:    "[backup]\ntype = local\ndescription = changed\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := os.WriteFile(tt.credential, []byte(tt.original), 0o600); err != nil {
+				t.Fatalf("WriteFile(credential) error: %v", err)
+			}
+			commandPath := filepath.Join(baseDir, "mutate-"+tt.name)
+			script := "#!/bin/sh\nprintf '%s' " + shellQuote(tt.mutated) + " > \"$1\"\n"
+			if err := os.WriteFile(commandPath, []byte(script), 0o700); err != nil {
+				t.Fatalf("WriteFile(command) error: %v", err)
+			}
+			job := tt.job
+			if job.Type == JobTypeRestic {
+				job.PasswordFile = tt.credential
+			} else {
+				job.ConfigFile = tt.credential
+			}
+			manager := &Manager{storageRoot: source}
+			snapshotPath := ""
+
+			_, err := manager.withJobCredentialSnapshot(context.Background(), job, "", func(commandCtx context.Context, executionJob config.BackupJobConfig) error {
+				if executionJob.Type == JobTypeRestic {
+					snapshotPath = executionJob.PasswordFile
+				} else {
+					snapshotPath = executionJob.ConfigFile
+				}
+				return runExternalCommand(commandCtx, commandPath, snapshotPath)
+			})
+			if !errors.Is(err, ErrUnsafePath) {
+				t.Fatalf("withJobCredentialSnapshot() error = %v, want ErrUnsafePath", err)
+			}
+			data, readErr := os.ReadFile(tt.credential)
+			if readErr != nil {
+				t.Fatalf("ReadFile(original credential) error: %v", readErr)
+			}
+			if string(data) != tt.original {
+				t.Fatalf("original credential changed to %q, want %q", data, tt.original)
+			}
+			if _, statErr := os.Stat(snapshotPath); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("private credential snapshot stat error = %v, want not exist", statErr)
+			}
+		})
+	}
+}
+
+func TestManager_CredentialSnapshotResolvesSymlinkedTempDir(t *testing.T) {
+	baseDir := t.TempDir()
+	realTempDir := filepath.Join(baseDir, "real-temp")
+	linkedTempDir := filepath.Join(baseDir, "linked-temp")
+	if err := os.Mkdir(realTempDir, 0o700); err != nil {
+		t.Fatalf("Mkdir(real temp) error: %v", err)
+	}
+	if err := os.Symlink(realTempDir, linkedTempDir); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	t.Setenv("TMPDIR", linkedTempDir)
+
+	resolvedRoot, err := resolvedCredentialSnapshotTempRoot()
+	if err != nil {
+		t.Fatalf("resolvedCredentialSnapshotTempRoot() error: %v", err)
+	}
+	if resolvedRoot != realTempDir {
+		t.Fatalf("resolved temp root = %q, want %q", resolvedRoot, realTempDir)
+	}
+
+	source := filepath.Join(baseDir, "source")
+	if err := os.Mkdir(source, 0o700); err != nil {
+		t.Fatalf("Mkdir(source) error: %v", err)
+	}
+	passwordFile := filepath.Join(baseDir, "restic.pass")
+	if err := os.WriteFile(passwordFile, []byte("restic-secret"), 0o600); err != nil {
+		t.Fatalf("WriteFile(password) error: %v", err)
+	}
+	commandPath := filepath.Join(baseDir, "succeed")
+	if err := os.WriteFile(commandPath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("WriteFile(command) error: %v", err)
+	}
+	manager := &Manager{storageRoot: source}
+	snapshotPath := ""
+
+	_, err = manager.withJobCredentialSnapshot(context.Background(), config.BackupJobConfig{
+		ID: "restic", Type: JobTypeRestic, Source: source,
+		Repository: "rest:http://backup.example/repo", PasswordFile: passwordFile,
+	}, "", func(commandCtx context.Context, executionJob config.BackupJobConfig) error {
+		snapshotPath = executionJob.PasswordFile
+		return runExternalCommand(commandCtx, commandPath)
+	})
+	if err != nil {
+		t.Fatalf("withJobCredentialSnapshot() error: %v", err)
+	}
+	relativeSnapshot, err := filepath.Rel(realTempDir, snapshotPath)
+	if err != nil {
+		t.Fatalf("Rel(snapshot) error: %v", err)
+	}
+	if relativeSnapshot == "." || relativeSnapshot == ".." || strings.HasPrefix(relativeSnapshot, ".."+string(filepath.Separator)) {
+		t.Fatalf("snapshot path %q is outside resolved temp root %q", snapshotPath, realTempDir)
+	}
+	if !strings.HasPrefix(filepath.Base(filepath.Dir(snapshotPath)), credentialSnapshotDirPrefix) {
+		t.Fatalf("snapshot directory = %q, want prefix %q", filepath.Dir(snapshotPath), credentialSnapshotDirPrefix)
+	}
+	if _, err := os.Stat(snapshotPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("private credential snapshot stat error = %v, want not exist", err)
 	}
 }
 
@@ -6817,7 +7364,22 @@ func readCommandCalls(t *testing.T, logPath string) [][]string {
 
 func assertCommandArgs(t *testing.T, got []string, want []string) {
 	t.Helper()
-	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+	normalized := append([]string(nil), got...)
+	for i := 1; i < len(normalized) && i < len(want); i++ {
+		if normalized[i] == want[i] || got[i-1] != "--password-file" && got[i-1] != "--config" {
+			continue
+		}
+		dir := filepath.Base(filepath.Dir(normalized[i]))
+		base := filepath.Base(normalized[i])
+		if !strings.HasPrefix(dir, "mnemonas-backup-credential-") || base != "password" && base != "rclone.conf" {
+			continue
+		}
+		if _, err := os.Stat(normalized[i]); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("private credential snapshot %q was not removed: %v", normalized[i], err)
+		}
+		normalized[i] = want[i]
+	}
+	if strings.Join(normalized, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("command args = %#v, want %#v", got, want)
 	}
 }

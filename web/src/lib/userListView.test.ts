@@ -18,6 +18,8 @@ const baseUser = {
   created_at: '2024-01-01T00:00:00Z',
   updated_at: '2024-01-01T00:00:00Z',
   last_login_at: '2024-01-15T10:00:00Z',
+  must_change_password: false,
+  password_changed_at: '2024-01-02T08:30:00Z',
   groups: [],
   quota_bytes: 1000,
   used_bytes: 100,
@@ -38,6 +40,7 @@ describe('userListView', () => {
     expect(getUserListFilterLabel('account-attention')).toBe('账号关注')
     expect(getUserListFilterLabel('disabled-account')).toBe('停用账号')
     expect(getUserListFilterLabel('never-login')).toBe('从未登录')
+    expect(getUserListFilterLabel('password-change-required')).toBe('待改密管理员')
     expect(getUserListFilterLabel('quota-attention')).toBe('配额关注')
     expect(getUserListFilterLabel('access-review')).toBe('复核提示')
   })
@@ -81,6 +84,12 @@ describe('userListView', () => {
     expect(filterUsersByListFilter(accountUsers, 'never-login').map((user) => user.username)).toEqual([
       'neverlogin',
     ])
+    expect(filterUsersByListFilter([
+      ...accountUsers,
+      { ...baseUser, id: 'pending-admin', username: 'pending-admin', role: 'admin', must_change_password: true },
+      { ...baseUser, id: 'disabled-pending-admin', username: 'disabled-pending-admin', role: 'admin', disabled: true, must_change_password: true },
+      { ...baseUser, id: 'pending-user', username: 'pending-user', must_change_password: true },
+    ], 'password-change-required').map((user) => user.username)).toEqual(['pending-admin'])
     expect(filterUsersByListFilter(users, 'quota-attention').map((user) => user.username)).toEqual(['nearquota'])
     expect(filterUsersByListFilter(users, 'access-review').map((user) => user.username)).toEqual([
       'nearquota',

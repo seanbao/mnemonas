@@ -1130,7 +1130,7 @@ EOF
 - [ ] WebDAV 使用 `auth_type = "users"`，或已设置全局 Basic Auth 强密码。
 - [ ] `auth_type` 不是 `none`。
 - [ ] 公网部署时 `server.host = "127.0.0.1"`。
-- [ ] 管理员首页的首次部署检查没有认证关闭或 WebDAV 匿名访问提示。
+- [ ] 管理员首页的首次设置必需项已由服务端判定完成。
 - [ ] dataplane gRPC/HTTP 端口保持在私有网络内。
 - [ ] Web UI “安全自检”没有 `block` 项。
 - [ ] 安全自检已覆盖 `allow_unsafe_no_auth` 和分享边界。
@@ -1166,7 +1166,7 @@ English | [简体中文](security.md)
 - [ ] WebDAV uses `auth_type = "users"` or strong global Basic Auth credentials.
 - [ ] `webdav.auth_type` is not `none`.
 - [ ] Public deployments use `server.host = "127.0.0.1"`.
-- [ ] The administrator Dashboard first-run checklist has no authentication-disabled or anonymous-WebDAV warning.
+- [ ] The administrator Dashboard first-run requirements are complete according to server-side evidence.
 - [ ] Dataplane gRPC/HTTP ports are private.
 - [ ] The Web UI security self-check has no `block` items.
 - [ ] The security self-check covers `allow_unsafe_no_auth` and share boundaries.

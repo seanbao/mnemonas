@@ -1746,12 +1746,28 @@ func TestServer_GetSettingsSecurityCheck_PassesTrustedProxyLoopbackSetup(t *test
 		if got := check.Details["key_scope"]; got != "username_and_client_ip" {
 			t.Fatalf("login_rate_limit key_scope = %#v, want username_and_client_ip", got)
 		}
+		if got := check.Details["credential_check_limit"]; got != float64(12) && got != 12 {
+			t.Fatalf("login_rate_limit credential_check_limit = %#v, want 12", got)
+		}
+		if got := check.Details["credential_check_scope"]; got != "client_ip" {
+			t.Fatalf("login_rate_limit credential_check_scope = %#v, want client_ip", got)
+		}
 		if _, ok := check.Details["password"]; ok {
 			t.Fatalf("login_rate_limit details must not expose passwords: %#v", check.Details)
 		}
 	}
 	if check := securityCheckByID(t, payload.Data.Checks, "browser_session_boundary"); check.Status != securityCheckPass {
 		t.Fatalf("browser_session_boundary status = %q, want %q; check=%#v", check.Status, securityCheckPass, check)
+	} else {
+		if got := check.Details["session_cookie_host_prefix"]; got != true {
+			t.Fatalf("session_cookie_host_prefix = %#v, want true", got)
+		}
+		if got := check.Details["session_cookie_name_prefix"]; got != "__Host-" {
+			t.Fatalf("session_cookie_name_prefix = %#v, want __Host-", got)
+		}
+		if got := check.Details["session_cookie_path"]; got != "/" {
+			t.Fatalf("session_cookie_path = %#v, want /", got)
+		}
 	}
 	if check := securityCheckByID(t, payload.Data.Checks, "public_share_boundary"); check.Status != securityCheckPass {
 		t.Fatalf("public_share_boundary status = %q, want %q; check=%#v", check.Status, securityCheckPass, check)
@@ -1859,6 +1875,9 @@ func TestServer_GetSettingsSecurityCheck_WarnsWhenBrowserSessionCookieWouldBeIns
 	}
 	if got := check.Details["session_cookie_secure"]; got != false {
 		t.Fatalf("session_cookie_secure = %#v, want false", got)
+	}
+	if got := check.Details["session_cookie_host_prefix"]; got != false {
+		t.Fatalf("session_cookie_host_prefix = %#v, want false", got)
 	}
 	if got := check.Details["same_origin_browser_write_protection"]; got != true {
 		t.Fatalf("same_origin_browser_write_protection = %#v, want true", got)

@@ -1,7 +1,7 @@
 import { Component, Suspense, lazy, useEffect, useRef, type ErrorInfo, type ReactNode } from 'react'
 import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom'
 import { AppLayout } from '@/components/layout'
-import { ProtectedRoute } from '@/components/auth'
+import { PasswordChangeGate, ProtectedRoute } from '@/components/auth'
 import { useAuthStore } from '@/stores/auth'
 import { shouldValidateSessionOnInitialRoute } from '@/lib/authInitialRoute'
 import { routeRenderDiagnosticMessage } from '@/lib/routeDiagnostics'
@@ -103,7 +103,9 @@ function AppRoutes() {
             path="/"
             element={
               <ProtectedRoute>
-                <AppLayout />
+                <PasswordChangeGate>
+                  <AppLayout />
+                </PasswordChangeGate>
               </ProtectedRoute>
             }
           >

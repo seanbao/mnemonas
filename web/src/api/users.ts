@@ -20,6 +20,8 @@ export interface User {
   created_at: string
   updated_at: string
   last_login_at?: string
+  must_change_password: boolean
+  password_changed_at?: string
   quota_bytes: number
   used_bytes: number
 }
@@ -89,7 +91,7 @@ type ApiUserQuotaTrendPoint = {
 }
 
 type ListUsersApiData = {
-  users?: User[]
+  users?: ApiUser[]
   total?: number
   quota_history?: unknown
   quota_history_available?: unknown
@@ -150,6 +152,8 @@ function isValidUser(value: unknown): value is ApiUser {
     typeof user.created_at === 'string' &&
     typeof user.updated_at === 'string' &&
     (user.last_login_at === undefined || typeof user.last_login_at === 'string') &&
+    typeof user.must_change_password === 'boolean' &&
+    (user.password_changed_at === undefined || typeof user.password_changed_at === 'string') &&
     isNonNegativeSafeInteger(user.quota_bytes) &&
     isNonNegativeSafeInteger(user.used_bytes)
   )
@@ -368,7 +372,7 @@ export async function createUser(data: CreateUserRequest, options: UsersRequestO
     throw await parseUsersError(response, USERS_ERROR_MESSAGES.create)
   }
 
-  const body = await parseUsersSuccess<{ user: User }>(response, INVALID_USERS_RESPONSE_MESSAGE)
+  const body = await parseUsersSuccess<{ user: ApiUser }>(response, INVALID_USERS_RESPONSE_MESSAGE)
   if (!body.data || !isValidUser(body.data.user)) {
     throw new Error(INVALID_USERS_RESPONSE_MESSAGE)
   }
@@ -401,7 +405,7 @@ export async function updateUser(userId: string, data: UpdateUserRequest, option
     throw await parseUsersError(response, USERS_ERROR_MESSAGES.update)
   }
 
-  const body = await parseUsersSuccess<{ user: User }>(response, INVALID_USERS_RESPONSE_MESSAGE)
+  const body = await parseUsersSuccess<{ user: ApiUser }>(response, INVALID_USERS_RESPONSE_MESSAGE)
   if (!body.data || !isValidUser(body.data.user)) {
     throw new Error(INVALID_USERS_RESPONSE_MESSAGE)
   }

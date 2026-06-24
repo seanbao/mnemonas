@@ -1,25 +1,143 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   AUTH_CLEARED_EVENT,
+  AUTH_CROSS_TAB_CHANNEL_NAME,
+  AUTH_CROSS_TAB_SYNC_KEY,
+  AUTH_SESSION_UPDATED_EVENT,
   AuthError,
   authFetch,
+  changePassword,
   ensureDownloadSession,
   getAuthHeaders,
   getCurrentUser,
   getStoredUser,
+  invalidateAuthSessionRequests,
   login,
   logout,
   refreshAuthSession,
+  storeTokens,
 } from './auth'
 
 const fetchMock = vi.fn()
+const originalNavigatorLocksDescriptor = Object.getOwnPropertyDescriptor(navigator, 'locks')
+const grantedRefreshLock = { name: 'mnemonas:auth-refresh', mode: 'exclusive' } as Lock
+
+function setNavigatorLocks(locks: LockManager | undefined): void {
+  Object.defineProperty(navigator, 'locks', {
+    configurable: true,
+    value: locks,
+  })
+}
+
+function restoreNavigatorLocks(): void {
+  if (originalNavigatorLocksDescriptor) {
+    Object.defineProperty(navigator, 'locks', originalNavigatorLocksDescriptor)
+    return
+  }
+  Reflect.deleteProperty(navigator, 'locks')
+}
+
+function blockLocalStorageAccess() {
+  const error = new DOMException('cross-tab storage is blocked', 'SecurityError')
+  const descriptor = Object.getOwnPropertyDescriptor(window, 'localStorage')
+  Object.defineProperty(window, 'localStorage', {
+    configurable: true,
+    get: () => {
+      throw error
+    },
+  })
+
+  return {
+    error,
+    restore: () => {
+      if (descriptor) {
+        Object.defineProperty(window, 'localStorage', descriptor)
+        return
+      }
+      Reflect.deleteProperty(window, 'localStorage')
+    },
+  }
+}
+
+function createQueuedLockManager(onRequest?: () => void): LockManager {
+  type TestLockCallback = (lock: Lock | null) => unknown
+
+  let held = false
+  const queue: Array<() => void> = []
+
+  const start = (callback: TestLockCallback): Promise<unknown> => {
+    held = true
+    return Promise.resolve(callback(grantedRefreshLock)).finally(() => {
+      held = false
+      queue.shift()?.()
+    })
+  }
+
+  const request = (
+    _name: string,
+    optionsOrCallback: LockOptions | TestLockCallback,
+    maybeCallback?: TestLockCallback,
+  ): Promise<unknown> => {
+    onRequest?.()
+    const options = typeof optionsOrCallback === 'function' ? {} : optionsOrCallback
+    const callback = typeof optionsOrCallback === 'function' ? optionsOrCallback : maybeCallback
+    if (!callback) {
+      return Promise.reject(new TypeError('lock callback is required'))
+    }
+    if (options.signal?.aborted) {
+      return Promise.reject(new DOMException('The operation was aborted', 'AbortError'))
+    }
+    if (options.ifAvailable && held) {
+      return Promise.resolve(callback(null))
+    }
+    if (!held) {
+      return start(callback)
+    }
+
+    return new Promise((resolve, reject) => {
+      const begin = () => {
+        options.signal?.removeEventListener('abort', abort)
+        void start(callback).then(resolve, reject)
+      }
+      const abort = () => {
+        const index = queue.indexOf(begin)
+        if (index >= 0) {
+          queue.splice(index, 1)
+        }
+        reject(new DOMException('The operation was aborted', 'AbortError'))
+      }
+      options.signal?.addEventListener('abort', abort, { once: true })
+      queue.push(begin)
+    })
+  }
+
+  return {
+    query: async () => ({ held: [], pending: [] }),
+    request: request as LockManager['request'],
+  }
+}
+
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
 
 describe('auth API', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     fetchMock.mockReset()
     localStorage.clear()
+    setNavigatorLocks(undefined)
     global.fetch = fetchMock as typeof fetch
+  })
+
+  afterEach(() => {
+    restoreNavigatorLocks()
   })
 
   it('treats download session as ready when no auth state is stored', async () => {
@@ -149,7 +267,7 @@ describe('auth API', () => {
             refresh_token: 'refresh-2',
             expires_at: '2026-03-13T00:00:00Z',
             token_type: 'Bearer',
-            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/', must_change_password: false },
           },
         }),
       })
@@ -213,6 +331,187 @@ describe('auth API', () => {
     }
   })
 
+  it('changes the current password and clears local authentication state', async () => {
+    const authCleared = vi.fn()
+    window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
+    localStorage.setItem('mnemonas_session', '1')
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'u1',
+      username: 'admin',
+      role: 'admin',
+      homeDir: '/',
+      mustChangePassword: true,
+    }))
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      json: () => Promise.resolve({
+        success: true,
+        data: null,
+        message: 'password changed successfully',
+      }),
+    })
+
+    await expect(changePassword({
+      old_password: 'initial-password',
+      new_password: 'replacement-password',
+    })).resolves.toEqual({
+      warning: false,
+      message: 'password changed successfully',
+    })
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/auth/password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({
+        old_password: 'initial-password',
+        new_password: 'replacement-password',
+      }),
+    })
+    expect(localStorage.getItem('mnemonas_session')).toBeNull()
+    expect(localStorage.getItem('mnemonas_user')).toBeNull()
+    expect(authCleared).toHaveBeenCalledTimes(1)
+    expect(authCleared.mock.calls[0]?.[0]).toMatchObject({
+      detail: { reason: 'password_changed' },
+    })
+    expect(JSON.parse(localStorage.getItem(AUTH_CROSS_TAB_SYNC_KEY) ?? '{}')).toMatchObject({
+      version: 1,
+      type: 'cleared',
+      reason: 'password_changed',
+    })
+
+    window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
+  })
+
+  it('preserves password-change warning metadata and forwards abort signals', async () => {
+    const signal = new AbortController().signal
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      headers: { get: () => '199 auth persistence warning' },
+      json: () => Promise.resolve({
+        success: true,
+        data: { warning: true },
+        message: 'password changed with persistence warning',
+      }),
+    })
+
+    await expect(changePassword({
+      old_password: 'initial-password',
+      new_password: 'replacement-password',
+    }, { signal })).resolves.toEqual({
+      warning: true,
+      message: 'password changed with persistence warning',
+    })
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/auth/password', expect.objectContaining({ signal }))
+  })
+
+  it('surfaces structured password-change failures without clearing the session', async () => {
+    localStorage.setItem('mnemonas_session', '1')
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      json: () => Promise.resolve({
+        success: false,
+        error: {
+          code: 'INVALID_PASSWORD',
+          message: 'current password is incorrect',
+        },
+      }),
+    })
+
+    await expect(changePassword({
+      old_password: 'incorrect-password',
+      new_password: 'replacement-password',
+    })).rejects.toMatchObject({
+      message: 'current password is incorrect',
+      status: 401,
+      code: 'INVALID_PASSWORD',
+    })
+    expect(localStorage.getItem('mnemonas_session')).toBe('1')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('preserves the session when the server rejects an unchanged password', async () => {
+    localStorage.setItem('mnemonas_session', '1')
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      json: () => Promise.resolve({
+        success: false,
+        error: {
+          code: 'PASSWORD_UNCHANGED',
+          message: 'new password must differ from current password',
+        },
+      }),
+    })
+
+    await expect(changePassword({
+      old_password: 'same-password',
+      new_password: 'same-password',
+    })).rejects.toMatchObject({
+      status: 400,
+      code: 'PASSWORD_UNCHANGED',
+    })
+    expect(localStorage.getItem('mnemonas_session')).toBe('1')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    ['missing data', { success: true }],
+    ['false success', { success: false, data: null }],
+    ['invalid warning data', { success: true, data: { warning: false } }],
+    ['invalid message metadata', { success: true, data: null, message: 42 }],
+  ])('rejects password-change success responses with %s and clears the invalidated session', async (_label, body) => {
+    localStorage.setItem('mnemonas_session', '1')
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      json: () => Promise.resolve(body),
+    })
+
+    await expect(changePassword({
+      old_password: 'initial-password',
+      new_password: 'replacement-password',
+    })).rejects.toMatchObject({
+      message: '修改密码响应无效',
+      status: 200,
+    })
+    expect(localStorage.getItem('mnemonas_session')).toBeNull()
+    expect(JSON.parse(localStorage.getItem(AUTH_CROSS_TAB_SYNC_KEY) ?? '{}')).toMatchObject({
+      version: 1,
+      type: 'cleared',
+      reason: 'password_changed',
+    })
+  })
+
+  it('clears the invalidated session when a successful password change returns malformed JSON', async () => {
+    localStorage.setItem('mnemonas_session', '1')
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      json: () => Promise.reject(new SyntaxError('malformed JSON')),
+    })
+
+    await expect(changePassword({
+      old_password: 'initial-password',
+      new_password: 'replacement-password',
+    })).rejects.toMatchObject({
+      message: '修改密码响应无效',
+      status: 200,
+    })
+    expect(localStorage.getItem('mnemonas_session')).toBeNull()
+    expect(JSON.parse(localStorage.getItem(AUTH_CROSS_TAB_SYNC_KEY) ?? '{}')).toMatchObject({
+      type: 'cleared',
+      reason: 'password_changed',
+    })
+  })
+
   it('clears legacy bearer tokens without syncing a download session', async () => {
     localStorage.setItem('mnemonas_token', 'access-1')
     localStorage.setItem('mnemonas_refresh_token', 'refresh-1')
@@ -244,6 +543,7 @@ describe('auth API', () => {
       username: 'admin',
       role: 'admin',
       homeDir: '/',
+      mustChangePassword: false,
     }))
     fetchMock.mockResolvedValueOnce({
       ok: false,
@@ -288,24 +588,54 @@ describe('auth API', () => {
             refresh_token: 'refresh-1',
             expires_at: '2026-03-13T00:00:00Z',
             token_type: 'Bearer',
-            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/', must_change_password: false },
           },
         }),
       })
       .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: true }) })
 
     await expect(login('admin', 'password')).resolves.toMatchObject({
-      user: { homeDir: '/' },
+      user: { homeDir: '/', mustChangePassword: false },
       warning: false,
       message: undefined,
     })
 
-    expect(getStoredUser()).toMatchObject({ homeDir: '/' })
+    expect(getStoredUser()).toMatchObject({ homeDir: '/', mustChangePassword: false })
+    expect(JSON.parse(localStorage.getItem(AUTH_CROSS_TAB_SYNC_KEY) ?? '{}')).toMatchObject({
+      version: 1,
+      type: 'session_updated',
+    })
 
     expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/v1/auth/download-session', expect.objectContaining({
       method: 'POST',
       credentials: 'same-origin',
     }))
+  })
+
+  it('does not sync a download session when login requires a password change', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          user: {
+            id: 'u1',
+            username: 'admin',
+            role: 'admin',
+            home_dir: '/',
+            must_change_password: true,
+          },
+        },
+      }),
+    })
+
+    await expect(login('admin', 'initial-password')).resolves.toMatchObject({
+      user: { mustChangePassword: true },
+      warning: false,
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
   it('syncs download session after login when localStorage writes are unavailable', async () => {
@@ -319,6 +649,10 @@ describe('auth API', () => {
     const removeItemSpy = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => {
       throw storageError
     })
+    const peerChannel = new window.BroadcastChannel(AUTH_CROSS_TAB_CHANNEL_NAME)
+    const broadcastSignal = new Promise<unknown>((resolve) => {
+      peerChannel.addEventListener('message', (event) => resolve(event.data), { once: true })
+    })
 
     try {
       fetchMock
@@ -331,7 +665,7 @@ describe('auth API', () => {
               refresh_token: 'refresh-1',
               expires_at: '2026-03-13T00:00:00Z',
               token_type: 'Bearer',
-              user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+              user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/', must_change_password: false },
             },
           }),
         })
@@ -346,7 +680,14 @@ describe('auth API', () => {
         method: 'POST',
         credentials: 'same-origin',
       }))
+      await expect(broadcastSignal).resolves.toMatchObject({
+        version: 1,
+        type: 'session_updated',
+        nonce: expect.any(String),
+        source_id: expect.any(String),
+      })
     } finally {
+      peerChannel.close()
       getItemSpy.mockRestore()
       setItemSpy.mockRestore()
       removeItemSpy.mockRestore()
@@ -367,7 +708,7 @@ describe('auth API', () => {
             refresh_token: 'refresh-1',
             expires_at: '2026-03-13T00:00:00Z',
             token_type: 'Bearer',
-            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/', must_change_password: false },
           },
         }),
       })
@@ -408,7 +749,7 @@ describe('auth API', () => {
             refresh_token: 'refresh-1',
             expires_at: '2026-03-13T00:00:00Z',
             token_type: 'Bearer',
-            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/', must_change_password: false },
           },
         }),
       })
@@ -435,7 +776,7 @@ describe('auth API', () => {
             expires_at: '2026-03-13T00:00:00Z',
             token_type: 'Bearer',
             warning: true,
-            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/', must_change_password: false },
           },
           message: 'login succeeded with persistence warning',
         }),
@@ -516,7 +857,7 @@ describe('auth API', () => {
             refresh_token: 'refresh-1',
             expires_at: '2026-03-13T00:00:00Z',
             token_type: 'Bearer',
-            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/', must_change_password: false },
           },
         }),
       })
@@ -552,7 +893,7 @@ describe('auth API', () => {
             refresh_token: 'refresh-1',
             expires_at: '2026-03-13T00:00:00Z',
             token_type: 'Bearer',
-            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/', must_change_password: false },
           },
         }),
       })
@@ -585,7 +926,7 @@ describe('auth API', () => {
             refresh_token: 'refresh-1',
             expires_at: '2026-03-13T00:00:00Z',
             token_type: 'Bearer',
-            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/', must_change_password: false },
           },
         }),
       })
@@ -624,6 +965,27 @@ describe('auth API', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
+  it.each([
+    ['a missing password-change requirement', { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' }],
+    ['a non-boolean password-change requirement', { id: 'u1', username: 'admin', role: 'admin', home_dir: '/', must_change_password: 'true' }],
+  ])('rejects successful login responses with %s', async (_label, user) => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        success: true,
+        data: { user },
+      }),
+    })
+
+    await expect(login('admin', 'password')).rejects.toMatchObject({
+      message: '登录响应无效',
+      status: 200,
+    })
+    expect(localStorage.getItem('mnemonas_user')).toBeNull()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
   it('accepts successful cookie-session login responses that omit bearer tokens', async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
@@ -634,7 +996,7 @@ describe('auth API', () => {
           refresh_token: 'refresh-1',
           expires_at: '2026-03-13T00:00:00Z',
           token_type: 'Bearer',
-          user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+          user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/', must_change_password: false },
         },
       }),
     })
@@ -660,7 +1022,7 @@ describe('auth API', () => {
           refresh_token: 'refresh-1',
           expires_at: '2026-03-13T00:00:00Z',
           token_type: 'Bearer',
-          user: { id: 'u1', username: 'tester', role: 'user', home_dir: '   ' },
+          user: { id: 'u1', username: 'tester', role: 'user', home_dir: '   ', must_change_password: false },
         },
       }),
     })
@@ -689,7 +1051,7 @@ describe('auth API', () => {
           refresh_token: 'refresh-1',
           expires_at: '2026-03-13T00:00:00Z',
           token_type: 'Bearer',
-          user: { role: 'admin', home_dir: '/', ...userOverride },
+          user: { role: 'admin', home_dir: '/', must_change_password: false, ...userOverride },
         },
       }),
     })
@@ -712,7 +1074,7 @@ describe('auth API', () => {
           refresh_token: 'refresh-1',
           expires_at: '2026-03-13T00:00:00Z',
           token_type: 'Bearer',
-          user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+          user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/', must_change_password: false },
         },
       }),
     })
@@ -736,7 +1098,7 @@ describe('auth API', () => {
         json: () => Promise.resolve({
           success: true,
           data: {
-            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/', must_change_password: false },
           },
         }),
       })
@@ -765,13 +1127,17 @@ describe('auth API', () => {
         json: () => Promise.resolve({
           success: true,
           data: {
-            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/', must_change_password: false },
           },
         }),
       })
       .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: true }) })
 
-    await expect(getCurrentUser()).resolves.toMatchObject({ username: 'admin', homeDir: '/' })
+    await expect(getCurrentUser()).resolves.toMatchObject({
+      username: 'admin',
+      homeDir: '/',
+      mustChangePassword: false,
+    })
 
     expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/v1/auth/me', expect.objectContaining({
       credentials: 'same-origin',
@@ -784,9 +1150,35 @@ describe('auth API', () => {
     expect(JSON.parse(localStorage.getItem('mnemonas_user') || '{}')).toMatchObject({
       username: 'admin',
       homeDir: '/',
+      mustChangePassword: false,
     })
     expect(localStorage.getItem('mnemonas_token')).toBeNull()
     expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
+  })
+
+  it('does not sync a download session when the current user must change the password', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          user: {
+            id: 'u1',
+            username: 'user',
+            role: 'user',
+            home_dir: '/users/user',
+            must_change_password: true,
+          },
+        },
+      }),
+    })
+
+    await expect(getCurrentUser()).resolves.toMatchObject({
+      username: 'user',
+      mustChangePassword: true,
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
   it('clears local auth state when current user payload is malformed', async () => {
@@ -797,6 +1189,7 @@ describe('auth API', () => {
       username: 'admin',
       role: 'admin',
       home_dir: '/',
+      must_change_password: false,
     }))
 
     fetchMock.mockResolvedValueOnce({
@@ -832,7 +1225,7 @@ describe('auth API', () => {
       json: () => Promise.resolve({
         success: true,
         data: {
-          user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '../secret' },
+          user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '../secret', must_change_password: false },
         },
       }),
     })
@@ -841,6 +1234,31 @@ describe('auth API', () => {
     expect(localStorage.getItem('mnemonas_token')).toBeNull()
     expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
     expect(localStorage.getItem('mnemonas_user')).toBeNull()
+  })
+
+  it('clears local auth state when current user password-change requirement is invalid', async () => {
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'u1',
+      username: 'admin',
+      role: 'admin',
+      homeDir: '/',
+      mustChangePassword: false,
+    }))
+
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/', must_change_password: 1 },
+        },
+      }),
+    })
+
+    await expect(getCurrentUser()).resolves.toBeNull()
+    expect(localStorage.getItem('mnemonas_user')).toBeNull()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
   it('returns warning metadata for successful logout responses with warning headers', async () => {
@@ -1062,7 +1480,7 @@ describe('auth API', () => {
             refresh_token: 'refresh-2',
             expires_at: '2026-03-13T00:00:00Z',
             token_type: 'Bearer',
-            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/', must_change_password: false },
           },
         }),
       })
@@ -1108,7 +1526,7 @@ describe('auth API', () => {
             refresh_token: 'refresh-2',
             expires_at: '2026-03-13T00:00:00Z',
             token_type: 'Bearer',
-            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/', must_change_password: false },
           },
         }),
       })
@@ -1125,6 +1543,87 @@ describe('auth API', () => {
     expect(localStorage.getItem('mnemonas_token')).toBeNull()
     expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
     expect(localStorage.getItem('mnemonas_user')).not.toBeNull()
+  })
+
+  it('publishes refreshed users that require a password change', async () => {
+    const sessionUpdated = vi.fn()
+    window.addEventListener(AUTH_SESSION_UPDATED_EVENT, sessionUpdated)
+    localStorage.setItem('mnemonas_session', '1')
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          access_token: 'access-2',
+          refresh_token: 'refresh-2',
+          expires_at: '2026-03-13T00:00:00Z',
+          token_type: 'Bearer',
+          user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/', must_change_password: true },
+        },
+      }),
+    })
+
+    await expect(refreshAuthSession()).resolves.toBe(false)
+    expect(sessionUpdated).toHaveBeenCalledTimes(1)
+    expect(sessionUpdated.mock.calls[0]?.[0]).toMatchObject({
+      detail: {
+        user: {
+          id: 'u1',
+          mustChangePassword: true,
+        },
+      },
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    window.removeEventListener(AUTH_SESSION_UPDATED_EVENT, sessionUpdated)
+  })
+
+  it('does not replay a protected request after refresh requires a password change', async () => {
+    localStorage.setItem('mnemonas_session', '1')
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'u1',
+      username: 'user',
+      role: 'user',
+      homeDir: '/users/user',
+      mustChangePassword: false,
+    }))
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        statusText: 'Unauthorized',
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            access_token: 'access-2',
+            refresh_token: 'refresh-2',
+            expires_at: '2026-03-13T00:00:00Z',
+            token_type: 'Bearer',
+            user: {
+              id: 'u1',
+              username: 'user',
+              role: 'user',
+              home_dir: '/users/user',
+              must_change_password: true,
+            },
+          },
+        }),
+      })
+
+    const response = await authFetch('/api/v1/files')
+
+    expect(response.status).toBe(401)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/v1/auth/refresh', expect.objectContaining({
+      method: 'POST',
+      credentials: 'same-origin',
+    }))
+    expect(getStoredUser()).toMatchObject({ mustChangePassword: true })
   })
 
   it('does not retry refresh endpoint after 401', async () => {
@@ -1173,6 +1672,7 @@ describe('auth API', () => {
       username: 'admin',
       role: 'admin',
       homeDir: '/',
+      mustChangePassword: false,
     }))
     const controller = new AbortController()
 
@@ -1219,7 +1719,7 @@ describe('auth API', () => {
             refresh_token: 'refresh-2',
             expires_at: '2026-03-13T00:00:00Z',
             token_type: 'Bearer',
-            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/', must_change_password: false },
           },
         }),
       })
@@ -1252,7 +1752,7 @@ describe('auth API', () => {
             refresh_token: 'refresh-2',
             expires_at: '2026-03-13T00:00:00Z',
             token_type: 'Bearer',
-            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/', must_change_password: false },
           },
         }),
       })
@@ -1331,7 +1831,7 @@ describe('auth API', () => {
             refresh_token: 'refresh-2',
             expires_at: '2026-03-13T00:00:00Z',
             token_type: 'Bearer',
-            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/', must_change_password: false },
           },
         }),
       })
@@ -1351,9 +1851,47 @@ describe('auth API', () => {
       username: 'admin',
       role: 'admin',
       home_dir: '/legacy',
+      must_change_password: false,
     }))
 
-    expect(getStoredUser()).toMatchObject({ homeDir: '/legacy' })
+    expect(getStoredUser()).toMatchObject({ homeDir: '/legacy', mustChangePassword: false })
+  })
+
+  it('preserves password-change requirements in stored user payloads', () => {
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'u1',
+      username: 'admin',
+      role: 'admin',
+      homeDir: '/',
+      mustChangePassword: true,
+    }))
+
+    expect(getStoredUser()).toMatchObject({ homeDir: '/', mustChangePassword: true })
+  })
+
+  it('clears stored user payloads with invalid password-change requirements', () => {
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'u1',
+      username: 'admin',
+      role: 'admin',
+      homeDir: '/',
+      mustChangePassword: 'true',
+    }))
+
+    expect(getStoredUser()).toBeNull()
+    expect(localStorage.getItem('mnemonas_user')).toBeNull()
+  })
+
+  it('clears stored user payloads without password-change requirements', () => {
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'u1',
+      username: 'admin',
+      role: 'admin',
+      homeDir: '/',
+    }))
+
+    expect(getStoredUser()).toBeNull()
+    expect(localStorage.getItem('mnemonas_user')).toBeNull()
   })
 
   it('clears stored user payloads with an invalid home directory', () => {
@@ -1406,7 +1944,7 @@ describe('auth API', () => {
             refresh_token: 'refresh-2',
             expires_at: '2026-03-13T00:00:00Z',
             token_type: 'Bearer',
-            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/', must_change_password: false },
           },
         }),
       })
@@ -1468,7 +2006,7 @@ describe('auth API', () => {
               refresh_token: 'refresh-2',
               expires_at: '2026-03-13T00:00:00Z',
               token_type: 'Bearer',
-              user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+              user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/', must_change_password: false },
             },
           }),
         } as Response
@@ -1490,6 +2028,766 @@ describe('auth API', () => {
     expect(second.ok).toBe(true)
     expect(fetchMock.mock.calls.filter(([url]) => String(url) === '/api/v1/auth/refresh')).toHaveLength(1)
     expect(fetchMock.mock.calls.filter(([url]) => String(url) === '/api/v1/auth/download-session')).toHaveLength(1)
+  })
+
+  it('keeps the single-tab refresh operation when Web Locks is unavailable', async () => {
+    localStorage.setItem('mnemonas_session', '1')
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'u1',
+      username: 'admin',
+      role: 'admin',
+      homeDir: '/',
+      mustChangePassword: false,
+    }))
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/v1/auth/refresh') {
+        return {
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({
+            success: true,
+            data: {
+              user: {
+                id: 'u1',
+                username: 'admin',
+                role: 'admin',
+                home_dir: '/',
+                must_change_password: false,
+              },
+            },
+          }),
+        } as Response
+      }
+      if (url === '/api/v1/auth/download-session') {
+        return { ok: true, status: 200 } as Response
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+
+    await expect(Promise.all([
+      refreshAuthSession(),
+      refreshAuthSession(),
+    ])).resolves.toEqual([true, true])
+
+    expect(fetchMock.mock.calls.filter(([url]) => String(url) === '/api/v1/auth/refresh')).toHaveLength(1)
+    expect(fetchMock.mock.calls.filter(([url]) => String(url) === '/api/v1/auth/download-session')).toHaveLength(1)
+  })
+
+  it('serializes simulated tab refreshes and reuses the access cookie updated by the lock owner', async () => {
+    const pendingRefresh = createDeferred<Response>()
+    let lockRequests = 0
+    setNavigatorLocks(createQueuedLockManager(() => {
+      lockRequests += 1
+    }))
+    localStorage.setItem('mnemonas_session', '1')
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'u1',
+      username: 'admin',
+      role: 'admin',
+      homeDir: '/',
+      mustChangePassword: false,
+    }))
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/v1/auth/refresh') {
+        return pendingRefresh.promise
+      }
+      if (url === '/api/v1/auth/me') {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({
+            success: true,
+            data: {
+              user: {
+                id: 'u1',
+                username: 'admin',
+                role: 'admin',
+                home_dir: '/',
+                must_change_password: false,
+              },
+            },
+          }),
+        } as Response)
+      }
+      if (url === '/api/v1/auth/download-session') {
+        return Promise.resolve({ ok: true, status: 200 } as Response)
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+
+    vi.resetModules()
+    const firstTabAuth = await import('./auth')
+    vi.resetModules()
+    const secondTabAuth = await import('./auth')
+
+    const firstRefresh = firstTabAuth.refreshAuthSession()
+    await vi.waitFor(() => {
+      expect(fetchMock.mock.calls.filter(([url]) => String(url) === '/api/v1/auth/refresh')).toHaveLength(1)
+    })
+    const secondRefresh = secondTabAuth.refreshAuthSession()
+    await vi.waitFor(() => expect(lockRequests).toBe(3))
+    pendingRefresh.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          user: {
+            id: 'u1',
+            username: 'admin',
+            role: 'admin',
+            home_dir: '/',
+            must_change_password: false,
+          },
+        },
+      }),
+    } as Response)
+
+    await expect(Promise.all([firstRefresh, secondRefresh])).resolves.toEqual([true, true])
+    expect(fetchMock.mock.calls.filter(([url]) => String(url) === '/api/v1/auth/refresh')).toHaveLength(1)
+    expect(fetchMock.mock.calls.filter(([url]) => String(url) === '/api/v1/auth/me')).toHaveLength(1)
+    expect(fetchMock.mock.calls.filter(([url]) => String(url) === '/api/v1/auth/download-session')).toHaveLength(2)
+  })
+
+  it('reuses the lock owner session when cross-tab storage is blocked', async () => {
+    const pendingRefresh = createDeferred<Response>()
+    let lockRequests = 0
+    setNavigatorLocks(createQueuedLockManager(() => {
+      lockRequests += 1
+    }))
+    vi.resetModules()
+    const firstTabAuth = await import('./auth')
+    vi.resetModules()
+    const secondTabAuth = await import('./auth')
+    const existingUser = {
+      id: 'u1',
+      username: 'admin',
+      role: 'admin' as const,
+      homeDir: '/',
+      mustChangePassword: false,
+    }
+    firstTabAuth.storeTokens('', '', existingUser)
+    secondTabAuth.storeTokens('', '', existingUser)
+
+    const blockedStorage = blockLocalStorageAccess()
+    expect(() => localStorage.getItem('blocked-read')).toThrow(blockedStorage.error)
+    expect(() => localStorage.setItem('blocked-write', '1')).toThrow(blockedStorage.error)
+    expect(() => localStorage.removeItem('blocked-remove')).toThrow(blockedStorage.error)
+    let refreshAttempts = 0
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/v1/auth/refresh') {
+        refreshAttempts += 1
+        if (refreshAttempts === 1) {
+          return pendingRefresh.promise
+        }
+        return Promise.resolve({
+          ok: false,
+          status: 429,
+          clone: () => ({
+            json: () => Promise.resolve({
+              success: false,
+              error: { code: 'RATE_LIMITED', message: 'refresh rotation is rate limited' },
+            }),
+          }),
+        } as Response)
+      }
+      if (url === '/api/v1/auth/me') {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({
+            success: true,
+            data: {
+              user: {
+                id: 'u1',
+                username: 'admin',
+                role: 'admin',
+                home_dir: '/',
+                must_change_password: false,
+              },
+            },
+          }),
+        } as Response)
+      }
+      if (url === '/api/v1/auth/download-session') {
+        return Promise.resolve({ ok: true, status: 200 } as Response)
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+
+    try {
+      const firstRefresh = firstTabAuth.refreshAuthSession()
+      await vi.waitFor(() => expect(refreshAttempts).toBe(1))
+      const secondRefresh = secondTabAuth.refreshAuthSession()
+      await vi.waitFor(() => expect(lockRequests).toBe(3))
+      pendingRefresh.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            user: {
+              id: 'u1',
+              username: 'admin',
+              role: 'admin',
+              home_dir: '/',
+              must_change_password: false,
+            },
+          },
+        }),
+      } as Response)
+
+      await expect(Promise.all([firstRefresh, secondRefresh])).resolves.toEqual([true, true])
+      expect(refreshAttempts).toBe(1)
+      expect(fetchMock.mock.calls.filter(([url]) => String(url) === '/api/v1/auth/me')).toHaveLength(1)
+    } finally {
+      blockedStorage.restore()
+    }
+  })
+
+  it.each([401, 403])(
+    'retries refresh without clearing its capability when the waited session probe returns %i',
+    async (probeStatus) => {
+      const pendingOwnerRefresh = createDeferred<Response>()
+      let lockRequests = 0
+      setNavigatorLocks(createQueuedLockManager(() => {
+        lockRequests += 1
+      }))
+      vi.resetModules()
+      const firstTabAuth = await import('./auth')
+      vi.resetModules()
+      const secondTabAuth = await import('./auth')
+      const existingUser = {
+        id: 'u1',
+        username: 'admin',
+        role: 'admin' as const,
+        homeDir: '/',
+        mustChangePassword: false,
+      }
+      firstTabAuth.storeTokens('', '', existingUser)
+      secondTabAuth.storeTokens('', '', existingUser)
+      const blockedStorage = blockLocalStorageAccess()
+      let refreshAttempts = 0
+      fetchMock.mockImplementation((input: RequestInfo | URL) => {
+        const url = String(input)
+        if (url === '/api/v1/auth/refresh') {
+          refreshAttempts += 1
+          if (refreshAttempts === 1) {
+            return pendingOwnerRefresh.promise
+          }
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({
+              success: true,
+              data: {
+                user: {
+                  id: 'u1',
+                  username: 'admin',
+                  role: 'admin',
+                  home_dir: '/',
+                  must_change_password: false,
+                },
+              },
+            }),
+          } as Response)
+        }
+        if (url === '/api/v1/auth/me') {
+          return Promise.resolve({ ok: false, status: probeStatus } as Response)
+        }
+        if (url === '/api/v1/auth/download-session') {
+          return Promise.resolve({ ok: true, status: 200 } as Response)
+        }
+        throw new Error(`unexpected fetch: ${url}`)
+      })
+
+      try {
+        const firstRefresh = firstTabAuth.refreshAuthSession()
+        await vi.waitFor(() => expect(refreshAttempts).toBe(1))
+        const secondRefresh = secondTabAuth.refreshAuthSession()
+        await vi.waitFor(() => expect(lockRequests).toBe(3))
+        pendingOwnerRefresh.resolve({
+          ok: false,
+          status: 503,
+          clone: () => ({
+            json: () => Promise.resolve({
+              success: false,
+              error: { code: 'SERVICE_UNAVAILABLE', message: 'refresh service unavailable' },
+            }),
+          }),
+        } as Response)
+
+        await expect(Promise.all([firstRefresh, secondRefresh])).resolves.toEqual([false, true])
+        expect(refreshAttempts).toBe(2)
+        expect(fetchMock.mock.calls.filter(([url]) => String(url) === '/api/v1/auth/me')).toHaveLength(1)
+      } finally {
+        blockedStorage.restore()
+      }
+    },
+  )
+
+  it('does not reuse or refresh a waited session when the user security scope changed', async () => {
+    const pendingRefresh = createDeferred<Response>()
+    let lockRequests = 0
+    setNavigatorLocks(createQueuedLockManager(() => {
+      lockRequests += 1
+    }))
+    vi.resetModules()
+    const firstTabAuth = await import('./auth')
+    vi.resetModules()
+    const secondTabAuth = await import('./auth')
+    const existingUser = {
+      id: 'u1',
+      username: 'family-user',
+      role: 'user' as const,
+      homeDir: '/users/family-user',
+      mustChangePassword: false,
+    }
+    firstTabAuth.storeTokens('', '', existingUser)
+    secondTabAuth.storeTokens('', '', existingUser)
+    const blockedStorage = blockLocalStorageAccess()
+    let refreshAttempts = 0
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/v1/auth/refresh') {
+        refreshAttempts += 1
+        return pendingRefresh.promise
+      }
+      if (url === '/api/v1/auth/me') {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({
+            success: true,
+            data: {
+              user: {
+                id: 'u1',
+                username: 'family-user',
+                role: 'admin',
+                home_dir: '/',
+                must_change_password: false,
+              },
+            },
+          }),
+        } as Response)
+      }
+      if (url === '/api/v1/auth/download-session') {
+        return Promise.resolve({ ok: true, status: 200 } as Response)
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+
+    try {
+      const firstRefresh = firstTabAuth.refreshAuthSession()
+      await vi.waitFor(() => expect(refreshAttempts).toBe(1))
+      const secondRefresh = secondTabAuth.refreshAuthSession()
+      await vi.waitFor(() => expect(lockRequests).toBe(3))
+      pendingRefresh.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            user: {
+              id: 'u1',
+              username: 'family-user',
+              role: 'admin',
+              home_dir: '/',
+              must_change_password: false,
+            },
+          },
+        }),
+      } as Response)
+
+      await expect(Promise.all([firstRefresh, secondRefresh])).resolves.toEqual([true, false])
+      expect(refreshAttempts).toBe(1)
+      expect(fetchMock.mock.calls.filter(([url]) => String(url) === '/api/v1/auth/me')).toHaveLength(1)
+      expect(fetchMock.mock.calls.filter(([url]) => String(url) === '/api/v1/auth/download-session')).toHaveLength(1)
+    } finally {
+      blockedStorage.restore()
+    }
+  })
+
+  it('preserves the browser session when Web Lock acquisition fails', async () => {
+    const authCleared = vi.fn()
+    const request = vi.fn().mockRejectedValue(new DOMException('locks are unavailable', 'SecurityError'))
+    setNavigatorLocks({
+      query: async () => ({ held: [], pending: [] }),
+      request: request as LockManager['request'],
+    })
+    window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
+    localStorage.setItem('mnemonas_session', '1')
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'u1',
+      username: 'admin',
+      role: 'admin',
+      homeDir: '/',
+      mustChangePassword: false,
+    }))
+
+    await expect(refreshAuthSession()).resolves.toBe(false)
+
+    expect(request).toHaveBeenCalledTimes(1)
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(localStorage.getItem('mnemonas_session')).toBe('1')
+    expect(getStoredUser()).toMatchObject({ id: 'u1' })
+    expect(authCleared).not.toHaveBeenCalled()
+    window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
+  })
+
+  it('aborts a queued Web Lock refresh after the auth generation changes', async () => {
+    const authCleared = vi.fn()
+    const request = vi.fn((
+      _name: string,
+      options: LockOptions,
+      callback: (lock: Lock | null) => unknown,
+    ) => {
+      if (options.ifAvailable) {
+        return Promise.resolve(callback(null))
+      }
+      return new Promise((_resolve, reject) => {
+        options.signal?.addEventListener('abort', () => {
+          reject(new DOMException('The operation was aborted', 'AbortError'))
+        }, { once: true })
+      })
+    })
+    setNavigatorLocks({
+      query: async () => ({ held: [], pending: [] }),
+      request: request as LockManager['request'],
+    })
+    const existingUser = {
+      id: 'u1',
+      username: 'admin',
+      role: 'admin' as const,
+      homeDir: '/',
+      mustChangePassword: false,
+    }
+    storeTokens('', '', existingUser)
+    window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
+    const blockedStorage = blockLocalStorageAccess()
+
+    try {
+      const refresh = refreshAuthSession()
+      await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2))
+      invalidateAuthSessionRequests()
+
+      await expect(refresh).resolves.toBe(false)
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(authCleared).not.toHaveBeenCalled()
+    } finally {
+      blockedStorage.restore()
+      window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
+    }
+    expect(localStorage.getItem('mnemonas_session')).toBe('1')
+    expect(getStoredUser()).toMatchObject({ id: 'u1' })
+  })
+
+  it('does not restore a refreshed user after logout supersedes the request', async () => {
+    const pendingRefresh = createDeferred<Response>()
+    let refreshSignal: AbortSignal | undefined
+    localStorage.setItem('mnemonas_session', '1')
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'old-user',
+      username: 'old-user',
+      role: 'user',
+      homeDir: '/old-user',
+      mustChangePassword: false,
+    }))
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url === '/api/v1/auth/refresh') {
+        refreshSignal = init?.signal as AbortSignal | undefined
+        return pendingRefresh.promise
+      }
+      if (url === '/api/v1/auth/logout') {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: new Headers(),
+          json: () => Promise.resolve({ success: true, data: null }),
+        } as Response)
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+
+    const refresh = refreshAuthSession()
+    await vi.waitFor(() => expect(refreshSignal).toBeInstanceOf(AbortSignal))
+    await expect(logout()).resolves.toMatchObject({ warning: false })
+    expect(refreshSignal?.aborted).toBe(true)
+
+    pendingRefresh.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          user: {
+            id: 'old-user',
+            username: 'old-user',
+            role: 'user',
+            home_dir: '/old-user',
+            must_change_password: false,
+          },
+        },
+      }),
+    } as Response)
+
+    await expect(refresh).resolves.toBe(false)
+    expect(getStoredUser()).toBeNull()
+  })
+
+  it('does not restore a refreshed user after a password change supersedes the request', async () => {
+    const pendingRefresh = createDeferred<Response>()
+    let refreshSignal: AbortSignal | undefined
+    localStorage.setItem('mnemonas_session', '1')
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'old-user',
+      username: 'old-user',
+      role: 'user',
+      homeDir: '/old-user',
+      mustChangePassword: true,
+    }))
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url === '/api/v1/auth/refresh') {
+        refreshSignal = init?.signal as AbortSignal | undefined
+        return pendingRefresh.promise
+      }
+      if (url === '/api/v1/auth/password') {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: new Headers(),
+          json: () => Promise.resolve({ success: true, data: null }),
+        } as Response)
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+
+    const refresh = refreshAuthSession()
+    await vi.waitFor(() => expect(refreshSignal).toBeInstanceOf(AbortSignal))
+    await expect(changePassword({
+      old_password: 'initial-password',
+      new_password: 'replacement-password',
+    })).resolves.toMatchObject({ warning: false })
+    expect(refreshSignal?.aborted).toBe(true)
+
+    pendingRefresh.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          user: {
+            id: 'old-user',
+            username: 'old-user',
+            role: 'user',
+            home_dir: '/old-user',
+            must_change_password: false,
+          },
+        },
+      }),
+    } as Response)
+
+    await expect(refresh).resolves.toBe(false)
+    expect(getStoredUser()).toBeNull()
+  })
+
+  it('does not let a stale refresh replace a newer login session', async () => {
+    const pendingRefresh = createDeferred<Response>()
+    let refreshSignal: AbortSignal | undefined
+    localStorage.setItem('mnemonas_session', '1')
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'old-user',
+      username: 'old-user',
+      role: 'user',
+      homeDir: '/old-user',
+      mustChangePassword: false,
+    }))
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url === '/api/v1/auth/refresh') {
+        refreshSignal = init?.signal as AbortSignal | undefined
+        return pendingRefresh.promise
+      }
+      if (url === '/api/v1/auth/login') {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: new Headers(),
+          json: () => Promise.resolve({
+            success: true,
+            data: {
+              user: {
+                id: 'new-user',
+                username: 'new-user',
+                role: 'admin',
+                home_dir: '/',
+                must_change_password: false,
+              },
+            },
+          }),
+        } as Response)
+      }
+      if (url === '/api/v1/auth/download-session') {
+        return Promise.resolve({ ok: true, status: 200 } as Response)
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+
+    const refresh = refreshAuthSession()
+    await vi.waitFor(() => expect(refreshSignal).toBeInstanceOf(AbortSignal))
+    await expect(login('new-user', 'new-password')).resolves.toMatchObject({
+      user: { id: 'new-user' },
+    })
+    expect(refreshSignal?.aborted).toBe(true)
+
+    pendingRefresh.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          user: {
+            id: 'old-user',
+            username: 'old-user',
+            role: 'user',
+            home_dir: '/old-user',
+            must_change_password: false,
+          },
+        },
+      }),
+    } as Response)
+
+    await expect(refresh).resolves.toBe(false)
+    expect(getStoredUser()).toMatchObject({ id: 'new-user', username: 'new-user' })
+  })
+
+  it('does not let a stale refresh download-session check clear a newer login', async () => {
+    const pendingOldDownload = createDeferred<Response>()
+    let oldDownloadSignal: AbortSignal | undefined
+    let downloadAttempt = 0
+    localStorage.setItem('mnemonas_session', '1')
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url === '/api/v1/auth/refresh') {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({
+            success: true,
+            data: {
+              user: {
+                id: 'old-user',
+                username: 'old-user',
+                role: 'user',
+                home_dir: '/old-user',
+                must_change_password: false,
+              },
+            },
+          }),
+        } as Response)
+      }
+      if (url === '/api/v1/auth/login') {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: new Headers(),
+          json: () => Promise.resolve({
+            success: true,
+            data: {
+              user: {
+                id: 'new-user',
+                username: 'new-user',
+                role: 'admin',
+                home_dir: '/',
+                must_change_password: false,
+              },
+            },
+          }),
+        } as Response)
+      }
+      if (url === '/api/v1/auth/download-session') {
+        downloadAttempt += 1
+        if (downloadAttempt === 1) {
+          oldDownloadSignal = init?.signal as AbortSignal | undefined
+          return pendingOldDownload.promise
+        }
+        return Promise.resolve({ ok: true, status: 200 } as Response)
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+
+    const refresh = refreshAuthSession()
+    await vi.waitFor(() => expect(oldDownloadSignal).toBeInstanceOf(AbortSignal))
+    await expect(login('new-user', 'new-password')).resolves.toMatchObject({
+      user: { id: 'new-user' },
+    })
+    expect(oldDownloadSignal?.aborted).toBe(true)
+
+    pendingOldDownload.resolve({
+      ok: false,
+      status: 401,
+      json: () => Promise.resolve({
+        success: false,
+        error: { code: 'NOT_AUTHENTICATED', message: 'old session missing' },
+      }),
+    } as Response)
+
+    await expect(refresh).resolves.toBe(false)
+    expect(getStoredUser()).toMatchObject({ id: 'new-user' })
+  })
+
+  it('does not restore a stale refresh after another tab signals a session transition', async () => {
+    const pendingRefresh = createDeferred<Response>()
+    let refreshSignal: AbortSignal | undefined
+    localStorage.setItem('mnemonas_session', '1')
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'old-user',
+      username: 'old-user',
+      role: 'user',
+      homeDir: '/old-user',
+      mustChangePassword: false,
+    }))
+    fetchMock.mockImplementation((_input: RequestInfo | URL, init?: RequestInit) => {
+      refreshSignal = init?.signal as AbortSignal | undefined
+      return pendingRefresh.promise
+    })
+
+    const refresh = refreshAuthSession()
+    await vi.waitFor(() => expect(refreshSignal).toBeInstanceOf(AbortSignal))
+    invalidateAuthSessionRequests()
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'verified-new-user',
+      username: 'verified-new-user',
+      role: 'admin',
+      homeDir: '/',
+      mustChangePassword: false,
+    }))
+    expect(refreshSignal?.aborted).toBe(true)
+
+    pendingRefresh.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          user: {
+            id: 'old-user',
+            username: 'old-user',
+            role: 'user',
+            home_dir: '/old-user',
+            must_change_password: false,
+          },
+        },
+      }),
+    } as Response)
+
+    await expect(refresh).resolves.toBe(false)
+    expect(getStoredUser()).toMatchObject({ id: 'verified-new-user' })
   })
 
   it('recovers a browser session when refresh reports a replayed token but current cookies are valid', async () => {
@@ -1529,7 +2827,7 @@ describe('auth API', () => {
         json: () => Promise.resolve({
           success: true,
           data: {
-            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/', must_change_password: false },
           },
         }),
       })
@@ -1632,6 +2930,7 @@ describe('auth API', () => {
       username: 'admin',
       role: 'admin',
       home_dir: '/',
+      must_change_password: false,
     }))
 
     fetchMock
@@ -1736,7 +3035,7 @@ describe('auth API', () => {
             refresh_token: 'refresh-2',
             expires_at: '2026-03-13T00:00:00Z',
             token_type: 'Bearer',
-            user: { id: 'u1', username: 'user', role: 'user', home_dir: '/users/user' },
+            user: { id: 'u1', username: 'user', role: 'user', home_dir: '/users/user', must_change_password: false },
           },
         }),
       })
@@ -1804,7 +3103,7 @@ describe('auth API', () => {
             refresh_token: 'refresh-2',
             expires_at: '2026-03-13T00:00:00Z',
             token_type: 'Bearer',
-            user: { id: 'u1', username: 'user', role: 'user', home_dir: '/users/user' },
+            user: { id: 'u1', username: 'user', role: 'user', home_dir: '/users/user', must_change_password: false },
           },
         }),
       })

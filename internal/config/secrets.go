@@ -12,14 +12,22 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
 // Secrets holds auto-generated secrets that persist across restarts
 type Secrets struct {
-	JWTSecret      string `json:"jwt_secret"`
-	WebDAVPassword string `json:"webdav_password,omitempty"` // Auto-generated if not configured
-	SetupShown     bool   `json:"setup_shown,omitempty"`     // True if setup info has been shown to user
+	JWTSecret      string              `json:"jwt_secret"`
+	WebDAVPassword string              `json:"webdav_password,omitempty"` // Auto-generated if not configured
+	SetupLifecycle SetupLifecycleState `json:"setup_lifecycle,omitempty"`
+}
+
+// SetupLifecycleState records durable setup completion and deferral state.
+type SetupLifecycleState struct {
+	CompletedAt   *time.Time `json:"completed_at,omitempty"`
+	DeferredAt    *time.Time `json:"deferred_at,omitempty"`
+	DeferredUntil *time.Time `json:"deferred_until,omitempty"`
 }
 
 // SecretsFile is the default filename for secrets
@@ -35,6 +43,7 @@ const (
 )
 
 var errSecretsFileSymlink = errors.New("secrets file path must not be a symlink")
+var secretsMu sync.Mutex
 
 // ErrSecretsNotFound indicates that the runtime secrets file is unexpectedly missing.
 var ErrSecretsNotFound = errors.New("secrets file not found")
@@ -42,6 +51,12 @@ var ErrSecretsNotFound = errors.New("secrets file not found")
 // LoadSecrets loads secrets from file without creating new ones.
 // Returns nil if file does not exist.
 func LoadSecrets(dataDir string) (*Secrets, error) {
+	secretsMu.Lock()
+	defer secretsMu.Unlock()
+	return loadSecrets(dataDir)
+}
+
+func loadSecrets(dataDir string) (*Secrets, error) {
 	secretsPath := filepath.Join(dataDir, SecretsFile)
 	normalizedPath, err := ensureManagedDirRoot(secretsPath, errSecretsFileSymlink, "secrets file", false)
 	if err != nil {
@@ -70,6 +85,12 @@ func LoadSecrets(dataDir string) (*Secrets, error) {
 
 // SaveSecrets saves secrets to file
 func SaveSecrets(dataDir string, secrets *Secrets) error {
+	secretsMu.Lock()
+	defer secretsMu.Unlock()
+	return saveSecrets(dataDir, secrets)
+}
+
+func saveSecrets(dataDir string, secrets *Secrets) error {
 	secretsPath := filepath.Join(dataDir, SecretsFile)
 	data, err := json.MarshalIndent(secrets, "", "  ")
 	if err != nil {
@@ -82,23 +103,85 @@ func SaveSecrets(dataDir string, secrets *Secrets) error {
 	return nil
 }
 
-// MarkSetupShown marks the setup as shown in secrets file
-func MarkSetupShown(dataDir string) error {
-	secrets, err := LoadSecrets(dataDir)
+// CompleteSetup records the first completion time and clears any deferral.
+// Lifecycle updates are serialized with all secrets file operations.
+func CompleteSetup(dataDir string, now time.Time) (SetupLifecycleState, error) {
+	secretsMu.Lock()
+	defer secretsMu.Unlock()
+
+	secrets, err := loadSecrets(dataDir)
 	if err != nil {
-		return err
+		return SetupLifecycleState{}, err
 	}
 	if secrets == nil {
-		return ErrSecretsNotFound
+		return SetupLifecycleState{}, ErrSecretsNotFound
 	}
 
-	secrets.SetupShown = true
-	return SaveSecrets(dataDir, secrets)
+	if secrets.SetupLifecycle.CompletedAt == nil {
+		completedAt := now
+		secrets.SetupLifecycle.CompletedAt = &completedAt
+	}
+	secrets.SetupLifecycle.DeferredAt = nil
+	secrets.SetupLifecycle.DeferredUntil = nil
+	if err := saveSecrets(dataDir, secrets); err != nil {
+		return SetupLifecycleState{}, err
+	}
+	return cloneSetupLifecycleState(secrets.SetupLifecycle), nil
+}
+
+// DeferSetup records a new setup deferral unless setup is already complete.
+// Lifecycle updates are serialized with all secrets file operations.
+func DeferSetup(dataDir string, now, until time.Time) (SetupLifecycleState, error) {
+	secretsMu.Lock()
+	defer secretsMu.Unlock()
+
+	secrets, err := loadSecrets(dataDir)
+	if err != nil {
+		return SetupLifecycleState{}, err
+	}
+	if secrets == nil {
+		return SetupLifecycleState{}, ErrSecretsNotFound
+	}
+	if secrets.SetupLifecycle.CompletedAt != nil {
+		return cloneSetupLifecycleState(secrets.SetupLifecycle), nil
+	}
+
+	deferredAt := now
+	deferredUntil := until
+	secrets.SetupLifecycle.DeferredAt = &deferredAt
+	secrets.SetupLifecycle.DeferredUntil = &deferredUntil
+	if err := saveSecrets(dataDir, secrets); err != nil {
+		return SetupLifecycleState{}, err
+	}
+	return cloneSetupLifecycleState(secrets.SetupLifecycle), nil
+}
+
+func cloneSetupLifecycleState(state SetupLifecycleState) SetupLifecycleState {
+	clone := state
+	if state.CompletedAt != nil {
+		completedAt := *state.CompletedAt
+		clone.CompletedAt = &completedAt
+	}
+	if state.DeferredAt != nil {
+		deferredAt := *state.DeferredAt
+		clone.DeferredAt = &deferredAt
+	}
+	if state.DeferredUntil != nil {
+		deferredUntil := *state.DeferredUntil
+		clone.DeferredUntil = &deferredUntil
+	}
+	return clone
 }
 
 // LoadOrCreateSecrets loads secrets from file, creating them if they don't exist.
 // Returns the secrets and a boolean indicating if they were newly created.
 func LoadOrCreateSecrets(dataDir string) (*Secrets, bool, error) {
+	secretsMu.Lock()
+	defer secretsMu.Unlock()
+	return loadOrCreateSecrets(dataDir)
+}
+
+func loadOrCreateSecrets(dataDir string) (*Secrets, bool, error) {
 	secretsPath := filepath.Join(dataDir, SecretsFile)
 	normalizedPath, err := ensureManagedDirRoot(secretsPath, errSecretsFileSymlink, "secrets file", false)
 	if err != nil {

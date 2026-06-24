@@ -3112,6 +3112,7 @@ export default function Maintenance() {
         ...current.filter((currentJob) => currentJob.id !== job.id),
       ])
       void queryClient.invalidateQueries({ queryKey: backupJobsQueryKey })
+      void queryClient.invalidateQueries({ queryKey: ['setup-readiness'] })
       setIsCreateBackupOpen(false)
       addToast({
         title: mutationRequest.request.schedule_interval === '0'
@@ -3151,6 +3152,7 @@ export default function Maintenance() {
         return
       }
       void queryClient.invalidateQueries({ queryKey: backupJobsQueryKey })
+      void queryClient.invalidateQueries({ queryKey: ['setup-readiness'] })
       const toastColor = getMaintenanceTaskToastColor(result)
       addToast({
         title: result.status === 'failed' ? '备份任务失败' : hasMaintenanceTaskWarning(result) ? '备份完成但有警告' : '备份已完成',
@@ -3187,6 +3189,7 @@ export default function Maintenance() {
         return
       }
       void queryClient.invalidateQueries({ queryKey: backupJobsQueryKey })
+      void queryClient.invalidateQueries({ queryKey: ['setup-readiness'] })
       const toastColor = getMaintenanceTaskToastColor(result)
       addToast({
         title: result.status === 'failed' ? '保留策略检测失败' : hasMaintenanceTaskWarning(result) ? '保留策略检测完成，有警告' : '保留策略检测完成',
@@ -3223,6 +3226,7 @@ export default function Maintenance() {
         return
       }
       void queryClient.invalidateQueries({ queryKey: backupJobsQueryKey })
+      void queryClient.invalidateQueries({ queryKey: ['setup-readiness'] })
       const toastColor = getMaintenanceTaskToastColor(result)
       addToast({
         title: result.status === 'failed' ? '恢复演练失败' : result.status === 'running' ? '恢复演练已启动' : hasMaintenanceTaskWarning(result) ? '恢复演练完成，有警告' : '恢复演练已完成',
@@ -3235,6 +3239,7 @@ export default function Maintenance() {
         return
       }
       void queryClient.invalidateQueries({ queryKey: backupJobsQueryKey })
+      void queryClient.invalidateQueries({ queryKey: ['setup-readiness'] })
       const errorPresentation = getMaintenanceActionErrorPresentation(
         error,
         '执行恢复演练失败',
@@ -3302,6 +3307,7 @@ export default function Maintenance() {
         return
       }
       void queryClient.invalidateQueries({ queryKey: backupJobsQueryKey })
+      void queryClient.invalidateQueries({ queryKey: ['setup-readiness'] })
       setRestoreVerifyResult(result)
       const verifyWarnings = result.warnings ?? []
       const toastColor = getMaintenanceTaskToastColor(result)
@@ -3355,6 +3361,7 @@ export default function Maintenance() {
         return
       }
       void queryClient.invalidateQueries({ queryKey: backupJobsQueryKey })
+      void queryClient.invalidateQueries({ queryKey: ['setup-readiness'] })
       setRestoreResult(result)
       setRestoreVerifyResult(null)
       setRestoreTargetPath(request.targetPath)
@@ -3439,6 +3446,7 @@ export default function Maintenance() {
         return
       }
       void queryClient.invalidateQueries({ queryKey: backupJobsQueryKey })
+      void queryClient.invalidateQueries({ queryKey: ['setup-readiness'] })
       setBatchRestoreResult(result)
       const batchWarnings = result.warnings ?? []
       const batchRestoreDescription = batchWarnings[0]

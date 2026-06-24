@@ -51,16 +51,18 @@ npx playwright install
 
 # Playwright starts an isolated backend, builds the frontend, and serves it through Vite preview by default.
 
-# Reusing an existing environment for protected-page tests requires explicit services and admin credentials.
+# Reusing an existing environment for protected-page tests requires explicit services and an admin account that has completed its initial password change.
 export MNEMONAS_E2E_REUSE_EXISTING=1
 export MNEMONAS_E2E_BACKEND_URL=http://127.0.0.1:8080
 export MNEMONAS_E2E_FRONTEND_URL=http://127.0.0.1:5173
 export E2E_USERNAME=admin
-export E2E_PASSWORD_FILE="$HOME/.mnemonas/.mnemonas/initial-password.txt"
-# If auth.users_file is stored at the storage.root top level, use:
+export E2E_PASSWORD="<current-admin-password>"
+
+# Only when the reused environment still uses its initial password, provide the initial password file and a one-time replacement:
+# export E2E_PASSWORD_FILE="$HOME/.mnemonas/.mnemonas/initial-password.txt"
+# export E2E_PASSWORD_CHANGE_TO="<replacement-admin-password>"
+# If auth.users_file is stored at the storage.root top level, use this password-file path:
 # export E2E_PASSWORD_FILE="$HOME/.mnemonas/initial-password.txt"
-# If the admin password was changed and no password file is used:
-# export E2E_PASSWORD="<admin-password>"
 
 npm run test:e2e
 npm run test:e2e:navigation
@@ -70,8 +72,9 @@ npm run test:e2e:update
 
 Notes:
 
-- Protected-page tests prefer `E2E_PASSWORD` and also support `E2E_PASSWORD_FILE`.
-- The default configuration starts an isolated test backend, builds the frontend, serves it through Vite preview, generates an initial password, and writes it under `MNEMONAS_E2E_ROOT`.
+- Protected-page tests prefer `E2E_PASSWORD` and also support reading the current password from `E2E_PASSWORD_FILE`. If an account in a reused environment reaches the required password-change gate, `E2E_PASSWORD_CHANGE_TO` is also required. Authentication setup completes the change and signs in again with the replacement. The gate is never recorded as skipped, including when `MNEMONAS_E2E_ALLOW_AUTH_SKIP=1`.
+- `E2E_PASSWORD_CHANGE_TO` must differ from the current password, contain 8 through 72 UTF-8 bytes, and not consist only of whitespace. The service removes the initial password file after a successful change. Later runs must use `E2E_PASSWORD=<replacement-admin-password>` instead of continuing to reference the removed file.
+- The default configuration starts an isolated test backend, builds the frontend, and serves it through Vite preview. Backend seeding changes the bootstrap password before browser tests and writes the effective admin password to `MNEMONAS_E2E_ROOT/backend/e2e-password.txt`. `password-change-gate.spec.ts` covers the real gate with a dedicated user and an administrator reset flow, independently of the bootstrap gate state.
 - The default isolated test environment treats authentication setup failures as test failures, so protected-page regressions are not hidden as skipped tests.
 - The isolated backend uses a 2-hour access-token lifetime and a 168-hour refresh-token lifetime to reduce shared storageState expiration risk during long parallel test runs.
 - `MNEMONAS_E2E_ROOT` must be under `/tmp` or the current checkout and must not contain `..` or symlink path components.

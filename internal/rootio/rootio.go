@@ -310,6 +310,27 @@ func OpenFilePathNoFollow(path string, flag int, perm os.FileMode) (*os.File, er
 	return OpenFileNoFollow(root, relPath, flag, perm)
 }
 
+// OpenRegularFilePathNoFollow opens a regular file for reading without
+// following symlinks in any path component. Special files are rejected without
+// waiting for a writer on platforms that support non-blocking opens.
+func OpenRegularFilePathNoFollow(path string) (*os.File, error) {
+	rootPath, relPath, err := splitHostPath(path)
+	if err != nil {
+		return nil, err
+	}
+	if relPath == "" {
+		return nil, rootPathError("open", path, errEscape)
+	}
+
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+
+	return OpenRegularFileNoFollow(root, relPath)
+}
+
 // OpenDirPathNoFollow opens a host path as a directory without following
 // symlinks in any path component.
 func OpenDirPathNoFollow(path string) (*os.File, error) {

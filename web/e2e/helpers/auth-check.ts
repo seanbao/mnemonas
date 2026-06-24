@@ -5,9 +5,10 @@ import { waitForRouteSettled } from './route-ready'
 export const LOGIN_BUTTON_PATTERN = /^(登录|sign in|login)$/i
 export const USERNAME_INPUT_PATTERN = /^用户名$/i
 export const PASSWORD_INPUT_PATTERN = /^密码$/i
+export const PASSWORD_CHANGE_GATE_HEADING = '必须修改密码'
 const AUTH_SURFACE_TIMEOUT_MS = 20_000
 
-type AuthSurface = 'app' | 'login' | 'loading'
+export type AuthSurface = 'app' | 'login' | 'password-change' | 'loading'
 
 async function isVisible(locator: Locator): Promise<boolean> {
   return locator.isVisible().catch(() => false)
@@ -26,14 +27,19 @@ function skipOrFail(message: string): never {
 }
 
 export async function waitForAuthSurface(page: Page, timeout = AUTH_SURFACE_TIMEOUT_MS): Promise<Exclude<AuthSurface, 'loading'>> {
-  const desktopNavigation = page.getByRole('navigation', { name: '主导航' })
-  const mobileNavigation = page.getByRole('navigation', { name: '移动端主导航' })
+  const desktopNavigation = page.getByRole('navigation', { name: '主导航', exact: true })
+  const mobileNavigation = page.getByRole('navigation', { name: '移动端主导航', exact: true })
   const mobileMenuButton = page.getByRole('button', { name: '打开导航菜单' })
   const usernameInput = page.getByLabel(USERNAME_INPUT_PATTERN)
   const loginButton = page.getByRole('button', { name: LOGIN_BUTTON_PATTERN })
+  const passwordChangeHeading = page.getByRole('heading', { name: PASSWORD_CHANGE_GATE_HEADING })
   let observedSurface: AuthSurface = 'loading'
 
   await expect.poll(async () => {
+    if (await isVisible(passwordChangeHeading)) {
+      observedSurface = 'password-change'
+      return observedSurface
+    }
     if (
       await isVisible(desktopNavigation)
       || await isVisible(mobileNavigation)
@@ -53,7 +59,20 @@ export async function waitForAuthSurface(page: Page, timeout = AUTH_SURFACE_TIME
   return observedSurface as Exclude<AuthSurface, 'loading'>
 }
 
-export async function waitForAppReady(page: Page, route?: string): Promise<void> {
+export async function waitForAuthenticatedSurface(
+  page: Page,
+  timeout = 10_000,
+): Promise<Exclude<AuthSurface, 'login' | 'loading'>> {
+  let surface: Exclude<AuthSurface, 'loading'> = 'login'
+  await expect.poll(async () => {
+    surface = await waitForAuthSurface(page, 1000)
+    return surface
+  }, { timeout }).not.toBe('login')
+
+  return surface as Exclude<AuthSurface, 'login' | 'loading'>
+}
+
+export async function waitForAppReady(page: Page, route?: string): Promise<Exclude<AuthSurface, 'loading'>> {
   // Vite HMR and app-level polling keep background requests alive, so networkidle is not a stable readiness signal.
   await page.waitForLoadState('domcontentloaded')
   await page.locator('body').waitFor({ state: 'visible' })
@@ -61,10 +80,11 @@ export async function waitForAppReady(page: Page, route?: string): Promise<void>
   const routeFallback = page.getByText('加载中…')
   await routeFallback.waitFor({ state: 'hidden', timeout: 10_000 }).catch(() => {})
 
-  await waitForAuthSurface(page)
+  const surface = await waitForAuthSurface(page)
   if (route) {
     await waitForRouteSettled(page, route)
   }
+  return surface
 }
 
 /**
@@ -91,6 +111,13 @@ export async function skipIfAuthRequired(page: Page, targetPath?: string): Promi
     }
     throw error
   })
+
+  if (surface === 'password-change') {
+    throw new Error(
+      'Password change is required before protected-page tests can continue. '
+      + 'The authentication setup must complete the password-change gate or fail explicitly.',
+    )
+  }
 
   if (surface !== 'login' && !page.url().includes('/login')) {
     return
@@ -120,6 +147,7 @@ export async function skipIfAuthRequired(page: Page, targetPath?: string): Promi
   await passwordInput.fill(password)
   await loginButton.click()
 
+  let postLoginSurface: Exclude<AuthSurface, 'loading'>
   try {
     await page.waitForURL(url => !url.pathname.includes('/login'), {
       timeout: 10000,
@@ -128,9 +156,19 @@ export async function skipIfAuthRequired(page: Page, targetPath?: string): Promi
     if (targetPath && !page.url().includes(targetPath)) {
       await page.goto(targetPath, { waitUntil: 'domcontentloaded' })
     }
-    await waitForAppReady(page, targetPath)
+    postLoginSurface = await waitForAppReady(page, targetPath)
+    if (postLoginSurface === 'login') {
+      postLoginSurface = await waitForAuthenticatedSurface(page)
+    }
   } catch {
     skipOrFail('Auto-login failed (invalid credentials, rate limit, or backend error)')
+  }
+
+  if (postLoginSurface === 'password-change') {
+    throw new Error(
+      'Auto-login reached the required password-change gate. '
+      + 'Run the authentication setup with E2E_PASSWORD_CHANGE_TO before protected-page tests.',
+    )
   }
 }
 

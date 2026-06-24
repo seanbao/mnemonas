@@ -84,8 +84,11 @@ MnemoNAS 提供内置备份任务入口，可在维护页或 API 中执行、查
 - `local.destination` 必须是 `storage.root` 之外的绝对路径，且不能是文件系统根目录或受保护系统目录；已存在的路径组件不能是符号链接，避免递归把备份写回源目录或写入符号链接指向的位置。本地恢复预览、恢复和恢复演练在读取快照 manifest 或创建演练产物前也会重新检查该目标路径。
 - 默认来源是 `storage.root`；生产环境更推荐把 `source` 指向 ZFS/Btrfs/LVM 快照挂载目录。
 - 源目录中遇到符号链接会中止备份任务，避免备份逃逸到源目录之外；`rclone` 恢复演练也会在执行远端校验前拒绝当前源树中的符号链接。
-- `restic` 和 `rclone` 任务不会通过 shell 拼接命令；`command` 只能是可执行名或绝对路径，不能包含空白或控制字符；`extra_args`、`exclude` 和 `retention_policy` 不能包含控制字符。`extra_args` 会作为 argv 追加到备份命令，恢复命令不会复用备份专用参数。
-- `password_file`、`config_file` 必须是 `source` 与 `storage.root` 之外的普通文件，且已存在的路径组件不能是符号链接，避免把备份凭据重新纳入备份数据或通过符号链接别名访问凭据。
+- `restic` 和 `rclone` 任务不会通过 shell 拼接命令；`command` 只能是可执行名或绝对路径，不能包含空白或控制字符；`extra_args`、`exclude` 和 `retention_policy` 不能包含控制字符。`extra_args` 会作为 argv 追加到备份命令，但不能覆盖任务身份；rclone 当前只接受 `--fast-list`，恢复命令不会复用备份专用参数。
+- `restic.repository` 只接受位于 `source` 与 `storage.root` 之外的绝对本地路径，或显式的 `rest:http://`、`rest:https://` REST 服务地址；不接受依赖云 SDK、SSH 或 rclone 外部凭据发现的仓库形式。
+- `restic.password_file` 和 `rclone.config_file` 分别为对应任务的必填项。文件必须是 `source` 与 `storage.root` 之外的非符号链接普通文件，已存在的路径组件也不能是符号链接，且文件大小不能超过 4 MiB。
+- `rclone.remote` 必须引用 `config_file` 中存在且声明了 `type` 的命名 remote，例如 `cloud:mnemonas/current` 引用 `[cloud]`。该配置必须是静态、自包含的明文配置：不能启用 `env_auth`，不能包含 `${...}` 展开，也不能通过名称含 `_file`、`_path`、`command`、`agent`、`ssh` 或 `token` 的非空配置项依赖外部文件、命令、代理、SSH 身份或可刷新的 token。当前证据模型不支持加密 rclone 配置或 token 自动写回。
+- 执行远端命令前，服务端会在解析后的系统临时目录中创建权限为 `0700` 的私有目录，并把凭据复制为权限为 `0600` 的快照；该目录必须位于 `source` 与 `storage.root` 之外，命令只读取快照。子进程不会继承云服务凭据、代理、SSH agent 或可覆盖显式任务身份的 `RESTIC_*`、`RCLONE_*` 环境变量；仓库、remote 和凭据文件只来自已验证的任务配置。
 - 任务视图、运行结果、恢复/预览结果、恢复报告和批量恢复结果中的目标路径与远端目标字段，以及 API 可见的备份错误、警告和恢复报告 findings 文本，会对内嵌 userinfo、token、密码、secret 和 key 参数做 `<redacted>` 脱敏；参数名中的 `_`/`-` 分隔符即使以 `%5F`/`%2D` 编码也会识别。
 - 备份提醒事件不会外发来源、目标、恢复目录、快照/manifest 路径或原始错误/警告文本，只保留状态、触发原因、计数、时间、失败分类和是否省略位置/错误详情的摘要字段。
 - 实际 restic/rclone 命令仍使用配置中的原始 `repository` 或 `remote`。客户端在恢复后继续调用 `restore-verify` 时，应复用原请求中的 `target_path`，不要把响应中用于展示的脱敏 `target_path` 当作新的请求参数。
@@ -175,7 +178,7 @@ extra_args = ["--fast-list"]
 
 manifest 中出现任务 ID、运行 ID、`created_at` 不匹配、不安全归档路径、重复路径、负文件大小、无效权限位、无效 SHA-256、统计字段不一致、缺少 `data/` 目录、manifest 未登记的额外文件或顶层异常目录时，也会失败，避免把损坏快照当作可用快照。
 
-本地恢复预览、恢复和恢复演练解析最近一次快照时，还会要求持久化状态里的快照路径和 manifest 路径与当前 `local.destination/<job-id>/snapshots/<run-id>/manifest.json` 位置一致。最新完成快照不能缺失或缺少 manifest，`snapshots/` 根目录不能包含非快照条目或非规范快照目录，manifest 路径不能包含符号链接，manifest 必须是常规文件；不一致会拒绝执行，避免使用当前备份目标之外的快照。
+本地恢复预览、恢复和恢复演练只信任 `status.json` 中 `last_successful_run` 指向的快照，不会通过扫描 `snapshots/` 目录推断可恢复快照。持久化的快照路径和 manifest 路径必须与当前 `local.destination/<job-id>/snapshots/<run-id>/manifest.json` 一致；manifest 必须是无符号链接路径上的普通文件，其实际大小和摘要必须与成功运行时保存的证据一致，任务、运行和统计字段也必须匹配。缺少这些证据的旧状态不能作为恢复依据，需要先完成一次新的本地备份。
 
 检测结果会写入 `last_retention_check`，并在快照缺失、远端为空、未填写 `retention_policy` 或命令失败时提示警告。`restore_drill_stale_after` 控制定期恢复演练提醒；留空或未配置时默认 30 天。
 

@@ -327,6 +327,13 @@ func newRouteSmokeServer(t *testing.T) (*Server, routeSmokeSession) {
 	if err != nil {
 		t.Fatalf("NewServer() error: %v", err)
 	}
+	admin, err := server.userStore.GetByUsername("admin")
+	if err != nil {
+		t.Fatalf("GetByUsername(admin) error: %v", err)
+	}
+	if err := server.userStore.ResetOwnPassword(admin.ID, password); err != nil {
+		t.Fatalf("ResetOwnPassword(admin) error: %v", err)
+	}
 
 	session := loginRouteSmokeAdmin(t, server, password)
 	session.password = password
@@ -429,7 +436,7 @@ func routeSmokeRequiresAdmin(contract string) bool {
 	}
 
 	switch {
-	case routePattern == "/api/v1/setup/acknowledge":
+	case routePattern == "/api/v1/setup/readiness" || routePattern == "/api/v1/setup/acknowledge" || routePattern == "/api/v1/setup/defer":
 		return true
 	case strings.HasPrefix(routePattern, "/api/v1/admin/users"):
 		return true
@@ -512,6 +519,8 @@ func routeSmokeRequestBody(contract string, session routeSmokeSession) string {
 		return `{"password":"route-smoke"}`
 	case "PUT /api/v1/settings/":
 		return `{}`
+	case "POST /api/v1/setup/defer":
+		return `{"remind_in_days":7}`
 	case "POST /api/v1/settings/access-check":
 		return `{"username":"admin","path":"/"}`
 	case "POST /api/v1/settings/access-preview":

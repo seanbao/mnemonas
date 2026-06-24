@@ -222,7 +222,13 @@ describe('API: files', () => {
               refresh_token: 'refresh-2',
               expires_at: '2026-03-13T00:00:00Z',
               token_type: 'Bearer',
-              user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+              user: {
+                id: 'u1',
+                username: 'admin',
+                role: 'admin',
+                home_dir: '/',
+                must_change_password: false,
+              },
             },
           }),
         })
@@ -549,7 +555,13 @@ describe('API: files', () => {
               refresh_token: 'refresh-2',
               expires_at: '2026-03-13T00:00:00Z',
               token_type: 'Bearer',
-              user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+              user: {
+                id: 'u1',
+                username: 'admin',
+                role: 'admin',
+                home_dir: '/',
+                must_change_password: false,
+              },
             },
           }),
         })

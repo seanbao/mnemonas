@@ -88,15 +88,22 @@ vi.mock('@/api/activity', async (importOriginal) => {
 })
 
 vi.mock('@/api/setup', () => ({
-  acknowledgeSetup: vi.fn().mockResolvedValue({ success: true, message: 'ok' }),
-  getSetupStatus: vi.fn().mockResolvedValue({
-    success: true,
-    is_first_run: false,
-    auth_enabled: true,
-    share_enabled: true,
-    webdav_enabled: true,
-    webdav_auth_type: 'basic',
-  }),
+  SETUP_DEFER_DAYS: [1, 3, 7, 30],
+  SetupError: class SetupError extends Error {
+    status: number
+    code?: string
+    constructor(message: string, status: number, code?: string) {
+      super(message)
+      this.status = status
+      this.code = code
+    }
+    get isUnavailable() {
+      return this.status === 503 || this.code === 'SERVICE_UNAVAILABLE'
+    }
+  },
+  acknowledgeSetup: vi.fn(),
+  deferSetup: vi.fn(),
+  getSetupReadiness: vi.fn(),
 }))
 
 // Mock navigation
@@ -120,7 +127,12 @@ vi.mock('@/stores/auth', async (importOriginal) => {
 
 import { ApiError as FilesApiError, getAppVersion, getHealth, getStorageStats, listBackupJobs } from '@/api/files'
 import { ApiError, listActivity } from '@/api/activity'
-import { acknowledgeSetup, getSetupStatus } from '@/api/setup'
+import {
+  acknowledgeSetup,
+  deferSetup,
+  getSetupReadiness,
+  type SetupReadiness,
+} from '@/api/setup'
 
 const mockGetHealth = getHealth as ReturnType<typeof vi.fn>
 const mockGetAppVersion = getAppVersion as ReturnType<typeof vi.fn>
@@ -128,7 +140,82 @@ const mockGetStorageStats = getStorageStats as ReturnType<typeof vi.fn>
 const mockListBackupJobs = listBackupJobs as ReturnType<typeof vi.fn>
 const mockListActivity = listActivity as ReturnType<typeof vi.fn>
 const mockAcknowledgeSetup = acknowledgeSetup as ReturnType<typeof vi.fn>
-const mockGetSetupStatus = getSetupStatus as ReturnType<typeof vi.fn>
+const mockDeferSetup = deferSetup as ReturnType<typeof vi.fn>
+const mockGetSetupReadiness = getSetupReadiness as ReturnType<typeof vi.fn>
+
+function createSetupReadiness(overrides: Partial<SetupReadiness> = {}): SetupReadiness {
+  return {
+    lifecycle: 'pending',
+    overall_status: 'action_required',
+    prompt: true,
+    generated_at: '2026-07-13T01:02:03Z',
+    can_complete: false,
+    can_defer: true,
+    required: { completed: 1, total: 2 },
+    recommended: { completed: 0, total: 1 },
+    checks: [
+      {
+        id: 'admin_access',
+        requirement: 'required',
+        status: 'complete',
+        deferrable: false,
+        title: '管理员访问可用',
+        message: '至少有一个启用中的管理员账号。',
+        action: 'manage_users',
+      },
+      {
+        id: 'backup_job',
+        requirement: 'required',
+        status: 'incomplete',
+        deferrable: true,
+        title: '添加独立备份',
+        message: '尚未添加启用中的备份任务。',
+        action: 'create_backup',
+      },
+      {
+        id: 'restore_verification',
+        requirement: 'recommended',
+        status: 'incomplete',
+        deferrable: true,
+        title: '验证恢复能力',
+        message: '建议执行一次恢复演练并保持验证结果有效。',
+        action: 'run_restore_drill',
+      },
+    ],
+    summary: {
+      auth_enabled: true,
+      active_admin_count: 1,
+      password_change_required_admin_count: 0,
+      initial_password_file: 'missing',
+      enabled_backup_job_count: 0,
+      security_status: 'warning',
+      security_blocking_check_ids: [],
+    },
+    ...overrides,
+  }
+}
+
+function completedSetupReadiness(): SetupReadiness {
+  return createSetupReadiness({
+    lifecycle: 'completed',
+    overall_status: 'ready',
+    prompt: false,
+    completed_at: '2026-07-13T01:03:00Z',
+    can_complete: false,
+    can_defer: false,
+    required: { completed: 2, total: 2 },
+  })
+}
+
+function deferredSetupReadiness(): SetupReadiness {
+  return createSetupReadiness({
+    lifecycle: 'deferred',
+    prompt: false,
+    deferred_until: '2026-07-20T01:02:03Z',
+    can_complete: false,
+    can_defer: false,
+  })
+}
 
 function expectListActivityCalledWithSignal(options: { limit?: number }) {
   const call = mockListActivity.mock.calls.find(([calledOptions]) => calledOptions?.limit === options.limit)
@@ -195,15 +282,9 @@ describe('DashboardPage', () => {
         { id: 'act-1', action: 'upload', path: '/docs/report.pdf', timestamp: '2024-01-15T10:00:00Z' },
       ],
     })
-    mockGetSetupStatus.mockResolvedValue({
-      success: true,
-      is_first_run: false,
-      auth_enabled: true,
-      share_enabled: true,
-      webdav_enabled: true,
-      webdav_auth_type: 'basic',
-    })
-    mockAcknowledgeSetup.mockResolvedValue({ success: true, message: 'ok' })
+    mockGetSetupReadiness.mockResolvedValue(completedSetupReadiness())
+    mockAcknowledgeSetup.mockResolvedValue(completedSetupReadiness())
+    mockDeferSetup.mockResolvedValue(deferredSetupReadiness())
   })
 
   describe('loading state', () => {
@@ -235,7 +316,7 @@ describe('DashboardPage', () => {
         expectCalledWithAbortSignal(mockGetAppVersion)
         expectListActivityCalledWithSignal({ limit: 5 })
         expectCalledWithAbortSignal(mockListBackupJobs)
-        expectCalledWithAbortSignal(mockGetSetupStatus)
+        expectCalledWithAbortSignal(mockGetSetupReadiness)
       })
     })
 
@@ -491,93 +572,199 @@ describe('DashboardPage', () => {
       })
     })
 
-    it('keeps first-run tasks collapsed by default, expands them, and acknowledges them explicitly', async () => {
+    it('renders server-derived required and recommended evidence without subjective checkboxes', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
-      mockGetSetupStatus
-        .mockResolvedValueOnce({
-          success: true,
-          is_first_run: true,
-          auth_enabled: true,
-          share_enabled: true,
-          webdav_enabled: true,
-          webdav_auth_type: 'basic',
-          allow_unsafe_no_auth: false,
-        })
-        .mockResolvedValueOnce({
-          success: true,
-          is_first_run: false,
-          auth_enabled: true,
-          share_enabled: true,
-          webdav_enabled: true,
-          webdav_auth_type: 'basic',
-          allow_unsafe_no_auth: false,
-        })
+      mockGetSetupReadiness.mockResolvedValueOnce(createSetupReadiness())
 
       render(<DashboardPage />)
 
-      expect(await screen.findByText('首次设置')).toBeTruthy()
-      expect(screen.getByText(/已完成 0\/4 项/)).toBeTruthy()
-      const setupDisclosure = screen.getByRole('button', { name: '展开首次设置任务' })
-      expect(setupDisclosure).toHaveAttribute('aria-expanded', 'false')
-      expect(screen.queryByRole('checkbox', { name: /初始登录凭据已处理/ })).toBeNull()
-      expect(screen.queryByText(/认证：\s*已启用/)).toBeNull()
+      const setupCard = await screen.findByRole('region', { name: '首次设置检查' })
+      expect(within(setupCard).getByText('必需 1/2')).toBeInTheDocument()
+      expect(within(setupCard).getByText('建议 0/1')).toBeInTheDocument()
+      expect(within(setupCard).queryByRole('checkbox')).not.toBeInTheDocument()
 
-      await user.click(setupDisclosure)
+      const disclosure = within(setupCard).getByRole('button', { name: '查看检测结果' })
+      expect(disclosure).toHaveAttribute('aria-expanded', 'false')
+      await user.click(disclosure)
 
-      expect(screen.getByRole('button', { name: '收起首次设置任务' })).toHaveAttribute('aria-expanded', 'true')
-      expect(screen.getByText('初始登录凭据已处理')).toBeTruthy()
-      expect(screen.getByText(/initial-password.txt/)).toHaveClass('hidden')
-      expect(screen.getByText('4 项待确认')).toBeTruthy()
-      expect(screen.getByRole('checkbox', {
-        name: '初始登录凭据已处理。确认已完成首次登录，并已修改密码或妥善处理 initial-password.txt。',
-      })).toBeTruthy()
-      expect(screen.getByText(/认证：\s*已启用/)).toBeTruthy()
-      expect(screen.getByText(/分享：\s*可用/)).toBeTruthy()
-      expect(screen.getByText(/WebDAV：\s*Basic Auth/)).toBeTruthy()
-      expect(screen.getByText(/无认证例外：\s*关闭/)).toBeTruthy()
-      expect(screen.getByText('还需确认 4 项后才能关闭首次运行提示。')).toBeTruthy()
-      const confirmButton = screen.getByRole('button', { name: '还需确认 4 项' })
+      expect(within(setupCard).getByRole('heading', { name: '必需项目' })).toBeInTheDocument()
+      expect(within(setupCard).getByRole('heading', { name: '建议项目' })).toBeInTheDocument()
+      expect(within(setupCard).getByText('尚未添加启用中的备份任务。')).toBeInTheDocument()
+      expect(within(setupCard).getByText('建议执行一次恢复演练并保持验证结果有效。')).toBeInTheDocument()
+      expect(within(setupCard).queryByRole('checkbox')).not.toBeInTheDocument()
+    })
 
-      expect(confirmButton).toBeDisabled()
-      await user.click(confirmButton)
-      expect(mockAcknowledgeSetup).not.toHaveBeenCalled()
+    it('routes every setup action enum to its owning page', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const actions = [
+        ['change_password', '更换初始密码', '修改密码', '/users?filter=password-change-required'],
+        ['manage_users', '准备备用管理员', '管理用户', '/users'],
+        ['create_backup', '添加独立备份', '创建备份', '/maintenance'],
+        ['run_backup', '完成首次备份', '运行备份', '/maintenance'],
+        ['run_restore_drill', '验证恢复能力', '运行恢复演练', '/maintenance'],
+        ['review_security', '满足安全基线', '查看安全检查', '/settings'],
+      ] as const
+      mockGetSetupReadiness.mockResolvedValueOnce(createSetupReadiness({
+        required: { completed: 0, total: actions.length },
+        recommended: { completed: 0, total: 0 },
+        checks: actions.map(([action, title]) => ({
+          id: action,
+          requirement: 'required' as const,
+          status: 'incomplete' as const,
+          deferrable: false,
+          title,
+          message: `${title}尚未完成。`,
+          action,
+        })),
+        summary: {
+          ...createSetupReadiness().summary,
+          password_change_required_admin_count: 1,
+        },
+      }))
 
-      for (const item of [
-        '初始登录凭据已处理',
-        '至少保留一个可用管理员',
-        '备份位置与恢复演练已规划',
-        '公网访问仅通过 HTTPS 反向代理',
-      ]) {
-        await user.click(screen.getByRole('checkbox', { name: new RegExp(item) }))
+      render(<DashboardPage />)
+
+      const setupCard = await screen.findByRole('region', { name: '首次设置检查' })
+      await user.click(within(setupCard).getByRole('button', { name: '查看检测结果' }))
+      for (const [, , buttonLabel, path] of actions) {
+        await user.click(within(setupCard).getByRole('button', { name: buttonLabel }))
+        expect(mockNavigate).toHaveBeenLastCalledWith(path)
       }
 
-      expect(screen.getByText('首次部署检查已完成，可以关闭首次运行提示。')).toBeTruthy()
-      expect(screen.getAllByText('可关闭提示')).toHaveLength(2)
-      expect(confirmButton).not.toBeDisabled()
-      await user.click(confirmButton)
+      expect(mockNavigate.mock.calls).toEqual(expect.arrayContaining([
+        ['/users?filter=password-change-required'],
+        ['/users'],
+        ['/maintenance'],
+        ['/settings'],
+      ]))
+      expect(mockNavigate.mock.calls.filter(([path]) => path === '/users')).toHaveLength(1)
+      expect(mockNavigate.mock.calls.filter(([path]) => path === '/maintenance')).toHaveLength(3)
+      expect(mockNavigate.mock.calls.filter(([path]) => path === '/settings')).toHaveLength(1)
+    })
+
+    it('keeps readiness visible until the server confirms completion', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const ready = createSetupReadiness({
+        overall_status: 'ready',
+        can_complete: true,
+        can_defer: false,
+        required: { completed: 2, total: 2 },
+      })
+      const completed = completedSetupReadiness()
+      let resolveAcknowledge!: (value: SetupReadiness) => void
+      mockGetSetupReadiness
+        .mockResolvedValueOnce(ready)
+        .mockResolvedValue(completed)
+      mockAcknowledgeSetup.mockReturnValueOnce(new Promise((resolve) => {
+        resolveAcknowledge = resolve
+      }))
+
+      render(<DashboardPage />)
+
+      const setupCard = await screen.findByRole('region', { name: '首次设置检查' })
+      await user.click(within(setupCard).getByRole('button', { name: '完成设置' }))
+      expect(mockAcknowledgeSetup).toHaveBeenCalledTimes(1)
+      expect(screen.getByRole('region', { name: '首次设置检查' })).toBeInTheDocument()
+
+      resolveAcknowledge(completed)
+      await waitFor(() => {
+        expect(screen.queryByRole('region', { name: '首次设置检查' })).not.toBeInTheDocument()
+      })
+      expect(mockGetSetupReadiness).toHaveBeenCalledTimes(2)
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '首次设置已完成', color: 'success' })
+    })
+
+    it('refetches and keeps server evidence after a completion conflict', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const ready = createSetupReadiness({
+        overall_status: 'ready',
+        can_complete: true,
+        can_defer: false,
+        required: { completed: 2, total: 2 },
+      })
+      mockGetSetupReadiness.mockResolvedValue(ready)
+      mockAcknowledgeSetup.mockRejectedValueOnce(Object.assign(new Error('required checks changed'), {
+        status: 409,
+        code: 'SETUP_NOT_READY',
+      }))
+
+      render(<DashboardPage />)
+
+      const setupCard = await screen.findByRole('region', { name: '首次设置检查' })
+      await user.click(within(setupCard).getByRole('button', { name: '完成设置' }))
 
       await waitFor(() => {
-        expect(mockAcknowledgeSetup).toHaveBeenCalledTimes(1)
-        expect(mockAddToast).toHaveBeenCalledWith({
-          title: '首次部署检查已确认',
-          description: undefined,
-          color: 'success',
-        })
+        expect(mockGetSetupReadiness).toHaveBeenCalledTimes(2)
       })
+      expect(screen.getByRole('region', { name: '首次设置检查' })).toBeInTheDocument()
+      expect(screen.getByRole('alert')).toHaveTextContent('操作未完成，请稍后重试。')
+    })
+
+    it('shows a lightweight deferred state after the server accepts a bounded delay', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const pending = createSetupReadiness({ can_complete: false, can_defer: true })
+      const deferred = deferredSetupReadiness()
+      mockGetSetupReadiness
+        .mockResolvedValueOnce(pending)
+        .mockResolvedValue(deferred)
+      mockDeferSetup.mockResolvedValueOnce(deferred)
+
+      render(<DashboardPage />)
+
+      const setupCard = await screen.findByRole('region', { name: '首次设置检查' })
+      await user.click(within(setupCard).getByRole('button', { name: '稍后提醒' }))
+      await user.click(screen.getByRole('radio', { name: '3 天后提醒' }))
+      await user.click(screen.getByRole('button', { name: '确认延期' }))
+
       await waitFor(() => {
-        expect(screen.queryByText('首次设置')).toBeNull()
+        expect(mockDeferSetup).toHaveBeenCalledWith({ remind_in_days: 3 })
+        expect(screen.getByRole('region', { name: '设置提醒已延期' })).toBeInTheDocument()
+      })
+      expect(mockGetSetupReadiness).toHaveBeenCalledTimes(2)
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '首次设置提醒已延期', color: 'success' })
+    })
+
+    it('retries unavailable readiness evidence', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const unavailable = createSetupReadiness({
+        overall_status: 'unavailable',
+        can_complete: false,
+        can_defer: false,
+      })
+      mockGetSetupReadiness
+        .mockResolvedValueOnce(unavailable)
+        .mockResolvedValueOnce(createSetupReadiness())
+
+      render(<DashboardPage />)
+
+      const unavailableCard = await screen.findByRole('region', { name: '设置检查暂不可用' })
+      await user.click(within(unavailableCard).getByRole('button', { name: '重新检查' }))
+
+      await waitFor(() => {
+        expect(mockGetSetupReadiness).toHaveBeenCalledTimes(2)
+        expect(screen.getByRole('region', { name: '首次设置检查' })).toBeInTheDocument()
+      })
+    })
+
+    it('shows and retries an initial readiness query failure', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSetupReadiness
+        .mockRejectedValueOnce(new Error('readiness unavailable'))
+        .mockResolvedValueOnce(createSetupReadiness())
+
+      render(<DashboardPage />)
+
+      const failureCard = await screen.findByRole('region', { name: '首次设置检查加载失败' })
+      await user.click(within(failureCard).getByRole('button', { name: '重新检查' }))
+
+      await waitFor(() => {
+        expect(mockGetSetupReadiness).toHaveBeenCalledTimes(2)
+        expect(screen.getByRole('region', { name: '首次设置检查' })).toBeInTheDocument()
       })
     })
 
     it('places the daily summary and ordered daily entries before setup and backup attention', async () => {
-      mockGetSetupStatus.mockResolvedValueOnce({
-        success: true,
-        is_first_run: true,
-        auth_enabled: true,
-        share_enabled: true,
-        webdav_enabled: true,
-        webdav_auth_type: 'basic',
-      })
+      mockGetSetupReadiness.mockResolvedValueOnce(createSetupReadiness())
       mockListBackupJobs.mockResolvedValueOnce([{
         id: 'external-disk',
         name: '外置硬盘备份',
@@ -594,7 +781,7 @@ describe('DashboardPage', () => {
 
       const dailySummary = await screen.findByRole('region', { name: '日常空间摘要' })
       const dailyEntries = screen.getByRole('navigation', { name: '常用入口' })
-      const setupDisclosure = await screen.findByRole('button', { name: '展开首次设置任务' })
+      const setupCard = await screen.findByRole('region', { name: '首次设置检查' })
       const backupAttention = await screen.findByText('备份需要查看')
       const entries = within(dailyEntries).getAllByRole('button')
 
@@ -604,176 +791,9 @@ describe('DashboardPage', () => {
       expect(entries[2]).toHaveTextContent('空间')
       expect(entries[3]).toHaveTextContent('备份与维护')
       for (const priorityContent of [dailySummary, dailyEntries]) {
-        expect(priorityContent.compareDocumentPosition(setupDisclosure) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+        expect(priorityContent.compareDocumentPosition(setupCard) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
         expect(priorityContent.compareDocumentPosition(backupAttention) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
       }
-    })
-
-    it('shows a warning toast when setup acknowledgement succeeds with warnings', async () => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      mockGetSetupStatus.mockResolvedValue({
-        success: true,
-        is_first_run: true,
-        auth_enabled: true,
-        share_enabled: false,
-        webdav_enabled: false,
-        webdav_auth_type: 'none',
-      })
-      mockAcknowledgeSetup.mockResolvedValueOnce({
-        success: true,
-        warning: true,
-        message: 'setup acknowledgement persisted with warning token=setup-secret',
-      })
-
-      render(<DashboardPage />)
-
-      expect(await screen.findByText('首次设置')).toBeTruthy()
-      await user.click(screen.getByRole('button', { name: '展开首次设置任务' }))
-
-      for (const item of [
-        '初始登录凭据已处理',
-        '至少保留一个可用管理员',
-        '备份位置与恢复演练已规划',
-        '公网访问仅通过 HTTPS 反向代理',
-      ]) {
-        await user.click(screen.getByRole('checkbox', { name: new RegExp(item) }))
-      }
-
-      await user.click(screen.getByRole('button', { name: '已确认' }))
-
-      await waitFor(() => {
-        expect(mockAddToast).toHaveBeenCalledWith({
-          title: '首次部署检查已确认，但存在警告',
-          description: 'setup acknowledgement persisted with warning token=<redacted>',
-          color: 'warning',
-        })
-      })
-      expect(mockAddToast).not.toHaveBeenCalledWith(expect.objectContaining({
-        description: expect.stringContaining('setup-secret'),
-      }))
-    })
-
-    it('keeps first-run checklist visible with a generic acknowledgement failure message', async () => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      mockGetSetupStatus.mockResolvedValue({
-        success: true,
-        is_first_run: true,
-        auth_enabled: true,
-        share_enabled: false,
-        webdav_enabled: false,
-        webdav_auth_type: 'none',
-      })
-      mockAcknowledgeSetup.mockRejectedValueOnce(new Error('setup acknowledge unavailable'))
-
-      render(<DashboardPage />)
-
-      expect(await screen.findByText('首次设置')).toBeTruthy()
-      await user.click(screen.getByRole('button', { name: '展开首次设置任务' }))
-      expect(screen.getByText(/分享：\s*未启用/)).toBeTruthy()
-      expect(screen.getByText(/WebDAV：\s*未启用/)).toBeTruthy()
-
-      for (const item of [
-        '初始登录凭据已处理',
-        '至少保留一个可用管理员',
-        '备份位置与恢复演练已规划',
-        '公网访问仅通过 HTTPS 反向代理',
-      ]) {
-        await user.click(screen.getByRole('checkbox', { name: new RegExp(item) }))
-      }
-
-      await user.click(screen.getByRole('button', { name: '已确认' }))
-
-      await waitFor(() => {
-        expect(mockAddToast).toHaveBeenCalledWith({
-          title: '确认初始化失败',
-          description: '操作未完成，请稍后重试。',
-          color: 'danger',
-        })
-      })
-      expect(screen.getByText('首次设置')).toBeTruthy()
-    })
-
-    it('shows WebDAV user authentication as a user-facing label', async () => {
-      mockGetSetupStatus.mockResolvedValueOnce({
-        success: true,
-        is_first_run: true,
-        auth_enabled: true,
-        share_enabled: true,
-        webdav_enabled: true,
-        webdav_auth_type: 'users',
-      })
-
-      render(<DashboardPage />)
-
-      expect(await screen.findByText('首次设置')).toBeTruthy()
-      await userEvent.setup({ writeToClipboard: false }).click(screen.getByRole('button', { name: '展开首次设置任务' }))
-      expect(screen.getByText(/WebDAV：\s*用户认证/)).toBeTruthy()
-    })
-
-    it('does not expose raw unknown WebDAV auth types in first-run safety highlights', async () => {
-      mockGetSetupStatus.mockResolvedValueOnce({
-        success: true,
-        is_first_run: true,
-        auth_enabled: true,
-        share_enabled: true,
-        webdav_enabled: true,
-        webdav_auth_type: 'backend_raw_auth_type',
-      })
-
-      render(<DashboardPage />)
-
-      expect(await screen.findByText('首次设置')).toBeTruthy()
-      await userEvent.setup({ writeToClipboard: false }).click(screen.getByRole('button', { name: '展开首次设置任务' }))
-      expect(screen.getByText(/WebDAV：\s*未知认证方式/)).toBeTruthy()
-      expect(screen.queryByText(/backend_raw_auth_type/)).toBeNull()
-    })
-
-    it('shows first-run public exposure warning when setup security status is unsafe', async () => {
-      mockGetSetupStatus.mockResolvedValueOnce({
-        success: true,
-        is_first_run: true,
-        auth_enabled: false,
-        share_enabled: true,
-        webdav_enabled: true,
-        webdav_auth_type: 'none',
-        allow_unsafe_no_auth: true,
-      })
-
-      render(<DashboardPage />)
-
-      expect(await screen.findByText('首次设置')).toBeTruthy()
-      expect(screen.getByRole('button', { name: '展开首次设置任务' })).toHaveTextContent('安全状态需要处理')
-      expect(screen.queryByText(/认证：\s*需启用/)).toBeNull()
-      await userEvent.setup({ writeToClipboard: false }).click(screen.getByRole('button', { name: '展开首次设置任务' }))
-      expect(screen.getByText(/认证：\s*需启用/)).toBeTruthy()
-      expect(screen.getByText(/分享：\s*可用/)).toBeTruthy()
-      expect(screen.getByText(/WebDAV：\s*匿名/)).toBeTruthy()
-      expect(screen.getByText(/无认证例外：\s*已开启/)).toBeTruthy()
-      expect(screen.getByText(/Web UI\/API 认证未启用/)).toBeTruthy()
-      expect(screen.getByText(/分享在无认证保护下可访问/)).toBeTruthy()
-      expect(screen.getByText(/WebDAV 匿名访问已启用/)).toBeTruthy()
-      expect(screen.getByText(/无认证暴露例外已开启/)).toBeTruthy()
-      expect(screen.getByText(/公网部署前应先处理/)).toBeTruthy()
-    })
-
-    it('does not warn about unauthenticated sharing when sharing is disabled', async () => {
-      mockGetSetupStatus.mockResolvedValueOnce({
-        success: true,
-        is_first_run: true,
-        auth_enabled: false,
-        share_enabled: false,
-        webdav_enabled: false,
-        webdav_auth_type: 'basic',
-      })
-
-      render(<DashboardPage />)
-
-      expect(await screen.findByText('首次设置')).toBeTruthy()
-      await userEvent.setup({ writeToClipboard: false }).click(screen.getByRole('button', { name: '展开首次设置任务' }))
-      expect(screen.getByText(/认证：\s*需启用/)).toBeTruthy()
-      expect(screen.getByText(/分享：\s*未启用/)).toBeTruthy()
-      expect(screen.getByText(/Web UI\/API 认证未启用/)).toBeTruthy()
-      expect(screen.queryByText(/分享在无认证保护下可访问/)).toBeNull()
     })
   })
 
@@ -792,6 +812,7 @@ describe('DashboardPage', () => {
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({ title: '首页已刷新', color: 'success' })
+        expect(mockGetSetupReadiness).toHaveBeenCalledTimes(2)
       })
     })
 

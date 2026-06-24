@@ -72,7 +72,7 @@ Examples:
 
 Integration tests validate multiple modules together:
 
-- Auth store, default admin creation, login, token refresh, and initial password removal.
+- Auth store, default admin creation, login, token refresh, the required password-change lifecycle, and initial password removal.
 - Config file loading and validation.
 - Workspace writes, version store, trash, and CAS behavior.
 - WebDAV handler behavior over real HTTP requests.
@@ -416,7 +416,7 @@ npm run test:e2e:quality
 npm run test:e2e:ui
 ```
 
-Playwright should cover desktop and mobile shells, navigation, file-page interactions, runtime console errors, and screenshot/layout checks for important views.
+Playwright should cover desktop and mobile shells, navigation, file-page interactions, runtime console errors, the required password-change gate, and screenshot/layout checks for important views. `password-change-gate.spec.ts` runs only against the default isolated backend. It creates a dedicated user through an administrator, resets that user's password, and verifies the real gate and post-change sign-in flow.
 
 `npm run test:e2e:quality` runs `accessibility.spec.ts`, `layout-integrity.spec.ts`, `interaction-integrity.spec.ts`, and `consumer-visual.spec.ts`. The consumer visual regression fixes theme and dynamic data, disables animation, masks the user avatar, and caps desktop and mobile screenshot differences at `0.005`. Changed-file validation selects this command for TSX and CSS changes under `web/src`; use `npm run test:e2e` for the complete Playwright suite.
 
@@ -428,6 +428,8 @@ In that isolated environment, authentication setup failures are test failures so
 
 Reused environments are enabled only with `MNEMONAS_E2E_REUSE_EXISTING=1`.
 Set `E2E_PASSWORD` or `E2E_PASSWORD_FILE` when the reused service requires authentication.
+If the account reaches the required password-change gate, `E2E_PASSWORD_CHANGE_TO` is also required. It must differ from the current password, contain 8 through 72 UTF-8 bytes, and not consist only of whitespace. Authentication setup completes the change and signs in again. The gate is not treated as missing authentication and is never skipped because `MNEMONAS_E2E_ALLOW_AUTH_SKIP=1` is set.
+The service removes the initial password file after a successful change. Later runs must provide the replacement through `E2E_PASSWORD`.
 When `E2E_PASSWORD_FILE` is not set explicitly, the Playwright credential helper tries `~/.mnemonas/.mnemonas/initial-password.txt` and then `~/.mnemonas/initial-password.txt`.
 When `E2E_PASSWORD_FILE` is set explicitly, that file is authoritative; missing or empty files do not fall back to the defaults.
 Those runs allow protected-page tests to skip when credentials are unavailable by default.

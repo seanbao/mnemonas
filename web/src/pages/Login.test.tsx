@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { BrowserRouter } from 'react-router-dom'
 import { LoginPage } from './Login'
@@ -349,6 +349,18 @@ describe('LoginPage', () => {
 
       expect(screen.getByRole('alert')).toHaveTextContent('请输入用户名和密码')
       expect(mockAddToast).not.toHaveBeenCalled()
+    })
+
+    it('rejects a password containing only whitespace', async () => {
+      const user = userEvent.setup()
+      renderLogin()
+
+      await user.type(screen.getByLabelText(/用户名/i, { selector: 'input' }), 'admin')
+      fireEvent.change(screen.getByLabelText(/密码/i, { selector: 'input' }), { target: { value: '        ' } })
+      await user.click(screen.getByRole('button', { name: /登录/i }))
+
+      expect(screen.getByRole('alert')).toHaveTextContent('请输入用户名和密码')
+      expect(mockLogin).not.toHaveBeenCalled()
     })
 
     it('clears inline validation error after user edits input', async () => {

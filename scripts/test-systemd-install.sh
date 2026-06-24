@@ -646,7 +646,7 @@ run_successful_upgrade_preserves_config_and_data_test() {
   printf 'old web\n' > "$web_dir/index.html"
   printf 'old-only asset\n' > "$web_dir/assets/legacy.js"
   printf 'existing user data\n' > "$storage_dir/files/projects/report.txt"
-  printf '{"users":[]}\n' > "$storage_dir/.mnemonas/users.json"
+  printf '{"schema_version":1,"users":[]}\n' > "$storage_dir/.mnemonas/users.json"
   make_fake_admin_path "$fake_path"
   make_release_tree "$release_dir"
   write_executable "$release_dir/nasd" \
@@ -758,7 +758,7 @@ grpc_address = "127.0.0.1:19190"
 EOF
   cp "$expected_config" "$config_path"
   printf 'existing rollback user data\n' > "$storage_dir/files/projects/report.txt"
-  printf '{"users":[{"username":"admin"}]}\n' > "$storage_dir/.mnemonas/users.json"
+  printf '{"schema_version":1,"users":[{"username":"admin","must_change_password":false,"credential_version":1}]}\n' > "$storage_dir/.mnemonas/users.json"
 
   PATH="$fake_path:$PATH" \
     RELEASE_DIR="$upgraded_release_dir" \
@@ -1543,9 +1543,12 @@ run_doctor_config_test() {
   chmod 0750 "$storage_dir"
   chmod 0700 "$storage_dir/.mnemonas"
   cat > "$storage_dir/.mnemonas/users.json" <<EOF
-[
-  {"id":"admin-1","username":"admin","password_hash":"$fake_admin_hash","role":"admin","disabled":false}
-]
+{
+  "schema_version": 1,
+  "users": [
+    {"id":"admin-1","username":"admin","password_hash":"$fake_admin_hash","role":"admin","disabled":false,"must_change_password":false,"credential_version":1}
+  ]
+}
 EOF
   chmod 0600 "$storage_dir/.mnemonas/users.json"
   cat > "$storage_dir/secrets.json" <<'JSON'
@@ -1648,7 +1651,7 @@ EOF
   assert_file_contains "$case_dir/doctor.log" "Summary: 0 failure(s)"
 
   cat > "$storage_dir/.mnemonas/users.json" <<'JSON'
-[]
+{"schema_version":1,"users":[]}
 JSON
   chmod 0600 "$storage_dir/.mnemonas/users.json"
   PATH="$fake_path:$PATH" \
@@ -1662,9 +1665,12 @@ JSON
   assert_file_contains "$case_dir/doctor-no-admin.log" "users file has no enabled administrators; MnemoNAS will create a recovery administrator on next startup if auth is enabled"
   assert_file_contains "$case_dir/doctor-no-admin.log" "Summary: 0 failure(s), 1 warning(s)"
   cat > "$storage_dir/.mnemonas/users.json" <<EOF
-[
-  {"id":"admin-1","username":"admin","password_hash":"$fake_admin_hash","role":"admin","disabled":false}
-]
+{
+  "schema_version": 1,
+  "users": [
+    {"id":"admin-1","username":"admin","password_hash":"$fake_admin_hash","role":"admin","disabled":false,"must_change_password":false,"credential_version":1}
+  ]
+}
 EOF
   chmod 0600 "$storage_dir/.mnemonas/users.json"
 
@@ -1928,11 +1934,14 @@ run_doctor_public_domain_test() {
   write_executable "$bin_dir/dataplane" '#!/usr/bin/env bash' 'exit 0'
   printf '<div id="root"></div>\n' > "$web_dir/index.html"
   cat > "$storage_dir/.mnemonas/users.json" <<EOF
-[
-  {"id":"admin-1","username":"admin","password_hash":"$fake_admin_hash","role":"admin","disabled":false},
-  {"id":"admin-2","username":"backup-admin","password_hash":"$fake_admin_hash","role":"admin","disabled":false},
-  {"id":"disabled-admin","username":"disabled-admin","role":"admin","disabled":true}
-]
+{
+  "schema_version": 1,
+  "users": [
+    {"id":"admin-1","username":"admin","password_hash":"$fake_admin_hash","role":"admin","disabled":false,"must_change_password":false,"credential_version":1},
+    {"id":"admin-2","username":"backup-admin","password_hash":"$fake_admin_hash","role":"admin","disabled":false,"must_change_password":false,"credential_version":1},
+    {"id":"disabled-admin","username":"disabled-admin","role":"admin","disabled":true,"must_change_password":false,"credential_version":1}
+  ]
+}
 EOF
   chmod 0600 "$storage_dir/.mnemonas/users.json"
   cat > "$storage_dir/secrets.json" <<'EOF'
@@ -3614,6 +3623,36 @@ EOF
   [[ "$status" -ne 0 ]] || fail "public doctor accepted zero auth access token TTL"
   assert_file_contains "$case_dir/doctor-public-zero-auth-access-ttl.log" "public auth.access_token_ttl must be a positive duration"
 
+  cat > "$case_dir/config-short-auth-access-ttl.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[auth]
+access_token_ttl = "29s"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-short-auth-access-ttl.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-short-auth-access-ttl.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted auth access token TTL below 30s"
+  assert_file_contains "$case_dir/doctor-public-short-auth-access-ttl.log" "public auth.access_token_ttl must be at least 30s"
+
   cat > "$case_dir/config-negative-auth-refresh-ttl.toml" <<EOF
 [server]
 host = "127.0.0.1"
@@ -4208,6 +4247,68 @@ EOF
   [[ "$status" -ne 0 ]] || fail "public doctor accepted a missing users file"
   assert_file_contains "$case_dir/doctor-public-missing-users.log" "public users file is missing; cannot verify administrator redundancy"
 
+  printf '[]\n' > "$case_dir/unversioned-users.json"
+  cat > "$case_dir/config-unversioned-users.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[auth]
+users_file = "$case_dir/unversioned-users.json"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-unversioned-users.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-unversioned-users.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted an unversioned users file"
+  assert_file_contains "$case_dir/doctor-public-unversioned-users.log" "public users file could not be parsed; cannot verify administrator redundancy"
+  assert_file_contains "$case_dir/doctor-public-unversioned-users.log" "users file root is not a versioned object"
+
+  printf '{"schema_version":1,"users":[{"id":"admin-1","username":"admin","password_hash":"%s","role":"admin","disabled":false,"credential_version":1}]}\n' "$fake_admin_hash" > "$case_dir/unversioned-users.json"
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-unversioned-users.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-missing-password-lifecycle.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted a user without must_change_password"
+  assert_file_contains "$case_dir/doctor-public-missing-password-lifecycle.log" "missing or invalid must_change_password"
+
+  printf '{"schema_version":1,"users":[{"id":"admin-1","username":"admin","password_hash":"%s","role":"admin","disabled":false,"must_change_password":false}]}\n' "$fake_admin_hash" > "$case_dir/unversioned-users.json"
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-unversioned-users.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-missing-credential-version.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted a user without credential_version"
+  assert_file_contains "$case_dir/doctor-public-missing-credential-version.log" "missing or invalid credential_version"
+
   printf '{not-json\n' > "$case_dir/invalid-users.json"
   cat > "$case_dir/config-invalid-users.toml" <<EOF
 [server]
@@ -4241,10 +4342,13 @@ EOF
   assert_file_contains "$case_dir/doctor-public-invalid-users.log" "users.json parse error"
 
   cat > "$case_dir/malformed-users.json" <<EOF
-[
-  {"id":"admin-1","username":"admin","password_hash":"$fake_admin_hash","role":"admin","disabled":false},
-  {"id":"admin-1","username":"backup-admin","password_hash":"$fake_admin_hash","role":"admin","disabled":false}
-]
+{
+  "schema_version": 1,
+  "users": [
+    {"id":"admin-1","username":"admin","password_hash":"$fake_admin_hash","role":"admin","disabled":false,"must_change_password":false,"credential_version":1},
+    {"id":"admin-1","username":"backup-admin","password_hash":"$fake_admin_hash","role":"admin","disabled":false,"must_change_password":false,"credential_version":1}
+  ]
+}
 EOF
   cat > "$case_dir/config-malformed-users.toml" <<EOF
 [server]
@@ -4278,10 +4382,13 @@ EOF
   assert_file_contains "$case_dir/doctor-public-malformed-users.log" "duplicate user id"
 
   cat > "$case_dir/unusable-admin-users.json" <<EOF
-[
-  {"id":"admin-1","username":"admin","role":"admin","disabled":false},
-  {"id":"admin-2","username":"backup-admin","password_hash":"not-bcrypt","role":"admin","disabled":false}
-]
+{
+  "schema_version": 1,
+  "users": [
+    {"id":"admin-1","username":"admin","role":"admin","disabled":false,"must_change_password":false,"credential_version":1},
+    {"id":"admin-2","username":"backup-admin","password_hash":"not-bcrypt","role":"admin","disabled":false,"must_change_password":false,"credential_version":1}
+  ]
+}
 EOF
   cat > "$case_dir/config-unusable-admin-users.toml" <<EOF
 [server]
@@ -4315,10 +4422,13 @@ EOF
   assert_file_contains "$case_dir/doctor-public-unusable-admin-users.log" "invalid password_hash for enabled administrator"
 
   cat > "$case_dir/zero-admin-users.json" <<'EOF'
-[
-  {"id":"disabled-admin","username":"disabled-admin","role":"admin","disabled":true},
-  {"id":"user-1","username":"user","role":"user","disabled":false}
-]
+{
+  "schema_version": 1,
+  "users": [
+    {"id":"disabled-admin","username":"disabled-admin","role":"admin","disabled":true,"must_change_password":false,"credential_version":1},
+    {"id":"user-1","username":"user","role":"user","disabled":false,"must_change_password":false,"credential_version":1}
+  ]
+}
 EOF
   cat > "$case_dir/config-zero-admin.toml" <<EOF
 [server]
@@ -4351,11 +4461,14 @@ EOF
   assert_file_contains "$case_dir/doctor-public-zero-admin.log" "public users file has no enabled administrators"
 
   cat > "$case_dir/single-admin-users.json" <<EOF
-[
-  {"id":"admin-1","username":"admin","password_hash":"$fake_admin_hash","role":"admin","disabled":false},
-  {"id":"disabled-admin","username":"disabled-admin","role":"admin","disabled":true},
-  {"id":"user-1","username":"user","role":"user","disabled":false}
-]
+{
+  "schema_version": 1,
+  "users": [
+    {"id":"admin-1","username":"admin","password_hash":"$fake_admin_hash","role":"admin","disabled":false,"must_change_password":false,"credential_version":1},
+    {"id":"disabled-admin","username":"disabled-admin","role":"admin","disabled":true,"must_change_password":false,"credential_version":1},
+    {"id":"user-1","username":"user","role":"user","disabled":false,"must_change_password":false,"credential_version":1}
+  ]
+}
 EOF
   cat > "$case_dir/config-single-admin.toml" <<EOF
 [server]

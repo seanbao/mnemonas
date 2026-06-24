@@ -499,7 +499,8 @@ func TestBuildWebDAVHandler(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewUserStore() error: %v", err)
 	}
-	if _, err := userStore.Create("davuser", "password123", "", auth.RoleUser); err != nil {
+	davUser, err := userStore.Create("davuser", "password123", "", auth.RoleUser)
+	if err != nil {
 		t.Fatalf("Create(davuser) error: %v", err)
 	}
 	prefix, handler = buildWebDAVHandler(nil, api.WebDAVRuntimeConfig{
@@ -517,6 +518,26 @@ func TestBuildWebDAVHandler(t *testing.T) {
 	handler.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("users auth OPTIONS status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if err := userStore.ResetPassword(davUser.ID, "temporary-password"); err != nil {
+		t.Fatalf("ResetPassword(davuser) error: %v", err)
+	}
+	req = httptest.NewRequest("OPTIONS", "/dav/", nil)
+	req.SetBasicAuth("davuser", "temporary-password")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("required-change WebDAV status = %d, want %d; body=%s", w.Code, http.StatusUnauthorized, w.Body.String())
+	}
+	if err := userStore.ChangePassword(davUser.ID, "temporary-password", "changed-password"); err != nil {
+		t.Fatalf("ChangePassword(davuser) error: %v", err)
+	}
+	req = httptest.NewRequest("OPTIONS", "/dav/", nil)
+	req.SetBasicAuth("davuser", "changed-password")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("changed-password WebDAV status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
 	}
 	if closer, ok := handler.(io.Closer); ok {
 		_ = closer.Close()

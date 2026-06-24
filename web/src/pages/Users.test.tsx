@@ -5,7 +5,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BrowserRouter } from 'react-router-dom'
 import { UsersPage } from './Users'
 import * as usersApi from '@/api/users'
-import * as authApi from '@/api/auth'
+import * as authStore from '@/stores/auth'
 import { UsersError } from '@/api/users'
 
 const mockAddToast = vi.fn()
@@ -35,8 +35,8 @@ vi.mock('@/api/users', async (importOriginal) => {
   }
 })
 
-vi.mock('@/api/auth', () => ({
-  getStoredUser: vi.fn(),
+vi.mock('@/stores/auth', () => ({
+  useUser: vi.fn(),
 }))
 
 vi.mock('@/lib/downloadResponse', () => ({
@@ -54,6 +54,8 @@ const mockUsers = [
     created_at: '2024-01-01T00:00:00Z',
     updated_at: '2024-01-01T00:00:00Z',
     last_login_at: '2024-01-15T10:00:00Z',
+    must_change_password: false,
+    password_changed_at: '2024-01-02T08:30:00Z',
     quota_bytes: 10737418240,
     used_bytes: 1073741824,
   },
@@ -66,6 +68,7 @@ const mockUsers = [
     home_dir: '/home/testuser',
     created_at: '2024-01-05T00:00:00Z',
     updated_at: '2024-01-05T00:00:00Z',
+    must_change_password: true,
     quota_bytes: 5368709120,
     used_bytes: 536870912,
   },
@@ -78,6 +81,7 @@ const mockUsers = [
     home_dir: '/home/guest',
     created_at: '2024-01-10T00:00:00Z',
     updated_at: '2024-01-10T00:00:00Z',
+    must_change_password: false,
     quota_bytes: 0,
     used_bytes: 0,
   },
@@ -140,12 +144,14 @@ describe('UsersPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     window.localStorage.clear()
-    vi.mocked(authApi.getStoredUser).mockReturnValue({
+    window.history.replaceState({}, '', '/users')
+    vi.mocked(authStore.useUser).mockReturnValue({
       id: 'user-1',
       username: 'admin',
       role: 'admin',
       homeDir: '/',
       email: '',
+      mustChangePassword: false,
     })
     vi.mocked(usersApi.listUsers).mockResolvedValue({
       success: true,
@@ -170,7 +176,18 @@ describe('UsersPage', () => {
       expect(screen.getByText('管理系统用户、权限和配额')).toBeInTheDocument()
     })
 
-    it('refetches the user list when the current session changes', async () => {
+    it('shows password-change requirements and the last confirmed password-change time', async () => {
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('必须修改密码')).toBeInTheDocument()
+        expect(screen.getByText(/密码修改于/)).toBeInTheDocument()
+        expect(screen.getAllByText('密码修改时间尚无记录').length).toBeGreaterThan(0)
+      })
+      expect(screen.getByText(/管理员重置不能代替此步骤/)).toBeInTheDocument()
+    })
+
+    it('refetches the user list when the current session security scope changes', async () => {
     vi.mocked(usersApi.listUsers)
       .mockResolvedValueOnce({
         success: true,
@@ -190,12 +207,13 @@ describe('UsersPage', () => {
       expect(vi.mocked(usersApi.listUsers)).toHaveBeenCalledTimes(1)
     })
 
-    vi.mocked(authApi.getStoredUser).mockReturnValue({
-      id: 'user-2',
-      username: 'other-admin',
-      role: 'admin',
-      homeDir: '/',
-      email: 'other@example.com',
+    vi.mocked(authStore.useUser).mockReturnValue({
+      id: 'user-1',
+      username: 'admin',
+      role: 'user',
+      homeDir: '/restricted/admin',
+      email: 'admin@example.com',
+      mustChangePassword: false,
     })
 
     rerender(
@@ -239,6 +257,73 @@ describe('UsersPage', () => {
         expect(screen.getByText('testuser')).toBeInTheDocument()
         expect(screen.getByText('guest')).toBeInTheDocument()
         expect(screen.getByText('显示全部 3 个用户')).toBeInTheDocument()
+      })
+    })
+
+    it('focuses the readiness remediation on enabled administrators that must change passwords', async () => {
+      window.history.replaceState({}, '', '/users?filter=password-change-required')
+      const focusedUsers = [
+        mockUsers[0],
+        {
+          ...mockUsers[0],
+          id: 'pending-admin',
+          username: 'pending-admin',
+          must_change_password: true,
+          password_changed_at: undefined,
+        },
+        {
+          ...mockUsers[0],
+          id: 'disabled-pending-admin',
+          username: 'disabled-pending-admin',
+          disabled: true,
+          must_change_password: true,
+        },
+        mockUsers[1],
+      ]
+      vi.mocked(usersApi.listUsers).mockResolvedValueOnce({
+        success: true,
+        users: focusedUsers,
+        total: focusedUsers.length,
+      })
+
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByRole('region', { name: '待改密管理员处理说明' })).toBeInTheDocument()
+        expect(screen.getByText('待改密管理员 1 个')).toBeInTheDocument()
+        expect(getVisibleUsernamesByCardOrder()).toEqual(['pending-admin'])
+      })
+      expect(screen.getByText(/账号本人需使用当前临时密码登录/)).toBeInTheDocument()
+      expect(screen.getByText(/不能代替账号本人完成改密/)).toBeInTheDocument()
+    })
+
+    it('keeps the selected filter in the URL while preserving unrelated parameters', async () => {
+      const user = userEvent.setup()
+      window.history.replaceState({}, '', '/users?source=readiness')
+      renderUsersPage()
+      await screen.findByText('admin')
+
+      await user.click(screen.getByRole('button', { name: '管理员' }))
+
+      expect(new URLSearchParams(window.location.search).get('filter')).toBe('admin')
+      expect(new URLSearchParams(window.location.search).get('source')).toBe('readiness')
+      await user.click(screen.getByRole('button', { name: '全部用户' }))
+      expect(new URLSearchParams(window.location.search).has('filter')).toBe(false)
+      expect(new URLSearchParams(window.location.search).get('source')).toBe('readiness')
+    })
+
+    it('updates the active filter when browser navigation changes the URL', async () => {
+      renderUsersPage()
+      await screen.findByText('admin')
+
+      act(() => {
+        window.history.pushState({}, '', '/users?filter=disabled-account')
+        window.dispatchEvent(new PopStateEvent('popstate'))
+      })
+
+      await waitFor(() => {
+        expect(screen.getByText('停用账号 1 / 3 个用户')).toBeInTheDocument()
+        expect(getVisibleUsernamesByCardOrder()).toEqual(['guest'])
       })
     })
 
@@ -2236,6 +2321,7 @@ describe('UsersPage', () => {
 
       await waitFor(() => {
         expect(screen.getByLabelText('新密码')).toBeInTheDocument()
+        expect(screen.getByText(/本操作不能代替账号本人完成改密/)).toBeInTheDocument()
       })
 
       await user.type(screen.getByLabelText('新密码'), 'password123')
@@ -2275,6 +2361,35 @@ describe('UsersPage', () => {
         )
         expect(mockAddToast).toHaveBeenCalledWith({ title: '密码已重置', color: 'success' })
       })
+    })
+
+    it('rejects a reset password containing only whitespace', async () => {
+      const user = userEvent.setup()
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('testuser')).toBeInTheDocument()
+      })
+
+      await clickUserActionMenuItem(user, 'testuser', '重置密码')
+      fireEvent.change(screen.getByLabelText('新密码'), { target: { value: '        ' } })
+
+      expect(screen.getByRole('button', { name: '确认重置' })).toBeDisabled()
+      expect(usersApi.resetUserPassword).not.toHaveBeenCalled()
+    })
+
+    it('accepts a multibyte reset password within the UTF-8 byte limits', async () => {
+      const user = userEvent.setup()
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('testuser')).toBeInTheDocument()
+      })
+
+      await clickUserActionMenuItem(user, 'testuser', '重置密码')
+      fireEvent.change(screen.getByLabelText('新密码'), { target: { value: '密码密码密码' } })
+
+      expect(screen.getByRole('button', { name: '确认重置' })).toBeEnabled()
     })
 
     it('keeps the reset password modal open when a pending reset later fails', async () => {
@@ -2693,6 +2808,39 @@ describe('UsersPage', () => {
   })
 
   describe('validation feedback', () => {
+    it('disables create when the password contains only whitespace', async () => {
+      const user = userEvent.setup()
+      renderUsersPage()
+
+      await user.click(screen.getByRole('button', { name: /添加用户/i }))
+
+      await waitFor(() => {
+        expect(screen.getByLabelText(/用户名/i)).toBeInTheDocument()
+      })
+
+      fireEvent.change(screen.getByLabelText(/用户名/i), { target: { value: 'newuser' } })
+      fireEvent.change(screen.getByLabelText(/密码/i), { target: { value: '        ' } })
+
+      expect(screen.getByRole('button', { name: '创建' })).toBeDisabled()
+      expect(usersApi.createUser).not.toHaveBeenCalled()
+    })
+
+    it('accepts a multibyte create password within the UTF-8 byte limits', async () => {
+      const user = userEvent.setup()
+      renderUsersPage()
+
+      await user.click(screen.getByRole('button', { name: /添加用户/i }))
+
+      await waitFor(() => {
+        expect(screen.getByLabelText(/用户名/i)).toBeInTheDocument()
+      })
+
+      fireEvent.change(screen.getByLabelText(/用户名/i), { target: { value: 'newuser' } })
+      fireEvent.change(screen.getByLabelText(/密码/i), { target: { value: '密码密码密码' } })
+
+      expect(screen.getByRole('button', { name: '创建' })).toBeEnabled()
+    })
+
     it('shows warning when trying to create a user with a short password', async () => {
       const user = userEvent.setup()
       renderUsersPage()
@@ -2796,12 +2944,13 @@ describe('UsersPage', () => {
 
     it('shows a specific warning for SELF_DISABLE responses', async () => {
       const user = userEvent.setup()
-      vi.mocked(authApi.getStoredUser).mockReturnValue({
+      vi.mocked(authStore.useUser).mockReturnValue({
         id: 'another-admin',
         username: 'operator',
         role: 'admin',
         homeDir: '/',
         email: '',
+        mustChangePassword: false,
       })
       vi.mocked(usersApi.toggleUserStatus).mockRejectedValueOnce(new UsersError('cannot disable self', 400, 'SELF_DISABLE'))
 
@@ -2824,12 +2973,13 @@ describe('UsersPage', () => {
 
     it('shows a specific warning for LAST_ADMIN responses', async () => {
       const user = userEvent.setup()
-      vi.mocked(authApi.getStoredUser).mockReturnValue({
+      vi.mocked(authStore.useUser).mockReturnValue({
         id: 'another-admin',
         username: 'operator',
         role: 'admin',
         homeDir: '/',
         email: '',
+        mustChangePassword: false,
       })
       vi.mocked(usersApi.toggleUserStatus).mockRejectedValueOnce(new UsersError('last admin', 400, 'LAST_ADMIN'))
 

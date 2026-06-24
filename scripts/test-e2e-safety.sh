@@ -949,8 +949,10 @@ run_web_readmes_avoid_e2e_placeholder_password_test() {
 	assert_file_contains "$REPO_ROOT/web/README.en.md" 'export E2E_PASSWORD_FILE="$HOME/.mnemonas/.mnemonas/initial-password.txt"'
 	# shellcheck disable=SC2016 # Match the literal README snippet containing $HOME.
 	assert_file_contains "$REPO_ROOT/web/README.en.md" '# export E2E_PASSWORD_FILE="$HOME/.mnemonas/initial-password.txt"'
-	assert_file_contains "$REPO_ROOT/web/README.md" '# export E2E_PASSWORD="<admin-password>"'
-	assert_file_contains "$REPO_ROOT/web/README.en.md" '# export E2E_PASSWORD="<admin-password>"'
+	assert_file_contains "$REPO_ROOT/web/README.md" 'export E2E_PASSWORD="<current-admin-password>"'
+	assert_file_contains "$REPO_ROOT/web/README.en.md" 'export E2E_PASSWORD="<current-admin-password>"'
+	assert_file_contains "$REPO_ROOT/web/README.md" '# export E2E_PASSWORD_CHANGE_TO="<replacement-admin-password>"'
+	assert_file_contains "$REPO_ROOT/web/README.en.md" '# export E2E_PASSWORD_CHANGE_TO="<replacement-admin-password>"'
 	# shellcheck disable=SC2016 # Match literal Markdown code spans.
 	assert_file_contains "$REPO_ROOT/web/README.md" 'Playwright 会依次尝试读取 `~/.mnemonas/.mnemonas/initial-password.txt` 和 `~/.mnemonas/initial-password.txt`'
 	# shellcheck disable=SC2016 # Match literal Markdown code spans.

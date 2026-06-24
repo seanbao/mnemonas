@@ -12,6 +12,7 @@ export type UserListFilter =
   | 'account-attention'
   | 'disabled-account'
   | 'never-login'
+  | 'password-change-required'
   | 'access-review'
 export type UserListSort = 'default' | 'username' | 'role' | 'quota-used' | 'last-login'
 
@@ -84,6 +85,9 @@ export function getUserListFilterLabel(filter: UserListFilter): string {
   if (filter === 'never-login') {
     return '从未登录'
   }
+  if (filter === 'password-change-required') {
+    return '待改密管理员'
+  }
   if (filter === 'quota-attention') {
     return '配额关注'
   }
@@ -127,6 +131,11 @@ export function filterUsersByListFilter<T extends User>(users: T[], filter: User
   }
   if (filter === 'never-login') {
     return [...users].filter((user) => !user.last_login_at).sort(compareUsersByUsername)
+  }
+  if (filter === 'password-change-required') {
+    return [...users]
+      .filter((user) => user.role === 'admin' && !user.disabled && user.must_change_password)
+      .sort(compareUsersByUsername)
   }
   if (filter === 'access-review') {
     return getUserAccessReviewListItems(users)

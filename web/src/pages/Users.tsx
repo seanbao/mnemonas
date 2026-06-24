@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useLayoutEffect, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useSearchParams } from 'react-router-dom'
 import {
   Card,
   CardBody,
@@ -50,7 +51,7 @@ import {
   TrendingUp,
 } from 'lucide-react'
 import { listUsers, createUser, deleteUser, resetUserPassword, revokeUserSessions, toggleUserStatus, updateUser, UsersError, type ListUsersResponse, type User } from '@/api/users'
-import { getStoredUser } from '@/api/auth'
+import { useUser } from '@/stores/auth'
 import { formatBytes, formatDate, cn, normalizeUserHomeDir } from '@/lib/utils'
 import { formatUserAccessReviewReport, getUserAccessContext, summarizeUserAccessReview } from '@/lib/userAccessContext'
 import {
@@ -83,11 +84,28 @@ import type { UserAccessContext } from '@/lib/userAccessContext'
 const usersUnavailableDescription = '用户配置当前不可用，请检查系统配置状态或稍后重试。'
 const usersLoadErrorDescription = '用户列表加载失败，请检查网络或稍后重试。'
 const clipboardWriteFailureDescription = '请检查浏览器剪贴板权限。'
+const minPasswordBytes = 8
 const maxPasswordBytes = 72
 const groupNamePattern = /^[A-Za-z0-9._-]+$/
 const userQuotaBrowserTrendHistoryLimit = 8
 const userQuotaServerTrendDisplayLimit = 64
 const userQuotaTrendHistoryStoragePrefix = 'mnemonas:user-quota-trend'
+const userListFilters: readonly UserListFilter[] = [
+  'all',
+  'admin',
+  'active',
+  'quota-attention',
+  'account-attention',
+  'disabled-account',
+  'never-login',
+  'password-change-required',
+  'access-review',
+]
+
+function getUserListFilterFromSearchParams(searchParams: URLSearchParams): UserListFilter {
+  const filter = searchParams.get('filter')
+  return userListFilters.includes(filter as UserListFilter) ? filter as UserListFilter : 'all'
+}
 
 type UsersPageListUsersResponse = ListUsersResponse & {
   quotaTrendHistory: UserQuotaTrendPoint[]
@@ -153,6 +171,9 @@ function getUserListEmptyTitle(filter: UserListFilter, isSearchActive: boolean):
   if (filter === 'never-login') {
     return '暂无从未登录用户'
   }
+  if (filter === 'password-change-required') {
+    return '暂无待改密管理员'
+  }
   if (filter === 'access-review') {
     return '暂无复核提示用户'
   }
@@ -178,6 +199,9 @@ function getUserListEmptyDescription(filter: UserListFilter, isSearchActive: boo
   if (filter === 'never-login') {
     return '所有用户当前均已有登录记录。'
   }
+  if (filter === 'password-change-required') {
+    return '当前没有启用且需要自行修改密码的管理员账号。'
+  }
   if (filter === 'access-review') {
     return '所有用户当前暂无账号、权限或配额复核提示。'
   }
@@ -199,6 +223,9 @@ function getUserListEmptyIcon(filter: UserListFilter, isSearchActive: boolean): 
   }
   if (filter === 'never-login') {
     return LogOut
+  }
+  if (filter === 'password-change-required') {
+    return KeyRound
   }
   if (filter === 'access-review') {
     return ListChecks
@@ -742,6 +769,9 @@ function UserCard({
                 {user.disabled && (
                   <Chip size="sm" variant="flat" color="warning">已禁用</Chip>
                 )}
+                {user.must_change_password && (
+                  <Chip size="sm" variant="flat" color="warning">必须修改密码</Chip>
+                )}
               </div>
               <div className="flex items-center gap-1 mt-0.5">
                 <RoleBadge role={user.role} />
@@ -797,6 +827,7 @@ function UserCard({
                   key="reset-password"
                   startContent={<KeyRound size={16} />}
                   onPress={onResetPassword}
+                  isDisabled={isCurrentUser}
                 >
                   重置密码
                 </DropdownItem>
@@ -867,6 +898,19 @@ function UserCard({
             </div>
           )}
           <div className="flex min-w-0 items-center gap-2 text-default-500">
+            <KeyRound size={14} className="shrink-0" />
+            <span className="truncate">
+              {user.password_changed_at
+                ? `密码修改于 ${formatDate(user.password_changed_at)}`
+                : '密码修改时间尚无记录'}
+            </span>
+          </div>
+          {user.must_change_password && (
+            <div className="rounded-lg border border-warning/25 bg-warning/10 px-3 py-2 text-xs leading-5 text-default-700">
+              该账号登录后必须通过强制改密页自行设置新密码，管理员重置不能代替此步骤。
+            </div>
+          )}
+          <div className="flex min-w-0 items-center gap-2 text-default-500">
             <HardDrive size={14} className="shrink-0" />
             <span className="truncate">
               已用 {formatBytes(user.used_bytes)}
@@ -912,6 +956,9 @@ function UserCard({
 
 export function UsersPage() {
   const queryClient = useQueryClient()
+  const currentUser = useUser()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const urlUserListFilter = getUserListFilterFromSearchParams(searchParams)
   const { isOpen: isCreateOpen, onOpen: onCreateOpen, onClose: onCreateClose } = useDisclosure()
   const { isOpen: isEditOpen, onOpen: onEditOpen, onClose: onEditClose } = useDisclosure()
   const { isOpen: isDeleteOpen, onOpen: onDeleteOpen, onClose: onDeleteClose } = useDisclosure()
@@ -935,11 +982,17 @@ export function UsersPage() {
   const [newQuotaValue, setNewQuotaValue] = useState('0')
   const [newQuotaUnit, setNewQuotaUnit] = useState<QuotaUnit>('GB')
   const [resetPassword, setResetPassword] = useState('')
-  const [userListFilter, setUserListFilter] = useState<UserListFilter>('all')
+  const userListFilter = urlUserListFilter
   const [userSearchQuery, setUserSearchQuery] = useState('')
   const [userListSort, setUserListSort] = useState<UserListSort>('default')
-  const currentUserId = getStoredUser()?.id ?? 'anonymous'
-  const usersQueryKey = ['users', currentUserId] as const
+  const currentUserId = currentUser?.id ?? 'no-session'
+  const usersQueryKey = [
+    'users',
+    currentUserId,
+    currentUser?.role ?? 'no-role',
+    currentUser?.homeDir ?? 'no-home',
+    currentUser?.mustChangePassword ?? false,
+  ] as const
   const quotaTrendHistoryStorageKey = getUserQuotaTrendHistoryStorageKey(currentUserId)
   const createSessionRef = useRef(0)
   const createDraftRef = useRef({
@@ -978,6 +1031,18 @@ export function UsersPage() {
     }
   }, [])
 
+  const updateUserListFilter = useCallback((filter: UserListFilter) => {
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current)
+      if (filter === 'all') {
+        next.delete('filter')
+      } else {
+        next.set('filter', filter)
+      }
+      return next
+    }, { replace: true })
+  }, [setSearchParams])
+
   useLayoutEffect(() => {
     createDraftRef.current = {
       username: newUsername,
@@ -993,6 +1058,7 @@ export function UsersPage() {
 
   const { data, isLoading, isRefetching, error, refetch } = useQuery<UsersPageListUsersResponse>({
     queryKey: usersQueryKey,
+    enabled: currentUser !== null,
     queryFn: async ({ signal }) => {
       const result = await listUsers({ signal })
       const serverQuotaTrendHistory = normalizeUserQuotaTrendHistory(result.quota_history ?? [], userQuotaServerTrendDisplayLimit)
@@ -1023,6 +1089,7 @@ export function UsersPage() {
         return
       }
       queryClient.invalidateQueries({ queryKey: usersQueryKey })
+      queryClient.invalidateQueries({ queryKey: ['setup-readiness'] })
       if (
         createSessionRef.current === variables.createSession
         && shallowEqualStringRecord(createDraftRef.current, variables.submittedDraft)
@@ -1069,6 +1136,7 @@ export function UsersPage() {
         return
       }
       queryClient.invalidateQueries({ queryKey: usersQueryKey })
+      queryClient.invalidateQueries({ queryKey: ['setup-readiness'] })
       onEditClose()
       setEditTarget(null)
       addToast(getUsersActionSuccessToast('update', { warning: result.warning }))
@@ -1104,6 +1172,7 @@ export function UsersPage() {
         return
       }
       queryClient.invalidateQueries({ queryKey: usersQueryKey })
+      queryClient.invalidateQueries({ queryKey: ['setup-readiness'] })
       onDeleteClose()
       setDeleteTarget(null)
       addToast(getUsersActionSuccessToast('delete', { warning: result.warning }))
@@ -1140,6 +1209,7 @@ export function UsersPage() {
         return
       }
       queryClient.invalidateQueries({ queryKey: usersQueryKey })
+      queryClient.invalidateQueries({ queryKey: ['setup-readiness'] })
       onResetClose()
       setResetTarget(null)
       setResetPassword('')
@@ -1208,6 +1278,7 @@ export function UsersPage() {
         return
       }
       queryClient.invalidateQueries({ queryKey: usersQueryKey })
+      queryClient.invalidateQueries({ queryKey: ['setup-readiness'] })
       addToast(getUsersActionSuccessToast('toggle-status', {
         warning: result.warning,
         disabled: variables.disabled,
@@ -1244,7 +1315,16 @@ export function UsersPage() {
     setNewHomeDir('')
     setNewQuotaValue('0')
     setNewQuotaUnit('GB')
-  }, [])
+  }, [
+    setNewEmail,
+    setNewGroups,
+    setNewHomeDir,
+    setNewPassword,
+    setNewQuotaUnit,
+    setNewQuotaValue,
+    setNewRole,
+    setNewUsername,
+  ])
 
   const handleOpenCreateModal = useCallback(() => {
     createSessionRef.current += 1
@@ -1263,8 +1343,8 @@ export function UsersPage() {
       addToast({ title: '请输入用户名和密码', color: 'warning' })
       return
     }
-    if (newPassword.length < 8) {
-      addToast({ title: '密码长度至少为 8 位', color: 'warning' })
+    if (utf8ByteLength(newPassword) < minPasswordBytes) {
+      addToast({ title: `密码至少为 ${minPasswordBytes} 个 UTF-8 字节`, color: 'warning' })
       return
     }
     if (utf8ByteLength(newPassword) > maxPasswordBytes) {
@@ -1315,7 +1395,16 @@ export function UsersPage() {
     setEditQuotaValue(quota.value)
     setEditQuotaUnit(quota.unit)
     onEditOpen()
-  }, [onEditOpen])
+  }, [
+    onEditOpen,
+    setEditEmail,
+    setEditGroups,
+    setEditHomeDir,
+    setEditQuotaUnit,
+    setEditQuotaValue,
+    setEditRole,
+    setEditTarget,
+  ])
 
   const handleCloseEditModal = useCallback(() => {
     if (updateMutation.isPending) return
@@ -1369,8 +1458,8 @@ export function UsersPage() {
       addToast({ title: '请输入新密码', color: 'warning' })
       return
     }
-    if (resetPassword.length < 8) {
-      addToast({ title: '新密码长度至少为 8 位', color: 'warning' })
+    if (utf8ByteLength(resetPassword) < minPasswordBytes) {
+      addToast({ title: `新密码至少为 ${minPasswordBytes} 个 UTF-8 字节`, color: 'warning' })
       return
     }
     if (utf8ByteLength(resetPassword) > maxPasswordBytes) {
@@ -1398,14 +1487,14 @@ export function UsersPage() {
     setResetTarget(user)
     setResetPassword('')
     onResetOpen()
-  }, [onResetOpen])
+  }, [onResetOpen, setResetPassword, setResetTarget])
 
   const handleCloseResetModal = useCallback(() => {
     if (resetPasswordMutation.isPending) return
     onResetClose()
     setResetTarget(null)
     setResetPassword('')
-  }, [resetPasswordMutation.isPending, onResetClose])
+  }, [resetPasswordMutation.isPending, onResetClose, setResetPassword, setResetTarget])
 
   const handleToggleStatus = useCallback((user: User) => {
     if (user.id === currentUserId) return
@@ -1433,21 +1522,24 @@ export function UsersPage() {
   }, [refetch])
 
   const handleClearUserListView = useCallback(() => {
-    setUserListFilter('all')
+    updateUserListFilter('all')
     setUserSearchQuery('')
     setUserListSort('default')
-  }, [])
+  }, [updateUserListFilter])
 
   const handleFocusUserListFilter = useCallback((filter: UserListFilter) => {
-    setUserListFilter(filter)
+    updateUserListFilter(filter)
     setUserSearchQuery('')
     setUserListSort('default')
-  }, [])
+  }, [updateUserListFilter])
 
   const users = data?.users ?? []
   const totalUsers = data?.total ?? users.length
   const adminCount = users.filter((user) => user.role === 'admin').length
   const activeUserCount = users.filter((user) => !user.disabled).length
+  const passwordChangeRequiredAdminCount = users.filter((user) => (
+    user.role === 'admin' && !user.disabled && user.must_change_password
+  )).length
   const accountAttentionSummary = summarizeUserAccountAttention(users)
   const accountAttentionCount = accountAttentionSummary.attentionCount
   const quotaSummary = summarizeUserQuotas(users)
@@ -1588,6 +1680,31 @@ export function UsersPage() {
         }
         className="mb-6"
       />
+
+      {userListFilter === 'password-change-required' && (
+        <Card
+          className="mb-4 border-warning/30 bg-warning/5 shadow-none"
+          role="region"
+          aria-label="待改密管理员处理说明"
+        >
+          <CardBody className="flex flex-col gap-2 p-4 sm:p-5">
+            <div className="flex items-start gap-3">
+              <KeyRound size={18} className="mt-0.5 shrink-0 text-warning" aria-hidden="true" />
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-foreground">
+                  待改密管理员 {passwordChangeRequiredAdminCount} 个
+                </p>
+                <p className="mt-1 text-xs leading-5 text-default-600">
+                  列表仅显示启用且必须修改密码的管理员。账号本人需使用当前临时密码登录，并在不可跳过的强制改密页完成设置。
+                </p>
+                <p className="mt-1 text-xs leading-5 text-default-500">
+                  管理员重置密码只会生成新的临时密码并保持待改密状态，不能代替账号本人完成改密。
+                </p>
+              </div>
+            </div>
+          </CardBody>
+        </Card>
+      )}
 
       {/* Stats */}
       <div className="grid grid-cols-2 gap-2 mb-4 sm:gap-3 xl:grid-cols-6">
@@ -1996,7 +2113,7 @@ export function UsersPage() {
                 variant={userListFilter === 'all' ? 'solid' : 'light'}
                 color={userListFilter === 'all' ? 'primary' : 'default'}
                 className="rounded-md"
-                onPress={() => setUserListFilter('all')}
+                onPress={() => updateUserListFilter('all')}
               >
                 全部用户
               </Button>
@@ -2006,7 +2123,7 @@ export function UsersPage() {
                 color={userListFilter === 'admin' ? 'danger' : 'default'}
                 className="rounded-md"
                 startContent={<Shield size={14} />}
-                onPress={() => setUserListFilter('admin')}
+                onPress={() => updateUserListFilter('admin')}
               >
                 管理员
               </Button>
@@ -2016,7 +2133,7 @@ export function UsersPage() {
                 color={userListFilter === 'active' ? 'success' : 'default'}
                 className="rounded-md"
                 startContent={<UserIcon size={14} />}
-                onPress={() => setUserListFilter('active')}
+                onPress={() => updateUserListFilter('active')}
               >
                 活跃用户
               </Button>
@@ -2026,7 +2143,7 @@ export function UsersPage() {
                 color={userListFilter === 'account-attention' ? 'warning' : 'default'}
                 className="rounded-md"
                 startContent={<UserX size={14} />}
-                onPress={() => setUserListFilter('account-attention')}
+                onPress={() => updateUserListFilter('account-attention')}
               >
                 账号关注
               </Button>
@@ -2036,7 +2153,7 @@ export function UsersPage() {
                 color={userListFilter === 'disabled-account' ? 'warning' : 'default'}
                 className="rounded-md"
                 startContent={<UserX size={14} />}
-                onPress={() => setUserListFilter('disabled-account')}
+                onPress={() => updateUserListFilter('disabled-account')}
               >
                 停用账号
               </Button>
@@ -2046,9 +2163,19 @@ export function UsersPage() {
                 color={userListFilter === 'never-login' ? 'warning' : 'default'}
                 className="rounded-md"
                 startContent={<LogOut size={14} />}
-                onPress={() => setUserListFilter('never-login')}
+                onPress={() => updateUserListFilter('never-login')}
               >
                 从未登录
+              </Button>
+              <Button
+                size="sm"
+                variant={userListFilter === 'password-change-required' ? 'solid' : 'light'}
+                color={userListFilter === 'password-change-required' ? 'warning' : 'default'}
+                className="rounded-md"
+                startContent={<KeyRound size={14} />}
+                onPress={() => updateUserListFilter('password-change-required')}
+              >
+                待改密管理员
               </Button>
               <Button
                 size="sm"
@@ -2056,7 +2183,7 @@ export function UsersPage() {
                 color={userListFilter === 'quota-attention' ? 'warning' : 'default'}
                 className="rounded-md"
                 startContent={<AlertCircle size={14} />}
-                onPress={() => setUserListFilter('quota-attention')}
+                onPress={() => updateUserListFilter('quota-attention')}
               >
                 配额关注
               </Button>
@@ -2066,7 +2193,7 @@ export function UsersPage() {
                 color={userListFilter === 'access-review' ? 'warning' : 'default'}
                 className="rounded-md"
                 startContent={<ListChecks size={14} />}
-                onPress={() => setUserListFilter('access-review')}
+                onPress={() => updateUserListFilter('access-review')}
               >
                 复核提示
               </Button>
@@ -2332,7 +2459,7 @@ export function UsersPage() {
               isDisabled={
                 !newUsername.trim()
                 || !newPassword.trim()
-                || newPassword.length < 8
+                || utf8ByteLength(newPassword) < minPasswordBytes
                 || utf8ByteLength(newPassword) > maxPasswordBytes
                 || Boolean(newHomeDirValidationIssue)
                 || quotaFormValueToBytes(newQuotaValue, newQuotaUnit) == null
@@ -2595,7 +2722,10 @@ export function UsersPage() {
             </div>
           </ModalHeader>
           <ModalBody className="px-6 py-4">
-            <div>
+            <div className="space-y-3">
+              <div className="rounded-lg border border-warning/25 bg-warning/10 px-3 py-2 text-xs leading-5 text-default-700">
+                重置后，该账号必须使用临时密码登录，并在强制改密页自行设置新密码。本操作不能代替账号本人完成改密。
+              </div>
               <Input
                 type="password"
                 label="新密码"
@@ -2627,7 +2757,7 @@ export function UsersPage() {
               color="primary"
               onPress={handleResetPassword}
               isLoading={resetPasswordMutation.isPending}
-              isDisabled={!resetPassword.trim() || resetPassword.length < 8 || utf8ByteLength(resetPassword) > maxPasswordBytes}
+              isDisabled={!resetPassword.trim() || utf8ByteLength(resetPassword) < minPasswordBytes || utf8ByteLength(resetPassword) > maxPasswordBytes}
               className="rounded-lg"
             >
               确认重置

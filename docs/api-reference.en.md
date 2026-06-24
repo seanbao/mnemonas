@@ -22,7 +22,13 @@ When Web UI/API authentication is enabled, the Web UI uses same-origin `HttpOnly
 Authorization: Bearer <access_token>
 ```
 
-Login and refresh set `mnemonas_access` and `mnemonas_refresh` cookies. Browser clients can send `X-MnemoNAS-Session-Mode: cookie`; in that mode the JSON response omits bearer tokens and returns only user/session metadata.
+Browser authentication cookie names and paths depend on the current request mode:
+
+- HTTPS mode uses `__Host-mnemonas_access`, `__Host-mnemonas_refresh`, and `__Host-mnemonas_download_access`. All three cookies use `Secure`, `Path=/`, and no `Domain` attribute.
+- Local HTTP mode uses `mnemonas_access`, `mnemonas_refresh`, and `mnemonas_download_access`. Access and download cookies use `/api/v1`; the refresh cookie uses `/api/v1/auth`.
+- HTTPS requests parse only the `__Host-` names, and HTTP requests parse only the unprefixed names; neither mode falls back to the other namespace. Authentication is rejected when one request contains different values for the same cookie name, or when access and download cookies resolve to different accounts.
+
+Login and refresh set the access and refresh cookies; the download-session endpoint sets the download cookie. Browser clients can send `X-MnemoNAS-Session-Mode: cookie`; in that mode the JSON response omits bearer tokens and returns only user/session metadata.
 
 WebDAV `auth_type = "users"` accepts MnemoNAS user credentials over HTTP Basic and applies role, group, `home_dir`, directory access-rule, home-scoped user-quota, and directory-quota boundaries. WebDAV `auth_type = "basic"` remains a separate global service credential mode.
 
@@ -145,15 +151,22 @@ Login response for API clients:
       "email": "admin@example.com",
       "role": "admin",
       "groups": ["family"],
-      "home_dir": "/"
+      "home_dir": "/",
+      "must_change_password": true
     }
   }
 }
 ```
 
-Cookie-session login also sets `mnemonas_access` and `mnemonas_refresh`. With `X-MnemoNAS-Session-Mode: cookie`, the `data` object omits `access_token` and `refresh_token`.
+Cookie-session login sets the access and refresh cookies for the current HTTPS or HTTP mode. The refresh-cookie path covers the authentication endpoints so logout can still revoke the current session after the access cookie expires. With `X-MnemoNAS-Session-Mode: cookie`, the `data` object omits `access_token` and `refresh_token`.
 
-Refresh accepts either a JSON refresh token body for API clients or the `mnemonas_refresh` cookie for the Web UI. Refresh rotates the refresh token and sets new access/refresh cookies. Responses using the refresh cookie, or `X-MnemoNAS-Session-Mode: cookie`, omit bearer tokens from JSON.
+Each login durably registers an active login session before the first tokens are issued. MnemoNAS retains at most 64 active sessions per user and 4096 active sessions globally. Login returns `429 REFRESH_SESSION_LIMIT` when either limit is reached.
+
+Refresh accepts either a JSON refresh-token body for API clients or the Web UI refresh cookie for the current request mode. Refresh rotates the refresh token and sets new access/refresh cookies. Rotated tokens retain the absolute session expiry established at login instead of extending the session indefinitely. Each refresh token can succeed only once. Reusing a rotated token returns `401 TOKEN_REVOKED` and revokes child tokens already issued in the same login session.
+
+A login session can rotate at most once every 30 seconds. An earlier rotation returns `429 REFRESH_RATE_LIMITED` with `Retry-After: 30`. Responses using the refresh cookie, or `X-MnemoNAS-Session-Mode: cookie`, omit bearer tokens from JSON.
+
+If authentication-state persistence definitely fails before the atomic rename, issuance and rotation do not publish new cookies, and logout does not clear existing cookies. If the rename has committed but the parent-directory sync is uncertain, the mutation remains successful and the response includes `Warning: 199 MnemoNAS "auth state persistence incomplete"`. When the authentication time lease has expired and cannot be renewed, protected requests and refresh return `503 TOKEN_STATE_UNAVAILABLE` and preserve existing cookies.
 
 Current user response example:
 
@@ -167,17 +180,18 @@ Current user response example:
       "email": "admin@example.com",
       "role": "admin",
       "groups": ["family"],
-      "home_dir": "/"
+      "home_dir": "/",
+      "must_change_password": true
     }
   }
 }
 ```
 
-Logout revokes the current access token when a valid bearer token or session cookie is present and clears `mnemonas_access`, `mnemonas_refresh`, and the short-lived `mnemonas_download_access` cookie. It still attempts cookie cleanup when the access cookie is expired.
+Logout removes the current login session from the authoritative registry. This immediately invalidates its access, refresh, and rotated tokens without affecting the same user's other independent logins. The Web UI submits session cookies; API clients may also submit `{"refresh_token":"<refresh-token>"}` in the request body. If the access cookie has expired, a valid refresh cookie or request-body refresh token still identifies and revokes the session. A definite revocation-persistence failure returns `500` and preserves session cookies for retry. A successful revocation, including one with an uncertain final directory sync, clears the access, refresh, and short-lived download cookies for the current request mode.
 
 `POST /api/v1/auth/download-session` creates the short-lived download-session cookie for browser preview, thumbnail, and download flows that cannot attach `Authorization` headers.
 
-The cookie is `HttpOnly`, `SameSite=Strict`, scoped to `/api/v1`, expires with the current access token, and uses `Secure` when the backend identifies the request as HTTPS.
+The cookie is `HttpOnly`, `SameSite=Strict`, and expires with the current access token. HTTPS mode sets `__Host-mnemonas_download_access` with `Secure`, `Path=/`, and no `Domain` attribute. Local HTTP mode sets `mnemonas_download_access` with the `/api/v1` path.
 
 Logout response example:
 
@@ -217,10 +231,14 @@ Change password response example:
 }
 ```
 
-Failed login attempts are rate-limited by username and client address:
+The automatically created bootstrap administrator returns `must_change_password=true`. Successful login and session refresh retain the server-side `initial-password.txt` file so the only persistent copy of the bootstrap credential is not lost before password change. While the flag is `true`, the authenticated session can access only current-user information, password change, and logout endpoints; other protected endpoints return `403 PASSWORD_CHANGE_REQUIRED`. After the current user sets a password different from the current password through `POST /api/v1/auth/password`, the flag becomes `false`, the initial-password file is removed, and the credential-version change invalidates previous access and refresh tokens. Reusing the current password returns `400 PASSWORD_UNCHANGED`. An administrator reset for another user restores the required-change state; an administrator resetting their own password follows the self-change behavior.
+
+Login protection combines a credential-check limit with consecutive-failure lockout:
 
 - Client address uses the direct peer by default.
 - The server parses forwarded headers only when `server.trusted_proxy_hops` is configured and the request comes from loopback or a proxy address listed in `server.trusted_proxy_cidrs`.
+- Each client IP can perform at most 12 password-credential checks in a fixed 10-second window. Excess requests return `429 LOGIN_RATE_LIMITED` before bcrypt runs.
+- Requests admitted by the credential-check window are still counted by normalized username and client IP. Reaching the failure threshold applies a short lockout.
 - When alert channels are configured, a rate-limited login sends a throttled `login_rate_limited` warning event.
 - Event details contain only the `trigger`, `key_scope`, `username_status`, and `client_ip_scope` classification fields, never raw usernames, client addresses, passwords, or tokens.
 - `username_status` is `unknown`, `invalid`, or `provided`; `client_ip_scope` is `public`, `private`, `loopback`, `link_local`, `multicast`, `unspecified`, or `unknown`.
@@ -241,7 +259,7 @@ Admin role required.
 
 User roles are `admin`, `user`, and `guest`. Non-admin users are scoped by `home_dir` and any matching directory access rules.
 
-User responses include `id`, `username`, `email`, `role`, `groups`, `disabled`, `home_dir`, `created_at`, `updated_at`, optional `last_login_at`, `quota_bytes`, and `used_bytes`. List responses also return `quota_history_available` and `quota_history`; the server keeps aggregate quota-change snapshots with tiered retention: all changes from the latest 30 days, the latest daily snapshot within 1 year, the latest monthly snapshot within 3 years, and at most 512 retained entries. If the history file cannot be written, the availability flag is `false` and the user list still returns.
+User responses include `id`, `username`, `email`, `role`, `groups`, `disabled`, `home_dir`, `created_at`, `updated_at`, optional `last_login_at`, `must_change_password`, optional `password_changed_at`, `quota_bytes`, and `used_bytes`. Password-change time is present only in administrator user-management responses, not normal login or current-user responses. List responses also return `quota_history_available` and `quota_history`; the server keeps aggregate quota-change snapshots with tiered retention: all changes from the latest 30 days, the latest daily snapshot within 1 year, the latest monthly snapshot within 3 years, and at most 512 retained entries. If the history file cannot be written, the availability flag is `false` and the user list still returns.
 
 List response example:
 
@@ -327,7 +345,7 @@ Create response example:
 User creation and update fields use these rules:
 
 - Usernames are limited to 255 characters and must not contain `/`, `\`, control characters, `.`, or `..`.
-- Passwords must be 8 to 72 bytes.
+- Passwords must contain 8 through 72 UTF-8 bytes and must not consist only of whitespace.
 - `home_dir` is optional at creation time and defaults to `/<username>` when omitted.
 - When provided, `home_dir` is normalized to a clean absolute MnemoNAS path and must not be empty or contain `.` or `..` path segments or control characters.
 - The `user` and `guest` roles cannot use `/` as `home_dir`; `admin` may use `/` for the global namespace.
@@ -449,7 +467,9 @@ Changing the current administrator's own role to a non-admin role is rejected wi
 | `HEAD` | `/health` | No | Health check status and headers without a response body |
 | `GET` | `/api/v1/version` | Usually no | Version/build info |
 | `GET` | `/api/v1/setup/` | No | Initial setup status |
-| `POST` | `/api/v1/setup/acknowledge` | Admin when auth enabled | Acknowledge initial info |
+| `GET` | `/api/v1/setup/readiness` | Admin; read-only when auth is disabled | Get automatically verified setup readiness |
+| `POST` | `/api/v1/setup/acknowledge` | Admin | Complete first-run setup |
+| `POST` | `/api/v1/setup/defer` | Admin | Defer eligible backup requirements |
 | `GET` | `/api/v1/stats` | Yes | Storage statistics |
 | `GET` | `/api/v1/diagnostics` | Admin | Diagnostic information |
 | `GET` | `/api/v1/diagnostics-export` | Admin | Sanitized diagnostic bundle download |
@@ -503,38 +523,208 @@ Notes:
 - The endpoint does not return initial usernames or passwords.
 - `allow_unsafe_no_auth` only reports whether the dangerous configuration exception is enabled; public deployments should still rely on the security self-check, `mnemonas-doctor --public-domain`, and cloud-firewall review.
 - The first-run Web administrator password is written only to `initial-password.txt` next to `auth.users_file`; the default path is `<storage.root>/.mnemonas/initial-password.txt`, and non-interactive startup logs only report that file path.
+- `is_first_run` is `true` until setup is completed. It is `false` during an active deferral and automatically returns to `true` after the deadline. The administrator readiness endpoint recomputes evidence independently and can restore its prompt before the deadline.
 - The endpoint returns a setup-specific flat JSON payload and does not use the common `data` wrapper.
+- Responses include `Cache-Control: private, no-store` and vary on both `Cookie` and `Authorization`.
 
-### Acknowledge Setup Information
+### Setup Readiness
 
-Marks the first-run setup information as shown. Later `GET /api/v1/setup/` responses return `is_first_run=false`.
+Administrator readiness is computed from server-side evidence for accounts, the initial credential file, backups, and the security self-check. The API does not accept subjective completion flags from the browser.
+
+```http
+GET /api/v1/setup/readiness
+```
+
+The response uses the common `data` envelope. The full response structure is shown below. `title` and `message` are display strings that vary with the detected result and must not be used for program logic. The English example translates these display strings for readability.
+
+```json
+{
+  "success": true,
+  "data": {
+    "lifecycle": "pending",
+    "prompt": true,
+    "generated_at": "2026-07-13T12:00:00Z",
+    "overall_status": "action_required",
+    "can_complete": false,
+    "can_defer": true,
+    "required": {
+      "completed": 4,
+      "total": 6
+    },
+    "recommended": {
+      "completed": 2,
+      "total": 4
+    },
+    "checks": [
+      {
+        "id": "admin_access",
+        "requirement": "required",
+        "status": "complete",
+        "deferrable": false,
+        "title": "Administrator access available",
+        "message": "At least one administrator account is active.",
+        "action": "manage_users"
+      },
+      {
+        "id": "bootstrap_credential",
+        "requirement": "required",
+        "status": "complete",
+        "deferrable": false,
+        "title": "Initial password changed",
+        "message": "All active administrators have completed their password change.",
+        "action": "change_password"
+      },
+      {
+        "id": "initial_password_file",
+        "requirement": "required",
+        "status": "complete",
+        "deferrable": false,
+        "title": "Remove the initial password file",
+        "message": "No initial password file remains on the server.",
+        "action": "change_password"
+      },
+      {
+        "id": "security_baseline",
+        "requirement": "required",
+        "status": "complete",
+        "deferrable": false,
+        "title": "Meet the security baseline",
+        "message": "The security baseline has no blocking items.",
+        "action": "review_security"
+      },
+      {
+        "id": "backup_job",
+        "requirement": "required",
+        "status": "incomplete",
+        "deferrable": true,
+        "title": "Add an independent backup",
+        "message": "No enabled backup job has been added.",
+        "action": "create_backup"
+      },
+      {
+        "id": "backup_success",
+        "requirement": "required",
+        "status": "incomplete",
+        "deferrable": true,
+        "title": "Complete the first backup",
+        "message": "No currently valid successful backup exists.",
+        "action": "run_backup"
+      },
+      {
+        "id": "admin_redundancy",
+        "requirement": "recommended",
+        "status": "complete",
+        "deferrable": false,
+        "title": "Prepare a backup administrator",
+        "message": "A backup administrator account is available.",
+        "action": "manage_users"
+      },
+      {
+        "id": "backup_schedule",
+        "requirement": "recommended",
+        "status": "incomplete",
+        "deferrable": false,
+        "title": "Enable automatic backups",
+        "message": "Enable an automatic schedule for a backup job.",
+        "action": "create_backup"
+      },
+      {
+        "id": "restore_verification",
+        "requirement": "recommended",
+        "status": "incomplete",
+        "deferrable": false,
+        "title": "Verify restore capability",
+        "message": "Run a restore drill and keep its verification result current.",
+        "action": "run_restore_drill"
+      },
+      {
+        "id": "security_recommendations",
+        "requirement": "recommended",
+        "status": "complete",
+        "deferrable": false,
+        "title": "Resolve security recommendations",
+        "message": "All security self-checks pass.",
+        "action": "review_security"
+      }
+    ],
+    "summary": {
+      "auth_enabled": true,
+      "active_admin_count": 2,
+      "password_change_required_admin_count": 0,
+      "initial_password_file": "missing",
+      "enabled_backup_job_count": 0,
+      "security_status": "pass",
+      "security_blocking_check_ids": []
+    }
+  },
+  "timestamp": "2026-07-13T12:00:00Z"
+}
+```
+
+The fixed enums are:
+
+- `lifecycle`: `pending`, `deferred`, or `completed`.
+- `overall_status`: `ready`, `action_required`, or `unavailable`.
+- `requirement`: `required` or `recommended`.
+- Check `status`: `complete`, `incomplete`, `unavailable`, or `not_applicable`.
+- `action`: `change_password`, `manage_users`, `create_backup`, `run_backup`, `run_restore_drill`, or `review_security`.
+- `summary.initial_password_file`: `missing`, `present`, or `unavailable`.
+- `summary.security_status`: `pass`, `warning`, `block`, or `unavailable`.
+
+The fixed checks and action mappings are:
+
+| Check ID | Level | Deferrable | Possible `action` | Server evidence |
+| --- | --- | --- | --- | --- |
+| `admin_access` | `required` | No | `manage_users`, `review_security` | Authentication is enabled and at least one administrator is active |
+| `bootstrap_credential` | `required` | No | `change_password`, `manage_users`, `review_security` | No active administrator requires a password change |
+| `initial_password_file` | `required` | No | `change_password` | The initial password file is absent and its path check passes |
+| `security_baseline` | `required` | No | `review_security` | The security self-check has no blocking items that must be resolved |
+| `backup_job` | `required` | Yes | `create_backup` | An independent enabled backup job exists |
+| `backup_success` | `required` | Yes | `run_backup` | A currently valid successful backup exists |
+| `admin_redundancy` | `recommended` | No | `manage_users` | At least two administrators are active |
+| `backup_schedule` | `recommended` | No | `create_backup` | An enabled scheduled backup job exists |
+| `restore_verification` | `recommended` | No | `run_restore_drill` | A currently valid restore-verification record exists |
+| `security_recommendations` | `recommended` | No | `review_security` | The security self-check has no warning or blocking items |
+
+`required.completed` and `recommended.completed` count checks with `complete` or `not_applicable` status. `completed_at`, `deferred_until`, `summary.latest_backup_success_at`, and `summary.latest_restore_verification_at` are optional RFC 3339 timestamps returned when the corresponding evidence exists. `generated_at` is the time at which the server recomputed readiness.
+
+The response does not expose usernames, user IDs, file paths, backup destinations, or raw security-check details.
+
+Responses include `Cache-Control: private, no-store` and vary on both `Cookie` and `Authorization`.
+
+When authentication is disabled, the sanitized status remains readable, but `admin_access` cannot pass and both mutation endpoints return `403`.
+
+### Complete First-run Setup
+
+The server recomputes every required check before persisting completion. Incomplete recommended checks do not block completion.
 
 ```http
 POST /api/v1/setup/acknowledge
 ```
 
-Authentication:
+Request body: `{}`.
 
-- When authentication is enabled, administrator access is required.
-- When authentication is disabled, the endpoint can be called anonymously.
-
-Request body: none.
-
-Example response:
-
-```json
-{
-  "success": true,
-  "message": "setup acknowledged"
-}
-```
+A successful response returns the same complete `data` structure as readiness and includes `message: "setup completed"`. `lifecycle` is `completed`; `prompt`, `can_complete`, and `can_defer` are all `false`; and `completed_at` is the first completion time. A repeated call returns `message: "setup already completed"` and preserves the first `completed_at`.
 
 Failure behavior:
 
-- Returns `401` when authentication is enabled and the caller is not logged in.
-- Returns `403` when authentication is enabled and the caller is not an administrator.
-- Returns `503` with message `setup acknowledge unavailable` when runtime secrets are unavailable.
-- This endpoint also returns setup-specific JSON and does not use the common `data` wrapper.
+- Returns `401` or `403` when the caller is unauthenticated or is not an administrator.
+- Returns `409 SETUP_NOT_READY` when a required check is incomplete. `details.required_check_ids` contains check IDs only.
+- Returns `503 SETUP_READINESS_UNAVAILABLE` when required evidence cannot be read.
+- Repeated completion returns `200`.
+
+### Defer First-run Setup
+
+Deferral is allowed only when the backup job or first successful backup remains incomplete and every other required check passes.
+
+```http
+POST /api/v1/setup/defer
+Content-Type: application/json
+
+{"remind_in_days": 7}
+```
+
+`remind_in_days` must be an integer from `1` through `30`. A successful response returns the same complete `data` structure as readiness and includes `message: "setup deferred"`; `lifecycle` is `deferred`, `prompt` is `false`, and `deferred_until` contains the new reminder deadline. Deferral does not write a completion time. After the deadline, `lifecycle` automatically returns to `pending`. Ineligible requests return `409 SETUP_DEFER_FORBIDDEN`.
 
 `GET /api/v1/stats` returns availability flags for each stats group.
 
@@ -640,9 +830,9 @@ Other file mutations may return success with a `Warning` header if the file oper
 
 Download-session cookies are used for preview and thumbnail flows where browser media elements cannot attach Authorization headers.
 
-`POST /api/v1/auth/download-session` can be authenticated by the Web UI session cookie or by `Authorization: Bearer <access-token>` and sets `mnemonas_download_access`.
+`POST /api/v1/auth/download-session` can be authenticated by the Web UI session cookie or by `Authorization: Bearer <access-token>`. HTTPS mode sets `__Host-mnemonas_download_access`; local HTTP mode sets `mnemonas_download_access`.
 
-The cookie is `HttpOnly`, `SameSite=Strict`, and scoped to `/api/v1`. Thumbnail responses are generated images and include `nosniff` plus a sandbox CSP.
+The cookie is `HttpOnly` and `SameSite=Strict`. HTTPS mode uses `Secure`, `Path=/`, and no `Domain` attribute; HTTP mode uses the `/api/v1` path. Thumbnail responses are generated images and include `nosniff` plus a sandbox CSP.
 
 `GET /api/v1/thumbnails/{path}` accepts an optional `size` query parameter at most once. Supported values are `small` or `s` for 150 px, `medium` or `m` for 300 px, and `large` or `l` for 600 px. Omitted `size` defaults to `medium`.
 
@@ -1292,7 +1482,7 @@ Notes:
 Settings updates can change the following configuration at runtime:
 
 - Directory quotas, directory access rules, WebDAV prefix, read-only mode, auth mode, share configuration, favorite configuration, and retention/versioning policies.
-- Web UI auth token lifetimes. `auth.access_token_ttl` and `auth.refresh_token_ttl` updates must be positive Go duration strings and affect newly issued Web UI access and refresh tokens immediately; already issued tokens keep their existing expiry.
+- Web UI auth token lifetimes. `auth.access_token_ttl` must be a Go duration of at least `30s`; `auth.refresh_token_ttl` must be a positive Go duration. New login sessions use the updated refresh lifetime. Refreshes in an existing session use the current access lifetime but retain the absolute session expiry established at login. Already issued tokens keep their existing expiry.
 - Webhook, Telegram, WeCom, DingTalk, and SMTP email notification settings.
 - Disk-health temperature thresholds and media-wear thresholds.
 - Scheduled Scrub maintenance. Updates immediately replace the running background scheduler.
@@ -1326,7 +1516,7 @@ Normalized no-op submissions do not emit this event. Alert delivery failures are
 
 - Server listener: `server.host` must be empty, `*`, a valid hostname, IPv4, or IPv6 literal, without a port, whitespace, or control characters. Set the port through `server.port`.
 - Reverse proxy: `server.trusted_proxy_hops` controls whether forwarded headers from trusted reverse proxies are honored when evaluating HTTPS request semantics. `server.trusted_proxy_cidrs` lists non-loopback proxy IPs or CIDRs allowed to supply those headers.
-- Web UI auth: `auth.access_token_ttl` and `auth.refresh_token_ttl` must be positive Go duration strings. Public deployments should keep access tokens at or below `1h` and refresh tokens at or below `720h`.
+- Web UI auth: `auth.access_token_ttl` must be at least `30s`, and `auth.refresh_token_ttl` must be positive. Public deployments should keep access tokens at or below `1h` and refresh tokens at or below `720h`.
 - Storage rules: `storage.root` remains read-only through the Settings API. `storage.directory_quotas` accepts MnemoNAS logical paths with positive `quota_bytes`.
   `storage.directory_access_rules` accepts MnemoNAS logical paths plus read/write grants for `*_users`, `*_groups`, and `*_roles`; the most specific matching rule wins, and write grants also allow reads.
 - WebDAV auth: `webdav.auth_type` supports `users`, `basic`, and `none`; blank values are normalized to `basic`, and `users` requires app auth to remain enabled.
@@ -1694,11 +1884,11 @@ Important check semantics:
   Public deployments should keep `auth.access_token_ttl <= 1h` and `auth.refresh_token_ttl <= 720h`; longer values are reported as `warning`.
   Details include only TTL text, seconds, and long-TTL booleans, never token contents.
 - `login_rate_limit` checks consecutive failed-login throttling for the Web UI.
-  With authentication enabled, failed attempts are counted by username and client IP, a short lockout is applied after the threshold, and the `login_rate_limited` alert event is emitted.
-  Details include only the threshold, counting window, lock duration, alert cooldown, and key scope, never usernames, passwords, or tokens.
+  With authentication enabled, each client IP can perform at most 12 credential checks in 10 seconds. Consecutive failures are separately counted by username and client IP; reaching the threshold applies a short lockout and emits the `login_rate_limited` alert event.
+  Details include `credential_check_limit=12`, `credential_check_window=10s`, `credential_check_window_seconds=10`, `credential_check_scope=client_ip`, the failure threshold, counting window, lock duration, alert cooldown, and key scope, never usernames, passwords, or tokens.
 - `browser_session_boundary` checks whether the current browser access path will set the `Secure` flag on Web UI session cookies and download cookies, and confirms that same-origin metadata validation is enabled for browser write requests.
   It reports `warning` when Web login authentication is disabled or the current request is not recognized as HTTPS.
-  Details include only cookie attributes, request scheme, proxy trust, and same-origin validation booleans, never token or cookie values.
+  Details report HTTPS `__Host-` names, path, Domain, and request-mode isolation through `session_cookie_host_prefix`, `session_cookie_name_prefix`, `session_cookie_path`, `session_cookie_domain_set`, and `request_mode_cookie_name_isolation`. They also include request scheme, proxy trust, and same-origin validation booleans, never token or cookie values.
 - `public_share_boundary` checks public-share access cookies, password-failure throttling, and public-share JSON response cache boundaries when sharing is enabled.
   Invalid HttpOnly, SameSite, cookie-path scoping, failure-throttling, `Cache-Control: private`, `Cache-Control: no-cache`, `Vary: Cookie`, `nosniff`, or `Referrer-Policy: no-referrer` boundaries are reported as `block`.
   Only when those boundaries are valid and the current request is not recognized as HTTPS are password-protected share cookies without `Secure` reported as `warning`.
@@ -2005,9 +2195,12 @@ Backup job types and command execution:
 - Local jobs copy into `destination/<job-id>/snapshots/<run-id>/` and can prune old snapshots by `max_snapshots` and `max_age`.
 - Restic jobs invoke `restic -r <repository> --password-file <password_file> backup <source>` and optionally `restic check`.
   rclone jobs invoke `rclone sync <source> <remote>` and optionally `rclone check --one-way`.
-- External commands are executed without a shell. `command` must be a bare executable name or absolute path, and `extra_args` are appended to backup commands as argv entries; restore commands do not reuse backup-specific extra args.
+- External commands are executed without a shell. `command` must be a bare executable name or absolute path, and `extra_args` are appended to backup commands but cannot override job identity. Rclone currently accepts only `--fast-list`; restore commands do not reuse backup-specific extra args.
 - Backup runs reject symlinks in the `source` tree; `rclone` restore drills apply the same check before remote verification.
-- `password_file` and `config_file` must be regular files outside `source` and `storage.root`.
+- `restic.password_file` and `rclone.config_file` are required for their respective job types. Each must be a non-symlink regular file no larger than 4 MiB, and both the file and its private runtime snapshot must remain outside `source` and `storage.root`.
+- `restic.repository` accepts only an absolute local path outside the source and `storage.root`, or an explicit `rest:http://` or `rest:https://` REST server URL.
+- `rclone.remote` must reference a named remote in `config_file` whose section contains `type`. The file must be a static, self-contained plaintext config; it cannot enable `env_auth`, contain `${...}` expansion, or use a non-empty option whose name contains `_file`, `_path`, `command`, `agent`, `ssh`, or `token`. The current API does not support encrypted rclone configs, environment credentials, external credential sources, or automatic token write-back.
+- Remote commands read only a mode-0600 credential snapshot created under a mode-0700 directory in the resolved system temporary directory. Child processes do not inherit cloud-provider credentials, proxy settings, SSH agents, or `RESTIC_*` and `RCLONE_*` variables that can override the explicit job identity. Repositories, remotes, and credential files come only from the validated job configuration.
 
 Backup redaction and alert boundaries:
 
@@ -2061,7 +2254,7 @@ Backup operation semantics:
   For local jobs with the default non-retained artifact behavior, if snapshot verification completes but temporary restore-directory cleanup fails, the response remains `status="completed"` and sets `warning=true`, populates `warnings[]`, and returns `artifact_kept=true` with `restored_path` for the Maintenance page. Warning text does not include raw paths or lower-level error text.
 - `POST /restore-preview` validates the same target rules as restore but does not create target data or write restore history.
   It returns `preflight_checks`, `warnings`, `cutover_checklist`, and `rollback_checklist` for target isolation, target state, backup content, target filesystem capacity, and config handling.
-- Local jobs summarize the latest manifest, restic jobs run `restic ls latest --json --tag mnemonas --tag job:<id> --path <source>`, and rclone jobs run `rclone lsjson <remote> --recursive --files-only`.
+- Local jobs summarize only the manifest bound to `status.json.last_successful_run`; they do not scan snapshot directories to infer the latest snapshot. The manifest path, size, digest, job ID, run ID, and summary fields must match the evidence saved by the successful run. A new successful local backup is required when that evidence is absent. Restic jobs run `restic ls latest --json --tag mnemonas --tag job:<id> --path <source>`, and rclone jobs run `rclone lsjson <remote> --recursive --files-only`.
 
 Batch restore:
 
@@ -2119,6 +2312,7 @@ WebDAV access and method semantics:
 
 - For day-to-day or production mounts, set `webdav.auth_type = "users"` to mount with MnemoNAS user accounts and per-user `home_dir` boundaries.
   Top-level navigation entries for granted shared directories are also listed at the WebDAV root for regular users.
+- Accounts with `must_change_password=true` cannot mount through `users` mode; WebDAV authentication becomes available after self-service password change.
 - The root example config keeps legacy global Basic Auth as a compatibility baseline; that mode uses service credentials from `[webdav]` or generated credentials in `secrets.json`.
 - Ancestor entries synthesized for nested grants are read-only navigation; writes still require a matching write grant.
 - Supported core methods include `OPTIONS`, `PROPFIND`, `GET`, `HEAD`, `PUT`, `DELETE`, `MKCOL`, `MOVE`, `COPY`, simplified `PROPPATCH`, simplified `LOCK`, and simplified `UNLOCK`.
@@ -2139,7 +2333,7 @@ Common error-code categories:
 
 | Category | Examples |
 | --- | --- |
-| Auth | `UNAUTHORIZED`, `LOGIN_RATE_LIMITED`, `TOKEN_EXPIRED` |
+| Auth | `UNAUTHORIZED`, `LOGIN_RATE_LIMITED`, `REFRESH_RATE_LIMITED`, `REFRESH_SESSION_LIMIT`, `TOKEN_EXPIRED`, `TOKEN_REVOKED`, `TOKEN_STATE_UNAVAILABLE`, `PASSWORD_CHANGE_REQUIRED`, `PASSWORD_UNCHANGED` |
 | Request | `BAD_REQUEST`, `INVALID_REQUEST_BODY`, `VALIDATION_ERROR` |
 | File | `NOT_FOUND`, `CONFLICT`, `FILE_TOO_LARGE` |
 | Share | `SHARE_NOT_FOUND`, `SHARE_EXPIRED`, `SHARE_PASSWORD_RATE_LIMITED` |

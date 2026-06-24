@@ -2,79 +2,131 @@ package auth
 
 import (
 	"bytes"
+	"container/list"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/golang-jwt/jwt/v5"
+	"unicode/utf8"
 
 	"github.com/seanbao/mnemonas/internal/requestip"
 )
 
 // Handler provides HTTP handlers for authentication
 type Handler struct {
-	userStore          *UserStore
-	tokenManager       *TokenManager
-	loginAttempts      *loginAttemptTracker
-	loginFailureLimit  int
-	loginFailureWindow time.Duration
-	loginLockDuration  time.Duration
-	usageResolver      UserUsageResolver
+	userStore                  *UserStore
+	tokenManager               *TokenManager
+	loginAttempts              *loginAttemptTracker
+	loginFailureLimit          int
+	loginFailureWindow         time.Duration
+	loginLockDuration          time.Duration
+	loginCredentialCheckLimit  int
+	loginCredentialCheckWindow time.Duration
+	usageResolver              UserUsageResolver
 }
 
 type UserUsageResolver func(context.Context, *User) (int64, error)
 
 type LoginRateLimitPolicy struct {
-	Enabled       bool
-	FailureLimit  int
-	FailureWindow time.Duration
-	LockDuration  time.Duration
+	Enabled               bool
+	FailureLimit          int
+	FailureWindow         time.Duration
+	LockDuration          time.Duration
+	CredentialCheckLimit  int
+	CredentialCheckWindow time.Duration
 }
 
 type loginAttemptTracker struct {
-	mu       sync.Mutex
-	attempts map[string]loginAttemptState
-	now      func() time.Time
+	mu                           sync.Mutex
+	attempts                     map[loginAttemptKey]loginAttemptState
+	entriesByIP                  map[string]int
+	credentialChecksByIP         map[string]loginCredentialCheckState
+	credentialCheckOrder         *list.List
+	unlockedFailures             *list.List
+	unlockedFailuresByIP         map[string]*list.List
+	maxEntries                   int
+	maxEntriesPerIP              int
+	maxCredentialCheckIPs        int
+	lastPrunedAt                 time.Time
+	lastCredentialChecksPrunedAt time.Time
+	now                          func() time.Time
+}
+
+type loginAttemptKey struct {
+	usernameDigest [sha256.Size]byte
+	clientIP       string
 }
 
 type loginAttemptState struct {
-	failures    int
-	lastFailure time.Time
-	lockedUntil time.Time
+	failures           int
+	lastFailure        time.Time
+	lockedUntil        time.Time
+	globalOrderElement *list.Element
+	ipOrderElement     *list.Element
+}
+
+type loginFailureOrderEntry struct {
+	key loginAttemptKey
+}
+
+type loginCredentialCheckState struct {
+	windowStartedAt time.Time
+	checks          int
+	orderElement    *list.Element
+}
+
+type loginCredentialCheckOrderEntry struct {
+	clientIP string
 }
 
 const (
-	defaultLoginFailureLimit     = 5
-	defaultLoginFailureWindow    = 15 * time.Minute
-	defaultLoginLockDuration     = 5 * time.Minute
-	defaultLoginRateLimitMessage = "too many login attempts, try later"
-	defaultJSONRequestBodyLimit  = 1 * 1024 * 1024
-	authPersistenceWarningHeader = `199 MnemoNAS "auth state persistence incomplete"`
-	sessionModeHeader            = "X-MnemoNAS-Session-Mode"
-	sessionModeCookie            = "cookie"
-	sessionCookiePath            = "/api/v1"
-	refreshSessionCookiePath     = "/api/v1/auth/refresh"
-	downloadSessionCookiePath    = "/api/v1"
-	downloadSessionSameSite      = http.SameSiteStrictMode
+	defaultLoginFailureLimit           = 5
+	defaultLoginFailureWindow          = 15 * time.Minute
+	defaultLoginLockDuration           = 5 * time.Minute
+	defaultLoginRateLimitMessage       = "too many login attempts, try later"
+	defaultLoginAttemptMaxEntries      = 4096
+	defaultLoginAttemptMaxEntriesPerIP = 64
+	defaultLoginAttemptPruneInterval   = time.Minute
+	defaultLoginCredentialCheckLimit   = 12
+	defaultLoginCredentialCheckWindow  = 10 * time.Second
+	defaultLoginCredentialCheckMaxIPs  = 4096
+	defaultJSONRequestBodyLimit        = 1 * 1024 * 1024
+	authPersistenceWarningHeader       = `199 MnemoNAS "auth state persistence incomplete"`
+	sessionModeHeader                  = "X-MnemoNAS-Session-Mode"
+	sessionModeCookie                  = "cookie"
+	sessionCookiePath                  = "/api/v1"
+	refreshSessionCookiePath           = "/api/v1/auth"
+	downloadSessionCookiePath          = "/api/v1"
+	downloadSessionSameSite            = http.SameSiteStrictMode
 )
 
 func newLoginAttemptTracker() *loginAttemptTracker {
 	return &loginAttemptTracker{
-		attempts: make(map[string]loginAttemptState),
-		now:      time.Now,
+		attempts:              make(map[loginAttemptKey]loginAttemptState),
+		entriesByIP:           make(map[string]int),
+		credentialChecksByIP:  make(map[string]loginCredentialCheckState),
+		credentialCheckOrder:  list.New(),
+		unlockedFailures:      list.New(),
+		unlockedFailuresByIP:  make(map[string]*list.List),
+		maxEntries:            defaultLoginAttemptMaxEntries,
+		maxEntriesPerIP:       defaultLoginAttemptMaxEntriesPerIP,
+		maxCredentialCheckIPs: defaultLoginCredentialCheckMaxIPs,
+		now:                   time.Now,
 	}
 }
 
-func (t *loginAttemptTracker) isLocked(key string) bool {
+func (t *loginAttemptTracker) isLocked(key loginAttemptKey, failureWindow time.Duration) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	now := t.now()
+	t.pruneExpiredIfDueLocked(now, failureWindow)
 	state, ok := t.attempts[key]
 	if !ok {
 		return false
@@ -82,59 +134,244 @@ func (t *loginAttemptTracker) isLocked(key string) bool {
 	if state.lockedUntil.After(now) {
 		return true
 	}
-	if !state.lockedUntil.IsZero() {
-		delete(t.attempts, key)
+	if !state.lockedUntil.IsZero() || loginAttemptFailureExpired(state, now, failureWindow) {
+		t.deleteEntryLocked(key)
+		return false
 	}
 	return false
 }
 
-func (t *loginAttemptTracker) recordFailure(key string, limit int, failureWindow, lockDuration time.Duration) bool {
+func (t *loginAttemptTracker) recordFailure(key loginAttemptKey, limit int, failureWindow, lockDuration time.Duration) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	now := t.now()
-	t.pruneExpiredLocked(now, failureWindow)
-	state := t.attempts[key]
-	if failureWindow > 0 && !state.lastFailure.IsZero() && now.Sub(state.lastFailure) > failureWindow {
+	t.pruneExpiredIfDueLocked(now, failureWindow)
+	state, exists := t.attempts[key]
+	if exists && state.lockedUntil.After(now) {
+		return true
+	}
+	if exists && (!state.lockedUntil.IsZero() && !state.lockedUntil.After(now) || loginAttemptFailureExpired(state, now, failureWindow)) {
+		t.deleteEntryLocked(key)
+		exists = false
 		state = loginAttemptState{}
+	}
+	if !exists {
+		if !t.ensureFailureCapacityLocked(key.clientIP) {
+			return false
+		}
+		t.entriesByIP[key.clientIP]++
 	}
 	state.failures++
 	state.lastFailure = now
 	if state.failures >= limit {
 		state.lockedUntil = now.Add(lockDuration)
+		t.removeUnlockedFailureOrderLocked(&state, key.clientIP)
+	} else {
+		t.touchUnlockedFailureOrderLocked(key, &state)
 	}
 	t.attempts[key] = state
 
 	return !state.lockedUntil.IsZero()
 }
 
-func (t *loginAttemptTracker) pruneExpiredLocked(now time.Time, failureWindow time.Duration) {
+func (t *loginAttemptTracker) pruneExpiredIfDueLocked(now time.Time, failureWindow time.Duration) {
+	pruneInterval := defaultLoginAttemptPruneInterval
+	if failureWindow > 0 && failureWindow < pruneInterval {
+		pruneInterval = failureWindow
+	}
+	if !t.lastPrunedAt.IsZero() && !now.Before(t.lastPrunedAt) && now.Sub(t.lastPrunedAt) < pruneInterval {
+		return
+	}
+
 	for key, state := range t.attempts {
-		if !state.lockedUntil.IsZero() && !state.lockedUntil.After(now) {
-			delete(t.attempts, key)
+		if state.lockedUntil.After(now) {
 			continue
 		}
-		if failureWindow > 0 && !state.lastFailure.IsZero() && now.Sub(state.lastFailure) > failureWindow {
-			delete(t.attempts, key)
+		if !state.lockedUntil.IsZero() && !state.lockedUntil.After(now) {
+			t.deleteEntryLocked(key)
+			continue
 		}
+		if loginAttemptFailureExpired(state, now, failureWindow) {
+			t.deleteEntryLocked(key)
+		}
+	}
+	t.lastPrunedAt = now
+}
+
+func loginAttemptFailureExpired(state loginAttemptState, now time.Time, failureWindow time.Duration) bool {
+	return failureWindow > 0 && !state.lastFailure.IsZero() && now.Sub(state.lastFailure) > failureWindow
+}
+
+func (t *loginAttemptTracker) ensureFailureCapacityLocked(clientIP string) bool {
+	if t.maxEntriesPerIP > 0 && t.entriesByIP[clientIP] >= t.maxEntriesPerIP {
+		if !t.evictOldestUnlockedFailureLocked(clientIP) {
+			return false
+		}
+	}
+	if t.maxEntries > 0 && len(t.attempts) >= t.maxEntries {
+		if !t.evictOldestUnlockedFailureLocked("") {
+			return false
+		}
+	}
+	return true
+}
+
+func (t *loginAttemptTracker) evictOldestUnlockedFailureLocked(clientIP string) bool {
+	failureOrder := t.unlockedFailures
+	if clientIP != "" {
+		failureOrder = t.unlockedFailuresByIP[clientIP]
+	}
+	if failureOrder == nil || failureOrder.Len() == 0 {
+		return false
+	}
+	entry, ok := failureOrder.Front().Value.(loginFailureOrderEntry)
+	if !ok {
+		return false
+	}
+	t.deleteEntryLocked(entry.key)
+	return true
+}
+
+func (t *loginAttemptTracker) touchUnlockedFailureOrderLocked(key loginAttemptKey, state *loginAttemptState) {
+	if state.globalOrderElement == nil {
+		state.globalOrderElement = t.unlockedFailures.PushBack(loginFailureOrderEntry{key: key})
+	} else {
+		t.unlockedFailures.MoveToBack(state.globalOrderElement)
+	}
+	perIPOrder := t.unlockedFailuresByIP[key.clientIP]
+	if perIPOrder == nil {
+		perIPOrder = list.New()
+		t.unlockedFailuresByIP[key.clientIP] = perIPOrder
+	}
+	if state.ipOrderElement == nil {
+		state.ipOrderElement = perIPOrder.PushBack(loginFailureOrderEntry{key: key})
+	} else {
+		perIPOrder.MoveToBack(state.ipOrderElement)
 	}
 }
 
-func (t *loginAttemptTracker) reset(key string) {
+func (t *loginAttemptTracker) removeUnlockedFailureOrderLocked(state *loginAttemptState, clientIP string) {
+	if state.globalOrderElement != nil {
+		t.unlockedFailures.Remove(state.globalOrderElement)
+		state.globalOrderElement = nil
+	}
+	if state.ipOrderElement == nil {
+		return
+	}
+	if perIPOrder := t.unlockedFailuresByIP[clientIP]; perIPOrder != nil {
+		perIPOrder.Remove(state.ipOrderElement)
+		if perIPOrder.Len() == 0 {
+			delete(t.unlockedFailuresByIP, clientIP)
+		}
+	}
+	state.ipOrderElement = nil
+}
+
+func (t *loginAttemptTracker) allowCredentialCheck(clientIP string, limit int, window time.Duration) bool {
+	if limit <= 0 || window <= 0 {
+		return true
+	}
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
+	now := t.now()
+	t.pruneCredentialChecksIfDueLocked(now, window)
+	state, exists := t.credentialChecksByIP[clientIP]
+	if exists && (now.Before(state.windowStartedAt) || now.Sub(state.windowStartedAt) >= window) {
+		t.deleteCredentialCheckLocked(clientIP)
+		state = loginCredentialCheckState{}
+		exists = false
+	}
+	if !exists {
+		t.ensureCredentialCheckCapacityLocked()
+		state.windowStartedAt = now
+		state.orderElement = t.credentialCheckOrder.PushBack(loginCredentialCheckOrderEntry{clientIP: clientIP})
+	} else if state.orderElement != nil {
+		t.credentialCheckOrder.MoveToBack(state.orderElement)
+	}
+	if state.checks >= limit {
+		t.credentialChecksByIP[clientIP] = state
+		return false
+	}
+	state.checks++
+	t.credentialChecksByIP[clientIP] = state
+	return true
+}
+
+func (t *loginAttemptTracker) pruneCredentialChecksIfDueLocked(now time.Time, window time.Duration) {
+	pruneInterval := window
+	if pruneInterval > defaultLoginAttemptPruneInterval {
+		pruneInterval = defaultLoginAttemptPruneInterval
+	}
+	if !t.lastCredentialChecksPrunedAt.IsZero() && !now.Before(t.lastCredentialChecksPrunedAt) && now.Sub(t.lastCredentialChecksPrunedAt) < pruneInterval {
+		return
+	}
+	for clientIP, state := range t.credentialChecksByIP {
+		if now.Before(state.windowStartedAt) || now.Sub(state.windowStartedAt) >= window {
+			t.deleteCredentialCheckLocked(clientIP)
+		}
+	}
+	t.lastCredentialChecksPrunedAt = now
+}
+
+func (t *loginAttemptTracker) ensureCredentialCheckCapacityLocked() {
+	if t.maxCredentialCheckIPs <= 0 || len(t.credentialChecksByIP) < t.maxCredentialCheckIPs {
+		return
+	}
+	oldest := t.credentialCheckOrder.Front()
+	if oldest == nil {
+		return
+	}
+	entry, ok := oldest.Value.(loginCredentialCheckOrderEntry)
+	if ok {
+		t.deleteCredentialCheckLocked(entry.clientIP)
+	}
+}
+
+func (t *loginAttemptTracker) deleteCredentialCheckLocked(clientIP string) {
+	state, ok := t.credentialChecksByIP[clientIP]
+	if !ok {
+		return
+	}
+	if state.orderElement != nil {
+		t.credentialCheckOrder.Remove(state.orderElement)
+	}
+	delete(t.credentialChecksByIP, clientIP)
+}
+
+func (t *loginAttemptTracker) deleteEntryLocked(key loginAttemptKey) {
+	state, ok := t.attempts[key]
+	if !ok {
+		return
+	}
+	t.removeUnlockedFailureOrderLocked(&state, key.clientIP)
 	delete(t.attempts, key)
+	if t.entriesByIP[key.clientIP] <= 1 {
+		delete(t.entriesByIP, key.clientIP)
+		return
+	}
+	t.entriesByIP[key.clientIP]--
+}
+
+func (t *loginAttemptTracker) reset(key loginAttemptKey) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.deleteEntryLocked(key)
 }
 
 // NewHandler creates a new auth handler
 func NewHandler(us *UserStore, tm *TokenManager) *Handler {
 	return &Handler{
-		userStore:          us,
-		tokenManager:       tm,
-		loginAttempts:      newLoginAttemptTracker(),
-		loginFailureLimit:  defaultLoginFailureLimit,
-		loginFailureWindow: defaultLoginFailureWindow,
-		loginLockDuration:  defaultLoginLockDuration,
+		userStore:                  us,
+		tokenManager:               tm,
+		loginAttempts:              newLoginAttemptTracker(),
+		loginFailureLimit:          defaultLoginFailureLimit,
+		loginFailureWindow:         defaultLoginFailureWindow,
+		loginLockDuration:          defaultLoginLockDuration,
+		loginCredentialCheckLimit:  defaultLoginCredentialCheckLimit,
+		loginCredentialCheckWindow: defaultLoginCredentialCheckWindow,
 	}
 }
 
@@ -147,14 +384,19 @@ func (h *Handler) LoginRateLimitPolicy() LoginRateLimitPolicy {
 		return LoginRateLimitPolicy{}
 	}
 	policy := LoginRateLimitPolicy{
-		FailureLimit:  h.loginFailureLimit,
-		FailureWindow: h.loginFailureWindow,
-		LockDuration:  h.loginLockDuration,
+		FailureLimit:          h.loginFailureLimit,
+		FailureWindow:         h.loginFailureWindow,
+		LockDuration:          h.loginLockDuration,
+		CredentialCheckLimit:  h.loginCredentialCheckLimit,
+		CredentialCheckWindow: h.loginCredentialCheckWindow,
 	}
 	policy.Enabled = h.loginAttempts != nil &&
 		policy.FailureLimit > 0 &&
 		policy.FailureWindow > 0 &&
 		policy.LockDuration > 0
+	policy.Enabled = policy.Enabled &&
+		policy.CredentialCheckLimit > 0 &&
+		policy.CredentialCheckWindow > 0
 	return policy
 }
 
@@ -212,12 +454,13 @@ type LoginResponse struct {
 
 // UserInfo is public user information
 type UserInfo struct {
-	ID       string   `json:"id"`
-	Username string   `json:"username"`
-	Email    string   `json:"email,omitempty"`
-	Role     Role     `json:"role"`
-	Groups   []string `json:"groups,omitempty"`
-	HomeDir  string   `json:"home_dir"`
+	ID                 string   `json:"id"`
+	Username           string   `json:"username"`
+	Email              string   `json:"email,omitempty"`
+	Role               Role     `json:"role"`
+	Groups             []string `json:"groups,omitempty"`
+	HomeDir            string   `json:"home_dir"`
+	MustChangePassword bool     `json:"must_change_password"`
 }
 
 // RefreshRequest is the refresh token request body
@@ -239,20 +482,24 @@ type ErrorDetail struct {
 
 func fullUserResponse(user *User) map[string]interface{} {
 	info := map[string]interface{}{
-		"id":          user.ID,
-		"username":    user.Username,
-		"email":       user.Email,
-		"role":        user.Role,
-		"groups":      append([]string(nil), user.Groups...),
-		"disabled":    user.Disabled,
-		"home_dir":    user.HomeDir,
-		"created_at":  user.CreatedAt,
-		"updated_at":  user.UpdatedAt,
-		"quota_bytes": user.QuotaBytes,
-		"used_bytes":  user.UsedBytes,
+		"id":                   user.ID,
+		"username":             user.Username,
+		"email":                user.Email,
+		"role":                 user.Role,
+		"groups":               append([]string(nil), user.Groups...),
+		"disabled":             user.Disabled,
+		"home_dir":             user.HomeDir,
+		"created_at":           user.CreatedAt,
+		"updated_at":           user.UpdatedAt,
+		"quota_bytes":          user.QuotaBytes,
+		"used_bytes":           user.UsedBytes,
+		"must_change_password": user.MustChangePassword,
 	}
 	if user.LastLoginAt != nil {
 		info["last_login_at"] = user.LastLoginAt
+	}
+	if user.PasswordChangedAt != nil {
+		info["password_changed_at"] = user.PasswordChangedAt
 	}
 	return info
 }
@@ -276,12 +523,13 @@ func loginResponseFromTokenPair(tokenPair *TokenPair, user *User, includeTokens 
 		ExpiresAt: tokenPair.ExpiresAt,
 		TokenType: tokenPair.TokenType,
 		User: UserInfo{
-			ID:       user.ID,
-			Username: user.Username,
-			Email:    user.Email,
-			Role:     user.Role,
-			Groups:   append([]string(nil), user.Groups...),
-			HomeDir:  user.HomeDir,
+			ID:                 user.ID,
+			Username:           user.Username,
+			Email:              user.Email,
+			Role:               user.Role,
+			Groups:             append([]string(nil), user.Groups...),
+			HomeDir:            user.HomeDir,
+			MustChangePassword: user.MustChangePassword,
 		},
 	}
 	if includeTokens {
@@ -292,11 +540,16 @@ func loginResponseFromTokenPair(tokenPair *TokenPair, user *User, includeTokens 
 }
 
 func setSessionCookies(w http.ResponseWriter, r *http.Request, tokenPair *TokenPair) {
-	setAuthCookie(w, r, AccessSessionCookieName, tokenPair.AccessToken, sessionCookiePath, tokenPair.ExpiresAt)
-	setAuthCookie(w, r, RefreshSessionCookieName, tokenPair.RefreshToken, refreshSessionCookiePath, tokenPair.RefreshExpiresAt)
+	secure := requestIsHTTPS(r)
+	setAuthCookie(w, AccessSessionCookieName, tokenPair.AccessToken, sessionCookiePath, tokenPair.ExpiresAt, secure)
+	setAuthCookie(w, RefreshSessionCookieName, tokenPair.RefreshToken, refreshSessionCookiePath, tokenPair.RefreshExpiresAt, secure)
 }
 
-func setAuthCookie(w http.ResponseWriter, r *http.Request, name, value, path string, expires time.Time) {
+func setAuthCookie(w http.ResponseWriter, name, value, path string, expires time.Time, secure bool) {
+	name = cookieNameForHTTPSMode(name, secure)
+	if secure {
+		path = "/"
+	}
 	maxAge := int(time.Until(expires).Seconds())
 	if maxAge < 0 {
 		maxAge = 0
@@ -307,25 +560,35 @@ func setAuthCookie(w http.ResponseWriter, r *http.Request, name, value, path str
 		Path:     path,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   requestIsHTTPS(r),
+		Secure:   secure,
 		Expires:  expires.UTC(),
 		MaxAge:   maxAge,
 	})
 }
 
-func clearSessionCookies(w http.ResponseWriter, r *http.Request) {
-	clearAuthCookie(w, r, AccessSessionCookieName, sessionCookiePath)
-	clearAuthCookie(w, r, RefreshSessionCookieName, refreshSessionCookiePath)
+func clearSessionCookiesForMode(w http.ResponseWriter, secure bool) {
+	clearAuthCookie(w, AccessSessionCookieName, sessionCookiePath, secure)
+	clearAuthCookie(w, RefreshSessionCookieName, refreshSessionCookiePath, secure)
 }
 
-func clearAuthCookie(w http.ResponseWriter, r *http.Request, name, path string) {
+func clearBrowserSessionCookies(w http.ResponseWriter, r *http.Request) {
+	secure := requestIsHTTPS(r)
+	clearSessionCookiesForMode(w, secure)
+	clearDownloadSessionCookieForMode(w, secure)
+}
+
+func clearAuthCookie(w http.ResponseWriter, name, path string, secure bool) {
+	name = cookieNameForHTTPSMode(name, secure)
+	if secure {
+		path = "/"
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     name,
 		Value:    "",
 		Path:     path,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   requestIsHTTPS(r),
+		Secure:   secure,
 		Expires:  time.Unix(0, 0).UTC(),
 		MaxAge:   -1,
 	})
@@ -371,15 +634,41 @@ func (h *Handler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSONBodyError(w, err)
 		return
 	}
-	req.Username = strings.TrimSpace(req.Username)
 
 	if req.Username == "" || req.Password == "" {
 		writeError(w, http.StatusBadRequest, "username and password required", "MISSING_CREDENTIALS")
 		return
 	}
+	cleanUsername, err := normalizeLoginUsername(req.Username)
+	if err != nil {
+		attemptKey := invalidLoginAttemptKey(r)
+		if h.loginAttempts != nil {
+			if h.loginAttempts.isLocked(attemptKey, h.loginFailureWindow) ||
+				h.loginAttempts.recordFailure(attemptKey, h.loginFailureLimit, h.loginFailureWindow, h.loginLockDuration) {
+				writeError(w, http.StatusTooManyRequests, defaultLoginRateLimitMessage, "LOGIN_RATE_LIMITED")
+				return
+			}
+		}
+		writeError(w, http.StatusUnauthorized, "invalid username or password", "INVALID_CREDENTIALS")
+		return
+	}
+	req.Username = cleanUsername
 
-	attemptKey := loginAttemptKey(r, req.Username)
-	if h.loginAttempts != nil && h.loginAttempts.isLocked(attemptKey) {
+	attemptKey := newLoginAttemptKey(r, req.Username)
+	if h.loginAttempts != nil && h.loginAttempts.isLocked(attemptKey, h.loginFailureWindow) {
+		writeError(w, http.StatusTooManyRequests, defaultLoginRateLimitMessage, "LOGIN_RATE_LIMITED")
+		return
+	}
+	if h.loginAttempts != nil && !h.loginAttempts.allowCredentialCheck(
+		attemptKey.clientIP,
+		h.loginCredentialCheckLimit,
+		h.loginCredentialCheckWindow,
+	) {
+		retryAfter := int((h.loginCredentialCheckWindow + time.Second - 1) / time.Second)
+		if retryAfter < 1 {
+			retryAfter = 1
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 		writeError(w, http.StatusTooManyRequests, defaultLoginRateLimitMessage, "LOGIN_RATE_LIMITED")
 		return
 	}
@@ -420,8 +709,20 @@ func (h *Handler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 
 	tokenPair, err := h.tokenManager.GenerateTokenPair(user)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error", "TOKEN_ERROR")
-		return
+		if isAuthPersistenceWarning(err) && tokenPair != nil {
+			markAuthPersistenceWarningHeaders(w)
+			loginWarning = true
+		} else {
+			switch {
+			case errors.Is(err, ErrRefreshSessionLimit):
+				writeError(w, http.StatusTooManyRequests, "active session limit reached", "REFRESH_SESSION_LIMIT")
+			case errors.Is(err, ErrTokenStateUnavailable):
+				writeError(w, http.StatusServiceUnavailable, "token session state unavailable", "TOKEN_STATE_UNAVAILABLE")
+			default:
+				writeError(w, http.StatusInternalServerError, "internal server error", "TOKEN_ERROR")
+			}
+			return
+		}
 	}
 
 	setSessionCookies(w, r, tokenPair)
@@ -434,8 +735,25 @@ func (h *Handler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	writeSuccess(w, http.StatusOK, resp, message)
 }
 
-func loginAttemptKey(r *http.Request, username string) string {
-	return normalizeUsername(strings.TrimSpace(username)) + "|" + requestip.ClientIP(r)
+func newLoginAttemptKey(r *http.Request, username string) loginAttemptKey {
+	return loginAttemptKey{
+		usernameDigest: sha256.Sum256([]byte(normalizeUsername(strings.TrimSpace(username)))),
+		clientIP:       requestip.ClientIP(r),
+	}
+}
+
+func invalidLoginAttemptKey(r *http.Request) loginAttemptKey {
+	return loginAttemptKey{
+		usernameDigest: sha256.Sum256([]byte("invalid-login-username")),
+		clientIP:       requestip.ClientIP(r),
+	}
+}
+
+func normalizeLoginUsername(username string) (string, error) {
+	if len(username) > maxUsernameRuneCount*utf8.UTFMax {
+		return "", ErrInvalidUsername
+	}
+	return normalizeNewUsername(username)
 }
 
 // HandleRefresh handles POST /api/v1/auth/refresh
@@ -457,22 +775,30 @@ func (h *Handler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 	if refreshToken != "" {
 		refreshTokens = append(refreshTokens, refreshToken)
 	} else {
-		refreshTokens = cookieValuesFromRequest(r, RefreshSessionCookieName)
+		var cookieErr error
+		refreshTokens, cookieErr = cookieValuesFromRequest(r, RefreshSessionCookieName)
+		if cookieErr != nil {
+			clearBrowserSessionCookies(w, r)
+			writeRefreshTokenError(w, ErrInvalidToken)
+			return
+		}
 		refreshFromCookie = len(refreshTokens) > 0
 	}
 
 	if len(refreshTokens) == 0 {
-		clearSessionCookies(w, r)
-		clearDownloadSessionCookie(w, r)
+		clearBrowserSessionCookies(w, r)
 		writeError(w, http.StatusBadRequest, "refresh token required", "MISSING_TOKEN")
 		return
 	}
 
 	claims, err := h.validateRefreshTokenCandidates(refreshTokens)
 	if err != nil {
+		if errors.Is(err, errRefreshTokenReused) && claims != nil {
+			h.handleRefreshTokenReuse(w, r, claims)
+			return
+		}
 		if refreshFromCookie && shouldClearSessionCookiesAfterRefreshFailure(err) {
-			clearSessionCookies(w, r)
-			clearDownloadSessionCookie(w, r)
+			clearBrowserSessionCookies(w, r)
 		}
 		writeRefreshTokenError(w, err)
 		return
@@ -482,8 +808,7 @@ func (h *Handler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 	user, err := h.userStore.GetByID(userID)
 	if err != nil {
 		if refreshFromCookie {
-			clearSessionCookies(w, r)
-			clearDownloadSessionCookie(w, r)
+			clearBrowserSessionCookies(w, r)
 		}
 		writeError(w, http.StatusUnauthorized, "user not found", "USER_NOT_FOUND")
 		return
@@ -491,16 +816,22 @@ func (h *Handler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 
 	if user.Disabled {
 		if refreshFromCookie {
-			clearSessionCookies(w, r)
-			clearDownloadSessionCookie(w, r)
+			clearBrowserSessionCookies(w, r)
 		}
 		writeError(w, http.StatusForbidden, "user account is disabled", "USER_DISABLED")
 		return
 	}
+	if claims.CredentialVersion != user.CredentialVersion {
+		if refreshFromCookie {
+			clearBrowserSessionCookies(w, r)
+		}
+		writeRefreshTokenError(w, ErrTokenRevoked)
+		return
+	}
 
-	tokenPair, err := h.tokenManager.GenerateTokenPair(user)
+	tokenPair, err := h.tokenManager.generateTokenPairForSession(user, claims.SessionID, claims.ExpiresAt.Time, claims.Generation+1)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error", "TOKEN_ERROR")
+		h.handleRefreshPairGenerationError(w, r, refreshTokens, refreshFromCookie, err)
 		return
 	}
 
@@ -508,12 +839,24 @@ func (h *Handler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 	if err := h.tokenManager.consumeRefreshTokenClaims(claims); err != nil {
 		if isAuthPersistenceWarning(err) {
 			revocationWarning = true
-		} else {
+		} else if errors.Is(err, errRefreshTokenReused) {
+			h.handleRefreshTokenReuse(w, r, claims)
+			return
+		} else if errors.Is(err, ErrRefreshRateLimited) {
+			w.Header().Set("Retry-After", "30")
+			writeError(w, http.StatusTooManyRequests, "refresh requests are temporarily limited", "REFRESH_RATE_LIMITED")
+			return
+		} else if errors.Is(err, ErrRefreshSessionLimit) {
+			writeError(w, http.StatusTooManyRequests, "active session limit reached", "REFRESH_SESSION_LIMIT")
+			return
+		} else if isRefreshTokenError(err) {
 			if refreshFromCookie && shouldClearSessionCookiesAfterRefreshFailure(err) {
-				clearSessionCookies(w, r)
-				clearDownloadSessionCookie(w, r)
+				clearBrowserSessionCookies(w, r)
 			}
 			writeRefreshTokenError(w, err)
+			return
+		} else {
+			writeError(w, http.StatusInternalServerError, "internal server error", "TOKEN_ERROR")
 			return
 		}
 	}
@@ -529,29 +872,80 @@ func (h *Handler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 	writeSuccess(w, http.StatusOK, resp, message)
 }
 
-func (h *Handler) validateRefreshTokenCandidates(candidates []string) (*jwt.RegisteredClaims, error) {
+func (h *Handler) validateRefreshTokenCandidates(candidates []string) (*refreshTokenClaims, error) {
 	var firstErr error
+	var firstClaims *refreshTokenClaims
 	for _, refreshToken := range candidates {
 		claims, err := h.tokenManager.validateRefreshTokenClaims(refreshToken)
 		if err == nil {
 			return claims, nil
 		}
+		if errors.Is(err, errRefreshTokenReused) && claims != nil {
+			return claims, err
+		}
 		if firstErr == nil {
 			firstErr = err
+			firstClaims = claims
 		}
 	}
 	if firstErr == nil {
 		firstErr = ErrInvalidToken
 	}
-	return nil, firstErr
+	return firstClaims, firstErr
 }
 
 func shouldClearSessionCookiesAfterRefreshFailure(err error) bool {
-	return !errors.Is(err, errRefreshTokenReused)
+	return !errors.Is(err, ErrTokenStateUnavailable)
+}
+
+func (h *Handler) handleRefreshPairGenerationError(w http.ResponseWriter, r *http.Request, refreshTokens []string, refreshFromCookie bool, generationErr error) {
+	if errors.Is(generationErr, ErrTokenStateUnavailable) {
+		writeError(w, http.StatusServiceUnavailable, "token session state unavailable", "TOKEN_STATE_UNAVAILABLE")
+		return
+	}
+	if errors.Is(generationErr, ErrInvalidToken) {
+		latestClaims, latestErr := h.validateRefreshTokenCandidates(refreshTokens)
+		if errors.Is(latestErr, errRefreshTokenReused) && latestClaims != nil {
+			h.handleRefreshTokenReuse(w, r, latestClaims)
+			return
+		}
+	}
+	if isRefreshTokenError(generationErr) {
+		if refreshFromCookie && shouldClearSessionCookiesAfterRefreshFailure(generationErr) {
+			clearBrowserSessionCookies(w, r)
+		}
+		writeRefreshTokenError(w, generationErr)
+		return
+	}
+	writeError(w, http.StatusInternalServerError, "internal server error", "TOKEN_ERROR")
+}
+
+func (h *Handler) handleRefreshTokenReuse(w http.ResponseWriter, r *http.Request, claims *refreshTokenClaims) {
+	if claims == nil || claims.SessionID == "" || claims.ExpiresAt == nil {
+		writeRefreshTokenError(w, ErrTokenRevoked)
+		return
+	}
+	if err := h.tokenManager.RevokeSession(claims.SessionID, claims.ExpiresAt.Time); err != nil {
+		if !isAuthPersistenceWarning(err) {
+			writeError(w, http.StatusInternalServerError, "internal server error", "TOKEN_ERROR")
+			return
+		}
+		markAuthPersistenceWarningHeaders(w)
+	}
+	clearBrowserSessionCookies(w, r)
+	writeRefreshTokenError(w, ErrTokenRevoked)
+}
+
+func isRefreshTokenError(err error) bool {
+	return errors.Is(err, ErrInvalidToken) ||
+		errors.Is(err, ErrTokenExpired) ||
+		errors.Is(err, ErrTokenRevoked)
 }
 
 func writeRefreshTokenError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, ErrTokenStateUnavailable):
+		writeError(w, http.StatusServiceUnavailable, "token session state unavailable", "TOKEN_STATE_UNAVAILABLE")
 	case errors.Is(err, ErrTokenExpired):
 		writeError(w, http.StatusUnauthorized, "refresh token expired", "TOKEN_EXPIRED")
 	case errors.Is(err, ErrTokenRevoked):
@@ -568,24 +962,69 @@ func (h *Handler) HandleLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	claims := GetClaimsFromContext(r.Context())
-	if claims != nil {
-		if err := h.tokenManager.RevokeToken(claims.TokenID); err != nil {
-			clearSessionCookies(w, r)
-			clearDownloadSessionCookie(w, r)
-			if isAuthPersistenceWarning(err) {
-				markAuthPersistenceWarningHeaders(w)
-				writeSuccess(w, http.StatusOK, nil, "logged out with persistence warning")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "internal server error", "TOKEN_ERROR")
+	var req RefreshRequest
+	if err := decodeOptionalRefreshRequest(r, &req); err != nil {
+		writeJSONBodyError(w, err)
+		return
+	}
+
+	sessions := make(map[string]time.Time, 2)
+	if claims := GetClaimsFromContext(r.Context()); claims != nil && claims.SessionID != "" && claims.SessionExpiresAt != nil {
+		sessions[claims.SessionID] = claims.SessionExpiresAt.Time
+	}
+
+	refreshTokens := make([]string, 0, 1)
+	if refreshToken := strings.TrimSpace(req.RefreshToken); refreshToken != "" {
+		refreshTokens = append(refreshTokens, refreshToken)
+	} else {
+		var cookieErr error
+		refreshTokens, cookieErr = cookieValuesFromRequest(r, RefreshSessionCookieName)
+		if cookieErr != nil {
+			clearBrowserSessionCookies(w, r)
+			writeRefreshTokenError(w, ErrInvalidToken)
 			return
 		}
 	}
-	clearSessionCookies(w, r)
-	clearDownloadSessionCookie(w, r)
+	if len(refreshTokens) > 0 {
+		refreshClaims, parseErr := h.parseLogoutRefreshTokenCandidates(refreshTokens)
+		if errors.Is(parseErr, ErrTokenStateUnavailable) {
+			writeError(w, http.StatusServiceUnavailable, "token session state unavailable", "TOKEN_STATE_UNAVAILABLE")
+			return
+		}
+		if refreshClaims != nil && refreshClaims.ExpiresAt != nil {
+			if currentExpiry, ok := sessions[refreshClaims.SessionID]; !ok || refreshClaims.ExpiresAt.Time.After(currentExpiry) {
+				sessions[refreshClaims.SessionID] = refreshClaims.ExpiresAt.Time
+			}
+		}
+	}
+
+	if err := h.tokenManager.RevokeSessions(sessions); err != nil {
+		if isAuthPersistenceWarning(err) {
+			clearBrowserSessionCookies(w, r)
+			markAuthPersistenceWarningHeaders(w)
+			writeSuccess(w, http.StatusOK, nil, "logged out with persistence warning")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error", "TOKEN_ERROR")
+		return
+	}
+	clearBrowserSessionCookies(w, r)
 
 	writeSuccess(w, http.StatusOK, nil, "logged out successfully")
+}
+
+func (h *Handler) parseLogoutRefreshTokenCandidates(candidates []string) (*refreshTokenClaims, error) {
+	var stateErr error
+	for _, refreshToken := range candidates {
+		claims, err := h.tokenManager.parseRefreshTokenClaims(refreshToken)
+		if err == nil {
+			return claims, nil
+		}
+		if errors.Is(err, ErrTokenStateUnavailable) {
+			stateErr = err
+		}
+	}
+	return nil, stateErr
 }
 
 // HandleCreateDownloadSession handles POST /api/v1/auth/download-session.
@@ -616,13 +1055,19 @@ func (h *Handler) HandleCreateDownloadSession(w http.ResponseWriter, r *http.Req
 		maxAge = 0
 	}
 
+	secure := requestIsHTTPS(r)
+	cookieName := cookieNameForHTTPSMode(DownloadSessionCookieName, secure)
+	cookiePath := downloadSessionCookiePath
+	if secure {
+		cookiePath = "/"
+	}
 	http.SetCookie(w, &http.Cookie{
-		Name:     string(DownloadSessionCookieName),
+		Name:     cookieName,
 		Value:    accessToken,
-		Path:     downloadSessionCookiePath,
+		Path:     cookiePath,
 		HttpOnly: true,
 		SameSite: downloadSessionSameSite,
-		Secure:   requestIsHTTPS(r),
+		Secure:   secure,
 		Expires:  claims.ExpiresAt.Time.UTC(),
 		MaxAge:   maxAge,
 	})
@@ -630,14 +1075,19 @@ func (h *Handler) HandleCreateDownloadSession(w http.ResponseWriter, r *http.Req
 	writeSuccess(w, http.StatusOK, nil, "")
 }
 
-func clearDownloadSessionCookie(w http.ResponseWriter, r *http.Request) {
+func clearDownloadSessionCookieForMode(w http.ResponseWriter, secure bool) {
+	cookieName := cookieNameForHTTPSMode(DownloadSessionCookieName, secure)
+	cookiePath := downloadSessionCookiePath
+	if secure {
+		cookiePath = "/"
+	}
 	http.SetCookie(w, &http.Cookie{
-		Name:     string(DownloadSessionCookieName),
+		Name:     cookieName,
 		Value:    "",
-		Path:     downloadSessionCookiePath,
+		Path:     cookiePath,
 		HttpOnly: true,
 		SameSite: downloadSessionSameSite,
-		Secure:   requestIsHTTPS(r),
+		Secure:   secure,
 		Expires:  time.Unix(0, 0).UTC(),
 		MaxAge:   -1,
 	})
@@ -670,12 +1120,13 @@ func (h *Handler) HandleMe(w http.ResponseWriter, r *http.Request) {
 
 	resp := map[string]interface{}{
 		"user": UserInfo{
-			ID:       user.ID,
-			Username: user.Username,
-			Email:    user.Email,
-			Role:     user.Role,
-			Groups:   append([]string(nil), user.Groups...),
-			HomeDir:  user.HomeDir,
+			ID:                 user.ID,
+			Username:           user.Username,
+			Email:              user.Email,
+			Role:               user.Role,
+			Groups:             append([]string(nil), user.Groups...),
+			HomeDir:            user.HomeDir,
+			MustChangePassword: user.MustChangePassword,
 		},
 	}
 
@@ -718,13 +1169,9 @@ func (h *Handler) HandleChangePassword(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.userStore.ChangePassword(user.ID, req.OldPassword, req.NewPassword); err != nil {
 		if isAuthPersistenceWarning(err) {
-			if revokeErr := h.tokenManager.RevokeByUser(user.ID); revokeErr != nil && !isAuthPersistenceWarning(revokeErr) {
-				writeError(w, http.StatusInternalServerError, "internal server error", "PASSWORD_ERROR")
-				return
-			}
+			_ = h.tokenManager.RevokeByUser(user.ID)
 			markAuthPersistenceWarningHeaders(w)
-			clearSessionCookies(w, r)
-			clearDownloadSessionCookie(w, r)
+			clearBrowserSessionCookies(w, r)
 			writeSuccess(w, http.StatusOK, map[string]interface{}{"warning": true}, "password changed with persistence warning")
 			return
 		}
@@ -732,9 +1179,11 @@ func (h *Handler) HandleChangePassword(w http.ResponseWriter, r *http.Request) {
 		case ErrInvalidCredentials:
 			writeError(w, http.StatusUnauthorized, "current password is incorrect", "INVALID_PASSWORD")
 		case ErrPasswordTooShort:
-			writeError(w, http.StatusBadRequest, "password must be at least 8 characters", "PASSWORD_TOO_SHORT")
+			writeError(w, http.StatusBadRequest, "password must contain at least 8 UTF-8 bytes and not be whitespace-only", "PASSWORD_TOO_SHORT")
 		case ErrPasswordTooLong:
 			writeError(w, http.StatusBadRequest, "password must be at most 72 bytes", "PASSWORD_TOO_LONG")
+		case ErrPasswordUnchanged:
+			writeError(w, http.StatusBadRequest, "new password must differ from current password", "PASSWORD_UNCHANGED")
 		default:
 			writeError(w, http.StatusInternalServerError, "internal server error", "PASSWORD_ERROR")
 		}
@@ -743,19 +1192,13 @@ func (h *Handler) HandleChangePassword(w http.ResponseWriter, r *http.Request) {
 
 	// Revoke all tokens for this user
 	if err := h.tokenManager.RevokeByUser(user.ID); err != nil {
-		if isAuthPersistenceWarning(err) {
-			markAuthPersistenceWarningHeaders(w)
-			clearSessionCookies(w, r)
-			clearDownloadSessionCookie(w, r)
-			writeSuccess(w, http.StatusOK, map[string]interface{}{"warning": true}, "password changed with persistence warning")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal server error", "PASSWORD_ERROR")
+		markAuthPersistenceWarningHeaders(w)
+		clearBrowserSessionCookies(w, r)
+		writeSuccess(w, http.StatusOK, map[string]interface{}{"warning": true}, "password changed with persistence warning")
 		return
 	}
 
-	clearSessionCookies(w, r)
-	clearDownloadSessionCookie(w, r)
+	clearBrowserSessionCookies(w, r)
 	writeSuccess(w, http.StatusOK, nil, "password changed successfully")
 }
 
@@ -906,7 +1349,7 @@ func (h *Handler) HandleCreateUser(w http.ResponseWriter, r *http.Request) {
 		case ErrUserExists:
 			writeError(w, http.StatusConflict, "user already exists", "USER_EXISTS")
 		case ErrPasswordTooShort:
-			writeError(w, http.StatusBadRequest, "password must be at least 8 characters", "PASSWORD_TOO_SHORT")
+			writeError(w, http.StatusBadRequest, "password must contain at least 8 UTF-8 bytes and not be whitespace-only", "PASSWORD_TOO_SHORT")
 		case ErrPasswordTooLong:
 			writeError(w, http.StatusBadRequest, "password must be at most 72 bytes", "PASSWORD_TOO_LONG")
 		case errInvalidUserGroups:
@@ -948,59 +1391,39 @@ func (h *Handler) HandleUpdateUser(w http.ResponseWriter, r *http.Request, userI
 		return
 	}
 
-	user, err := h.userStore.GetByID(userID)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "user not found", "USER_NOT_FOUND")
-		return
-	}
-
-	if req.Email != nil {
-		user.Email = strings.TrimSpace(*req.Email)
-	}
+	var role *Role
 	if req.Role != nil {
-		role := Role(strings.ToLower(strings.TrimSpace(*req.Role)))
-		if role != RoleAdmin && role != RoleUser && role != RoleGuest {
+		normalizedRole := Role(strings.ToLower(strings.TrimSpace(*req.Role)))
+		if normalizedRole != RoleAdmin && normalizedRole != RoleUser && normalizedRole != RoleGuest {
 			writeError(w, http.StatusBadRequest, "invalid role, must be admin, user, or guest", "INVALID_ROLE")
 			return
 		}
 		currentUser := GetUserFromContext(r.Context())
-		if currentUser != nil && currentUser.ID == userID && role != RoleAdmin {
+		if currentUser != nil && currentUser.ID == userID && normalizedRole != RoleAdmin {
 			writeError(w, http.StatusBadRequest, "cannot change your own admin role", "SELF_ROLE_CHANGE")
 			return
 		}
-		if user.Role == RoleAdmin && !user.Disabled && role != RoleAdmin {
-			activeAdmins := 0
-			for _, u := range h.userStore.List() {
-				if u.Role == RoleAdmin && !u.Disabled {
-					activeAdmins++
-				}
-			}
-			if activeAdmins <= 1 {
-				writeError(w, http.StatusBadRequest, "cannot remove last admin user", "LAST_ADMIN")
-				return
-			}
-		}
-		user.Role = role
-	}
-	if req.HomeDir != nil {
-		user.HomeDir = strings.TrimSpace(*req.HomeDir)
-	}
-	if req.Groups != nil {
-		user.Groups = append([]string(nil), (*req.Groups)...)
+		role = &normalizedRole
 	}
 	if req.QuotaBytes != nil {
 		if *req.QuotaBytes < 0 {
 			writeError(w, http.StatusBadRequest, "quota_bytes must be greater than or equal to 0", "INVALID_QUOTA")
 			return
 		}
-		user.QuotaBytes = *req.QuotaBytes
 	}
 
-	if err := h.userStore.Update(user); err != nil {
+	updatedUser, err := h.userStore.Patch(userID, UserPatch{
+		Email:      req.Email,
+		Role:       role,
+		Groups:     req.Groups,
+		HomeDir:    req.HomeDir,
+		QuotaBytes: req.QuotaBytes,
+	})
+	if err != nil {
 		if isAuthPersistenceWarning(err) {
-			updatedUser := user
-			if storedUser, getErr := h.userStore.GetByID(userID); getErr == nil {
-				updatedUser = storedUser
+			if updatedUser == nil {
+				writeError(w, http.StatusInternalServerError, "internal server error", "UPDATE_ERROR")
+				return
 			}
 			markAuthPersistenceWarningHeaders(w)
 			writeSuccess(w, http.StatusOK, map[string]interface{}{
@@ -1030,10 +1453,6 @@ func (h *Handler) HandleUpdateUser(w http.ResponseWriter, r *http.Request, userI
 		return
 	}
 
-	updatedUser := user
-	if storedUser, getErr := h.userStore.GetByID(userID); getErr == nil {
-		updatedUser = storedUser
-	}
 	writeSuccess(w, http.StatusOK, map[string]interface{}{
 		"user": h.fullUserResponse(r.Context(), updatedUser),
 	}, "user updated successfully")
@@ -1060,10 +1479,7 @@ func (h *Handler) HandleDeleteUser(w http.ResponseWriter, r *http.Request, userI
 
 	if err := h.userStore.Delete(userID); err != nil {
 		if isAuthPersistenceWarning(err) {
-			if revokeErr := h.tokenManager.RevokeByUser(userID); revokeErr != nil && !isAuthPersistenceWarning(revokeErr) {
-				writeError(w, http.StatusInternalServerError, "internal server error", "DELETE_ERROR")
-				return
-			}
+			_ = h.tokenManager.RevokeByUser(userID)
 			markAuthPersistenceWarningHeaders(w)
 			writeSuccess(w, http.StatusOK, map[string]interface{}{"warning": true}, "user deleted with persistence warning")
 			return
@@ -1080,12 +1496,8 @@ func (h *Handler) HandleDeleteUser(w http.ResponseWriter, r *http.Request, userI
 	}
 
 	if err := h.tokenManager.RevokeByUser(userID); err != nil {
-		if isAuthPersistenceWarning(err) {
-			markAuthPersistenceWarningHeaders(w)
-			writeSuccess(w, http.StatusOK, map[string]interface{}{"warning": true}, "user deleted with persistence warning")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal server error", "DELETE_ERROR")
+		markAuthPersistenceWarningHeaders(w)
+		writeSuccess(w, http.StatusOK, map[string]interface{}{"warning": true}, "user deleted with persistence warning")
 		return
 	}
 
@@ -1117,21 +1529,25 @@ func (h *Handler) HandleResetUserPassword(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := h.userStore.ResetPassword(userID, req.NewPassword); err != nil {
-		if isAuthPersistenceWarning(err) {
-			if revokeErr := h.tokenManager.RevokeByUser(userID); revokeErr != nil && !isAuthPersistenceWarning(revokeErr) {
-				writeError(w, http.StatusInternalServerError, "internal server error", "RESET_ERROR")
-				return
-			}
+	actor := GetUserFromContext(r.Context())
+	var resetErr error
+	if actor != nil && actor.ID == userID {
+		resetErr = h.userStore.ResetOwnPassword(userID, req.NewPassword)
+	} else {
+		resetErr = h.userStore.ResetPassword(userID, req.NewPassword)
+	}
+	if resetErr != nil {
+		if isAuthPersistenceWarning(resetErr) {
+			_ = h.tokenManager.RevokeByUser(userID)
 			markAuthPersistenceWarningHeaders(w)
 			writeSuccess(w, http.StatusOK, map[string]interface{}{"warning": true}, "password reset with persistence warning")
 			return
 		}
-		switch err {
+		switch resetErr {
 		case ErrUserNotFound:
 			writeError(w, http.StatusNotFound, "user not found", "USER_NOT_FOUND")
 		case ErrPasswordTooShort:
-			writeError(w, http.StatusBadRequest, "password must be at least 8 characters", "PASSWORD_TOO_SHORT")
+			writeError(w, http.StatusBadRequest, "password must contain at least 8 UTF-8 bytes and not be whitespace-only", "PASSWORD_TOO_SHORT")
 		case ErrPasswordTooLong:
 			writeError(w, http.StatusBadRequest, "password must be at most 72 bytes", "PASSWORD_TOO_LONG")
 		default:
@@ -1142,12 +1558,8 @@ func (h *Handler) HandleResetUserPassword(w http.ResponseWriter, r *http.Request
 
 	// Revoke all tokens for this user
 	if err := h.tokenManager.RevokeByUser(userID); err != nil {
-		if isAuthPersistenceWarning(err) {
-			markAuthPersistenceWarningHeaders(w)
-			writeSuccess(w, http.StatusOK, map[string]interface{}{"warning": true}, "password reset with persistence warning")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal server error", "RESET_ERROR")
+		markAuthPersistenceWarningHeaders(w)
+		writeSuccess(w, http.StatusOK, map[string]interface{}{"warning": true}, "password reset with persistence warning")
 		return
 	}
 
@@ -1211,12 +1623,6 @@ func (h *Handler) HandleToggleUserStatus(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	user, err := h.userStore.GetByID(userID)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "user not found", "USER_NOT_FOUND")
-		return
-	}
-
 	// Prevent disabling self
 	currentUser := GetUserFromContext(r.Context())
 	if currentUser != nil && currentUser.ID == userID && *req.Disabled {
@@ -1224,29 +1630,10 @@ func (h *Handler) HandleToggleUserStatus(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Prevent disabling last admin
-	if user.Role == RoleAdmin && *req.Disabled {
-		// Count active admins
-		activeAdmins := 0
-		for _, u := range h.userStore.List() {
-			if u.Role == RoleAdmin && !u.Disabled {
-				activeAdmins++
-			}
-		}
-		if activeAdmins <= 1 {
-			writeError(w, http.StatusBadRequest, "cannot disable last admin user", "LAST_ADMIN")
-			return
-		}
-	}
-
-	user.Disabled = *req.Disabled
-	if err := h.userStore.Update(user); err != nil {
+	if _, err := h.userStore.Patch(userID, UserPatch{Disabled: req.Disabled}); err != nil {
 		if isAuthPersistenceWarning(err) {
 			if *req.Disabled {
-				if revokeErr := h.tokenManager.RevokeByUser(userID); revokeErr != nil && !isAuthPersistenceWarning(revokeErr) {
-					writeError(w, http.StatusInternalServerError, "internal server error", "UPDATE_ERROR")
-					return
-				}
+				_ = h.tokenManager.RevokeByUser(userID)
 			}
 			markAuthPersistenceWarningHeaders(w)
 			writeSuccess(w, http.StatusOK, map[string]interface{}{
@@ -1259,6 +1646,10 @@ func (h *Handler) HandleToggleUserStatus(w http.ResponseWriter, r *http.Request,
 			writeError(w, http.StatusBadRequest, "cannot disable last admin user", "LAST_ADMIN")
 			return
 		}
+		if errors.Is(err, ErrUserNotFound) {
+			writeError(w, http.StatusNotFound, "user not found", "USER_NOT_FOUND")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal server error", "UPDATE_ERROR")
 		return
 	}
@@ -1266,15 +1657,11 @@ func (h *Handler) HandleToggleUserStatus(w http.ResponseWriter, r *http.Request,
 	// If disabling, revoke all tokens
 	if *req.Disabled {
 		if err := h.tokenManager.RevokeByUser(userID); err != nil {
-			if isAuthPersistenceWarning(err) {
-				markAuthPersistenceWarningHeaders(w)
-				writeSuccess(w, http.StatusOK, map[string]interface{}{
-					"disabled": req.Disabled,
-					"warning":  true,
-				}, "user status updated with persistence warning")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "internal server error", "UPDATE_ERROR")
+			markAuthPersistenceWarningHeaders(w)
+			writeSuccess(w, http.StatusOK, map[string]interface{}{
+				"disabled": req.Disabled,
+				"warning":  true,
+			}, "user status updated with persistence warning")
 			return
 		}
 	}

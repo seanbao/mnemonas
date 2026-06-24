@@ -1,11 +1,15 @@
 import { create } from 'zustand'
-import type { AuthActionResult, User } from '@/api/auth'
+import type { AuthActionResult, AuthClearedDetail, AuthSessionUpdatedDetail, User } from '@/api/auth'
 import { 
   AUTH_CLEARED_EVENT,
+  AUTH_CROSS_TAB_CHANNEL_NAME,
+  AUTH_CROSS_TAB_SOURCE_ID,
+  AUTH_CROSS_TAB_SYNC_KEY,
+  AUTH_SESSION_UPDATED_EVENT,
   login as apiLogin, 
   logout as apiLogout, 
   getCurrentUser,
-  getStoredUser,
+  invalidateAuthSessionRequests,
 } from '@/api/auth'
 import { getSetupStatus } from '@/api/setup'
 import { queryClient } from '@/lib/queryClient'
@@ -15,6 +19,8 @@ let authStateEpoch = 0
 let initializeRunId = 0
 let initializeAbortController: AbortController | null = null
 let postLoginSetupAbortController: AbortController | null = null
+let crossTabSessionValidationAbortController: AbortController | null = null
+const sessionValidationFailureMessage = '无法验证登录会话，请检查网络后重试'
 
 function bumpAuthStateEpoch(): number {
   authStateEpoch += 1
@@ -29,6 +35,19 @@ function cancelPendingInitialize(): void {
 function cancelPendingPostLoginSetup(): void {
   postLoginSetupAbortController?.abort()
   postLoginSetupAbortController = null
+}
+
+function cancelPendingCrossTabSessionValidation(): void {
+  crossTabSessionValidationAbortController?.abort()
+  crossTabSessionValidationAbortController = null
+}
+
+function createSupersededAuthError(): DOMException {
+  return new DOMException('身份验证状态已发生变化', 'AbortError')
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError'
 }
 
 function getAuthStoreActionErrorMessage(error: unknown, fallback: string): string {
@@ -100,7 +119,14 @@ export const useAuthStore = create<AuthState>((set) => ({
             shareEnabled: setupStatus.share_enabled ?? null,
             isAuthenticated: true, // Treat as authenticated when auth is disabled
             isLoading: false,
-            user: { id: 'guest', username: 'guest', role: 'admin' as const, email: '', homeDir: '/' }
+            user: {
+              id: 'guest',
+              username: 'guest',
+              role: 'admin' as const,
+              email: '',
+              homeDir: '/',
+              mustChangePassword: false,
+            }
           })
           return
         }
@@ -120,8 +146,6 @@ export const useAuthStore = create<AuthState>((set) => ({
         return
       }
 
-      const storedUser = getStoredUser()
-
       // Try to get current user. The browser sends the HttpOnly session cookie.
       try {
         const user = await getCurrentUser({ signal: controller.signal })
@@ -140,14 +164,13 @@ export const useAuthStore = create<AuthState>((set) => ({
           return
         }
 
-        // Terminal auth failures clear local state inside the auth API and return null above.
-        // Preserve the cached session only when validation is temporarily unavailable.
-        if (storedUser) {
-          set({ user: storedUser, isAuthenticated: true, isLoading: false, error: null })
-          return
-        }
-
-        set({ user: null, isAuthenticated: false, isLoading: false })
+        queryClient.clear()
+        set({
+          user: null,
+          isAuthenticated: false,
+          isLoading: false,
+          error: sessionValidationFailureMessage,
+        })
       }
     } finally {
       if (initializeAbortController === controller) {
@@ -160,15 +183,20 @@ export const useAuthStore = create<AuthState>((set) => ({
     const loginEpoch = bumpAuthStateEpoch()
     cancelPendingInitialize()
     cancelPendingPostLoginSetup()
-    set({ isLoading: true, error: null })
+    cancelPendingCrossTabSessionValidation()
+    queryClient.clear()
+    set({ user: null, isAuthenticated: false, isLoading: true, error: null })
     
     try {
       const result = await apiLogin(username, password)
       const user = result.user
+      if (authStateEpoch !== loginEpoch) {
+        throw createSupersededAuthError()
+      }
 
-      set({ user, isAuthenticated: true, isLoading: false, error: null })
+      applyAuthSessionUpdated(user)
 
-      if (user.role === 'admin') {
+      if (user.role === 'admin' && !user.mustChangePassword) {
         const controller = new AbortController()
         postLoginSetupAbortController = controller
         const isCurrent = () => authStateEpoch === loginEpoch
@@ -198,6 +226,9 @@ export const useAuthStore = create<AuthState>((set) => ({
         message: result.message,
       }
     } catch (err) {
+      if (authStateEpoch !== loginEpoch || isAbortError(err)) {
+        throw err
+      }
       const message = getAuthStoreActionErrorMessage(err, '登录失败')
       set({ isLoading: false, error: message })
       throw err
@@ -208,6 +239,7 @@ export const useAuthStore = create<AuthState>((set) => ({
     bumpAuthStateEpoch()
     cancelPendingInitialize()
     cancelPendingPostLoginSetup()
+    cancelPendingCrossTabSessionValidation()
     set({ isLoading: true, error: null })
 
     try {
@@ -261,32 +293,250 @@ export function useAuthError() {
 }
 
 const AUTH_CLEARED_LISTENER_KEY = '__mnemonasAuthClearedListenerRegistered__'
+const AUTH_SESSION_UPDATED_LISTENER_KEY = '__mnemonasAuthSessionUpdatedListenerRegistered__'
+const AUTH_CROSS_TAB_LISTENER_KEY = '__mnemonasAuthCrossTabListenerRegistered__'
+const AUTH_CROSS_TAB_CHANNEL_KEY = '__mnemonasAuthCrossTabBroadcastChannel__'
+const processedAuthCrossTabNonces = new Set<string>()
+const maxProcessedAuthCrossTabNonces = 64
 
-if (typeof window !== 'undefined') {
-  const markerWindow = window as Window & { [AUTH_CLEARED_LISTENER_KEY]?: boolean }
+type AuthCrossTabSync = {
+  type: 'session_updated' | 'cleared'
+  reason?: AuthClearedDetail['reason']
+  nonce: string
+  sourceId?: string
+}
 
-  if (!markerWindow[AUTH_CLEARED_LISTENER_KEY]) {
-    window.addEventListener(AUTH_CLEARED_EVENT, (event) => {
-      bumpAuthStateEpoch()
-      cancelPendingInitialize()
-      cancelPendingPostLoginSetup()
-      const state = useAuthStore.getState()
-      if (!state.isAuthenticated && !state.user && !state.isLoading) {
+function parseAuthCrossTabSync(value: unknown): AuthCrossTabSync | null {
+  if (value === null || value === undefined || value === '') {
+    return null
+  }
+
+  try {
+    const parsed: unknown = typeof value === 'string' ? JSON.parse(value) : value
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return null
+    }
+
+    const signal = parsed as Record<string, unknown>
+    if (signal.version !== 1 || typeof signal.nonce !== 'string' || signal.nonce.length === 0) {
+      return null
+    }
+    const sourceId = typeof signal.source_id === 'string' && signal.source_id.length > 0
+      ? signal.source_id
+      : undefined
+    if (signal.type === 'session_updated') {
+      return { type: 'session_updated', nonce: signal.nonce, sourceId }
+    }
+    if (signal.type !== 'cleared') {
+      return null
+    }
+
+    const reason = signal.reason
+    if (reason === undefined) {
+      return { type: 'cleared', nonce: signal.nonce, sourceId }
+    }
+    if (reason !== 'expired'
+      && reason !== 'disabled'
+      && reason !== 'missing'
+      && reason !== 'logout'
+      && reason !== 'password_changed') {
+      return null
+    }
+    return { type: 'cleared', reason, nonce: signal.nonce, sourceId }
+  } catch {
+    return null
+  }
+}
+
+function rememberAuthCrossTabNonce(nonce: string): boolean {
+  if (processedAuthCrossTabNonces.has(nonce)) {
+    return false
+  }
+  processedAuthCrossTabNonces.add(nonce)
+  if (processedAuthCrossTabNonces.size > maxProcessedAuthCrossTabNonces) {
+    const oldestNonce = processedAuthCrossTabNonces.values().next().value
+    if (typeof oldestNonce === 'string') {
+      processedAuthCrossTabNonces.delete(oldestNonce)
+    }
+  }
+  return true
+}
+
+function handleAuthCrossTabSync(value: unknown): void {
+  const signal = parseAuthCrossTabSync(value)
+  if (!signal
+    || signal.sourceId === AUTH_CROSS_TAB_SOURCE_ID
+    || !rememberAuthCrossTabNonce(signal.nonce)) {
+    return
+  }
+  if (signal.type === 'cleared') {
+    applyAuthCleared({ reason: signal.reason })
+    return
+  }
+
+  validateCrossTabSessionUpdate()
+}
+
+function applyAuthCleared(detail?: AuthClearedDetail): void {
+  bumpAuthStateEpoch()
+  invalidateAuthSessionRequests()
+  cancelPendingInitialize()
+  cancelPendingPostLoginSetup()
+  cancelPendingCrossTabSessionValidation()
+  const state = useAuthStore.getState()
+  queryClient.clear()
+  if (!state.isAuthenticated && !state.user && !state.isLoading) {
+    return
+  }
+
+  useAuthStore.setState({
+    user: null,
+    isAuthenticated: false,
+    isLoading: false,
+    shareEnabled: null,
+    error: detail?.reason === 'logout' || detail?.reason === 'password_changed'
+      ? null
+      : getRedactedDiagnosticMessage(detail?.message) ?? state.error ?? '登录已过期，请重新登录',
+  })
+}
+
+function applyAuthSessionUpdated(
+  user: User,
+  isolateQueries = false,
+  queriesAlreadyIsolated = false,
+): void {
+  if (user.mustChangePassword) {
+    cancelPendingPostLoginSetup()
+  }
+
+  const previousUser = useAuthStore.getState().user
+  const securityScopeChanged = previousUser?.id !== user.id
+    || previousUser?.role !== user.role
+    || previousUser?.homeDir !== user.homeDir
+    || previousUser?.mustChangePassword !== user.mustChangePassword
+
+  if (!queriesAlreadyIsolated && (isolateQueries || securityScopeChanged)) {
+    queryClient.clear()
+  }
+
+  useAuthStore.setState({
+    user,
+    isAuthenticated: true,
+    isLoading: false,
+    error: null,
+  })
+}
+
+function validateCrossTabSessionUpdate(): void {
+  const validationEpoch = bumpAuthStateEpoch()
+  invalidateAuthSessionRequests()
+  cancelPendingInitialize()
+  cancelPendingPostLoginSetup()
+  cancelPendingCrossTabSessionValidation()
+  queryClient.clear()
+
+  const controller = new AbortController()
+  crossTabSessionValidationAbortController = controller
+  const isCurrent = () => authStateEpoch === validationEpoch
+    && crossTabSessionValidationAbortController === controller
+    && !controller.signal.aborted
+
+  useAuthStore.setState({
+    user: null,
+    isAuthenticated: false,
+    isLoading: true,
+    shareEnabled: null,
+    error: null,
+  })
+
+  void (async () => {
+    try {
+      const user = await getCurrentUser({ signal: controller.signal })
+      if (!isCurrent()) {
+        return
+      }
+      if (!user) {
+        useAuthStore.setState({
+          user: null,
+          isAuthenticated: false,
+          isLoading: false,
+          error: '登录会话已结束，请重新登录',
+        })
         return
       }
 
-      const detail = event instanceof CustomEvent ? event.detail : undefined
-      queryClient.clear()
-
+      applyAuthSessionUpdated(user, false, true)
+    } catch (error) {
+      if (!isCurrent() || isAbortError(error)) {
+        return
+      }
       useAuthStore.setState({
         user: null,
         isAuthenticated: false,
         isLoading: false,
-        shareEnabled: null,
-        error: getRedactedDiagnosticMessage(detail?.message) ?? state.error ?? '登录已过期，请重新登录',
+        error: sessionValidationFailureMessage,
       })
+    } finally {
+      if (crossTabSessionValidationAbortController === controller) {
+        crossTabSessionValidationAbortController = null
+      }
+    }
+  })()
+}
+
+if (typeof window !== 'undefined') {
+  const markerWindow = window as Window & {
+    [AUTH_CLEARED_LISTENER_KEY]?: boolean
+    [AUTH_SESSION_UPDATED_LISTENER_KEY]?: boolean
+    [AUTH_CROSS_TAB_LISTENER_KEY]?: boolean
+    [AUTH_CROSS_TAB_CHANNEL_KEY]?: BroadcastChannel | null
+  }
+
+  if (!markerWindow[AUTH_CLEARED_LISTENER_KEY]) {
+    window.addEventListener(AUTH_CLEARED_EVENT, (event) => {
+      const detail = event instanceof CustomEvent ? event.detail : undefined
+      applyAuthCleared(detail)
     })
 
     markerWindow[AUTH_CLEARED_LISTENER_KEY] = true
+  }
+
+  if (!markerWindow[AUTH_SESSION_UPDATED_LISTENER_KEY]) {
+    window.addEventListener(AUTH_SESSION_UPDATED_EVENT, (event) => {
+      const detail = event instanceof CustomEvent
+        ? event.detail as AuthSessionUpdatedDetail | undefined
+        : undefined
+      if (!detail?.user) {
+        return
+      }
+
+      applyAuthSessionUpdated(detail.user)
+    })
+
+    markerWindow[AUTH_SESSION_UPDATED_LISTENER_KEY] = true
+  }
+
+  if (!markerWindow[AUTH_CROSS_TAB_LISTENER_KEY]) {
+    window.addEventListener('storage', (event) => {
+      if (event.key !== AUTH_CROSS_TAB_SYNC_KEY) {
+        return
+      }
+
+      handleAuthCrossTabSync(event.newValue)
+    })
+
+    try {
+      if (typeof window.BroadcastChannel === 'function') {
+        const channel = new window.BroadcastChannel(AUTH_CROSS_TAB_CHANNEL_NAME)
+        channel.addEventListener('message', (event) => {
+          handleAuthCrossTabSync(event.data)
+        })
+        markerWindow[AUTH_CROSS_TAB_CHANNEL_KEY] = channel
+      }
+    } catch {
+      markerWindow[AUTH_CROSS_TAB_CHANNEL_KEY] = null
+    }
+
+    markerWindow[AUTH_CROSS_TAB_LISTENER_KEY] = true
   }
 }

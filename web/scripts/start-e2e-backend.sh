@@ -68,11 +68,15 @@ def find_value(value):
 found = find_value(data)
 if isinstance(found, str):
     sys.stdout.write(found)
+elif isinstance(found, bool):
+    sys.stdout.write("true" if found else "false")
 ' "$field" 2>/dev/null
     return 0
   fi
 
-  printf '%s' "$json" | sed -n "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"
+  printf '%s' "$json" | sed -n \
+    -e "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" \
+    -e "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p"
 }
 
 json_escape_string() {
@@ -97,6 +101,15 @@ json_login_payload() {
   printf '{"username":%s,"password":%s}' "$(json_escape_string "$username")" "$(json_escape_string "$password")"
 }
 
+json_password_change_payload() {
+  local old_password=$1
+  local new_password=$2
+
+  printf '{"old_password":%s,"new_password":%s}' \
+    "$(json_escape_string "$old_password")" \
+    "$(json_escape_string "$new_password")"
+}
+
 http_host_for_url() {
   local host="$1"
   if [[ "$host" == *:* && "$host" != \[*\] ]]; then
@@ -107,7 +120,7 @@ http_host_for_url() {
 }
 
 seed_e2e_fixtures() {
-  local login_response token share_response share_id protected_share_id disabled_share_id folder_share_id
+  local login_response token share_response share_id protected_share_id disabled_share_id folder_share_id password_change_required
   local protected_share_password="playwright-secret"
 
   if [[ ! -f "$E2E_PASSWORD_FILE" ]]; then
@@ -129,6 +142,26 @@ seed_e2e_fixtures() {
   if [[ -z "$token" ]]; then
     echo "failed to retrieve E2E auth token" >&2
     return 1
+  fi
+
+  password_change_required=$(extract_json_field "$login_response" 'must_change_password')
+  if [[ "$password_change_required" == "true" ]]; then
+    local changed_password="${MNEMONAS_E2E_ADMIN_PASSWORD:-mnemonas-e2e-admin-password}"
+    curl -sf -X POST "$NASD_BASE_URL/api/v1/auth/password" \
+      -H "Authorization: Bearer $token" \
+      -H 'Content-Type: application/json' \
+      -d "$(json_password_change_payload "$password" "$changed_password")" >/dev/null
+    password=$changed_password
+    printf 'Username: admin\nPassword: %s\n' "$password" > "$E2E_PASSWORD_FILE"
+
+    login_response=$(curl -sf -X POST "$NASD_BASE_URL/api/v1/auth/login" \
+      -H 'Content-Type: application/json' \
+      -d "$(json_login_payload "admin" "$password")")
+    token=$(extract_json_field "$login_response" 'access_token')
+    if [[ -z "$token" ]]; then
+      echo "failed to retrieve E2E auth token after required password change" >&2
+      return 1
+    fi
   fi
 
   curl -sf -X POST "$NASD_BASE_URL/api/v1/files/e2e-trash-fixture.txt" \

@@ -17,9 +17,11 @@
 - 初始管理员密码不会长期保存在 `secrets.json`
 - setup API 不返回初始用户名或密码
 - 默认不会把初始密码明文打印到终端；只提示 `initial-password.txt` 路径。仅本地受控调试时，可在首次启动前设置 `MNEMONAS_PRINT_INITIAL_PASSWORD=1` 临时打印
-- 首次成功登录对应管理员账号后，`initial-password.txt` 会自动删除
-- 登录后应立即修改管理员密码
-- 管理员首页的首次部署检查会展示 Web UI/API 认证、分享和 WebDAV 状态；认证关闭或 WebDAV 匿名访问时，会提示仅适合受控内网或外层访问控制。该提示不替代部署前安全自检和 `mnemonas-doctor`
+- 登录、刷新会话和服务重启都会保留 `initial-password.txt`；对应管理员成功修改或重置密码后，文件才会删除
+- 登录后应立即修改管理员密码；初始管理员在自行修改密码前只能访问当前用户信息、修改密码和退出端点，不能进入其他业务接口
+- 新密码必须包含 8 至 72 个 UTF-8 字节，且不能只包含空白字符
+- WebDAV `auth_type = "users"` 同样拒绝仍需修改密码的账号；完成自助改密后才允许挂载
+- 管理员首页的首次设置检查使用服务端账号、初始密码文件、安全自检、备份和恢复验证证据，不使用浏览器本地勾选。该检查不替代部署前 `mnemonas-doctor` 和云防火墙复核
 
 systemd 部署默认路径：
 
@@ -231,7 +233,7 @@ cloudflared tunnel run mnemonas
 - [ ] WebDAV 使用 `auth_type = "users"`，或已记录全局 Basic Auth 凭据并设置自定义强密码或自动生成密码，未保留示例密码
 - [ ] `auth_type` 不是 `none`（除非仅本地访问）
 - [ ] 公网部署时 `server.host = "127.0.0.1"`，只通过 HTTPS 反向代理访问
-- [ ] 管理员首页的首次部署检查没有认证关闭或 WebDAV 匿名访问提示；如存在提示，应先处理对应配置或确认外层访问控制
+- [ ] 管理员首页的首次设置必需项已由服务端判定完成；如果备份项延期，已记录明确的下次提醒时间
 - [ ] dataplane gRPC/HTTP 端口保持在 `127.0.0.1` 或受信私有网络内，没有直接暴露到公网
 - [ ] Web UI “安全自检”没有 `block` 项；公网部署前应处理所有 `warning`
 - [ ] 安全自检已覆盖 `allow_unsafe_no_auth`、会话有效期、登录限速、浏览器会话 cookie 边界、公开分享 cookie/cache 边界、配置文件权限、自动 WebDAV 凭据文件权限、用户文件权限、反向代理 header、dataplane 端口、本地备份目标、分享基础 URL、分享默认策略和备用管理员提醒
@@ -291,8 +293,9 @@ curl https://<domain>/dav/
 ### 速率限制
 
 - 内置并发请求限制（默认 100 并发）
-- 未提供按 IP/用户的细粒度速率限制
-- 可通过反向代理实现更细粒度限制
+- Web UI 登录在 bcrypt 前按客户端 IP 限制凭据检查，固定的 10 秒窗口内最多允许 12 次；超限请求返回 `429 LOGIN_RATE_LIMITED`
+- 通过凭据检查窗口的请求仍按“归一化用户名 + 客户端 IP”记录连续失败，达到阈值后应用短期锁定
+- 其他 API 未提供通用的按 IP/用户细粒度限制；可在反向代理中补充站点级限速策略
 
 示例（Nginx）：
 
@@ -306,20 +309,30 @@ location /api/ {
 
 ### 预览和下载鉴权
 
-- 文件下载、版本预览、音视频预览、缩略图与外部打开使用短期 `HttpOnly`、`SameSite=Strict` download-session cookie，不再通过 URL 查询参数传递长期访问令牌
-- 该 cookie 由已认证会话在登录、初始化或刷新令牌后同步到 `/api/v1` 路径，并覆盖下载与缩略图请求
+- 文件下载、版本预览、音视频预览、缩略图与外部打开使用短期 `HttpOnly`、`SameSite=Strict` download-session Cookie，不通过 URL 查询参数传递长期访问令牌
+- HTTPS 模式使用 `__Host-mnemonas_download_access`、`Secure`、`Path=/` 且不设置 `Domain`；本机 HTTP 模式使用 `mnemonas_download_access`，路径为 `/api/v1`
 - 内部文件预览与缩略图请求路径不再依赖 `auth` 查询参数
-- `Secure` 标记只会在实际 HTTPS，或显式启用 `trusted_proxy_hops > 0` 且请求直接来自 loopback / `trusted_proxy_cidrs` 中的代理地址并携带 `X-Forwarded-Proto=https` 时启用，避免公网请求伪造 HTTPS 语义
+- HTTPS 模式只在请求实际使用 TLS，或显式启用 `trusted_proxy_hops > 0` 且请求直接来自 loopback / `trusted_proxy_cidrs` 中的代理地址并携带 `X-Forwarded-Proto=https` 时启用，避免公网请求伪造 HTTPS 语义
 
 ### Web UI 会话令牌
 
-- Web UI 主会话使用 `HttpOnly`、`SameSite=Lax` cookie 保存访问令牌和刷新令牌，不再把 bearer token 写入 `localStorage`
-- 公网部署建议将 `auth.access_token_ttl` 保持在 `1h` 以内，将 `auth.refresh_token_ttl` 保持在 `720h`（30 天）以内；安全自检会提示超出建议值的配置
-- REST API、上传请求、刷新令牌与退出登录请求由浏览器自动携带同源 cookie；旧版本残留在 `localStorage` 的令牌会在初始化、刷新、登出等路径中清理
+- Web UI 主会话使用 `HttpOnly`、`SameSite=Lax` Cookie 保存访问令牌和刷新令牌，不把 bearer token 写入 `localStorage`
+- HTTPS 模式使用 `__Host-mnemonas_access` 和 `__Host-mnemonas_refresh`；两者均带 `Secure`，作用域为 `/`，不设置 `Domain`。本机 HTTP 模式使用 `mnemonas_access` 和 `mnemonas_refresh`，路径分别为 `/api/v1` 和 `/api/v1/auth`
+- HTTPS 请求只解析 `__Host-` 名称，HTTP 请求只解析无前缀名称。同一请求中同名 Cookie 出现不同值时，服务端拒绝认证；access 和 download Cookie 属于不同账号时也会拒绝认证
+- `auth.access_token_ttl` 必须不少于 `30s`。公网部署建议将其保持在 `1h` 以内，并将 `auth.refresh_token_ttl` 保持在 `720h`（30 天）以内；安全自检会提示超出建议值的配置
+- 每次登录会在首次签发 token 前建立并持久化独立的活动会话；每个用户最多保留 64 个，服务全局最多保留 4096 个。超过任一限制时返回 `429 REFRESH_SESSION_LIMIT`；退出或会话到期会释放容量
+- 刷新令牌轮换不会延长登录时确定的绝对会话到期时间；单个会话每 30 秒最多轮换一次。refresh token 只能成功使用一次；重放已轮换的 token 会吊销同一会话族。access token 过期后仍可通过 refresh Cookie 退出当前会话
+- REST API、上传请求、刷新令牌与退出登录请求由浏览器自动携带同源 Cookie。Web UI 用 `storage` 信号和 `BroadcastChannel` 同步跨标签页的会话变更，并用 Web Locks 串行化跨标签页刷新；这些通道只传递会话变更信号，不传递 token 值。旧版本残留在 `localStorage` 的令牌会在认证流程中清理
 - 对带浏览器 `Origin` / `Referer` / `Sec-Fetch-Site` 元数据的 REST 写请求和 WebDAV 写方法（`POST`、`PUT`、`PATCH`、`DELETE`、`MKCOL`、`COPY`、`MOVE`、`PROPPATCH`、`LOCK`、`UNLOCK`），服务端会拒绝来源 scheme、主机或端口与当前请求不一致的请求，并拒绝浏览器明确标记为 `cross-site` 或 `same-site` 的无 `Authorization` 写请求；无浏览器来源头的脚本客户端以及显式 `Authorization` API 客户端继续可用
 - API 客户端仍可使用 `Authorization: Bearer <access-token>` 与 JSON refresh token，兼容脚本和自动化调用
 - 服务端已设置基础安全响应头、CSP 与 `Permissions-Policy`；文件下载、版本预览、缩略图、WebDAV 文件与 WebDAV 目录列表响应额外带 `X-Content-Type-Options: nosniff` 和 sandbox CSP，降低同源打开用户文件时的脚本执行面。公网部署仍必须使用受信任的静态资源、HTTPS 反向代理和较新的浏览器，不要在同一域名下注入第三方脚本
 - 共用电脑上使用后应主动退出登录；修改密码、退出登录、删除用户、禁用用户或管理员手动让用户现有登录失效时，会撤销或清理对应会话
+- `auth-sessions.json` 是权威且有界的活动会话注册表，使用 schema v3，文件上限为 2 MiB。即使 JWT 签名有效，会话 ID 不在注册表中时也会拒绝请求。退出会话会直接删除对应记录，不保留 tombstone，因此长期登录与退出不会线性增大文件
+- 服务会在 `auth-sessions.json` 中保存 60 秒重启时间租约，并在剩余 15 秒时尝试续租。续租持久化明确失败时，现有租约有效期内仍可验证请求；租约耗尽后继续失败，服务端会拒绝继续验证并返回 `503 TOKEN_STATE_UNAVAILABLE`，避免时钟回拨让已失效会话恢复有效
+- 当前版本只支持单个控制面进程作为 `auth-sessions.json` 的唯一写入者。不得让多个 `nasd` 实例共享同一个认证状态文件，否则会话注册表的顺序与完整性无法保证
+- 服务启动时会把逻辑验证时间推进到新的 60 秒租约下限。快速、连续的崩溃重启会在每次启动时约向前推进 60 秒，因此活动会话可能早于按系统时钟计算的到期时刻失效
+- 认证状态在原子重命名前持久化失败时，登录和刷新不会发布新 Cookie，退出不会清理现有 Cookie。重命名已提交但父目录同步结果不确定时，操作仍返回成功，并附带 HTTP `Warning`
+- `auth-sessions.json` 和 `users.json` 均使用严格的显式版本格式。文件损坏、缺少必填字段、含未知字段、缺少版本或版本不受支持时，认证初始化会失败。`users.json` 中的 bcrypt 密码哈希、角色与 `home_dir` 组合或 `quota_bytes` 不变量无效时也会拒绝启动
 
 ### 公开分享密码验证
 

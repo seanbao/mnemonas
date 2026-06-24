@@ -37,26 +37,45 @@ const (
 const printInitialPasswordEnv = "MNEMONAS_PRINT_INITIAL_PASSWORD"
 
 const (
-	minPasswordLength    = 8
-	maxPasswordBytes     = 72
-	maxUsernameRuneCount = 255
+	minPasswordLength      = 8
+	maxPasswordBytes       = 72
+	maxUsernameRuneCount   = 255
+	userStoreSchemaVersion = 1
 )
 
 // User represents a system user
 type User struct {
-	ID           string     `json:"id"`
-	Username     string     `json:"username"`
-	Email        string     `json:"email,omitempty"`
-	PasswordHash string     `json:"password_hash"`
-	Role         Role       `json:"role"`
-	Groups       []string   `json:"groups,omitempty"`
-	Disabled     bool       `json:"disabled"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
-	LastLoginAt  *time.Time `json:"last_login_at,omitempty"`
-	HomeDir      string     `json:"home_dir"`
-	QuotaBytes   int64      `json:"quota_bytes"`
-	UsedBytes    int64      `json:"used_bytes"`
+	ID                 string     `json:"id"`
+	Username           string     `json:"username"`
+	Email              string     `json:"email,omitempty"`
+	PasswordHash       string     `json:"password_hash"`
+	Role               Role       `json:"role"`
+	Groups             []string   `json:"groups,omitempty"`
+	Disabled           bool       `json:"disabled"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+	LastLoginAt        *time.Time `json:"last_login_at,omitempty"`
+	MustChangePassword bool       `json:"must_change_password"`
+	PasswordChangedAt  *time.Time `json:"password_changed_at,omitempty"`
+	CredentialVersion  uint64     `json:"credential_version"`
+	HomeDir            string     `json:"home_dir"`
+	QuotaBytes         int64      `json:"quota_bytes"`
+	UsedBytes          int64      `json:"used_bytes"`
+}
+
+type persistedUserStore struct {
+	SchemaVersion int     `json:"schema_version"`
+	Users         []*User `json:"users"`
+}
+
+// UserPatch contains administrator-managed user fields that can be updated atomically.
+type UserPatch struct {
+	Email      *string
+	Role       *Role
+	Groups     *[]string
+	HomeDir    *string
+	QuotaBytes *int64
+	Disabled   *bool
 }
 
 // UserStore manages user persistence
@@ -138,25 +157,32 @@ func cloneUser(user *User) *User {
 		lastLoginAt := *user.LastLoginAt
 		clone.LastLoginAt = &lastLoginAt
 	}
+	if user.PasswordChangedAt != nil {
+		passwordChangedAt := *user.PasswordChangedAt
+		clone.PasswordChangedAt = &passwordChangedAt
+	}
 	return &clone
 }
 
 // Errors
 var (
-	ErrUserNotFound        = errors.New("user not found")
-	ErrUserExists          = errors.New("user already exists")
-	ErrUserDisabled        = errors.New("user is disabled")
-	ErrInvalidCredentials  = errors.New("invalid credentials")
-	ErrInvalidUsername     = errors.New("invalid username")
-	ErrInvalidRole         = errors.New("invalid role")
-	ErrPasswordTooShort    = errors.New("password must be at least 8 characters")
-	ErrPasswordTooLong     = errors.New("password must be at most 72 bytes")
-	ErrLastAdmin           = errors.New("cannot delete last admin user")
-	errInvalidUserHomeDir  = errors.New("invalid home_dir")
-	errInvalidUserGroups   = errors.New("invalid groups")
-	errInvalidQuotaBytes   = errors.New("invalid quota_bytes")
-	errUserStoreSymlink    = errors.New("users file path must not be a symlink")
-	errPasswordFileSymlink = errors.New("initial password file path must not be a symlink")
+	ErrUserNotFound           = errors.New("user not found")
+	ErrUserExists             = errors.New("user already exists")
+	ErrUserDisabled           = errors.New("user is disabled")
+	ErrInvalidCredentials     = errors.New("invalid credentials")
+	ErrInvalidUsername        = errors.New("invalid username")
+	ErrInvalidRole            = errors.New("invalid role")
+	ErrPasswordTooShort       = errors.New("password must contain at least 8 UTF-8 bytes and not be whitespace-only")
+	ErrPasswordTooLong        = errors.New("password must be at most 72 bytes")
+	ErrPasswordChangeRequired = errors.New("password change required")
+	ErrPasswordUnchanged      = errors.New("new password must differ from current password")
+	ErrLastAdmin              = errors.New("cannot delete last admin user")
+	errInvalidUserHomeDir     = errors.New("invalid home_dir")
+	errInvalidUserGroups      = errors.New("invalid groups")
+	errInvalidQuotaBytes      = errors.New("invalid quota_bytes")
+	errUserStoreSymlink       = errors.New("users file path must not be a symlink")
+	errPasswordFileSymlink    = errors.New("initial password file path must not be a symlink")
+	errUserStoreSchema        = errors.New("invalid users file schema")
 )
 
 const authRootEscapeError = "path escapes from parent"
@@ -178,12 +204,7 @@ func NewUserStore(filePath string) (*UserStore, string, error) {
 	}
 
 	if err := store.load(); err != nil {
-		if recoverErr := store.recoverCorruptUsers(err); recoverErr != nil {
-			return nil, "", errors.Join(
-				fmt.Errorf("load users: %w", err),
-				fmt.Errorf("recover corrupt users: %w", recoverErr),
-			)
-		}
+		return nil, "", fmt.Errorf("load users: %w", err)
 	}
 
 	if !store.hasEnabledAdmin() {
@@ -209,9 +230,9 @@ func (s *UserStore) load() error {
 		return fmt.Errorf("failed to read users file: %w", err)
 	}
 
-	var users []*User
-	if err := json.Unmarshal(data, &users); err != nil {
-		return fmt.Errorf("failed to parse users file: %w", err)
+	users, err := decodePersistedUserStore(data)
+	if err != nil {
+		return err
 	}
 
 	loadedUsers := make(map[string]*User, len(users))
@@ -241,6 +262,15 @@ func (s *UserStore) load() error {
 		if err != nil {
 			return fmt.Errorf("users file contains invalid home_dir for user %q: %w", u.Username, err)
 		}
+		if err := validateRoleHomeDir(u.Role, homeDir); err != nil {
+			return fmt.Errorf("users file contains invalid role/home_dir combination for user %q: %w", u.Username, err)
+		}
+		if u.QuotaBytes < 0 {
+			return fmt.Errorf("users file contains invalid quota_bytes for user %q: %w", u.Username, errInvalidQuotaBytes)
+		}
+		if _, err := bcrypt.Cost([]byte(u.PasswordHash)); err != nil {
+			return fmt.Errorf("users file contains invalid password_hash for user %q: %w", u.Username, err)
+		}
 		groups, err := normalizeGroupNames(u.Groups)
 		if err != nil {
 			return fmt.Errorf("users file contains invalid groups for user %q: %w", u.Username, err)
@@ -260,48 +290,67 @@ func (s *UserStore) load() error {
 	return nil
 }
 
-func (s *UserStore) recoverCorruptUsers(loadErr error) error {
-	if !isRecoverableUserLoadError(loadErr) {
-		return loadErr
-	}
-
-	corruptPath := fmt.Sprintf("%s.corrupt.%d", s.filePath, time.Now().UnixNano())
-	if err := renameRegisteredAuthFile(s.filePath, corruptPath, errUserStoreSymlink); err != nil {
-		return fmt.Errorf("backup corrupt users file: %w", err)
-	}
-	if err := syncRegisteredAuthDir(s.filePath); err != nil {
-		if rollbackErr := renameRegisteredAuthFile(corruptPath, s.filePath, errUserStoreSymlink); rollbackErr != nil {
-			return errors.Join(
-				fmt.Errorf("sync corrupt users directory: %w", err),
-				fmt.Errorf("rollback corrupt users backup: %w", rollbackErr),
-			)
+func decodePersistedUserStore(data []byte) ([]*User, error) {
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(data, &document); err != nil {
+		var syntaxErr *json.SyntaxError
+		if errors.As(err, &syntaxErr) {
+			return nil, fmt.Errorf("failed to parse users file: %w", err)
 		}
-		if rollbackSyncErr := syncRegisteredAuthDir(s.filePath); rollbackSyncErr != nil {
-			return errors.Join(
-				fmt.Errorf("sync corrupt users directory: %w", err),
-				fmt.Errorf("sync corrupt users rollback: %w", rollbackSyncErr),
-			)
+		return nil, fmt.Errorf("%w: users file must be a versioned JSON object with schema_version %d", errUserStoreSchema, userStoreSchemaVersion)
+	}
+
+	versionData, ok := document["schema_version"]
+	if !ok || len(versionData) == 0 || strings.TrimSpace(string(versionData)) == "null" {
+		return nil, fmt.Errorf("%w: users file is missing schema_version; expected %d", errUserStoreSchema, userStoreSchemaVersion)
+	}
+	var version int
+	if err := json.Unmarshal(versionData, &version); err != nil {
+		return nil, fmt.Errorf("%w: users file schema_version must be an integer; expected %d", errUserStoreSchema, userStoreSchemaVersion)
+	}
+	switch {
+	case version < userStoreSchemaVersion:
+		return nil, fmt.Errorf("%w: users file schema_version %d is obsolete; expected %d", errUserStoreSchema, version, userStoreSchemaVersion)
+	case version > userStoreSchemaVersion:
+		return nil, fmt.Errorf("%w: users file schema_version %d is unsupported; expected %d", errUserStoreSchema, version, userStoreSchemaVersion)
+	}
+
+	usersData, ok := document["users"]
+	if !ok || len(usersData) == 0 || strings.TrimSpace(string(usersData)) == "null" {
+		return nil, fmt.Errorf("%w: users file is missing users array", errUserStoreSchema)
+	}
+	var rawUsers []json.RawMessage
+	if err := json.Unmarshal(usersData, &rawUsers); err != nil {
+		return nil, fmt.Errorf("%w: users must be an array: %v", errUserStoreSchema, err)
+	}
+
+	users := make([]*User, 0, len(rawUsers))
+	for index, rawUser := range rawUsers {
+		if strings.TrimSpace(string(rawUser)) == "null" {
+			users = append(users, nil)
+			continue
 		}
-		return fmt.Errorf("sync corrupt users directory: %w", err)
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(rawUser, &fields); err != nil {
+			return nil, fmt.Errorf("%w: user at index %d must be an object: %v", errUserStoreSchema, index, err)
+		}
+		for _, field := range []string{"must_change_password", "credential_version"} {
+			value, ok := fields[field]
+			if !ok || len(value) == 0 || strings.TrimSpace(string(value)) == "null" {
+				return nil, fmt.Errorf("%w: user at index %d is missing required field %q", errUserStoreSchema, index, field)
+			}
+		}
+
+		var user User
+		if err := json.Unmarshal(rawUser, &user); err != nil {
+			return nil, fmt.Errorf("%w: invalid user at index %d: %v", errUserStoreSchema, index, err)
+		}
+		if user.CredentialVersion == 0 {
+			return nil, fmt.Errorf("%w: user at index %d has invalid credential_version 0", errUserStoreSchema, index)
+		}
+		users = append(users, &user)
 	}
-
-	s.users = make(map[string]*User)
-	s.byName = make(map[string]*User)
-	return nil
-}
-
-func isRecoverableUserLoadError(err error) bool {
-	if errors.Is(err, io.EOF) {
-		return true
-	}
-
-	var syntaxErr *json.SyntaxError
-	if errors.As(err, &syntaxErr) {
-		return true
-	}
-
-	var typeErr *json.UnmarshalTypeError
-	return errors.As(err, &typeErr)
+	return users, nil
 }
 
 func (s *UserStore) save() error {
@@ -315,7 +364,10 @@ func saveUserState(filePath string, users map[string]*User) error {
 	}
 	sortUsersForList(serializedUsers)
 
-	data, err := json.MarshalIndent(serializedUsers, "", "  ")
+	data, err := json.MarshalIndent(persistedUserStore{
+		SchemaVersion: userStoreSchemaVersion,
+		Users:         serializedUsers,
+	}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to serialize users: %w", err)
 	}
@@ -868,12 +920,14 @@ func (s *UserStore) createDefaultAdmin() (string, error) {
 	username := s.bootstrapAdminUsername()
 
 	admin := &User{
-		ID:        adminID,
-		Username:  username,
-		Role:      RoleAdmin,
-		HomeDir:   "/",
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		ID:                 adminID,
+		Username:           username,
+		Role:               RoleAdmin,
+		HomeDir:            "/",
+		MustChangePassword: true,
+		CredentialVersion:  1,
+		CreatedAt:          time.Now(),
+		UpdatedAt:          time.Now(),
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
@@ -890,7 +944,7 @@ Username: %s
 Password: %s
 
 Please change this password after first login!
-This file will be automatically deleted after you login.
+This file will be automatically deleted after you change this password.
 `, username, password)
 
 	var persistenceWarning error
@@ -988,13 +1042,15 @@ func (s *UserStore) VerifyCredentials(username, password string) (*User, error) 
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
 		return nil, ErrInvalidCredentials
 	}
+	if user.MustChangePassword {
+		return nil, ErrPasswordChangeRequired
+	}
 	return user, nil
 }
 
 // Authenticate verifies username and password
 func (s *UserStore) Authenticate(username, password string) (*User, error) {
 	normalizedUsername := normalizeUsername(username)
-	var authenticatedUser *User
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
@@ -1013,11 +1069,6 @@ func (s *UserStore) Authenticate(username, password string) (*User, error) {
 			return nil, ErrInvalidCredentials
 		}
 
-		initialPasswordRemoval, err := removeInitialPasswordFileForUser(snapshot.filePath, user.Username)
-		if err != nil {
-			return nil, fmt.Errorf("failed to remove initial password file: %w", err)
-		}
-
 		updated := cloneUser(user)
 		now := time.Now()
 		updated.LastLoginAt = &now
@@ -1028,18 +1079,12 @@ func (s *UserStore) Authenticate(username, password string) (*User, error) {
 			if s.commitSnapshotOnPersistenceWarning(snapshot, err) {
 				return cloneUser(updated), err
 			}
-			if restoreErr := initialPasswordRemoval.restore(); restoreErr != nil {
-				return nil, errors.Join(err, fmt.Errorf("restore initial password file: %w", restoreErr))
-			}
 			return nil, err
 		}
 		if s.commitSnapshot(snapshot) {
-			authenticatedUser = cloneUser(updated)
-			break
+			return cloneUser(updated), nil
 		}
 	}
-
-	return authenticatedUser, nil
 }
 
 type initialPasswordFileRemoval struct {
@@ -1053,6 +1098,16 @@ func (r *initialPasswordFileRemoval) restore() error {
 		return nil
 	}
 	return writeRegisteredAuthFileAtomically(r.path, r.content, errPasswordFileSymlink, ".initial-password-*.tmp", "initial password")
+}
+
+func initialPasswordRollbackError(commitErr, restoreErr error) error {
+	if restoreErr == nil {
+		return commitErr
+	}
+	// The commit failure remains authoritative. A durability warning while
+	// restoring the bootstrap file must not reclassify an uncommitted password
+	// mutation as successful.
+	return fmt.Errorf("%w; restore initial password file: %v", commitErr, restoreErr)
 }
 
 func removeInitialPasswordFileForUser(usersFilePath, username string) (*initialPasswordFileRemoval, error) {
@@ -1079,11 +1134,15 @@ func removeInitialPasswordFileForUser(usersFilePath, username string) (*initialP
 	if err := removeRegisteredAuthFile(passwordFile, errPasswordFileSymlink); err != nil {
 		return nil, err
 	}
-	return &initialPasswordFileRemoval{
+	removal := &initialPasswordFileRemoval{
 		path:    passwordFile,
 		content: append([]byte(nil), content...),
 		removed: true,
-	}, nil
+	}
+	if err := syncRegisteredAuthDir(passwordFile); err != nil {
+		return removal, wrapAuthPersistenceWarning(fmt.Errorf("failed to sync initial password directory: %w", err))
+	}
+	return removal, nil
 }
 
 // Create creates a new user
@@ -1144,16 +1203,17 @@ func (s *UserStore) CreateWithOptions(username, password, email string, role Rol
 	}
 
 	user := &User{
-		ID:           userID,
-		Username:     cleanUsername,
-		Email:        email,
-		PasswordHash: string(hash),
-		Role:         role,
-		Groups:       normalizedGroups,
-		HomeDir:      homeDir,
-		QuotaBytes:   options.QuotaBytes,
-		CreatedAt:    time.Now(),
-		UpdatedAt:    time.Now(),
+		ID:                userID,
+		Username:          cleanUsername,
+		Email:             email,
+		PasswordHash:      string(hash),
+		Role:              role,
+		Groups:            normalizedGroups,
+		HomeDir:           homeDir,
+		QuotaBytes:        options.QuotaBytes,
+		CredentialVersion: 1,
+		CreatedAt:         time.Now(),
+		UpdatedAt:         time.Now(),
 	}
 	normalizedUsername := normalizeUsername(cleanUsername)
 	s.writeMu.Lock()
@@ -1193,6 +1253,20 @@ func (s *UserStore) Update(user *User) error {
 		}
 
 		updated := cloneUser(user)
+		updated.PasswordHash = existing.PasswordHash
+		updated.MustChangePassword = existing.MustChangePassword
+		updated.CredentialVersion = existing.CredentialVersion
+		updated.PasswordChangedAt = nil
+		if existing.PasswordChangedAt != nil {
+			passwordChangedAt := *existing.PasswordChangedAt
+			updated.PasswordChangedAt = &passwordChangedAt
+		}
+		updated.LastLoginAt = nil
+		if existing.LastLoginAt != nil {
+			lastLoginAt := *existing.LastLoginAt
+			updated.LastLoginAt = &lastLoginAt
+		}
+		updated.CreatedAt = existing.CreatedAt
 		cleanUsername, err := normalizeNewUsername(updated.Username)
 		if err != nil {
 			return err
@@ -1242,6 +1316,77 @@ func (s *UserStore) Update(user *User) error {
 	}
 }
 
+// Patch applies only explicitly provided administrator-managed fields to the
+// latest stored user record.
+func (s *UserStore) Patch(id string, patch UserPatch) (*User, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	for {
+		snapshot := s.snapshotState()
+		existing, ok := snapshot.users[id]
+		if !ok {
+			return nil, ErrUserNotFound
+		}
+
+		updated := cloneUser(existing)
+		if patch.Email != nil {
+			updated.Email = strings.TrimSpace(*patch.Email)
+		}
+		if patch.Role != nil {
+			updated.Role = *patch.Role
+		}
+		if patch.Groups != nil {
+			updated.Groups = append([]string(nil), (*patch.Groups)...)
+		}
+		if patch.HomeDir != nil {
+			updated.HomeDir = *patch.HomeDir
+		}
+		if patch.QuotaBytes != nil {
+			updated.QuotaBytes = *patch.QuotaBytes
+		}
+		if patch.Disabled != nil {
+			updated.Disabled = *patch.Disabled
+		}
+
+		if err := validateRole(updated.Role); err != nil {
+			return nil, err
+		}
+		groups, err := normalizeGroupNames(updated.Groups)
+		if err != nil {
+			return nil, err
+		}
+		updated.Groups = groups
+		homeDir, err := normalizeHomeDir(updated.HomeDir)
+		if err != nil {
+			return nil, err
+		}
+		if isEnabledAdmin(existing) && !isEnabledAdmin(updated) && enabledAdminCount(snapshot.users) <= 1 {
+			return nil, ErrLastAdmin
+		}
+		if err := validateRoleHomeDir(updated.Role, homeDir); err != nil {
+			return nil, err
+		}
+		updated.HomeDir = homeDir
+		if updated.QuotaBytes < 0 {
+			return nil, errInvalidQuotaBytes
+		}
+		updated.UpdatedAt = time.Now()
+		snapshot.users[id] = updated
+		snapshot.byName[normalizeUsername(updated.Username)] = updated
+
+		if err := saveUserState(snapshot.filePath, snapshot.users); err != nil {
+			if s.commitSnapshotOnPersistenceWarning(snapshot, err) {
+				return cloneUser(updated), err
+			}
+			return nil, err
+		}
+		if s.commitSnapshot(snapshot) {
+			return cloneUser(updated), nil
+		}
+	}
+}
+
 // ChangePassword changes a user's password
 func (s *UserStore) ChangePassword(id, oldPassword, newPassword string) error {
 	if err := validateNewPassword(newPassword); err != nil {
@@ -1254,6 +1399,7 @@ func (s *UserStore) ChangePassword(id, oldPassword, newPassword string) error {
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	var initialPasswordWarning error
 
 	for {
 		snapshot := s.snapshotState()
@@ -1265,27 +1411,51 @@ func (s *UserStore) ChangePassword(id, oldPassword, newPassword string) error {
 		if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(oldPassword)); err != nil {
 			return ErrInvalidCredentials
 		}
+		if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(newPassword)); err == nil {
+			return ErrPasswordUnchanged
+		}
+		initialPasswordRemoval, err := removeInitialPasswordFileForUser(snapshot.filePath, user.Username)
+		if err != nil && !isAuthPersistenceWarning(err) {
+			return fmt.Errorf("failed to remove initial password file: %w", err)
+		}
+		if isAuthPersistenceWarning(err) {
+			initialPasswordWarning = errors.Join(initialPasswordWarning, err)
+		}
 
 		updated := cloneUser(user)
+		now := time.Now()
 		updated.PasswordHash = string(hash)
-		updated.UpdatedAt = time.Now()
+		updated.MustChangePassword = false
+		updated.PasswordChangedAt = &now
+		updated.CredentialVersion++
+		updated.UpdatedAt = now
 		snapshot.users[id] = updated
 		snapshot.byName[normalizeUsername(updated.Username)] = updated
 
 		if err := saveUserState(snapshot.filePath, snapshot.users); err != nil {
 			if s.commitSnapshotOnPersistenceWarning(snapshot, err) {
-				return err
+				return errors.Join(initialPasswordWarning, err)
 			}
-			return err
+			return initialPasswordRollbackError(err, initialPasswordRemoval.restore())
 		}
 		if s.commitSnapshot(snapshot) {
-			return nil
+			return initialPasswordWarning
 		}
 	}
 }
 
 // ResetPassword resets a user's password (admin only)
 func (s *UserStore) ResetPassword(id, newPassword string) error {
+	return s.resetPassword(id, newPassword, true)
+}
+
+// ResetOwnPassword resets an administrator's own password without requiring a
+// subsequent forced password change.
+func (s *UserStore) ResetOwnPassword(id, newPassword string) error {
+	return s.resetPassword(id, newPassword, false)
+}
+
+func (s *UserStore) resetPassword(id, newPassword string, mustChangePassword bool) error {
 	if err := validateNewPassword(newPassword); err != nil {
 		return err
 	}
@@ -1296,6 +1466,7 @@ func (s *UserStore) ResetPassword(id, newPassword string) error {
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	var initialPasswordWarning error
 
 	for {
 		snapshot := s.snapshotState()
@@ -1303,21 +1474,32 @@ func (s *UserStore) ResetPassword(id, newPassword string) error {
 		if !ok {
 			return ErrUserNotFound
 		}
+		initialPasswordRemoval, err := removeInitialPasswordFileForUser(snapshot.filePath, user.Username)
+		if err != nil && !isAuthPersistenceWarning(err) {
+			return fmt.Errorf("failed to remove initial password file: %w", err)
+		}
+		if isAuthPersistenceWarning(err) {
+			initialPasswordWarning = errors.Join(initialPasswordWarning, err)
+		}
 
 		updated := cloneUser(user)
+		now := time.Now()
 		updated.PasswordHash = string(hash)
-		updated.UpdatedAt = time.Now()
+		updated.MustChangePassword = mustChangePassword
+		updated.PasswordChangedAt = &now
+		updated.CredentialVersion++
+		updated.UpdatedAt = now
 		snapshot.users[id] = updated
 		snapshot.byName[normalizeUsername(updated.Username)] = updated
 
 		if err := saveUserState(snapshot.filePath, snapshot.users); err != nil {
 			if s.commitSnapshotOnPersistenceWarning(snapshot, err) {
-				return err
+				return errors.Join(initialPasswordWarning, err)
 			}
-			return err
+			return initialPasswordRollbackError(err, initialPasswordRemoval.restore())
 		}
 		if s.commitSnapshot(snapshot) {
-			return nil
+			return initialPasswordWarning
 		}
 	}
 }
@@ -1446,7 +1628,7 @@ func normalizeNewUsername(username string) (string, error) {
 }
 
 func validateNewPassword(password string) error {
-	if len(password) < minPasswordLength {
+	if strings.TrimSpace(password) == "" || len(password) < minPasswordLength {
 		return ErrPasswordTooShort
 	}
 	if len([]byte(password)) > maxPasswordBytes {

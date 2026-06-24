@@ -186,7 +186,7 @@ DNS 检查需要服务器上有 `getent`；缺少 `getent`，或 `getent ahosts 
 
 检查报告还会提示本机可检测到的续期路径：Nginx/certbot 部署应先执行 `sudo certbot renew --dry-run`，Caddy 部署应检查 `sudo journalctl -u caddy --since '24 hours ago'` 是否没有 ACME 错误。
 
-公网部署时，`mnemonas-doctor --public-domain` 会检查 `auth.access_token_ttl` 和 `auth.refresh_token_ttl`。访问令牌长于 `1h` 或刷新令牌长于 `720h`（30 天）会产生告警；空值、`0` 或负值会失败。
+公网部署时，`mnemonas-doctor --public-domain` 会检查 `auth.access_token_ttl` 和 `auth.refresh_token_ttl`。访问令牌长于 `1h` 或刷新令牌长于 `720h`（30 天）会产生告警；访问令牌短于 `30s`，或任一值为空、为零或为负时，配置校验会失败。
 
 启用分享功能时，`mnemonas-doctor --public-domain` 还会检查 `share.default_expires_in` 和 `share.default_max_access`。
 默认不过期、长于 `720h`（30 天），或默认访问次数为 `0` 会产生告警。

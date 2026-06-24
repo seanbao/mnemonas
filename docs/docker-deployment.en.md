@@ -191,7 +191,7 @@ When the path is under the container `/data` mount, it reports the corresponding
 When the path is outside `/data`, it reports the container path and includes a `docker compose exec` read command.
 
 The script does not print the password.
-Existing deployments may have removed that file after the first login.
+Existing deployments remove that file after the corresponding administrator successfully changes or resets the password.
 A new deployment without that file should be investigated through the container logs.
 
 Verify:

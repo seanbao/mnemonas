@@ -18,6 +18,7 @@ const validUser = {
   home_dir: '/',
   created_at: '2024-01-01',
   updated_at: '2024-01-01',
+  must_change_password: false,
   quota_bytes: 0,
   used_bytes: 0,
 }
@@ -33,7 +34,7 @@ describe('Users API', () => {
       json: () => Promise.resolve({
         success: true,
         data: {
-          users: [{ id: 'u1', username: 'admin', email: '', role: 'admin', disabled: false, home_dir: '/', created_at: '2024-01-01', updated_at: '2024-01-01', quota_bytes: 0, used_bytes: 0 }],
+          users: [{ id: 'u1', username: 'admin', email: '', role: 'admin', disabled: false, home_dir: '/', created_at: '2024-01-01', updated_at: '2024-01-01', quota_bytes: 0, used_bytes: 0, must_change_password: true, password_changed_at: '2024-01-02T03:04:05Z' }],
           total: 1,
         },
       }),
@@ -43,6 +44,10 @@ describe('Users API', () => {
 
     expect(result.users).toHaveLength(1)
     expect(result.total).toBe(1)
+    expect(result.users[0]).toMatchObject({
+      must_change_password: true,
+      password_changed_at: '2024-01-02T03:04:05Z',
+    })
   })
 
   it('forwards abort signals when listing users', async () => {
@@ -132,8 +137,8 @@ describe('Users API', () => {
         success: true,
         data: {
           users: [
-            { id: 'u1', username: 'admin', email: '', role: 'admin', disabled: false, home_dir: '/', created_at: '2024-01-01', updated_at: '2024-01-01', quota_bytes: 0, used_bytes: 0 },
-            { id: 'u2', username: 'guest', email: '', role: 'guest', disabled: false, home_dir: '/guest', created_at: '2024-01-01', updated_at: '2024-01-01', quota_bytes: 0, used_bytes: 0 },
+            { id: 'u1', username: 'admin', email: '', role: 'admin', disabled: false, home_dir: '/', created_at: '2024-01-01', updated_at: '2024-01-01', quota_bytes: 0, used_bytes: 0, must_change_password: false },
+            { id: 'u2', username: 'guest', email: '', role: 'guest', disabled: false, home_dir: '/guest', created_at: '2024-01-01', updated_at: '2024-01-01', quota_bytes: 0, used_bytes: 0, must_change_password: false },
           ],
         },
       }),
@@ -211,7 +216,7 @@ describe('Users API', () => {
       json: () => Promise.resolve({
         success: true,
         data: {
-          user: { id: 'u1', username: 'admin', email: '', role: 'admin', disabled: false, home_dir: '/', created_at: '2024-01-01', updated_at: '2024-01-01', quota_bytes: 0, used_bytes: 0 },
+          user: { id: 'u1', username: 'admin', email: '', role: 'admin', disabled: false, home_dir: '/', created_at: '2024-01-01', updated_at: '2024-01-01', quota_bytes: 0, used_bytes: 0, must_change_password: false },
         },
       }),
     })
@@ -228,7 +233,7 @@ describe('Users API', () => {
       json: () => Promise.resolve({
         success: true,
         data: {
-          user: { id: 'u1', username: 'editor', email: '', role: 'user', groups: ['editors', 'family'], disabled: false, home_dir: '/editor', created_at: '2024-01-01', updated_at: '2024-01-01', quota_bytes: 0, used_bytes: 0 },
+          user: { id: 'u1', username: 'editor', email: '', role: 'user', groups: ['editors', 'family'], disabled: false, home_dir: '/editor', created_at: '2024-01-01', updated_at: '2024-01-01', quota_bytes: 0, used_bytes: 0, must_change_password: false },
         },
       }),
     })
@@ -249,7 +254,7 @@ describe('Users API', () => {
       json: () => Promise.resolve({
         success: true,
         data: {
-          user: { id: 'u1', username: 'editor', email: '', role: 'user', groups: ['editors'], disabled: false, home_dir: '/team/editor', created_at: '2024-01-01', updated_at: '2024-01-01', quota_bytes: 2147483648, used_bytes: 0 },
+          user: { id: 'u1', username: 'editor', email: '', role: 'user', groups: ['editors'], disabled: false, home_dir: '/team/editor', created_at: '2024-01-01', updated_at: '2024-01-01', quota_bytes: 2147483648, used_bytes: 0, must_change_password: false },
         },
       }),
     })
@@ -312,7 +317,7 @@ describe('Users API', () => {
       json: () => Promise.resolve({
         success: true,
         data: {
-          user: { id: 'u1', username: 'admin', email: 'ops@example.com', role: 'admin', disabled: false, home_dir: '/', created_at: '2024-01-01', updated_at: '2024-01-02', quota_bytes: 1024, used_bytes: 512 },
+          user: { id: 'u1', username: 'admin', email: 'ops@example.com', role: 'admin', disabled: false, home_dir: '/', created_at: '2024-01-01', updated_at: '2024-01-02', quota_bytes: 1024, used_bytes: 512, must_change_password: false },
         },
         message: 'user updated successfully',
       }),
@@ -327,7 +332,7 @@ describe('Users API', () => {
     })
     expect(result).toMatchObject({
       success: true,
-      user: { email: 'ops@example.com', quota_bytes: 1024, used_bytes: 512 },
+      user: { email: 'ops@example.com', quota_bytes: 1024, used_bytes: 512, must_change_password: false },
       warning: false,
       message: 'user updated successfully',
     })
@@ -360,7 +365,7 @@ describe('Users API', () => {
       json: () => Promise.resolve({
         success: true,
         data: {
-          users: [{ id: 'u1', username: 'admin', email: '', role: 'superadmin', disabled: false, home_dir: '/', created_at: '2024-01-01', updated_at: '2024-01-01', quota_bytes: 0, used_bytes: 0 }],
+          users: [{ id: 'u1', username: 'admin', email: '', role: 'superadmin', disabled: false, home_dir: '/', created_at: '2024-01-01', updated_at: '2024-01-01', quota_bytes: 0, used_bytes: 0, must_change_password: false }],
         },
       }),
     })
@@ -439,7 +444,7 @@ describe('Users API', () => {
       json: () => Promise.resolve({
         success: true,
         data: {
-          user: { id: 'u1', username: 'admin', email: '', role: 'admin', disabled: false, created_at: '2024-01-01', updated_at: '2024-01-01', quota_bytes: 0, used_bytes: 0 },
+          user: { id: 'u1', username: 'admin', email: '', role: 'admin', disabled: false, created_at: '2024-01-01', updated_at: '2024-01-01', quota_bytes: 0, used_bytes: 0, must_change_password: false },
         },
       }),
     })
@@ -453,7 +458,7 @@ describe('Users API', () => {
       json: () => Promise.resolve({
         success: true,
         data: {
-          user: { id: 'u1', username: 'admin', email: '', role: 'admin', disabled: false, created_at: '2024-01-01', updated_at: '2024-01-01', quota_bytes: 0, used_bytes: 0 },
+          user: { id: 'u1', username: 'admin', email: '', role: 'admin', disabled: false, created_at: '2024-01-01', updated_at: '2024-01-01', quota_bytes: 0, used_bytes: 0, must_change_password: false },
         },
       }),
     })
@@ -464,6 +469,9 @@ describe('Users API', () => {
   it.each([
     ['create response with blank id', () => createUser({ username: 'admin', password: 'password123' }), { ...validUser, id: '' }],
     ['create response with blank username', () => createUser({ username: 'admin', password: 'password123' }), { ...validUser, username: '   ' }],
+    ['create response without password-change requirement', () => createUser({ username: 'admin', password: 'password123' }), { ...validUser, must_change_password: undefined }],
+    ['create response with invalid password-change requirement', () => createUser({ username: 'admin', password: 'password123' }), { ...validUser, must_change_password: 'false' }],
+    ['create response with invalid password-change timestamp', () => createUser({ username: 'admin', password: 'password123' }), { ...validUser, password_changed_at: null }],
     ['create response with fractional quota', () => createUser({ username: 'admin', password: 'password123' }), { ...validUser, quota_bytes: 1.5 }],
     ['create response with unsafe used bytes', () => createUser({ username: 'admin', password: 'password123' }), { ...validUser, used_bytes: 9007199254740992 }],
     ['create response with unsafe home directory', () => createUser({ username: 'admin', password: 'password123' }), { ...validUser, home_dir: '/users/./admin' }],
@@ -653,7 +661,7 @@ describe('Users API', () => {
           success: true,
           message: 'user created with persistence warning',
           data: {
-            user: { id: 'u1', username: 'admin', email: '', role: 'admin', disabled: false, home_dir: '/', created_at: '2024-01-01', updated_at: '2024-01-01', quota_bytes: 0, used_bytes: 0 },
+            user: { id: 'u1', username: 'admin', email: '', role: 'admin', disabled: false, home_dir: '/', created_at: '2024-01-01', updated_at: '2024-01-01', quota_bytes: 0, used_bytes: 0, must_change_password: false },
           },
         }),
       })

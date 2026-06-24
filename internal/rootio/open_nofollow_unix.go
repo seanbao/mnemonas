@@ -17,6 +17,25 @@ func OpenFileNoFollow(root *os.Root, name string, flag int, perm os.FileMode) (*
 	return openNoFollow(root, name, flag, perm)
 }
 
+// OpenRegularFileNoFollow opens a regular file for reading without blocking on
+// FIFOs or other special files.
+func OpenRegularFileNoFollow(root *os.Root, name string) (*os.File, error) {
+	file, err := openNoFollow(root, name, unix.O_RDONLY|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = file.Close()
+		return nil, rootPathError("openat", name, unix.EINVAL)
+	}
+	return file, nil
+}
+
 // OpenDirNoFollow opens name as a directory relative to root without following
 // symlinks in any path component.
 func OpenDirNoFollow(root *os.Root, name string) (*os.File, error) {

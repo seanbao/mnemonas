@@ -2,6 +2,7 @@
 package config
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -36,9 +37,11 @@ var managedDirRootsMu sync.RWMutex
 var managedDirRoots = map[string]*os.Root{}
 
 const (
-	configFileMode         os.FileMode = 0600
-	managedRootEscapeError             = "path escapes from parent"
-	maxManagedTempAttempts             = 32
+	configFileMode              os.FileMode = 0600
+	managedRootEscapeError                  = "path escapes from parent"
+	maxManagedTempAttempts                  = 32
+	maxBackupCredentialFileSize             = 4 * 1024 * 1024
+	minimumAuthAccessTokenTTL               = 30 * time.Second
 )
 
 var durationFieldPaths = [][]string{
@@ -1607,8 +1610,8 @@ func (c *Config) Validate() error {
 	if c.WebDAV.Enabled && webDAVPrefixOverlapsReservedRoute(c.WebDAV.Prefix) {
 		errs = append(errs, errors.New("webdav.prefix overlaps a reserved HTTP route namespace"))
 	}
-	if c.Auth.AccessTokenTTL <= 0 {
-		errs = append(errs, errors.New("auth.access_token_ttl must be positive"))
+	if c.Auth.AccessTokenTTL < minimumAuthAccessTokenTTL {
+		errs = append(errs, fmt.Errorf("auth.access_token_ttl must be at least %s", minimumAuthAccessTokenTTL))
 	}
 	if c.Auth.RefreshTokenTTL <= 0 {
 		errs = append(errs, errors.New("auth.refresh_token_ttl must be positive"))
@@ -2365,6 +2368,9 @@ func validateBackupJob(job BackupJobConfig, storageRoot string, seen map[string]
 		if err := validateBackupCommandArg(arg, fmt.Sprintf("backup job %q extra_args", job.ID)); err != nil {
 			errs = append(errs, err)
 		}
+		if err := validateBackupIdentityOverrideArg(job.Type, arg, fmt.Sprintf("backup job %q extra_args", job.ID)); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	if job.ScheduleInterval < 0 {
 		errs = append(errs, fmt.Errorf("backup job %q schedule_interval cannot be negative", job.ID))
@@ -2425,6 +2431,9 @@ func validateBackupJob(job BackupJobConfig, storageRoot string, seen map[string]
 		if hasControlChar(job.Remote) {
 			errs = append(errs, fmt.Errorf("backup job %q remote contains invalid control characters", job.ID))
 		}
+		if job.ConfigFile == "" {
+			errs = append(errs, fmt.Errorf("backup job %q config_file cannot be empty for rclone", job.ID))
+		}
 	}
 	storageRootForValidation := storageRoot
 	if storageRootForValidation != "" && !filepath.IsAbs(storageRootForValidation) {
@@ -2435,11 +2444,21 @@ func validateBackupJob(job BackupJobConfig, storageRoot string, seen map[string]
 	if job.Type == "local" && filepath.IsAbs(storageRootForValidation) && job.Destination != "" && pathContainsOrEquals(storageRootForValidation, job.Destination) {
 		errs = append(errs, fmt.Errorf("backup job %q destination must not be inside storage.root", job.ID))
 	}
+	if job.Type == "restic" {
+		if err := validateResticRepositoryBoundary(job.Repository, job.ID, source, storageRootForValidation); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	for field, filePath := range map[string]string{
 		"password_file": job.PasswordFile,
 		"config_file":   job.ConfigFile,
 	} {
 		if err := validateBackupCredentialFile(filePath, field, job.ID, source, storageRootForValidation); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if job.Type == "rclone" && job.ConfigFile != "" {
+		if err := validateRcloneConfigEvidenceFile(job.ConfigFile, job.ID, job.Remote); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -2534,6 +2553,28 @@ func validateBackupCommandArg(arg string, label string) error {
 	return nil
 }
 
+func validateBackupIdentityOverrideArg(jobType, arg, label string) error {
+	arg = strings.ToLower(strings.TrimSpace(arg))
+	var forbidden []string
+	switch jobType {
+	case "restic":
+		forbidden = []string{"-r", "--repo", "--repository-file", "--password-file", "--password-command"}
+	case "rclone":
+		if arg != "--fast-list" {
+			return fmt.Errorf("%s currently allows only --fast-list for rclone", label)
+		}
+		return nil
+	default:
+		return nil
+	}
+	for _, flag := range forbidden {
+		if arg == flag || strings.HasPrefix(arg, flag+"=") || flag == "-r" && strings.HasPrefix(arg, "-r") {
+			return fmt.Errorf("%s cannot override backup identity option %q", label, flag)
+		}
+	}
+	return nil
+}
+
 func validateBackupCredentialFile(filePath string, field string, jobID string, source string, storageRoot string) error {
 	if filePath == "" {
 		return nil
@@ -2566,6 +2607,9 @@ func validateBackupCredentialFile(filePath string, field string, jobID string, s
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("backup job %q %s must be a regular file", jobID, field)
 	}
+	if info.Size() > maxBackupCredentialFileSize {
+		return fmt.Errorf("backup job %q %s exceeds the %d-byte limit", jobID, field, maxBackupCredentialFileSize)
+	}
 	return nil
 }
 
@@ -2575,6 +2619,122 @@ func validateBackupCredentialPathNoSymlink(filePath string, field string, jobID 
 			return fmt.Errorf("backup job %q %s path must not contain symlink", jobID, field)
 		}
 		return fmt.Errorf("backup job %q %s cannot be checked: %w", jobID, field, err)
+	}
+	return nil
+}
+
+func validateRcloneConfigEvidenceFile(filePath, jobID, remote string) error {
+	file, err := rootio.OpenRegularFilePathNoFollow(filePath)
+	if err != nil {
+		return fmt.Errorf("backup job %q config_file cannot be read safely: %w", jobID, err)
+	}
+	data, readErr := io.ReadAll(io.LimitReader(file, maxBackupCredentialFileSize+1))
+	closeErr := file.Close()
+	if readErr != nil {
+		return fmt.Errorf("backup job %q config_file cannot be read: %w", jobID, readErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("backup job %q config_file cannot be closed: %w", jobID, closeErr)
+	}
+	if len(data) > maxBackupCredentialFileSize {
+		return fmt.Errorf("backup job %q config_file exceeds the %d-byte limit", jobID, maxBackupCredentialFileSize)
+	}
+	remoteName, err := backupRcloneRemoteName(remote)
+	if err != nil {
+		return fmt.Errorf("backup job %q %w", jobID, err)
+	}
+	content := string(data)
+	if strings.Contains(content, "${") {
+		return fmt.Errorf("backup job %q config_file cannot expand environment-dependent paths", jobID)
+	}
+	sections := make(map[string]map[string]string)
+	currentSection := ""
+	scanner := bufio.NewScanner(strings.NewReader(content))
+	scanner.Buffer(make([]byte, 4096), maxBackupCredentialFileSize)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			currentSection = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "["), "]"))
+			if currentSection == "" {
+				return fmt.Errorf("backup job %q config_file contains an empty remote section", jobID)
+			}
+			if _, exists := sections[currentSection]; !exists {
+				sections[currentSection] = make(map[string]string)
+			}
+			continue
+		}
+		key, value, found := strings.Cut(line, "=")
+		if !found || currentSection == "" || strings.TrimSpace(value) == "" {
+			continue
+		}
+		key = strings.ToLower(strings.TrimSpace(key))
+		value = strings.TrimSpace(value)
+		sections[currentSection][key] = value
+		if key == "env_auth" && strings.EqualFold(value, "true") {
+			return fmt.Errorf("backup job %q config_file cannot enable env_auth", jobID)
+		}
+		if strings.Contains(key, "_file") || strings.Contains(key, "_path") ||
+			strings.Contains(key, "command") || strings.Contains(key, "agent") || key == "ssh" {
+			return fmt.Errorf("backup job %q config_file option %q cannot depend on an external runtime input", jobID, key)
+		}
+		if strings.Contains(key, "token") {
+			return fmt.Errorf("backup job %q token-refreshing config_file requires a managed writable credential store", jobID)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("backup job %q config_file cannot be parsed: %w", jobID, err)
+	}
+	remoteSection, exists := sections[remoteName]
+	if !exists {
+		return fmt.Errorf("backup job %q remote %q is not defined in config_file", jobID, remoteName)
+	}
+	if strings.TrimSpace(remoteSection["type"]) == "" {
+		return fmt.Errorf("backup job %q remote %q has no type", jobID, remoteName)
+	}
+	return nil
+}
+
+func backupRcloneRemoteName(remote string) (string, error) {
+	remote = strings.TrimSpace(remote)
+	separator := strings.IndexByte(remote, ':')
+	if separator <= 0 || strings.HasPrefix(remote, ":") {
+		return "", errors.New("rclone remote must reference a named config_file section")
+	}
+	name := strings.TrimSpace(remote[:separator])
+	if name == "" || strings.ContainsAny(name, `/\\`) || hasControlChar(name) {
+		return "", errors.New("rclone remote name is invalid")
+	}
+	return name, nil
+}
+
+func validateResticRepositoryBoundary(repository, jobID, source, storageRoot string) error {
+	repository = strings.TrimSpace(repository)
+	if repository == "" {
+		return nil
+	}
+	if !filepath.IsAbs(repository) {
+		lower := strings.ToLower(repository)
+		if !strings.HasPrefix(lower, "rest:") {
+			return fmt.Errorf("backup job %q repository must be an absolute local path or an explicit REST server URL", jobID)
+		}
+		endpoint, err := neturl.Parse(repository[len("rest:"):])
+		if err != nil || endpoint.Host == "" || endpoint.Fragment != "" ||
+			!strings.EqualFold(endpoint.Scheme, "http") && !strings.EqualFold(endpoint.Scheme, "https") {
+			return fmt.Errorf("backup job %q REST repository URL is invalid", jobID)
+		}
+		return nil
+	}
+	repository = filepath.Clean(repository)
+	for label, protected := range map[string]string{
+		"backup source": source,
+		"storage.root":  storageRoot,
+	} {
+		if protected != "" && filepath.IsAbs(protected) && pathContainsOrEquals(protected, repository) {
+			return fmt.Errorf("backup job %q repository must not be inside %s", jobID, label)
+		}
 	}
 	return nil
 }
