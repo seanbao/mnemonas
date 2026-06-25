@@ -128,6 +128,7 @@ mkdir -p dist/release-check
 
 随后应完成至少一次归档安装 smoke、Docker release 镜像启动 smoke、公开文档链接检查，以及公网部署环境的 `mnemonas-doctor --public-domain`、外部网络 `public-go-live-smoke.sh`、DNS、防火墙、TLS 和云安全组复核。
 显式 `--artifact-dir` 可以使用以 `-` 开头的相对路径；仓库名会在下载前校验为 GHCR 兼容的小写 `owner/repo`。
+如需保留临时下载产物排查失败，可省略 `--artifact-dir` 并传入 `--keep-artifacts`，脚本会输出保留目录。
 
 ## 已知限制
 

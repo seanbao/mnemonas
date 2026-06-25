@@ -128,6 +128,7 @@ mkdir -p dist/release-check
 
 Then complete at least one archive-install smoke test, one Docker release-image startup smoke test, public documentation link checks, and deployment-environment review covering `mnemonas-doctor --public-domain`, external-network `public-go-live-smoke.sh`, DNS, firewall, TLS, and cloud security groups.
 Explicit `--artifact-dir` values may use dash-prefixed relative paths, and repository names are validated as GHCR-compatible lowercase `owner/repo` values before download.
+To retain temporary downloaded artifacts while investigating a failure, omit `--artifact-dir` and pass `--keep-artifacts`; the script prints the retained directory.
 
 ## Known Limitations
 
