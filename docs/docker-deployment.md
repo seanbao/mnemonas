@@ -200,6 +200,24 @@ curl "http://localhost:${MNEMONAS_HTTP_PORT:-8080}/health"
 docker compose logs -f
 ```
 
+## 管理员密码恢复
+
+现有且已启用的管理员忘记密码时，应停止 `mnemonas` 容器，再运行一次性恢复容器。以下示例恢复 `admin` 账号：
+
+```bash
+docker compose stop mnemonas
+docker compose run --rm --no-deps mnemonas \
+  /app/nasd --config /data/config.toml --recover-admin admin
+cat ~/.mnemonas/.mnemonas/initial-password.txt
+docker compose up -d
+```
+
+上述 `cat` 命令适用于默认宿主机数据目录。若 `.env` 中设置了 `MNEMONAS_DATA_DIR`，应从该目录读取 `.mnemonas/initial-password.txt`。若 `auth.users_file` 已自定义，凭据文件位于该 users 文件同目录；恢复命令会报告容器内路径，位于 `/data` 挂载内时可按相对路径映射到宿主机数据目录。
+
+恢复命令不接受指定密码，也不会把生成的临时密码写入终端。命令只输出管理员用户名、凭据文件路径和非敏感状态信息；随机临时密码以 `0600` 权限写入 `initial-password.txt`。配置必须保持 `auth.enabled = true`，恢复对象必须是现有、已启用且角色为 `admin` 的账号。
+
+恢复会撤销该账号的全部现有会话。使用临时密码登录后必须立即修改密码，成功改密后凭据文件会被删除。服务进程和恢复命令都会独占 `auth-state.lock`；认证状态路径必须由 root 或容器服务账号持有，认证状态目录不能授予 group/other 写权限，祖先目录也不能被其他本地账号替换。容器未停止、目录权限不安全或另一恢复命令仍在运行时，恢复会被拒绝。恢复中断后应保持服务停止，并用相同管理员用户名重新运行命令；待提交、冲突或损坏的恢复标记会阻止正常启动，凭据文件中的恢复标记会续跑未完成的操作。MnemoNAS 不提供匿名或远程 HTTP 管理员恢复端点。
+
 ## 手动构建镜像
 
 直接验证 Dockerfile：

@@ -141,6 +141,25 @@ http://<server-ip>:8080
 
 登录后应立即修改管理员密码；初始密码文件如果仍存在，`mnemonas-doctor` 会提示。
 
+## 管理员密码恢复
+
+现有且已启用的管理员忘记密码时，应在服务器本地停服后运行恢复命令。以下示例恢复 `admin` 账号：
+
+```bash
+sudo systemctl stop mnemonas
+sudo -u mnemonas /usr/local/bin/nasd \
+  --config /etc/mnemonas/config.toml \
+  --recover-admin admin
+sudo cat /srv/mnemonas/.mnemonas/initial-password.txt
+sudo systemctl start mnemonas
+```
+
+恢复命令不接受指定密码，也不会把生成的临时密码写入终端。命令只输出管理员用户名、凭据文件路径和非敏感状态信息；随机临时密码保存在权限为 `0600` 的 `initial-password.txt` 中。若自定义了 `auth.users_file`，凭据文件位于该 users 文件同目录，应以命令输出的路径为准。
+
+配置必须保持 `auth.enabled = true`。恢复对象必须是现有、已启用且角色为 `admin` 的账号。恢复会撤销该账号的全部现有会话；使用临时密码登录后必须立即修改密码，成功改密后凭据文件会被删除。
+
+`nasd` 服务和恢复命令都会独占认证状态目录中的 `auth-state.lock`。认证状态路径必须由 root 或 `mnemonas` 服务账号持有，该目录不能授予 group/other 写权限，祖先目录也不能被其他本地账号替换。未停止服务、目录权限不安全或已有另一个恢复命令运行时，恢复会被拒绝。恢复中断后应保持服务停止，并用相同管理员用户名重新运行命令；待提交、冲突或损坏的恢复标记会阻止正常启动，凭据文件中的恢复标记用于安全续跑。MnemoNAS 不提供匿名或远程 HTTP 管理员恢复端点。
+
 ## 日常管理
 
 ```bash
@@ -312,6 +331,7 @@ sudo mnemonas-doctor
 | 现象 | 检查项 |
 | --- | --- |
 | Web 打不开 | `systemctl status mnemonas`、防火墙、端口是否被占用 |
+| 管理员忘记密码 | 停止 `mnemonas` 后运行 `nasd --config /etc/mnemonas/config.toml --recover-admin <管理员用户名>`，再读取命令报告的 `initial-password.txt` |
 | 登录后写入失败 | `/srv/mnemonas` 和 `/etc/mnemonas` 是否归 `mnemonas` 用户所有 |
 | WebDAV 连不上 | 地址是否为 `/dav`，客户端是否按当前 `[webdav].auth_type` 使用对应凭据 |
 | 上传大文件失败 | 磁盘空间、反向代理上传限制、`journalctl -u mnemonas` |

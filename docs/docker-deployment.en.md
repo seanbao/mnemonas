@@ -201,6 +201,24 @@ curl "http://localhost:${MNEMONAS_HTTP_PORT:-8080}/health"
 docker compose logs -f
 ```
 
+## Administrator Password Recovery
+
+When an existing enabled administrator loses the password, stop the `mnemonas` container and run a one-off recovery container. This example recovers the `admin` account:
+
+```bash
+docker compose stop mnemonas
+docker compose run --rm --no-deps mnemonas \
+  /app/nasd --config /data/config.toml --recover-admin admin
+cat ~/.mnemonas/.mnemonas/initial-password.txt
+docker compose up -d
+```
+
+The `cat` command above applies to the default host data directory. If `.env` sets `MNEMONAS_DATA_DIR`, read `.mnemonas/initial-password.txt` under that directory. If `auth.users_file` is customized, the credential file is stored next to that users file. The recovery command reports the container path; when the path is under the `/data` mount, map its relative path to the host data directory.
+
+The recovery command does not accept a password and does not print the generated temporary password. It prints only the administrator username, credential-file path, and non-sensitive status information. The random temporary password is written to `initial-password.txt` with mode `0600`. The configuration must keep `auth.enabled = true`, and the target must be an existing enabled account with the `admin` role.
+
+Recovery revokes all existing sessions for that account. The temporary password requires an immediate password change after login, and the credential file is removed after the password change succeeds. The service process and recovery command both exclusively acquire `auth-state.lock`. Root or the container service account must own the authentication-state path, the authentication-state directory must not be writable by group or other users, and no ancestor may be replaceable by another local account. Recovery is rejected if the container is still running, the directory permissions are unsafe, or another recovery command owns the lock. After an interruption, keep the service stopped and rerun the command with the same administrator username. A pending, conflicting, or malformed marker blocks normal startup, and the recovery marker resumes the incomplete operation. MnemoNAS does not expose an anonymous or remote HTTP administrator-recovery endpoint.
+
 ## Manual Image Build
 
 To test the Dockerfile directly:

@@ -18,6 +18,7 @@ import {
   Clock,
   Eye,
   EyeOff,
+  ExternalLink,
 } from 'lucide-react'
 import { useAuthStore, useIsAuthenticated } from '@/stores/auth'
 import { getSetupStatus, type SetupStatusResponse } from '@/api/setup'
@@ -45,6 +46,7 @@ function getPostLoginRedirectPath(state: unknown): string {
 }
 
 const loginWarningTitle = '登录成功，但操作记录写入失败'
+const ADMIN_RECOVERY_DOCS_URL = 'https://github.com/seanbao/mnemonas/blob/main/docs/security.md#%E7%AE%A1%E7%90%86%E5%91%98%E7%A6%BB%E7%BA%BF%E6%81%A2%E5%A4%8D'
 
 function getSetupSecurityHints(status: SetupStatusResponse | null): string[] {
   if (!status) {
@@ -221,7 +223,7 @@ export function LoginPage() {
       </div>
 
       {/* Right side - Login form */}
-      <div className="flex w-full items-center justify-center px-5 py-8 sm:p-8 lg:w-[56%]">
+      <main aria-label="登录" className="flex w-full items-center justify-center px-5 py-8 sm:p-8 lg:w-[56%]">
         <div className="w-full max-w-md">
           {/* Mobile logo */}
           <div className="mb-8 text-center lg:hidden">
@@ -302,8 +304,29 @@ export function LoginPage() {
                   />
                 </div>
 
-                <div className="rounded-lg bg-content2/40 px-3 py-2 text-xs text-default-500">
-                  忘记密码？请在服务器上按照文档重置管理员密码。
+                <div
+                  role="note"
+                  aria-label="账号恢复帮助"
+                  className="space-y-1.5 rounded-lg bg-content2/40 px-3 py-2.5 text-xs leading-5 text-default-500"
+                >
+                  <p>
+                    <span className="font-medium text-default-600">普通用户：</span>
+                    忘记密码时，请联系设备管理员。
+                  </p>
+                  <p>
+                    <span className="font-medium text-default-600">设备管理员：</span>
+                    需先在 NAS 主机停止 MnemoNAS 服务，再按说明运行本地离线恢复命令。登录页不提供远程或匿名恢复入口。
+                  </p>
+                  <a
+                    href={ADMIN_RECOVERY_DOCS_URL}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex max-w-full items-center gap-1 font-medium text-accent-primary underline-offset-4 hover:underline focus-visible:rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary/40"
+                  >
+                    <span>查看管理员恢复说明</span>
+                    <ExternalLink aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
+                    <span className="sr-only">（在新标签页打开）</span>
+                  </a>
                 </div>
 
                 <Button
@@ -363,7 +386,7 @@ export function LoginPage() {
             MnemoNAS · 开源自托管文件存储
           </p>
         </div>
-      </div>
+      </main>
     </div>
   )
 }

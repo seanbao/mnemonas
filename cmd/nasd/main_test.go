@@ -305,6 +305,47 @@ func TestLoadConfig_UsesBuiltInDefaultsWhenNoConfigFileExists(t *testing.T) {
 	}
 }
 
+func TestAcquireRuntimeAuthStateLockSkipsDisabledAuthentication(t *testing.T) {
+	cfg := config.Default()
+	cfg.Auth.Enabled = false
+	cfg.Auth.UsersFile = filepath.Join(t.TempDir(), "missing", "users.json")
+
+	lock, err := acquireRuntimeAuthStateLock(cfg)
+	if err != nil {
+		t.Fatalf("acquireRuntimeAuthStateLock() error: %v", err)
+	}
+	if lock != nil {
+		t.Fatal("acquireRuntimeAuthStateLock() returned a lock with authentication disabled")
+	}
+	if _, err := os.Stat(filepath.Dir(cfg.Auth.UsersFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("disabled authentication created state directory, stat error = %v", err)
+	}
+}
+
+func TestAcquireRuntimeAuthStateLockExcludesAnotherWriter(t *testing.T) {
+	cfg := config.Default()
+	cfg.Auth.Enabled = true
+	cfg.Auth.UsersFile = filepath.Join(privateRecoveryAuthStateTestDir(t), "auth", "users.json")
+
+	lock, err := acquireRuntimeAuthStateLock(cfg)
+	if err != nil {
+		t.Fatalf("acquireRuntimeAuthStateLock() error: %v", err)
+	}
+	if lock == nil {
+		t.Fatal("acquireRuntimeAuthStateLock() returned nil lock with authentication enabled")
+	}
+	defer lock.Close()
+
+	contender, err := auth.AcquireStateLock(cfg.Auth.UsersFile)
+	if contender != nil {
+		_ = contender.Close()
+		t.Fatal("second authentication writer acquired the runtime state lock")
+	}
+	if !errors.Is(err, auth.ErrAuthStateLockHeld) {
+		t.Fatalf("second writer error = %v, want ErrAuthStateLockHeld", err)
+	}
+}
+
 func TestLoadConfig_UsesDefaultHomeConfigPath(t *testing.T) {
 	homeDir := t.TempDir()
 	configDir := filepath.Join(homeDir, ".mnemonas")

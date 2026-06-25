@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { BrowserRouter } from 'react-router-dom'
 import { LoginPage } from './Login'
@@ -153,7 +153,43 @@ describe('LoginPage', () => {
 
       expect(await screen.findByText(/使用已配置的管理员或用户账号登录/i)).toBeInTheDocument()
       expect(screen.getByText(/初始密码只会写入服务器端文件/i)).toBeInTheDocument()
-      expect(screen.getByText(/忘记密码？请在服务器上按照文档重置管理员密码/i)).toBeInTheDocument()
+    })
+
+    it('separates ordinary-user help from local administrator recovery', async () => {
+      renderLogin()
+
+      const recoveryHelp = await screen.findByRole('note', { name: '账号恢复帮助' })
+      expect(within(recoveryHelp).getByText(/普通用户：/).closest('p')).toHaveTextContent(
+        '忘记密码时，请联系设备管理员。'
+      )
+      expect(within(recoveryHelp).getByText(/设备管理员：/).closest('p')).toHaveTextContent(
+        '需先在 NAS 主机停止 MnemoNAS 服务，再按说明运行本地离线恢复命令。'
+      )
+      expect(recoveryHelp).toHaveTextContent('登录页不提供远程或匿名恢复入口。')
+
+      const recoveryLink = within(recoveryHelp).getByRole('link', { name: /查看管理员恢复说明/ })
+      expect(recoveryLink).toHaveAttribute(
+        'href',
+        'https://github.com/seanbao/mnemonas/blob/main/docs/security.md#%E7%AE%A1%E7%90%86%E5%91%98%E7%A6%BB%E7%BA%BF%E6%81%A2%E5%A4%8D'
+      )
+      expect(recoveryLink).toHaveAttribute('target', '_blank')
+      expect(recoveryLink).toHaveAttribute('rel', expect.stringContaining('noopener'))
+      expect(recoveryLink).toHaveAttribute('rel', expect.stringContaining('noreferrer'))
+    })
+
+    it('keeps the responsive login panel classes for narrow screens', async () => {
+      renderLogin()
+      await waitForSetupStatusLoad()
+
+      const loginPanel = screen.getByRole('main', { name: '登录' })
+      expect(loginPanel).toHaveClass(
+        'w-full',
+        'px-5',
+        'py-8',
+        'sm:p-8',
+        'lg:w-[56%]'
+      )
+      expect(loginPanel.firstElementChild).toHaveClass('w-full', 'max-w-md')
     })
 
     it('renders the backend version in the brand panel when available', async () => {
@@ -301,6 +337,27 @@ describe('LoginPage', () => {
       await user.type(passwordInput, 'testpass')
       
       expect(passwordInput).toHaveValue('testpass')
+    })
+
+    it('does not copy entered credentials into administrator recovery help or its link', async () => {
+      const user = userEvent.setup()
+      renderLogin()
+
+      const privateUsername = 'private-user-938'
+      const privatePassword = 'private-pass-938'
+      await user.type(screen.getByLabelText(/用户名/i, { selector: 'input' }), privateUsername)
+      await user.type(screen.getByLabelText(/密码/i, { selector: 'input' }), privatePassword)
+
+      const recoveryHelp = screen.getByRole('note', { name: '账号恢复帮助' })
+      const recoveryLink = within(recoveryHelp).getByRole('link', { name: /查看管理员恢复说明/ })
+      expect(recoveryHelp).not.toHaveTextContent(privateUsername)
+      expect(recoveryHelp).not.toHaveTextContent(privatePassword)
+      expect(recoveryLink.getAttribute('href')).not.toContain(privateUsername)
+      expect(recoveryLink.getAttribute('href')).not.toContain(privatePassword)
+      const recoveryURL = new URL(recoveryLink.getAttribute('href') ?? '')
+      expect(recoveryURL.username).toBe('')
+      expect(recoveryURL.password).toBe('')
+      expect(recoveryURL.search).toBe('')
     })
 
     it('toggles password visibility with an accessible control', async () => {

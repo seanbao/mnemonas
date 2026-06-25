@@ -158,6 +158,25 @@ For public-domain access, do not expose `8080` directly. Follow the [Public serv
 
 Change the administrator password after the first login. `mnemonas-doctor` reports if the initial-password file still exists.
 
+## Administrator Password Recovery
+
+When an existing enabled administrator loses the password, stop the service and run recovery locally on the server. This example recovers the `admin` account:
+
+```bash
+sudo systemctl stop mnemonas
+sudo -u mnemonas /usr/local/bin/nasd \
+  --config /etc/mnemonas/config.toml \
+  --recover-admin admin
+sudo cat /srv/mnemonas/.mnemonas/initial-password.txt
+sudo systemctl start mnemonas
+```
+
+The recovery command does not accept a password and does not print the generated temporary password. It prints only the administrator username, credential-file path, and non-sensitive status information. The random temporary password is stored in `initial-password.txt` with mode `0600`. If `auth.users_file` is customized, the credential file is stored next to that users file; use the path reported by the command.
+
+The configuration must keep `auth.enabled = true`. The target must be an existing enabled account with the `admin` role. Recovery revokes all existing sessions for that account. The temporary password requires an immediate password change after login, and the credential file is removed after the password change succeeds.
+
+The `nasd` service and recovery command both exclusively acquire `auth-state.lock` in the authentication-state directory. Root or the `mnemonas` service account must own the authentication-state path, that directory must not be writable by group or other users, and no ancestor may be replaceable by another local account. Recovery is rejected when the service is still running, the directory permissions are unsafe, or another recovery command owns the lock. After an interruption, keep the service stopped and rerun the command with the same administrator username; a pending, conflicting, or malformed marker blocks normal startup, and the recovery marker makes the operation safely resumable. MnemoNAS does not expose an anonymous or remote HTTP administrator-recovery endpoint.
+
 ## Daily Operations
 
 ```bash
@@ -336,6 +355,7 @@ Common checks:
 | Symptom | Check |
 | --- | --- |
 | Web UI does not open | `systemctl status mnemonas`, firewall, port conflict |
+| Administrator password is unavailable | Stop `mnemonas`, run `nasd --config /etc/mnemonas/config.toml --recover-admin <administrator-username>`, then read the reported `initial-password.txt` |
 | Writes fail after login | Ownership of `/srv/mnemonas` and `/etc/mnemonas` |
 | WebDAV cannot connect | URL ends with `/dav`; credentials match the current `[webdav].auth_type` |
 | Large upload fails | Disk space, reverse proxy upload limits, `journalctl -u mnemonas` |

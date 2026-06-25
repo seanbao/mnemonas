@@ -35,6 +35,28 @@ Docker default path:
 cat ~/.mnemonas/.mnemonas/initial-password.txt
 ```
 
+### Offline Administrator Credential Recovery
+
+When an existing enabled administrator loses the password, a local server operator can run the offline recovery command:
+
+```bash
+nasd --config <config-path> --recover-admin <existing-enabled-admin>
+```
+
+The recovery command enforces these security boundaries:
+
+- Stop `nasd` before running the command. The service and recovery command both exclusively acquire `auth-state.lock` next to `auth.users_file`; a running service or another recovery command causes the new command to be rejected. Root or the current service account must own the authentication-state path, the authentication-state directory must not be writable by group or other users, and no ancestor may be replaceable by another local account. Otherwise, the service rejects the lock.
+- The configuration must keep `auth.enabled = true`. The target must already exist in `users.json`, be enabled, and have the `admin` role. The command does not create or enable an account and does not elevate a role.
+- The command does not accept a caller-supplied password. It generates a random temporary password and writes `initial-password.txt` next to `auth.users_file` with mode `0600`.
+- Standard output contains only the administrator username, credential-file path, and non-sensitive status information. It does not contain the temporary password. Treat the credential file as a clear-text password and permit only authorized local operators to read it.
+- Recovery revokes every existing session for that administrator. The temporary password requires an immediate password change after login; until then, the account has the same restricted access as the bootstrap administrator.
+- A recovery marker in the credential file makes an interrupted operation safely resumable. A pending, conflicting, or malformed recovery marker blocks normal `nasd` startup. If the command exits unexpectedly, keep the service stopped and rerun the command with the same administrator username.
+- MnemoNAS does not expose an anonymous or remote HTTP administrator-recovery endpoint. Recovery authority comes from host access to the config, authentication-state files, and service account.
+
+The command depends on Unix file modes and no-follow file operations, and the filesystem containing the authentication-state directory must support same-directory hard links. It supports Unix systems and Linux environments. On Windows, use WSL2; native Windows binaries do not support offline recovery. If the filesystem does not support hard links, the command exits safely before changing users or sessions.
+
+For deployment-specific commands, see the [Linux/systemd deployment guide](linux-systemd-deployment.en.md#administrator-password-recovery) or [Docker deployment guide](docker-deployment.en.md#administrator-password-recovery).
+
 ## WebDAV Authentication
 
 Configure WebDAV in `config.toml`:
@@ -342,7 +364,7 @@ Signing out, changing a user's password, deleting the user, disabling the user, 
 
 The service persists a 60-second restart-time lease in `auth-sessions.json` and attempts renewal with 15 seconds remaining. A hard renewal failure still permits validation while the existing lease remains valid. If renewal continues to fail after the lease expires, the server fails closed with `503 TOKEN_STATE_UNAVAILABLE` so a wall-clock rollback cannot restore an invalid session.
 
-The current version supports only one control-plane process as the sole writer of `auth-sessions.json`. Multiple `nasd` instances must not share the same authentication-state file; doing so cannot preserve the ordering or integrity of the session registry.
+`auth-state.lock` enforces one writer per authentication-state directory. Normal startup and offline administrator recovery must acquire this process-level exclusive lock. Another `nasd` instance or recovery command is rejected and cannot share `users.json` and `auth-sessions.json` with the current writer.
 
 At startup, the service advances logical validation time to the lower bound of a new 60-second lease. Rapid consecutive crash restarts therefore advance logical time by approximately 60 seconds per start and can expire active sessions earlier than wall-clock time.
 
@@ -370,7 +392,7 @@ When sharing is enabled, `share.base_url` should use HTTPS on the default port, 
 
 | Status | Capability |
 | --- | --- |
-| Supported | Web UI login, users/roles/groups, user root-directory isolation, directory access rules, user session revocation, WebDAV user auth/global Basic Auth, path traversal protection, WebDAV read-only mode, share password validation and lockout |
+| Supported | Web UI login, users/roles/groups, user root-directory isolation, directory access rules, user session revocation, offline administrator credential recovery, WebDAV user auth/global Basic Auth, path traversal protection, WebDAV read-only mode, share password validation and lockout |
 | Add through reverse proxy | HTTPS certificate renewal, finer rate limits, public access controls |
 | Planned | OAuth/OIDC integration, finer application-level access policies |
 

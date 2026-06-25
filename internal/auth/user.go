@@ -37,10 +37,11 @@ const (
 const printInitialPasswordEnv = "MNEMONAS_PRINT_INITIAL_PASSWORD"
 
 const (
-	minPasswordLength      = 8
-	maxPasswordBytes       = 72
-	maxUsernameRuneCount   = 255
-	userStoreSchemaVersion = 1
+	minPasswordLength           = 8
+	maxPasswordBytes            = 72
+	maxUsernameRuneCount        = 255
+	maxInitialPasswordFileBytes = 16 << 10
+	userStoreSchemaVersion      = 1
 )
 
 // User represents a system user
@@ -176,6 +177,7 @@ var (
 	ErrPasswordTooLong        = errors.New("password must be at most 72 bytes")
 	ErrPasswordChangeRequired = errors.New("password change required")
 	ErrPasswordUnchanged      = errors.New("new password must differ from current password")
+	ErrInitialPasswordActive  = errors.New("username cannot be changed while an initial password credential is active")
 	ErrLastAdmin              = errors.New("cannot delete last admin user")
 	errInvalidUserHomeDir     = errors.New("invalid home_dir")
 	errInvalidUserGroups      = errors.New("invalid groups")
@@ -1112,20 +1114,9 @@ func initialPasswordRollbackError(commitErr, restoreErr error) error {
 
 func removeInitialPasswordFileForUser(usersFilePath, username string) (*initialPasswordFileRemoval, error) {
 	passwordFile := filepath.Join(filepath.Dir(usersFilePath), "initial-password.txt")
-	content, err := readRegisteredAuthFile(passwordFile, errPasswordFileSymlink)
-	if os.IsNotExist(err) {
-		return &initialPasswordFileRemoval{path: passwordFile}, nil
-	}
+	content, matchedUsername, err := readInitialPasswordFileForUser(passwordFile, username)
 	if err != nil {
 		return nil, err
-	}
-
-	matchedUsername := false
-	for _, line := range strings.Split(string(content), "\n") {
-		if strings.TrimSpace(line) == "Username: "+username {
-			matchedUsername = true
-			break
-		}
 	}
 	if !matchedUsername {
 		return &initialPasswordFileRemoval{path: passwordFile}, nil
@@ -1143,6 +1134,22 @@ func removeInitialPasswordFileForUser(usersFilePath, username string) (*initialP
 		return removal, wrapAuthPersistenceWarning(fmt.Errorf("failed to sync initial password directory: %w", err))
 	}
 	return removal, nil
+}
+
+func readInitialPasswordFileForUser(passwordFile, username string) ([]byte, bool, error) {
+	content, err := readRegisteredAuthFileLimited(passwordFile, errPasswordFileSymlink, maxInitialPasswordFileBytes)
+	if os.IsNotExist(err) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	for _, line := range strings.Split(string(content), "\n") {
+		if strings.TrimSpace(line) == "Username: "+username {
+			return content, true, nil
+		}
+	}
+	return content, false, nil
 }
 
 // Create creates a new user
@@ -1297,6 +1304,16 @@ func (s *UserStore) Update(user *User) error {
 		updated.UpdatedAt = time.Now()
 		oldName := normalizeUsername(existing.Username)
 		newName := normalizeUsername(updated.Username)
+		if existing.Username != updated.Username {
+			passwordFile := filepath.Join(filepath.Dir(snapshot.filePath), "initial-password.txt")
+			_, initialPasswordActive, err := readInitialPasswordFileForUser(passwordFile, existing.Username)
+			if err != nil {
+				return fmt.Errorf("inspect initial password before changing username: %w", err)
+			}
+			if initialPasswordActive {
+				return ErrInitialPasswordActive
+			}
+		}
 		if other, ok := snapshot.byName[newName]; ok && other.ID != user.ID {
 			return ErrUserExists
 		}
@@ -1528,6 +1545,15 @@ func (s *UserStore) Delete(id string) error {
 			}
 		}
 
+		initialPasswordRemoval, err := removeInitialPasswordFileForUser(snapshot.filePath, user.Username)
+		if err != nil {
+			if isAuthPersistenceWarning(err) && initialPasswordRemoval != nil {
+				durabilityErr := fmt.Errorf("initial password removal durability was not confirmed: %v", err)
+				return initialPasswordRollbackError(durabilityErr, initialPasswordRemoval.restore())
+			}
+			return fmt.Errorf("failed to remove initial password file for deleted user: %w", err)
+		}
+
 		delete(snapshot.users, id)
 		delete(snapshot.byName, normalizeUsername(user.Username))
 
@@ -1535,7 +1561,7 @@ func (s *UserStore) Delete(id string) error {
 			if s.commitSnapshotOnPersistenceWarning(snapshot, err) {
 				return err
 			}
-			return err
+			return initialPasswordRollbackError(err, initialPasswordRemoval.restore())
 		}
 		if s.commitSnapshot(snapshot) {
 			return nil

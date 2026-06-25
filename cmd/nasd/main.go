@@ -531,12 +531,47 @@ func connectStartupDataplane(addr string, timeout time.Duration) (*dataplane.Cli
 	return client, nil
 }
 
+func acquireRuntimeAuthStateLock(cfg *config.Config) (*auth.StateLock, error) {
+	if cfg == nil || !cfg.Auth.Enabled {
+		return nil, nil
+	}
+	return auth.AcquireStateLock(cfg.Auth.UsersFile)
+}
+
+func validateRuntimeAdminRecoveryState(cfg *config.Config) error {
+	if cfg == nil || !cfg.Auth.Enabled {
+		return nil
+	}
+	return auth.ValidateAdminRecoveryStartupState(cfg.Auth.UsersFile)
+}
+
 func main() {
 	// Command line arguments
 	configPath := flag.String("config", "", "config file path")
 	checkConfig := flag.Bool("check-config", false, "validate config and exit")
 	showVersion := flag.Bool("version", false, "show version info")
+	recoverAdmin := flag.String("recover-admin", "", "recover an existing administrator while the service is stopped")
 	flag.Parse()
+	recoverAdminRequested := false
+	flag.Visit(func(parsed *flag.Flag) {
+		if parsed.Name == "recover-admin" {
+			recoverAdminRequested = true
+		}
+	})
+
+	if recoverAdminRequested {
+		if *checkConfig || *showVersion {
+			log.Fatal().Msg("--recover-admin cannot be combined with --check-config or --version")
+		}
+		if flag.NArg() != 0 {
+			log.Fatal().Msg("--recover-admin does not accept positional arguments")
+		}
+		initLogger()
+		if err := recoverAdminOnly(*configPath, *recoverAdmin, os.Stdout); err != nil {
+			log.Fatal().Err(err).Msg("failed to recover administrator")
+		}
+		return
+	}
 
 	if *showVersion {
 		fmt.Printf("MnemoNAS %s\n", version)
@@ -573,6 +608,21 @@ func main() {
 	// Ensure directories exist
 	if err := cfg.EnsureDirs(); err != nil {
 		log.Fatal().Err(err).Msg("failed to create directories")
+	}
+
+	authStateLock, err := acquireRuntimeAuthStateLock(cfg)
+	if err != nil {
+		log.Fatal().Err(err).Msg("failed to acquire authentication state lock")
+	}
+	if authStateLock != nil {
+		defer func() {
+			if err := authStateLock.Close(); err != nil {
+				log.Warn().Err(err).Msg("failed to release authentication state lock")
+			}
+		}()
+	}
+	if err := validateRuntimeAdminRecoveryState(cfg); err != nil {
+		log.Fatal().Err(err).Msg("offline administrator recovery must be completed before startup")
 	}
 
 	// Load or create secrets (for JWT, etc.)
