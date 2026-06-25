@@ -303,11 +303,45 @@ run_invalid_repository_fails_before_download() {
 	assert_file_not_exists "$gh_state/tag"
 }
 
+run_keep_artifacts_reports_temp_dir_after_verifier_failure() {
+	local case_dir="$TMP_ROOT/keep-artifacts-failure"
+	local release_dir="$case_dir/release"
+	local fake_bin="$case_dir/bin"
+	local gh_state="$case_dir/gh-state"
+	local out="$case_dir/out.log"
+	local retained_dir
+	local status
+
+	mkdir -p "$release_dir"
+	printf 'unexpected\n' >"$release_dir/unexpected.txt"
+	make_fake_gh "$fake_bin" "$gh_state"
+
+	set +e
+	PATH="$fake_bin:$PATH" \
+		FAKE_GH_RELEASE_DIR="$release_dir" \
+		FAKE_GH_STATE="$gh_state" \
+		bash "$REPO_ROOT/scripts/verify-published-release.sh" \
+			--version v1.2.3 \
+			--repository seanbao/mnemonas \
+			--keep-artifacts >"$out" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "published release verifier accepted invalid downloaded artifacts"
+	assert_file_contains "$out" "missing checksums file"
+	assert_file_contains "$out" "retained artifacts at "
+	retained_dir="$(awk '/retained artifacts at / {print $NF}' "$out" | tail -n 1)"
+	[[ -n "$retained_dir" && -d "$retained_dir" ]] || fail "retained artifact directory was not kept: $retained_dir"
+	[[ -f "$retained_dir/unexpected.txt" ]] || fail "retained artifact directory does not contain downloaded files"
+	rm -rf -- "$(dirname "$retained_dir")"
+}
+
 run_downloads_and_verifies_published_release
 run_skip_image_check_avoids_docker
 run_dash_prefixed_artifact_dir_downloads_and_verifies
 run_non_empty_artifact_dir_fails_before_download
 run_invalid_version_fails_before_download
 run_invalid_repository_fails_before_download
+run_keep_artifacts_reports_temp_dir_after_verifier_failure
 
 printf '[published-release-verify-test] all checks passed\n'

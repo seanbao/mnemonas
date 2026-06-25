@@ -11,11 +11,19 @@ DOWNLOAD_DIR=""
 CHECK_IMAGE=1
 KEEP_ARTIFACTS=0
 TMP_ROOT=""
+RETAINED_ARTIFACTS_REPORTED=0
 
 cleanup() {
+	local status=$?
+
+	if [[ "$KEEP_ARTIFACTS" == "1" ]]; then
+		report_retained_artifacts
+		return "$status"
+	fi
 	if [[ -n "$TMP_ROOT" && -d "$TMP_ROOT" && "$KEEP_ARTIFACTS" == "0" ]]; then
 		rm -rf -- "$TMP_ROOT"
 	fi
+	return "$status"
 }
 
 trap cleanup EXIT
@@ -23,6 +31,16 @@ trap cleanup EXIT
 fail() {
 	printf '[published-release-verify] ERROR: %s\n' "$*" >&2
 	exit 1
+}
+
+report_retained_artifacts() {
+	if [[ "$RETAINED_ARTIFACTS_REPORTED" == "1" ]]; then
+		return
+	fi
+	if [[ -n "$TMP_ROOT" && -n "$DOWNLOAD_DIR" && -d "$DOWNLOAD_DIR" ]]; then
+		printf '[published-release-verify] retained artifacts at %s\n' "$DOWNLOAD_DIR"
+		RETAINED_ARTIFACTS_REPORTED=1
+	fi
 }
 
 # shellcheck source=scripts/release-version.sh
@@ -200,6 +218,6 @@ fi
 bash "$SCRIPT_DIR/verify-release-artifacts.sh" "${verifier_args[@]}" -- "$DOWNLOAD_DIR"
 
 printf '[published-release-verify] verified published release %s from %s\n' "$VERSION" "$REPOSITORY"
-if [[ "$KEEP_ARTIFACTS" == "1" && -n "$TMP_ROOT" ]]; then
-	printf '[published-release-verify] retained artifacts at %s\n' "$DOWNLOAD_DIR"
+if [[ "$KEEP_ARTIFACTS" == "1" ]]; then
+	report_retained_artifacts
 fi
