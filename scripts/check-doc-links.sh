@@ -283,6 +283,7 @@ const hardeningProgressReleaseReadinessContracts = [
       '真实公网部署、正式 tag、Release workflow 结果和发布后产物核验仍缺少环境证据',
       '已确认推迟的边缘功能不阻塞当前硬化收尾',
       '以 `-` 开头的显式 artifact 目录',
+      '--keep-published-artifacts',
     ],
   },
   {
@@ -300,6 +301,7 @@ const hardeningProgressReleaseReadinessContracts = [
       'real public deployment, the official tag, Release workflow results, and post-publication artifact verification still lack environment evidence',
       'Confirmed deferred edge features do not block the current hardening closeout',
       'Dash-prefixed explicit artifact directories',
+      '--keep-published-artifacts',
     ],
   },
 ]
@@ -317,6 +319,7 @@ const dockerDeploymentReleaseVerificationContracts = [
       'MNEMONAS_RELEASE_IMAGE_CHECK_SLEEP_SECONDS',
       '--skip-image-check',
       '--keep-artifacts',
+      '--keep-published-artifacts',
       './scripts/release-go-live-check.sh',
       '--backup-api-url',
       '--skip-backup-restore-drill',
@@ -338,6 +341,7 @@ const dockerDeploymentReleaseVerificationContracts = [
       'MNEMONAS_RELEASE_IMAGE_CHECK_SLEEP_SECONDS',
       '--skip-image-check',
       '--keep-artifacts',
+      '--keep-published-artifacts',
       './scripts/release-go-live-check.sh',
       '--backup-api-url',
       '--skip-backup-restore-drill',

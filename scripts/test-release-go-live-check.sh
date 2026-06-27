@@ -139,6 +139,31 @@ run_skip_backup_requires_explicit_flag() {
 	assert_file_contains "$out" "skipped backup restore-drill smoke by request"
 }
 
+run_keep_published_artifacts_passes_through_to_verifier() {
+	local case_dir="$TMP_ROOT/keep-published-artifacts"
+	local helper_dir="$case_dir/helpers"
+	local log="$case_dir/invocations.log"
+
+	mkdir -p "$case_dir"
+	make_fake_helpers "$case_dir"
+
+	RELEASE_GO_LIVE_LOG="$log" \
+		MNEMONAS_RELEASE_READINESS_BIN="$helper_dir/release-readiness" \
+		MNEMONAS_VERIFY_PUBLISHED_RELEASE_BIN="$helper_dir/verify-published" \
+		MNEMONAS_DOCTOR_BIN="$helper_dir/doctor" \
+		MNEMONAS_PUBLIC_GO_LIVE_SMOKE_BIN="$helper_dir/public-smoke" \
+		MNEMONAS_BACKUP_RESTORE_DRILL_SMOKE_BIN="$helper_dir/backup-smoke" \
+		bash "$REPO_ROOT/scripts/release-go-live-check.sh" \
+			--version v1.2.3 \
+			--domain nas.example.com \
+			--keep-published-artifacts \
+			--skip-backup-restore-drill >"$case_dir/out.log"
+
+	assert_file_contains "$log" "verify-published --version v1.2.3 --repository seanbao/mnemonas --keep-artifacts"
+	assert_file_contains "$log" "doctor --public-domain nas.example.com"
+	assert_file_not_contains "$log" "backup-smoke"
+}
+
 run_missing_backup_args_fails_before_helpers() {
 	local case_dir="$TMP_ROOT/missing-backup"
 	local helper_dir="$case_dir/helpers"
@@ -310,6 +335,25 @@ run_invalid_release_inputs_fail_before_helpers() {
 	[[ "$status" -ne 0 ]] || fail "release go-live check accepted a repeated trailing-dot public domain"
 	assert_file_contains "$case_dir/repeated-trailing-dot-domain.err" "public domain must be a valid ASCII hostname"
 	[[ ! -f "$case_dir/repeated-trailing-dot-domain.log" ]] || fail "helpers ran before repeated trailing-dot public domain was validated"
+
+	set +e
+	RELEASE_GO_LIVE_LOG="$case_dir/keep-with-artifact-dir.log" \
+		MNEMONAS_RELEASE_READINESS_BIN="$helper_dir/release-readiness" \
+		MNEMONAS_VERIFY_PUBLISHED_RELEASE_BIN="$helper_dir/verify-published" \
+		MNEMONAS_DOCTOR_BIN="$helper_dir/doctor" \
+		MNEMONAS_PUBLIC_GO_LIVE_SMOKE_BIN="$helper_dir/public-smoke" \
+		bash "$REPO_ROOT/scripts/release-go-live-check.sh" \
+			--version v1.2.3 \
+			--domain nas.example.com \
+			--artifact-dir "$case_dir/artifacts" \
+			--keep-published-artifacts \
+			--skip-backup-restore-drill >"$case_dir/keep-with-artifact-dir.out" 2>"$case_dir/keep-with-artifact-dir.err"
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "release go-live check accepted keep-published-artifacts with artifact-dir"
+	assert_file_contains "$case_dir/keep-with-artifact-dir.err" "--keep-published-artifacts cannot be combined with --artifact-dir"
+	[[ ! -f "$case_dir/keep-with-artifact-dir.log" ]] || fail "helpers ran before published artifact retention arguments were validated"
 }
 
 run_helper_failure_stops_later_steps() {
@@ -351,6 +395,7 @@ mkdir -p "$TMP_ROOT"
 
 run_full_check_orchestrates_all_steps
 run_skip_backup_requires_explicit_flag
+run_keep_published_artifacts_passes_through_to_verifier
 run_missing_backup_args_fails_before_helpers
 run_invalid_backup_inputs_fail_before_helpers
 run_invalid_release_inputs_fail_before_helpers

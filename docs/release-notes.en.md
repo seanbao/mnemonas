@@ -46,7 +46,7 @@ This release candidate focuses on improving MnemoNAS stability, public-access sa
 - Go test entry points now keep a 20-minute package timeout so heavy race packages are not interrupted by Go's default 10-minute timeout during full branch validation.
 - Documentation checks reject copyable raw `?path=/...` path queries in API examples, requiring restore and favorite-check `path` query examples to use `%2F...` encoding.
 - Documentation checks require the bilingual release-notes pre-release validation list to keep its Playwright E2E counts, frontend-unit-test counts, Docker image, and Docker smoke port aligned with the latest full-validation evidence in the hardening review summary, preventing stale local evidence after validation evidence refreshes.
-- Documentation checks require the bilingual Docker deployment guide to retain the post-publish `verify-published-release.sh` command, version and repository arguments, optional artifact directory, image-manifest retry settings, `--skip-image-check`, empty-directory requirements, dash-prefixed artifact directories, and pre-download repository validation guidance, preventing post-publish verification guidance from regressing.
+- Documentation checks require the bilingual Docker deployment guide to retain the post-publish `verify-published-release.sh` command, version and repository arguments, optional artifact directory, image-manifest retry settings, `--skip-image-check`, `--keep-artifacts`, `--keep-published-artifacts`, empty-directory requirements, dash-prefixed artifact directories, and pre-download repository validation guidance, preventing post-publish verification guidance from regressing.
 - Documentation checks require the security hardening guide's public-deployment checklist to retain the initial-password, WebDAV authentication, doctor, public firewall, anonymous WebDAV, direct-backend, and dataplane exposure review items.
 - Documentation checks require the backup guide to retain restore-drill commands, 30-day drill reminders, failure categories, retained drill artifacts, restore-summary export, and the guidance that backups are not proven until restored, preventing recovery-usability documentation from regressing.
 - Storage and configuration documentation clarify that the FastCDC API is a Rust dataplane capability, while current version history still uses whole-object CAS snapshots and does not reference-count CDC chunks; documentation checks reject overclaims that imply block-level version deduplication is enabled.
@@ -115,6 +115,7 @@ After the release tag is published, prefer the unified go-live entry point:
   --cookie-file cookies.txt
 ```
 
+To make the unified go-live check retain temporary downloaded artifacts for failure investigation, omit `--artifact-dir` and pass `--keep-published-artifacts`; explicit `--artifact-dir` values are maintainer-selected and already retained, so they cannot be combined with this option.
 When the backup restore drill cannot be run for the release, pass `--skip-backup-restore-drill` explicitly and record that the release does not have complete restore evidence.
 To verify only the GitHub Release artifacts, run:
 

@@ -293,6 +293,7 @@ mkdir -p dist/release-check
   --backup-job-id external-disk
 ```
 
+如果统一上线核验入口需要在使用临时下载目录时保留已发布产物用于排障，应省略 `--artifact-dir` 并传入 `--keep-published-artifacts`；显式 `--artifact-dir` 目录本身会保留，因此该参数不能和 `--artifact-dir` 混用。
 如不能执行备份恢复演练，必须显式传入 `--skip-backup-restore-drill`，该结果不等同于完整恢复证据。
 
 下列示例默认使用源码构建的本地镜像，也可通过 `MNEMONAS_IMAGE` 切换到已验证的 release 镜像。

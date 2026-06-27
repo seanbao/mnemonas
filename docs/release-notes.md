@@ -46,7 +46,7 @@
 - Go 测试入口现在保留 20 分钟包级超时，避免重负载 race 包在完整分支验证中被 Go 默认 10 分钟超时中断。
 - 文档检查会拒绝 API 示例中可复制的 `?path=/...` 裸路径查询，要求恢复和收藏检查等 `path` 查询示例使用 `%2F...` 编码形式。
 - 文档检查会要求双语 release notes 发布前验证清单中的 Playwright E2E、前端单测数量、Docker image 和 Docker smoke 端口与 hardening 审查摘要中的最新完整验证证据一致，避免验证证据刷新后发布说明局部数据滞后。
-- 文档检查会要求双语 Docker 部署指南保留发布后 `verify-published-release.sh` 命令、版本和仓库参数、可选 artifact 目录、镜像 manifest 重试参数、`--skip-image-check`、空目录要求、dash-prefixed artifact 目录和仓库名下载前校验说明，避免发布后核验说明退化。
+- 文档检查会要求双语 Docker 部署指南保留发布后 `verify-published-release.sh` 命令、版本和仓库参数、可选 artifact 目录、镜像 manifest 重试参数、`--skip-image-check`、`--keep-artifacts`、`--keep-published-artifacts`、空目录要求、dash-prefixed artifact 目录和仓库名下载前校验说明，避免发布后核验说明退化。
 - 文档检查会要求安全加固指南的公网部署清单保留初始密码、WebDAV 认证、doctor、公网防火墙、匿名 WebDAV、直连后端和 dataplane 暴露等关键复核项。
 - 文档检查会要求备份指南保留恢复演练命令、30 天演练提醒、失败分类、保留演练产物、恢复摘要导出和“未恢复过不算验证”的说明，避免恢复可用性文档退化。
 - 存储和配置文档明确 FastCDC API 属于 Rust 数据面能力，当前版本历史仍使用整对象 CAS 快照，不按 CDC 分块引用计数；文档检查会拒绝回退为块级版本去重的过度承诺。
@@ -115,6 +115,7 @@ Release workflow 预期生成以下产物：
   --cookie-file cookies.txt
 ```
 
+如需让统一上线核验入口保留临时下载产物排查失败，应省略 `--artifact-dir` 并传入 `--keep-published-artifacts`；显式 `--artifact-dir` 已由维护者指定并会保留，因此不能与该参数混用。
 如本次发布无法执行备份恢复演练，必须显式传入 `--skip-backup-restore-drill`，并在发布记录中标记为未形成完整恢复证据。
 只核验 GitHub Release 产物时，也可单独执行：
 
