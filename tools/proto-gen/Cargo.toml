@@ -6,4 +6,4 @@ rust-version = "1.92"
 publish = false
 
 [dependencies]
-tonic-build = "0.13"
+tonic-build = "0.14"
