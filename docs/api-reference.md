@@ -217,9 +217,12 @@ Cookie 会话登录会设置当前 HTTPS 或 HTTP 模式对应的 access 与 ref
 ```json
 {
   "old_password": "current_password",
-  "new_password": "new_secure_password"
+  "new_password": "new_secure_password",
+  "expected_user_id": "current_session_user_id"
 }
 ```
+
+`expected_user_id` 为必填字段，必须与认证上下文中的当前用户 ID 一致。两者不一致时，端点返回 `409 AUTH_SCOPE_CHANGED`，且不会修改任何账户的密码。
 
 修改密码响应示例：
 
@@ -230,6 +233,37 @@ Cookie 会话登录会设置当前 HTTPS 或 HTTP 模式对应的 access 与 ref
   "message": "password changed successfully"
 }
 ```
+
+修改成功后，服务端会递增账户凭据版本、撤销该账户的全部活动会话，并清除当前请求模式下的 access、refresh 和 download Cookie。响应不会签发新令牌，客户端必须使用新密码重新登录。
+
+Web 客户端在请求已经发出，且单页应用仍能观察到传输中断、应用内页面离开，或未携带已知 MnemoNAS 错误码的网关与代理失败响应时，会将修改结果视为无法确认，清除当前浏览器的认证状态，并在登录页提示先尝试使用新密码；新密码无法登录时，再尝试原密码。浏览器硬刷新、关闭标签页或进程终止可能先于客户端中止处理，不能保证立即清理状态或显示提示；此类中断同样应按修改结果无法确认处理。
+
+密码已经修改，但会话撤销或认证状态持久化未完全确认时，端点仍返回 HTTP 200，同时设置 `Warning: 199 MnemoNAS "auth state persistence incomplete"`，并返回：
+
+```json
+{
+  "success": true,
+  "data": {
+    "warning": true
+  },
+  "message": "password changed with persistence warning"
+}
+```
+
+修改密码错误：
+
+| HTTP 状态 | 错误码 | 含义 |
+|---|---|---|
+| `400` | `MISSING_PASSWORD` | 当前密码或新密码为空 |
+| `400` | `MISSING_EXPECTED_USER_ID` | 请求未提供 `expected_user_id` |
+| `401` | `INVALID_PASSWORD` | 当前密码不正确 |
+| `400` | `PASSWORD_TOO_SHORT` | 新密码少于 8 个 UTF-8 字节或只包含空白字符 |
+| `400` | `PASSWORD_TOO_LONG` | 新密码超过 72 个 UTF-8 字节 |
+| `400` | `PASSWORD_UNCHANGED` | 新密码与当前密码相同 |
+| `409` | `AUTH_SCOPE_CHANGED` | `expected_user_id` 与认证上下文中的当前用户不一致 |
+| `500` | `PASSWORD_ERROR` | 密码状态未能更新 |
+
+认证中间件仍可能返回 `MISSING_AUTH_HEADER`、`INVALID_AUTH_HEADER`、`INVALID_TOKEN`、`TOKEN_EXPIRED`、`TOKEN_REVOKED`、`USER_NOT_FOUND`、`USER_DISABLED` 或 `TOKEN_STATE_UNAVAILABLE`。除成功或持久化警告响应外，端点不会主动清除有效会话。
 
 自动创建的初始管理员返回 `must_change_password=true`。成功登录和刷新会话都会保留服务器端 `initial-password.txt`，避免在完成改密前丢失唯一的持久化初始凭据。标记为 `true` 时，认证会话只能访问当前用户信息、修改密码和退出端点；其他受保护端点返回 `403 PASSWORD_CHANGE_REQUIRED`。当前用户通过 `POST /api/v1/auth/password` 设置不同于当前密码的新密码后，标记变为 `false`，初始密码文件会删除，旧访问令牌和刷新令牌因凭据版本变化而失效；提交相同密码返回 `400 PASSWORD_UNCHANGED`。管理员重置其他用户密码时，目标用户重新进入需要修改密码状态；管理员重置自己的密码按自行修改处理。
 

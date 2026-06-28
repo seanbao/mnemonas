@@ -1135,8 +1135,9 @@ func (h *Handler) HandleMe(w http.ResponseWriter, r *http.Request) {
 
 // ChangePasswordRequest is the change password request body
 type ChangePasswordRequest struct {
-	OldPassword string `json:"old_password"`
-	NewPassword string `json:"new_password"`
+	ExpectedUserID string `json:"expected_user_id"`
+	OldPassword    string `json:"old_password"`
+	NewPassword    string `json:"new_password"`
 }
 
 // HandleChangePassword handles POST /api/v1/auth/password
@@ -1162,6 +1163,14 @@ func (h *Handler) HandleChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.ExpectedUserID == "" {
+		writeError(w, http.StatusBadRequest, "expected user id required", "MISSING_EXPECTED_USER_ID")
+		return
+	}
+	if req.ExpectedUserID != user.ID {
+		writeError(w, http.StatusConflict, "authentication scope changed", "AUTH_SCOPE_CHANGED")
+		return
+	}
 	if req.OldPassword == "" || req.NewPassword == "" {
 		writeError(w, http.StatusBadRequest, "old and new password required", "MISSING_PASSWORD")
 		return

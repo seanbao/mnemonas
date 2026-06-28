@@ -695,6 +695,22 @@ run_playwright_backend_uses_long_access_ttl_test() {
 	assert_file_contains "$backend_script" 'refresh_token_ttl = "168h"'
 }
 
+run_playwright_backend_uses_private_auth_state_directories_test() {
+	local backend_script="$REPO_ROOT/web/scripts/start-e2e-backend.sh"
+
+	assert_file_contains "$backend_script" 'umask 077'
+	# shellcheck disable=SC2016 # Match the literal directory hardening command.
+	assert_file_contains "$backend_script" 'chmod go-w "$E2E_ROOT" "$BACKEND_ROOT"'
+}
+
+run_playwright_backend_binds_password_change_to_authenticated_user_test() {
+	local backend_script="$REPO_ROOT/web/scripts/start-e2e-backend.sh"
+
+	assert_file_contains "$backend_script" 'user_id=$(extract_json_field "$login_response" '\''id'\'')'
+	assert_file_contains "$backend_script" 'printf '\''{"expected_user_id":%s,"old_password":%s,"new_password":%s}'\'''
+	assert_file_contains "$backend_script" 'json_password_change_payload "$user_id" "$password" "$changed_password"'
+}
+
 run_playwright_defaults_use_low_collision_ports_test() {
 	assert_file_contains "$REPO_ROOT/web/playwright.config.ts" "http://127.0.0.1:18180"
 	assert_file_contains "$REPO_ROOT/web/playwright.config.ts" "http://127.0.0.1:14173"
@@ -1498,6 +1514,8 @@ run_refuse_newline_playwright_backend_root_test
 run_refuse_control_character_playwright_backend_root_test
 run_playwright_defaults_use_low_collision_ports_test
 run_playwright_backend_uses_long_access_ttl_test
+run_playwright_backend_uses_private_auth_state_directories_test
+run_playwright_backend_binds_password_change_to_authenticated_user_test
 run_testing_strategy_uses_json_safe_login_payload_test
 run_testing_strategy_uses_portable_toml_snippet_test
 run_configuration_complete_example_keeps_optional_arrays_commented_test

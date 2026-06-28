@@ -4,6 +4,7 @@ import {
   AUTH_CROSS_TAB_CHANNEL_NAME,
   AUTH_CROSS_TAB_SYNC_KEY,
   AUTH_SESSION_UPDATED_EVENT,
+  PASSWORD_CHANGE_UNCONFIRMED_MESSAGE,
   AuthError,
   authFetch,
   changePassword,
@@ -14,6 +15,7 @@ import {
   invalidateAuthSessionRequests,
   login,
   logout,
+  recordAuthCrossTabScopeTransition,
   refreshAuthSession,
   storeTokens,
 } from './auth'
@@ -49,6 +51,41 @@ function blockLocalStorageAccess() {
 
   return {
     error,
+    restore: () => {
+      if (descriptor) {
+        Object.defineProperty(window, 'localStorage', descriptor)
+        return
+      }
+      Reflect.deleteProperty(window, 'localStorage')
+    },
+  }
+}
+
+function blockStoredUserWrites() {
+  const storage = window.localStorage
+  const descriptor = Object.getOwnPropertyDescriptor(window, 'localStorage')
+  const proxy = {
+    get length() {
+      return storage.length
+    },
+    clear: () => storage.clear(),
+    getItem: (key: string) => storage.getItem(key),
+    key: (index: number) => storage.key(index),
+    removeItem: (key: string) => storage.removeItem(key),
+    setItem: (key: string, value: string) => {
+      if (key === 'mnemonas_user') {
+        throw new DOMException('stored user is read only', 'QuotaExceededError')
+      }
+      storage.setItem(key, value)
+    },
+  } satisfies Storage
+  Object.defineProperty(window, 'localStorage', {
+    configurable: true,
+    get: () => proxy,
+  })
+
+  return {
+    storage,
     restore: () => {
       if (descriptor) {
         Object.defineProperty(window, 'localStorage', descriptor)
@@ -125,6 +162,17 @@ function createDeferred<T>() {
     reject = rejectPromise
   })
   return { promise, resolve, reject }
+}
+
+function setPasswordChangeTestUser(id = 'u1'): void {
+  localStorage.setItem('mnemonas_session', '1')
+  localStorage.setItem('mnemonas_user', JSON.stringify({
+    id,
+    username: id,
+    role: 'user',
+    homeDir: `/${id}`,
+    mustChangePassword: false,
+  }))
 }
 
 describe('auth API', () => {
@@ -356,7 +404,7 @@ describe('auth API', () => {
     await expect(changePassword({
       old_password: 'initial-password',
       new_password: 'replacement-password',
-    })).resolves.toEqual({
+    }, { expectedUserId: 'u1' })).resolves.toEqual({
       warning: false,
       message: 'password changed successfully',
     })
@@ -368,6 +416,7 @@ describe('auth API', () => {
       body: JSON.stringify({
         old_password: 'initial-password',
         new_password: 'replacement-password',
+        expected_user_id: 'u1',
       }),
     })
     expect(localStorage.getItem('mnemonas_session')).toBeNull()
@@ -380,6 +429,7 @@ describe('auth API', () => {
       version: 1,
       type: 'cleared',
       reason: 'password_changed',
+      user_id: 'u1',
     })
 
     window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
@@ -387,6 +437,9 @@ describe('auth API', () => {
 
   it('preserves password-change warning metadata and forwards abort signals', async () => {
     const signal = new AbortController().signal
+    const authCleared = vi.fn()
+    window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
+    setPasswordChangeTestUser()
     fetchMock.mockResolvedValueOnce({
       ok: true,
       status: 200,
@@ -401,16 +454,20 @@ describe('auth API', () => {
     await expect(changePassword({
       old_password: 'initial-password',
       new_password: 'replacement-password',
-    }, { signal })).resolves.toEqual({
+    }, { expectedUserId: 'u1', signal })).resolves.toEqual({
       warning: true,
       message: 'password changed with persistence warning',
     })
 
     expect(fetchMock).toHaveBeenCalledWith('/api/v1/auth/password', expect.objectContaining({ signal }))
+    expect(authCleared).toHaveBeenCalledWith(expect.objectContaining({
+      detail: { reason: 'password_change_warning' },
+    }))
+    window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
   })
 
   it('surfaces structured password-change failures without clearing the session', async () => {
-    localStorage.setItem('mnemonas_session', '1')
+    setPasswordChangeTestUser()
     fetchMock.mockResolvedValueOnce({
       ok: false,
       status: 401,
@@ -426,7 +483,7 @@ describe('auth API', () => {
     await expect(changePassword({
       old_password: 'incorrect-password',
       new_password: 'replacement-password',
-    })).rejects.toMatchObject({
+    }, { expectedUserId: 'u1' })).rejects.toMatchObject({
       message: 'current password is incorrect',
       status: 401,
       code: 'INVALID_PASSWORD',
@@ -435,8 +492,468 @@ describe('auth API', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
+  it.each([
+    [503, 'TOKEN_STATE_UNAVAILABLE'],
+    [500, 'PASSWORD_ERROR'],
+  ] as const)('preserves the session for a definitive %s %s password-change failure', async (status, code) => {
+    setPasswordChangeTestUser()
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status,
+      json: () => Promise.resolve({
+        success: false,
+        error: {
+          code,
+          message: 'password change was rejected before completion',
+        },
+      }),
+    })
+
+    await expect(changePassword({
+      old_password: 'current-password',
+      new_password: 'replacement-password',
+    }, { expectedUserId: 'u1' })).rejects.toMatchObject({ status, code })
+
+    expect(localStorage.getItem('mnemonas_session')).toBe('1')
+    expect(getStoredUser()).toMatchObject({ id: 'u1' })
+  })
+
+  it.each([
+    {
+      label: 'bodyless bad gateway',
+      status: 502,
+      json: () => Promise.reject(new SyntaxError('gateway returned HTML')),
+    },
+    {
+      label: 'unrecognized gateway error',
+      status: 504,
+      json: () => Promise.resolve({
+        success: false,
+        error: { code: 'GATEWAY_TIMEOUT', message: 'upstream response timed out' },
+      }),
+    },
+  ])('fails closed when password change receives $label', async ({ status, json }) => {
+    setPasswordChangeTestUser()
+    fetchMock.mockResolvedValueOnce({ ok: false, status, json })
+
+    await expect(changePassword({
+      old_password: 'current-password',
+      new_password: 'replacement-password',
+    }, { expectedUserId: 'u1' })).rejects.toMatchObject({
+      message: PASSWORD_CHANGE_UNCONFIRMED_MESSAGE,
+      status,
+      code: 'PASSWORD_CHANGE_UNCONFIRMED',
+    })
+
+    expect(localStorage.getItem('mnemonas_session')).toBeNull()
+    expect(getStoredUser()).toBeNull()
+    expect(JSON.parse(localStorage.getItem(AUTH_CROSS_TAB_SYNC_KEY) ?? '{}')).toMatchObject({
+      type: 'cleared',
+      reason: 'password_change_unconfirmed',
+      user_id: 'u1',
+    })
+  })
+
+  it.each([
+    [401, 'TOKEN_EXPIRED', 'expired'],
+    [401, 'TOKEN_REVOKED', 'expired'],
+    [401, 'USER_NOT_FOUND', 'missing'],
+    [403, 'USER_DISABLED', 'disabled'],
+  ] as const)('clears a terminal password-change session for %s %s', async (status, code, reason) => {
+    const authCleared = vi.fn()
+    window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
+    setPasswordChangeTestUser()
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status,
+      json: () => Promise.resolve({
+        success: false,
+        error: { code, message: 'authentication is no longer valid' },
+      }),
+    })
+
+    await expect(changePassword({
+      old_password: 'current-password',
+      new_password: 'replacement-password',
+    }, { expectedUserId: 'u1' })).rejects.toMatchObject({ status, code })
+
+    expect(localStorage.getItem('mnemonas_session')).toBeNull()
+    expect(authCleared).toHaveBeenCalledTimes(1)
+    expect(authCleared.mock.calls[0]?.[0]).toMatchObject({ detail: { reason } })
+    window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
+  })
+
+  it('fails closed when a password-change request ends before receiving a response', async () => {
+    setPasswordChangeTestUser()
+    fetchMock.mockRejectedValueOnce(new TypeError('network unavailable'))
+
+    await expect(changePassword({
+      old_password: 'current-password',
+      new_password: 'replacement-password',
+    }, { expectedUserId: 'u1' })).rejects.toMatchObject({
+      message: PASSWORD_CHANGE_UNCONFIRMED_MESSAGE,
+      status: 0,
+      code: 'PASSWORD_CHANGE_UNCONFIRMED',
+    })
+
+    expect(localStorage.getItem('mnemonas_session')).toBeNull()
+    expect(JSON.parse(localStorage.getItem(AUTH_CROSS_TAB_SYNC_KEY) ?? '{}')).toMatchObject({
+      type: 'cleared',
+      reason: 'password_change_unconfirmed',
+      user_id: 'u1',
+    })
+  })
+
+  it('fails closed when the same account receives a newer auth generation during the request', async () => {
+    const pending = createDeferred<Response>()
+    const authCleared = vi.fn()
+    setPasswordChangeTestUser()
+    fetchMock.mockReturnValueOnce(pending.promise)
+    window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
+
+    const request = changePassword({
+      old_password: 'current-password',
+      new_password: 'replacement-password',
+    }, { expectedUserId: 'u1' })
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    localStorage.setItem(AUTH_CROSS_TAB_SYNC_KEY, JSON.stringify({
+      version: 1,
+      type: 'session_updated',
+      nonce: 'same-account-new-generation',
+      source_id: 'other-tab',
+      user_id: 'u1',
+    }))
+    invalidateAuthSessionRequests()
+    pending.reject(new TypeError('network unavailable'))
+
+    await expect(request).rejects.toMatchObject({
+      message: PASSWORD_CHANGE_UNCONFIRMED_MESSAGE,
+      code: 'PASSWORD_CHANGE_UNCONFIRMED',
+    })
+    expect(authCleared).toHaveBeenCalledWith(expect.objectContaining({
+      detail: expect.objectContaining({ reason: 'password_change_unconfirmed' }),
+    }))
+    expect(localStorage.getItem('mnemonas_session')).toBeNull()
+    window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
+  })
+
+  it('fails closed when an in-flight password-change request is aborted', async () => {
+    const controller = new AbortController()
+    setPasswordChangeTestUser()
+    fetchMock.mockImplementationOnce((_input, init?: RequestInit) => new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        reject(new DOMException('request aborted', 'AbortError'))
+      }, { once: true })
+    }))
+
+    const request = changePassword({
+      old_password: 'current-password',
+      new_password: 'replacement-password',
+    }, { expectedUserId: 'u1', signal: controller.signal })
+    controller.abort()
+
+    await expect(request).rejects.toMatchObject({
+      code: 'PASSWORD_CHANGE_UNCONFIRMED',
+      message: PASSWORD_CHANGE_UNCONFIRMED_MESSAGE,
+    })
+    expect(localStorage.getItem('mnemonas_session')).toBeNull()
+  })
+
+  it('does not clear a newer account when an older password request ends without a response', async () => {
+    const pending = createDeferred<Response>()
+    setPasswordChangeTestUser('old-user')
+    fetchMock.mockReturnValueOnce(pending.promise)
+
+    const request = changePassword({
+      old_password: 'old-password',
+      new_password: 'replacement-password',
+    }, { expectedUserId: 'old-user' })
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    setPasswordChangeTestUser('new-user')
+    pending.reject(new TypeError('network unavailable'))
+
+    await expect(request).rejects.toMatchObject({ name: 'AbortError' })
+    expect(getStoredUser()).toMatchObject({ id: 'new-user' })
+    expect(localStorage.getItem('mnemonas_session')).toBe('1')
+  })
+
+  it('does not apply an older password response to a newer account scope', async () => {
+    const pending = createDeferred<Response>()
+    setPasswordChangeTestUser('old-user')
+    fetchMock.mockReturnValueOnce(pending.promise)
+
+    const request = changePassword({
+      old_password: 'old-password',
+      new_password: 'replacement-password',
+    }, { expectedUserId: 'old-user' })
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    setPasswordChangeTestUser('new-user')
+    pending.resolve({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      json: () => Promise.resolve({ success: true, data: null }),
+    } as Response)
+
+    await expect(request).rejects.toMatchObject({ name: 'AbortError' })
+    expect(getStoredUser()).toMatchObject({ id: 'new-user' })
+    expect(localStorage.getItem('mnemonas_session')).toBe('1')
+  })
+
+  it('rejects a stale password form before sending credentials for another account', async () => {
+    setPasswordChangeTestUser('new-user')
+
+    await expect(changePassword({
+      old_password: 'old-password',
+      new_password: 'replacement-password',
+    }, { expectedUserId: 'old-user' })).rejects.toMatchObject({
+      status: 409,
+      code: 'AUTH_SCOPE_CHANGED',
+    })
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(getStoredUser()).toMatchObject({ id: 'new-user' })
+  })
+
+  it('does not clear another account identified by a broadcast-only scope transition', async () => {
+    const pending = createDeferred<Response>()
+    const authCleared = vi.fn()
+    setPasswordChangeTestUser('old-user')
+    fetchMock.mockReturnValueOnce(pending.promise)
+    window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
+
+    const request = changePassword({
+      old_password: 'old-password',
+      new_password: 'replacement-password',
+    }, { expectedUserId: 'old-user' })
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+
+    recordAuthCrossTabScopeTransition('new-user')
+    invalidateAuthSessionRequests()
+    pending.reject(new TypeError('network unavailable'))
+
+    await expect(request).rejects.toMatchObject({ name: 'AbortError' })
+    expect(authCleared).not.toHaveBeenCalled()
+    expect(localStorage.getItem('mnemonas_session')).toBe('1')
+    window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
+  })
+
+  it('does not let a same-account broadcast transition hide a newer storage account', async () => {
+    const pending = createDeferred<Response>()
+    const authCleared = vi.fn()
+    setPasswordChangeTestUser('old-user')
+    fetchMock.mockReturnValueOnce(pending.promise)
+    window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
+
+    const request = changePassword({
+      old_password: 'old-password',
+      new_password: 'replacement-password',
+    }, { expectedUserId: 'old-user' })
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+
+    recordAuthCrossTabScopeTransition('old-user')
+    setPasswordChangeTestUser('new-user')
+    localStorage.setItem(AUTH_CROSS_TAB_SYNC_KEY, JSON.stringify({
+      version: 1,
+      type: 'session_updated',
+      nonce: 'newer-storage-account',
+      source_id: 'other-tab',
+      user_id: 'new-user',
+    }))
+    pending.reject(new TypeError('network unavailable'))
+
+    await expect(request).rejects.toMatchObject({ name: 'AbortError' })
+    expect(authCleared).not.toHaveBeenCalled()
+    expect(getStoredUser()).toMatchObject({ id: 'new-user' })
+    expect(localStorage.getItem('mnemonas_session')).toBe('1')
+    window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
+  })
+
+  it('does not treat a cleared broadcast transition as the current account scope', async () => {
+    const pending = createDeferred<Response>()
+    const authCleared = vi.fn()
+    setPasswordChangeTestUser('old-user')
+    fetchMock.mockReturnValueOnce(pending.promise)
+    window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
+
+    const request = changePassword({
+      old_password: 'old-password',
+      new_password: 'replacement-password',
+    }, { expectedUserId: 'old-user' })
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+
+    recordAuthCrossTabScopeTransition(null)
+    pending.reject(new TypeError('network unavailable'))
+
+    await expect(request).rejects.toMatchObject({ name: 'AbortError' })
+    expect(authCleared).not.toHaveBeenCalled()
+    expect(localStorage.getItem('mnemonas_session')).toBe('1')
+    window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
+  })
+
+  it('does not clear when a changed storage transition has no account scope', async () => {
+    const pending = createDeferred<Response>()
+    const authCleared = vi.fn()
+    setPasswordChangeTestUser('old-user')
+    fetchMock.mockReturnValueOnce(pending.promise)
+    window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
+
+    const request = changePassword({
+      old_password: 'old-password',
+      new_password: 'replacement-password',
+    }, { expectedUserId: 'old-user' })
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+
+    localStorage.setItem(AUTH_CROSS_TAB_SYNC_KEY, JSON.stringify({
+      version: 1,
+      type: 'session_updated',
+      nonce: 'legacy-scope-unknown',
+      source_id: 'other-tab',
+    }))
+    pending.reject(new TypeError('network unavailable'))
+
+    await expect(request).rejects.toMatchObject({ name: 'AbortError' })
+    expect(authCleared).not.toHaveBeenCalled()
+    expect(localStorage.getItem('mnemonas_session')).toBe('1')
+    window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
+  })
+
+  it('does not clear when the current user scope becomes unknown', async () => {
+    const pending = createDeferred<Response>()
+    const authCleared = vi.fn()
+    setPasswordChangeTestUser('old-user')
+    fetchMock.mockReturnValueOnce(pending.promise)
+    window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
+
+    const request = changePassword({
+      old_password: 'old-password',
+      new_password: 'replacement-password',
+    }, { expectedUserId: 'old-user' })
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+
+    localStorage.removeItem('mnemonas_user')
+    pending.reject(new TypeError('network unavailable'))
+
+    await expect(request).rejects.toMatchObject({ name: 'AbortError' })
+    expect(authCleared).not.toHaveBeenCalled()
+    expect(localStorage.getItem('mnemonas_session')).toBe('1')
+    window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
+  })
+
+  it('keeps a memory-only newer account authoritative when browser storage writes fail', async () => {
+    const pending = createDeferred<Response>()
+    const authCleared = vi.fn()
+    setPasswordChangeTestUser('old-user')
+    fetchMock.mockReturnValueOnce(pending.promise)
+    window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
+
+    const oldRequest = changePassword({
+      old_password: 'old-password',
+      new_password: 'replacement-password',
+    }, { expectedUserId: 'old-user' })
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+
+    const blockedStorage = blockStoredUserWrites()
+
+    try {
+      storeTokens('', '', {
+        id: 'new-user',
+        username: 'new-user',
+        role: 'user',
+        homeDir: '/new-user',
+        mustChangePassword: false,
+      })
+      pending.reject(new TypeError('network unavailable'))
+
+      await expect(oldRequest).rejects.toMatchObject({ name: 'AbortError' })
+      expect(authCleared).not.toHaveBeenCalled()
+      expect(getStoredUser()).toMatchObject({ id: 'new-user' })
+
+      fetchMock.mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        json: () => Promise.resolve({
+          success: false,
+          error: { code: 'INVALID_PASSWORD', message: 'current password is incorrect' },
+        }),
+      })
+      await expect(changePassword({
+        old_password: 'incorrect-password',
+        new_password: 'another-password',
+      }, { expectedUserId: 'new-user' })).rejects.toMatchObject({ code: 'INVALID_PASSWORD' })
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+    } finally {
+      blockedStorage.restore()
+      window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
+      storeTokens('', '', {
+        id: 'cleanup-user',
+        username: 'cleanup-user',
+        role: 'user',
+        homeDir: '/cleanup-user',
+        mustChangePassword: false,
+      })
+      localStorage.clear()
+      expect(getStoredUser()).toBeNull()
+    }
+  })
+
+  it('treats a sync-only cross-tab account update as an uncertain memory-only scope', async () => {
+    const pending = createDeferred<Response>()
+    const authCleared = vi.fn()
+    setPasswordChangeTestUser('old-user')
+    const blockedStorage = blockStoredUserWrites()
+
+    try {
+      storeTokens('', '', {
+        id: 'old-user',
+        username: 'old-user',
+        role: 'user',
+        homeDir: '/old-user',
+        mustChangePassword: false,
+      })
+      fetchMock.mockReturnValueOnce(pending.promise)
+      window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
+      const oldRequest = changePassword({
+        old_password: 'old-password',
+        new_password: 'replacement-password',
+      }, { expectedUserId: 'old-user' })
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+
+      blockedStorage.storage.setItem(AUTH_CROSS_TAB_SYNC_KEY, JSON.stringify({
+        version: 1,
+        type: 'session_updated',
+        nonce: 'other-tab-session',
+        source_id: 'other-tab',
+        user_id: 'new-user',
+      }))
+      pending.reject(new TypeError('network unavailable'))
+
+      await expect(oldRequest).rejects.toMatchObject({ name: 'AbortError' })
+      expect(authCleared).not.toHaveBeenCalled()
+      await expect(changePassword({
+        old_password: 'old-password',
+        new_password: 'another-password',
+      }, { expectedUserId: 'old-user' })).rejects.toMatchObject({
+        status: 409,
+        code: 'AUTH_SCOPE_CHANGED',
+      })
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+    } finally {
+      blockedStorage.restore()
+      window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
+      storeTokens('', '', {
+        id: 'cleanup-user',
+        username: 'cleanup-user',
+        role: 'user',
+        homeDir: '/cleanup-user',
+        mustChangePassword: false,
+      })
+      localStorage.clear()
+      expect(getStoredUser()).toBeNull()
+    }
+  })
+
   it('preserves the session when the server rejects an unchanged password', async () => {
-    localStorage.setItem('mnemonas_session', '1')
+    setPasswordChangeTestUser()
     fetchMock.mockResolvedValueOnce({
       ok: false,
       status: 400,
@@ -452,7 +969,7 @@ describe('auth API', () => {
     await expect(changePassword({
       old_password: 'same-password',
       new_password: 'same-password',
-    })).rejects.toMatchObject({
+    }, { expectedUserId: 'u1' })).rejects.toMatchObject({
       status: 400,
       code: 'PASSWORD_UNCHANGED',
     })
@@ -466,7 +983,7 @@ describe('auth API', () => {
     ['invalid warning data', { success: true, data: { warning: false } }],
     ['invalid message metadata', { success: true, data: null, message: 42 }],
   ])('rejects password-change success responses with %s and clears the invalidated session', async (_label, body) => {
-    localStorage.setItem('mnemonas_session', '1')
+    setPasswordChangeTestUser()
     fetchMock.mockResolvedValueOnce({
       ok: true,
       status: 200,
@@ -477,7 +994,7 @@ describe('auth API', () => {
     await expect(changePassword({
       old_password: 'initial-password',
       new_password: 'replacement-password',
-    })).rejects.toMatchObject({
+    }, { expectedUserId: 'u1' })).rejects.toMatchObject({
       message: '修改密码响应无效',
       status: 200,
     })
@@ -485,12 +1002,12 @@ describe('auth API', () => {
     expect(JSON.parse(localStorage.getItem(AUTH_CROSS_TAB_SYNC_KEY) ?? '{}')).toMatchObject({
       version: 1,
       type: 'cleared',
-      reason: 'password_changed',
+      reason: 'password_change_unconfirmed',
     })
   })
 
   it('clears the invalidated session when a successful password change returns malformed JSON', async () => {
-    localStorage.setItem('mnemonas_session', '1')
+    setPasswordChangeTestUser()
     fetchMock.mockResolvedValueOnce({
       ok: true,
       status: 200,
@@ -501,14 +1018,37 @@ describe('auth API', () => {
     await expect(changePassword({
       old_password: 'initial-password',
       new_password: 'replacement-password',
-    })).rejects.toMatchObject({
+    }, { expectedUserId: 'u1' })).rejects.toMatchObject({
       message: '修改密码响应无效',
       status: 200,
     })
     expect(localStorage.getItem('mnemonas_session')).toBeNull()
     expect(JSON.parse(localStorage.getItem(AUTH_CROSS_TAB_SYNC_KEY) ?? '{}')).toMatchObject({
       type: 'cleared',
-      reason: 'password_changed',
+      reason: 'password_change_unconfirmed',
+    })
+  })
+
+  it('reports an unconfirmed result when a successful response body is aborted', async () => {
+    setPasswordChangeTestUser()
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      json: () => Promise.reject(new DOMException('response body aborted', 'AbortError')),
+    })
+
+    await expect(changePassword({
+      old_password: 'initial-password',
+      new_password: 'replacement-password',
+    }, { expectedUserId: 'u1' })).rejects.toMatchObject({
+      message: PASSWORD_CHANGE_UNCONFIRMED_MESSAGE,
+      code: 'PASSWORD_CHANGE_UNCONFIRMED',
+    })
+    expect(localStorage.getItem('mnemonas_session')).toBeNull()
+    expect(JSON.parse(localStorage.getItem(AUTH_CROSS_TAB_SYNC_KEY) ?? '{}')).toMatchObject({
+      type: 'cleared',
+      reason: 'password_change_unconfirmed',
     })
   })
 
@@ -604,6 +1144,7 @@ describe('auth API', () => {
     expect(JSON.parse(localStorage.getItem(AUTH_CROSS_TAB_SYNC_KEY) ?? '{}')).toMatchObject({
       version: 1,
       type: 'session_updated',
+      user_id: 'u1',
     })
 
     expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/v1/auth/download-session', expect.objectContaining({
@@ -685,6 +1226,7 @@ describe('auth API', () => {
         type: 'session_updated',
         nonce: expect.any(String),
         source_id: expect.any(String),
+        user_id: 'u1',
       })
     } finally {
       peerChannel.close()
@@ -2572,7 +3114,7 @@ describe('auth API', () => {
     await expect(changePassword({
       old_password: 'initial-password',
       new_password: 'replacement-password',
-    })).resolves.toMatchObject({ warning: false })
+    }, { expectedUserId: 'old-user' })).resolves.toMatchObject({ warning: false })
     expect(refreshSignal?.aborted).toBe(true)
 
     pendingRefresh.resolve({

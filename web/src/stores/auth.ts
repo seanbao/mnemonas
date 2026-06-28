@@ -6,10 +6,13 @@ import {
   AUTH_CROSS_TAB_SOURCE_ID,
   AUTH_CROSS_TAB_SYNC_KEY,
   AUTH_SESSION_UPDATED_EVENT,
+  PASSWORD_CHANGE_UNCONFIRMED_MESSAGE,
   login as apiLogin, 
   logout as apiLogout, 
   getCurrentUser,
+  getStoredUser,
   invalidateAuthSessionRequests,
+  recordAuthCrossTabScopeTransition,
 } from '@/api/auth'
 import { getSetupStatus } from '@/api/setup'
 import { queryClient } from '@/lib/queryClient'
@@ -21,6 +24,13 @@ let initializeAbortController: AbortController | null = null
 let postLoginSetupAbortController: AbortController | null = null
 let crossTabSessionValidationAbortController: AbortController | null = null
 const sessionValidationFailureMessage = '无法验证登录会话，请检查网络后重试'
+const passwordChangePersistenceWarningMessage = '设备未确认所有登录的注销状态已保存。请使用新密码重新登录，并检查其他设备是否已退出。'
+
+export interface AuthNotice {
+  color: 'success' | 'warning'
+  title: string
+  description?: string
+}
 
 function bumpAuthStateEpoch(): number {
   authStateEpoch += 1
@@ -63,6 +73,7 @@ interface AuthState {
   isAuthenticated: boolean
   isLoading: boolean
   error: string | null
+  notice: AuthNotice | null
   
   // Whether auth is enabled on the server (default: true for security)
   authEnabled: boolean
@@ -86,6 +97,7 @@ export const useAuthStore = create<AuthState>((set) => ({
   isAuthenticated: false,
   isLoading: true,
   error: null,
+  notice: null,
   // Default to true for security - auth is required unless explicitly disabled by server
   authEnabled: true,
   shareEnabled: null,
@@ -240,11 +252,11 @@ export const useAuthStore = create<AuthState>((set) => ({
     cancelPendingInitialize()
     cancelPendingPostLoginSetup()
     cancelPendingCrossTabSessionValidation()
-    set({ isLoading: true, error: null })
+    set({ isLoading: true, error: null, notice: null })
 
     try {
       const result = await apiLogout()
-      set({ user: null, isAuthenticated: false, isLoading: false, error: null, shareEnabled: null })
+      set({ user: null, isAuthenticated: false, isLoading: false, error: null, notice: null, shareEnabled: null })
       return result
     } catch (err) {
       const message = getAuthStoreActionErrorMessage(err, '退出登录失败')
@@ -304,6 +316,7 @@ type AuthCrossTabSync = {
   reason?: AuthClearedDetail['reason']
   nonce: string
   sourceId?: string
+  userId?: string
 }
 
 function parseAuthCrossTabSync(value: unknown): AuthCrossTabSync | null {
@@ -324,8 +337,13 @@ function parseAuthCrossTabSync(value: unknown): AuthCrossTabSync | null {
     const sourceId = typeof signal.source_id === 'string' && signal.source_id.length > 0
       ? signal.source_id
       : undefined
+    const userId = typeof signal.user_id === 'string'
+      && signal.user_id.trim() === signal.user_id
+      && signal.user_id.length > 0
+      ? signal.user_id
+      : undefined
     if (signal.type === 'session_updated') {
-      return { type: 'session_updated', nonce: signal.nonce, sourceId }
+      return { type: 'session_updated', nonce: signal.nonce, sourceId, userId }
     }
     if (signal.type !== 'cleared') {
       return null
@@ -333,16 +351,18 @@ function parseAuthCrossTabSync(value: unknown): AuthCrossTabSync | null {
 
     const reason = signal.reason
     if (reason === undefined) {
-      return { type: 'cleared', nonce: signal.nonce, sourceId }
+      return { type: 'cleared', nonce: signal.nonce, sourceId, userId }
     }
     if (reason !== 'expired'
       && reason !== 'disabled'
       && reason !== 'missing'
       && reason !== 'logout'
-      && reason !== 'password_changed') {
+      && reason !== 'password_changed'
+      && reason !== 'password_change_warning'
+      && reason !== 'password_change_unconfirmed') {
       return null
     }
-    return { type: 'cleared', reason, nonce: signal.nonce, sourceId }
+    return { type: 'cleared', reason, nonce: signal.nonce, sourceId, userId }
   } catch {
     return null
   }
@@ -369,7 +389,32 @@ function handleAuthCrossTabSync(value: unknown): void {
     || !rememberAuthCrossTabNonce(signal.nonce)) {
     return
   }
+  recordAuthCrossTabScopeTransition(signal.type === 'session_updated' ? signal.userId : null)
   if (signal.type === 'cleared') {
+    const stateUserId = useAuthStore.getState().user?.id
+    const storedUserId = getStoredUser()?.id
+    if (!signal.userId) {
+      if (stateUserId || storedUserId) {
+        validateCrossTabSessionUpdate()
+      } else {
+        applyAuthCleared({ reason: signal.reason })
+      }
+      return
+    }
+    const stateScopeMatches = stateUserId === signal.userId
+    const storedScopeMatches = storedUserId === signal.userId
+    const hasConflictingScope = (stateUserId !== undefined && !stateScopeMatches)
+      || (storedUserId !== undefined && !storedScopeMatches)
+    if (hasConflictingScope) {
+      if (stateScopeMatches || storedScopeMatches) {
+        validateCrossTabSessionUpdate()
+      }
+      return
+    }
+    if (!stateScopeMatches && !storedScopeMatches) {
+      validateCrossTabSessionUpdate()
+      return
+    }
     applyAuthCleared({ reason: signal.reason })
     return
   }
@@ -385,7 +430,24 @@ function applyAuthCleared(detail?: AuthClearedDetail): void {
   cancelPendingCrossTabSessionValidation()
   const state = useAuthStore.getState()
   queryClient.clear()
-  if (!state.isAuthenticated && !state.user && !state.isLoading) {
+
+  const notice: AuthNotice | null = detail?.reason === 'password_changed'
+    ? { title: '密码已修改，请重新登录', color: 'success' }
+    : detail?.reason === 'password_change_warning'
+      ? {
+          title: '密码已修改，请重新登录',
+          description: passwordChangePersistenceWarningMessage,
+          color: 'warning',
+        }
+      : detail?.reason === 'password_change_unconfirmed'
+        ? {
+            title: '密码修改结果无法确认',
+            description: PASSWORD_CHANGE_UNCONFIRMED_MESSAGE,
+            color: 'warning',
+          }
+        : null
+
+  if (!state.isAuthenticated && !state.user && !state.isLoading && !notice) {
     return
   }
 
@@ -394,7 +456,11 @@ function applyAuthCleared(detail?: AuthClearedDetail): void {
     isAuthenticated: false,
     isLoading: false,
     shareEnabled: null,
-    error: detail?.reason === 'logout' || detail?.reason === 'password_changed'
+    notice,
+    error: detail?.reason === 'logout'
+      || detail?.reason === 'password_changed'
+      || detail?.reason === 'password_change_warning'
+      || detail?.reason === 'password_change_unconfirmed'
       ? null
       : getRedactedDiagnosticMessage(detail?.message) ?? state.error ?? '登录已过期，请重新登录',
   })
@@ -424,6 +490,7 @@ function applyAuthSessionUpdated(
     isAuthenticated: true,
     isLoading: false,
     error: null,
+    notice: null,
   })
 }
 
@@ -447,6 +514,7 @@ function validateCrossTabSessionUpdate(): void {
     isLoading: true,
     shareEnabled: null,
     error: null,
+    notice: null,
   })
 
   void (async () => {

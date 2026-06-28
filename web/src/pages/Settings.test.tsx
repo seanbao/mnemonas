@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor } from '@/test/utils'
 import { act, fireEvent, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { useSettingsDraftStore } from '@/stores/settingsDraft'
 import { SettingsPage } from './Settings'
 import * as HeroUI from '@heroui/react'
 
@@ -323,6 +324,7 @@ describe('SettingsPage', () => {
     mockUser.role = 'admin'
     mockUser.email = 'admin@local'
     mockUser.homeDir = '/'
+    useSettingsDraftStore.setState({ hasPendingChanges: false })
     window.history.pushState({}, '', '/settings?tab=general')
     localStorage.removeItem(directoryAccessReviewHistoryStorageKey)
     mockGetSettings.mockResolvedValue(defaultSettingsResponse)
@@ -747,6 +749,8 @@ describe('SettingsPage', () => {
     it('shows general settings when selected', async () => {
       render(<SettingsPage />)
       await waitFor(() => {
+        expect(screen.getByText('当前账户')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '修改当前账户密码' })).toBeTruthy()
         expect(screen.getByText('公网访问向导')).toBeTruthy()
         expect(screen.getByText('公网访问安全自检')).toBeTruthy()
         expect(screen.getByText('证书续期检查')).toBeTruthy()
@@ -756,6 +760,30 @@ describe('SettingsPage', () => {
         expect(screen.getByText('服务器')).toBeTruthy()
         expect(screen.getByText('存储路径')).toBeTruthy()
       })
+    })
+
+    it('opens the shared account-security page from current-account settings', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await user.click(await screen.findByRole('button', { name: '修改当前账户密码' }))
+
+      expect(window.location.pathname).toBe('/account/security')
+      expect(window.history.state?.usr).toEqual({ returnTo: '/settings?tab=general' })
+    })
+
+    it('keeps the account-security shortcut on settings while configuration changes are unsaved', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      fireEvent.change(await screen.findByLabelText('公网域名'), { target: { value: 'nas.example.com' } })
+      await user.click(screen.getByRole('button', { name: '应用推荐到表单' }))
+
+      const passwordButton = screen.getByRole('button', { name: '修改当前账户密码' })
+      expect(passwordButton).toBeDisabled()
+      expect(screen.getByText('当前设置尚未保存。请先保存或重置当前更改，再修改账户密码。')).toBeInTheDocument()
+      expect(useSettingsDraftStore.getState().hasPendingChanges).toBe(true)
+      expect(window.location.pathname).toBe('/settings')
     })
 
     it('keeps professional network parameters behind explicit disclosure', async () => {

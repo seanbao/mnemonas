@@ -1,77 +1,16 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
-import { Button, Card, CardBody, Input, addToast } from '@heroui/react'
-import { KeyRound, LogOut, ShieldAlert } from 'lucide-react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { Button, Card, CardBody, addToast } from '@heroui/react'
+import { LogOut, ShieldAlert } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
-import { AuthError, changePassword, logout, type User } from '@/api/auth'
+import { logout, type User } from '@/api/auth'
 import { useUser } from '@/stores/auth'
+import { PasswordChangeForm } from './PasswordChangeForm'
 
 interface PasswordChangeGateProps {
   children: ReactNode
 }
 
-const minPasswordBytes = 8
-const maxPasswordBytes = 72
-const passwordChangeFailureMessage = '密码修改失败，请检查网络后重试。'
 const logoutFailureMessage = '退出登录失败，请稍后重试。'
-
-function utf8ByteLength(value: string): number {
-  return new TextEncoder().encode(value).length
-}
-
-function validatePasswordChange(
-  currentPassword: string,
-  newPassword: string,
-  confirmation: string,
-): string | null {
-  if (!currentPassword) {
-    return '请输入当前密码。'
-  }
-  if (!newPassword.trim()) {
-    return '请输入新密码。'
-  }
-
-  const passwordBytes = utf8ByteLength(newPassword)
-  if (passwordBytes < minPasswordBytes || passwordBytes > maxPasswordBytes) {
-    return `新密码长度必须为 ${minPasswordBytes} 至 ${maxPasswordBytes} 个 UTF-8 字节。`
-  }
-  if (!confirmation) {
-    return '请再次输入新密码。'
-  }
-  if (newPassword !== confirmation) {
-    return '两次输入的新密码不一致。'
-  }
-  if (newPassword === currentPassword) {
-    return '新密码不能与当前密码相同。'
-  }
-
-  return null
-}
-
-function getPasswordChangeFailureMessage(error: unknown): string {
-  if (error instanceof AuthError) {
-    switch (error.code) {
-      case 'INVALID_PASSWORD':
-        return '当前密码不正确。'
-      case 'PASSWORD_TOO_SHORT':
-      case 'PASSWORD_TOO_LONG':
-        return `新密码长度必须为 ${minPasswordBytes} 至 ${maxPasswordBytes} 个 UTF-8 字节。`
-      case 'PASSWORD_UNCHANGED':
-        return '新密码不能与当前密码相同。'
-      case 'USER_DISABLED':
-        return '当前账户已被禁用，请退出后联系管理员。'
-      case 'NOT_AUTHENTICATED':
-      case 'TOKEN_EXPIRED':
-      case 'TOKEN_REVOKED':
-        return '登录会话已失效，请退出后重新登录。'
-      default:
-        if (error.message === '修改密码响应无效') {
-          return error.message
-        }
-    }
-  }
-
-  return passwordChangeFailureMessage
-}
 
 export function PasswordChangeGate({ children }: PasswordChangeGateProps) {
   const user = useUser()
@@ -80,16 +19,13 @@ export function PasswordChangeGate({ children }: PasswordChangeGateProps) {
     return <>{children}</>
   }
 
-  return <PasswordChangeForm key={user.id} user={user} />
+  return <RequiredPasswordChangeView key={user.id} user={user} />
 }
 
-function PasswordChangeForm({ user }: { user: User }) {
+function RequiredPasswordChangeView({ user }: { user: User }) {
   const navigate = useNavigate()
-  const [currentPassword, setCurrentPassword] = useState('')
-  const [newPassword, setNewPassword] = useState('')
-  const [confirmation, setConfirmation] = useState('')
-  const [formError, setFormError] = useState<string | null>(null)
-  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [logoutError, setLogoutError] = useState<string | null>(null)
+  const [isChangingPassword, setIsChangingPassword] = useState(false)
   const [isLoggingOut, setIsLoggingOut] = useState(false)
   const gateRef = useRef<HTMLElement | null>(null)
   const requestControllerRef = useRef<AbortController | null>(null)
@@ -102,64 +38,12 @@ function PasswordChangeForm({ user }: { user: User }) {
     }
   }, [])
 
-  const isBusy = isSubmitting || isLoggingOut
-  const clearFormError = () => {
-    if (formError) {
-      setFormError(null)
-    }
-  }
-
-  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    if (isBusy) {
-      return
-    }
-
-    const validationError = validatePasswordChange(currentPassword, newPassword, confirmation)
-    if (validationError) {
-      setFormError(validationError)
-      return
-    }
-
-    setFormError(null)
-    setIsSubmitting(true)
-    const controller = new AbortController()
-    requestControllerRef.current = controller
-    try {
-      const result = await changePassword({
-        old_password: currentPassword,
-        new_password: newPassword,
-      }, { signal: controller.signal })
-      if (controller.signal.aborted) {
-        return
-      }
-      addToast(result.warning
-        ? {
-            title: '密码已修改，但认证状态持久化未完全确认',
-            description: '请使用新密码重新登录验证，并检查设备存储状态或服务日志。',
-            color: 'warning',
-          }
-        : { title: '密码已修改，请重新登录', color: 'success' })
-      navigate('/login', { replace: true })
-    } catch (error) {
-      if (controller.signal.aborted) {
-        return
-      }
-      setFormError(getPasswordChangeFailureMessage(error))
-    } finally {
-      if (requestControllerRef.current === controller) {
-        requestControllerRef.current = null
-        setIsSubmitting(false)
-      }
-    }
-  }
-
   const handleLogout = async () => {
-    if (isBusy) {
+    if (isChangingPassword || isLoggingOut) {
       return
     }
 
-    setFormError(null)
+    setLogoutError(null)
     setIsLoggingOut(true)
     const controller = new AbortController()
     requestControllerRef.current = controller
@@ -180,7 +64,7 @@ function PasswordChangeForm({ user }: { user: User }) {
       if (controller.signal.aborted) {
         return
       }
-      setFormError(logoutFailureMessage)
+      setLogoutError(logoutFailureMessage)
     } finally {
       if (requestControllerRef.current === controller) {
         requestControllerRef.current = null
@@ -217,87 +101,36 @@ function PasswordChangeForm({ user }: { user: User }) {
             </div>
 
             <div className="mb-6 rounded-lg border border-divider bg-content2/50 px-4 py-3 text-sm leading-6 text-default-600">
-              密码修改后，当前会话将结束。请使用新密码重新登录。
+              密码修改后，此账户在所有设备上的登录都将退出。请使用新密码重新登录。
             </div>
 
-            {formError && (
+            {logoutError && (
               <div role="alert" className="mb-5 rounded-lg border border-danger/20 bg-danger/5 px-4 py-3 text-sm text-danger">
-                {formError}
+                {logoutError}
               </div>
             )}
 
-            <form onSubmit={handleSubmit} noValidate className="space-y-5">
-              <Input
-                type="password"
-                label="当前密码"
-                aria-label="当前密码"
-                value={currentPassword}
-                onValueChange={(value) => {
-                  setCurrentPassword(value)
-                  clearFormError()
-                }}
-                autoComplete="current-password"
-                variant="bordered"
-                size="lg"
-                isDisabled={isBusy}
-                isRequired
-              />
-              <Input
-                type="password"
-                label="新密码"
-                aria-label="新密码"
-                description={`${minPasswordBytes} 至 ${maxPasswordBytes} 个 UTF-8 字节`}
-                value={newPassword}
-                onValueChange={(value) => {
-                  setNewPassword(value)
-                  clearFormError()
-                }}
-                autoComplete="new-password"
-                variant="bordered"
-                size="lg"
-                isDisabled={isBusy}
-                isRequired
-              />
-              <Input
-                type="password"
-                label="确认新密码"
-                aria-label="确认新密码"
-                value={confirmation}
-                onValueChange={(value) => {
-                  setConfirmation(value)
-                  clearFormError()
-                }}
-                autoComplete="new-password"
-                variant="bordered"
-                size="lg"
-                isDisabled={isBusy}
-                isRequired
-              />
-
-              <Button
-                type="submit"
-                color="primary"
-                size="lg"
-                className="w-full rounded-lg"
-                isLoading={isSubmitting}
-                isDisabled={isLoggingOut}
-                startContent={!isSubmitting && <KeyRound className="h-4 w-4" aria-hidden="true" />}
-              >
-                修改密码并重新登录
-              </Button>
-              <Button
-                type="button"
-                variant="flat"
-                size="lg"
-                className="w-full rounded-lg"
-                onPress={handleLogout}
-                isLoading={isLoggingOut}
-                isDisabled={isSubmitting}
-                startContent={!isLoggingOut && <LogOut className="h-4 w-4" aria-hidden="true" />}
-              >
-                退出登录
-              </Button>
-            </form>
+            <PasswordChangeForm
+              accountId={user.id}
+              isExternallyBusy={isLoggingOut}
+              onSubmittingChange={setIsChangingPassword}
+              actionsClassName="space-y-2"
+              submitClassName="w-full rounded-lg"
+              secondaryAction={({ isSubmitting }) => (
+                <Button
+                  type="button"
+                  variant="flat"
+                  size="lg"
+                  className="w-full rounded-lg"
+                  onPress={handleLogout}
+                  isLoading={isLoggingOut}
+                  isDisabled={isSubmitting}
+                  startContent={!isLoggingOut && <LogOut className="h-4 w-4" aria-hidden="true" />}
+                >
+                  退出登录
+                </Button>
+              )}
+            />
           </CardBody>
         </Card>
       </main>

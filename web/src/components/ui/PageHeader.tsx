@@ -3,6 +3,7 @@ import { cn } from '@/lib/utils'
 
 interface PageHeaderProps {
   title: string
+  titleId?: string
   subtitle?: string
   icon?: ElementType
   actions?: ReactNode
@@ -12,6 +13,7 @@ interface PageHeaderProps {
 
 export function PageHeader({
   title,
+  titleId,
   subtitle,
   icon: Icon,
   actions,
@@ -27,7 +29,7 @@ export function PageHeader({
           </div>
         )}
         <div className="min-w-0">
-          <h1 className="page-title">{title}</h1>
+          <h1 id={titleId} className="page-title">{title}</h1>
           {subtitle && <p className="page-subtitle mt-0.5">{subtitle}</p>}
         </div>
       </div>

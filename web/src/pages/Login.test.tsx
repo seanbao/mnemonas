@@ -19,6 +19,7 @@ vi.mock('@/stores/auth', () => ({
   useAuthStore: vi.fn(() => ({
     login: mockLogin,
     error: null,
+    notice: null,
     isLoading: false,
     clearError: mockClearError,
   })),
@@ -75,6 +76,7 @@ describe('LoginPage', () => {
     vi.mocked(useAuthStore).mockReturnValue({
       login: mockLogin,
       error: null,
+      notice: null,
       isLoading: false,
       clearError: mockClearError,
     })
@@ -175,6 +177,7 @@ describe('LoginPage', () => {
       expect(recoveryLink).toHaveAttribute('target', '_blank')
       expect(recoveryLink).toHaveAttribute('rel', expect.stringContaining('noopener'))
       expect(recoveryLink).toHaveAttribute('rel', expect.stringContaining('noreferrer'))
+      expect(recoveryHelp.previousElementSibling).toBe(screen.getByRole('button', { name: /登录/i }))
     })
 
     it('keeps the responsive login panel classes for narrow screens', async () => {
@@ -306,6 +309,7 @@ describe('LoginPage', () => {
       vi.mocked(useAuthStore).mockReturnValue({
         login: mockLogin,
         error: '用户名或密码错误',
+        notice: null,
         isLoading: false,
         clearError: mockClearError,
       })
@@ -315,6 +319,28 @@ describe('LoginPage', () => {
 
       expect(screen.getByRole('alert')).toHaveTextContent('用户名或密码错误')
       expect(mockAddToast).not.toHaveBeenCalled()
+    })
+
+    it('shows a password-change outcome notice carried across the protected-route redirect', async () => {
+      const { useAuthStore } = await import('@/stores/auth')
+      vi.mocked(useAuthStore).mockReturnValue({
+        login: mockLogin,
+        error: null,
+        notice: {
+          title: '密码修改结果无法确认',
+          description: '请先尝试使用新密码登录；若无法登录，再尝试原密码。',
+          color: 'warning',
+        },
+        isLoading: false,
+        clearError: mockClearError,
+      })
+
+      renderLogin()
+      await waitForSetupStatusLoad()
+
+      const notice = screen.getByRole('status')
+      expect(notice).toHaveTextContent('密码修改结果无法确认')
+      expect(notice).toHaveTextContent('请先尝试使用新密码登录；若无法登录，再尝试原密码。')
     })
   })
 
@@ -449,6 +475,7 @@ describe('LoginPage', () => {
       vi.mocked(useAuthStore).mockReturnValue({
         login: mockLogin,
         error: '用户名或密码错误',
+        notice: null,
         isLoading: false,
         clearError: mockClearError,
       })
@@ -485,6 +512,63 @@ describe('LoginPage', () => {
       await user.click(screen.getByRole('button', { name: /登录/i }))
 
       expect(mockNavigate).toHaveBeenCalledWith('/files/report?view=grid#preview', { replace: true })
+    })
+
+    it('returns home after password change instead of reopening account security', async () => {
+      mockLocationState.current = { from: '/ACCOUNT/SECURITY/?source=profile' }
+      mockLogin.mockResolvedValue({ warning: false, message: undefined })
+      const user = userEvent.setup()
+      renderLogin()
+
+      await user.type(screen.getByLabelText(/用户名/i, { selector: 'input' }), 'admin')
+      await user.type(screen.getByLabelText(/密码/i, { selector: 'input' }), 'password')
+      await user.click(screen.getByRole('button', { name: /登录/i }))
+
+      expect(mockNavigate).toHaveBeenCalledWith('/', { replace: true })
+      expect(mockNavigate).not.toHaveBeenCalledWith('/ACCOUNT/SECURITY/?source=profile', expect.anything())
+    })
+
+    it.each([
+      '/account/%73ecurity?source=profile',
+      '/%61ccount/security#password',
+    ])('returns home when account security uses an encoded path alias: %s', async (from) => {
+      mockLocationState.current = { from }
+      mockLogin.mockResolvedValue({ warning: false, message: undefined })
+      const user = userEvent.setup()
+      renderLogin()
+
+      await user.type(screen.getByLabelText(/用户名/i, { selector: 'input' }), 'admin')
+      await user.type(screen.getByLabelText(/密码/i, { selector: 'input' }), 'password')
+      await user.click(screen.getByRole('button', { name: /登录/i }))
+
+      expect(mockNavigate).toHaveBeenCalledWith('/', { replace: true })
+      expect(mockNavigate).not.toHaveBeenCalledWith(from, expect.anything())
+    })
+
+    it('returns home when the redirect path has malformed encoding', async () => {
+      mockLocationState.current = { from: '/files/%E0%A4%A' }
+      mockLogin.mockResolvedValue({ warning: false, message: undefined })
+      const user = userEvent.setup()
+      renderLogin()
+
+      await user.type(screen.getByLabelText(/用户名/i, { selector: 'input' }), 'admin')
+      await user.type(screen.getByLabelText(/密码/i, { selector: 'input' }), 'password')
+      await user.click(screen.getByRole('button', { name: /登录/i }))
+
+      expect(mockNavigate).toHaveBeenCalledWith('/', { replace: true })
+    })
+
+    it('returns home when decoding creates a protocol-relative path', async () => {
+      mockLocationState.current = { from: '/%2Fexternal.example/path' }
+      mockLogin.mockResolvedValue({ warning: false, message: undefined })
+      const user = userEvent.setup()
+      renderLogin()
+
+      await user.type(screen.getByLabelText(/用户名/i, { selector: 'input' }), 'admin')
+      await user.type(screen.getByLabelText(/密码/i, { selector: 'input' }), 'password')
+      await user.click(screen.getByRole('button', { name: /登录/i }))
+
+      expect(mockNavigate).toHaveBeenCalledWith('/', { replace: true })
     })
 
     it('falls back to home after successful login when the redirect target is external', async () => {
@@ -536,6 +620,7 @@ describe('LoginPage', () => {
       vi.mocked(useAuthStore).mockReturnValue({
         login: mockLogin,
         error: null,
+        notice: null,
         isLoading: true,
         clearError: mockClearError,
       })

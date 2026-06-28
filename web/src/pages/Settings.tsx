@@ -47,6 +47,7 @@ import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { SettingsOverview, type SettingsDestination } from '@/components/settings/SettingsOverview'
 import { useAuthStore, useUser } from '@/stores/auth'
+import { useSettingsDraftStore } from '@/stores/settingsDraft'
 import {
   SettingsError,
   checkDirectoryAccess,
@@ -4204,6 +4205,8 @@ function PublicAccessWizard({
 
 export function SettingsPage() {
   const user = useUser()
+  const authEnabled = useAuthStore((state) => state.authEnabled)
+  const setHasPendingSettingsChanges = useSettingsDraftStore((state) => state.setHasPendingChanges)
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const selectedTab = normalizeSettingsTab(searchParams.get('tab'))
@@ -5290,6 +5293,14 @@ export function SettingsPage() {
     },
   })
 
+  useEffect(() => {
+    setHasPendingSettingsChanges(isDirty || saveMutation.isPending)
+  }, [isDirty, saveMutation.isPending, setHasPendingSettingsChanges])
+
+  useEffect(() => {
+    return () => setHasPendingSettingsChanges(false)
+  }, [setHasPendingSettingsChanges])
+
   const handleSave = () => {
     let minFreeSpaceBytes: number
     let trashMaxSizeBytes: number
@@ -5681,6 +5692,20 @@ export function SettingsPage() {
     })
   }
 
+  const handleOpenAccountSecurity = () => {
+    if (isDirty || saveMutation.isPending) {
+      addToast({
+        title: '设置尚未保存',
+        description: '请先保存设置或重置当前更改，再修改账户密码。',
+        color: 'warning',
+      })
+      return
+    }
+    navigate('/account/security', {
+      state: { returnTo: '/settings?tab=general' },
+    })
+  }
+
   if (isLoading) {
     return (
       <div className="h-full overflow-auto custom-scrollbar">
@@ -5828,6 +5853,37 @@ export function SettingsPage() {
 
           <Tab key="general" title="账户与访问">
             <div className="space-y-6 mt-6">
+              {authEnabled && (
+                <SettingsSection
+                  title="当前账户"
+                  description="查看当前登录身份并修改本人的登录密码"
+                  icon={User}
+                >
+                  <div className="flex flex-col gap-4 rounded-lg border border-divider bg-content2/45 p-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-w-0">
+                      <p className="break-anywhere text-sm font-semibold text-foreground">
+                        {user?.username ?? '未知账户'}
+                      </p>
+                      <p id="current-account-password-guidance" className="mt-1 text-xs leading-5 text-default-500">
+                        {isDirty || saveMutation.isPending
+                          ? '当前设置尚未保存。请先保存或重置当前更改，再修改账户密码。'
+                          : '修改密码会单独生效，并让此账户在所有设备上的登录退出；无需使用页面顶部的“保存设置”。'}
+                      </p>
+                    </div>
+                    <Button
+                      variant="bordered"
+                      className="min-h-10 shrink-0 rounded-lg"
+                      startContent={<Key size={16} aria-hidden="true" />}
+                      aria-describedby="current-account-password-guidance"
+                      isDisabled={isDirty || saveMutation.isPending}
+                      onPress={handleOpenAccountSecurity}
+                    >
+                      修改当前账户密码
+                    </Button>
+                  </div>
+                </SettingsSection>
+              )}
+
               <PublicAccessWizard
                 domainInput={publicAccessDomain}
                 normalizedDomain={normalizedPublicAccessDomain}

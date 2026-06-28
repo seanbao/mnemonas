@@ -89,9 +89,19 @@ export interface AuthRequestOptions {
   signal?: AbortSignal
 }
 
+export interface PasswordChangeRequestOptions extends AuthRequestOptions {
+  expectedUserId: string
+}
+
 export interface AuthClearedDetail {
   message?: string
-  reason?: 'expired' | 'disabled' | 'missing' | 'logout' | 'password_changed'
+  reason?: 'expired'
+    | 'disabled'
+    | 'missing'
+    | 'logout'
+    | 'password_changed'
+    | 'password_change_warning'
+    | 'password_change_unconfirmed'
 }
 
 export interface AuthSessionUpdatedDetail {
@@ -129,6 +139,37 @@ const COOKIE_SESSION_VALUE = 'cookie'
 const INVALID_AUTH_RESPONSE_MESSAGE = '登录响应无效'
 const INVALID_PASSWORD_CHANGE_RESPONSE_MESSAGE = '修改密码响应无效'
 const INVALID_USER_PAYLOAD_MESSAGE = '用户数据无效'
+export const PASSWORD_CHANGE_UNCONFIRMED_MESSAGE = '密码修改结果无法确认。请先尝试使用新密码登录；若无法登录，再尝试原密码。'
+const TERMINAL_PASSWORD_CHANGE_AUTH_CODES = new Set([
+  'NOT_AUTHENTICATED',
+  'MISSING_AUTH_HEADER',
+  'INVALID_AUTH_HEADER',
+  'INVALID_TOKEN',
+  'TOKEN_EXPIRED',
+  'TOKEN_REVOKED',
+])
+const DEFINITIVE_PASSWORD_CHANGE_FAILURES = new Set([
+  '400:INVALID_REQUEST',
+  '400:MISSING_EXPECTED_USER_ID',
+  '400:MISSING_PASSWORD',
+  '400:PASSWORD_TOO_SHORT',
+  '400:PASSWORD_TOO_LONG',
+  '400:PASSWORD_UNCHANGED',
+  '401:NOT_AUTHENTICATED',
+  '401:MISSING_AUTH_HEADER',
+  '401:INVALID_AUTH_HEADER',
+  '401:INVALID_TOKEN',
+  '401:TOKEN_EXPIRED',
+  '401:TOKEN_REVOKED',
+  '401:USER_NOT_FOUND',
+  '401:INVALID_PASSWORD',
+  '403:USER_DISABLED',
+  '403:PASSWORD_CHANGE_REQUIRED',
+  '409:AUTH_SCOPE_CHANGED',
+  '413:PAYLOAD_TOO_LARGE',
+  '500:PASSWORD_ERROR',
+  '503:TOKEN_STATE_UNAVAILABLE',
+])
 const AUTH_REFRESH_LOCK_NAME = 'mnemonas:auth-refresh'
 export const AUTH_CLEARED_EVENT = 'mnemonas:auth-cleared'
 export const AUTH_SESSION_UPDATED_EVENT = 'mnemonas:auth-session-updated'
@@ -146,7 +187,16 @@ let refreshOperation: RefreshOperation | null = null
 let isDownloadSessionReady = true
 let legacyAuthRequestCount = 0
 let authCrossTabSyncSequence = 0
+let authCrossTabScopeTransitionSequence = 0
+const maxAuthCrossTabScopeTransitions = 64
+const authCrossTabScopeTransitions: Array<{
+  sequence: number
+  userId: string | null | undefined
+}> = []
 let inMemorySessionUser: User | null = null
+let inMemorySessionUserWriteFailed = false
+let inMemorySessionUserWriteFailureUserSnapshot: LocalStorageReadResult | null = null
+let inMemorySessionUserWriteFailureSyncSnapshot: LocalStorageReadResult | null = null
 let authBroadcastChannel: BroadcastChannel | null = null
 
 interface LocalStorageReadResult {
@@ -169,14 +219,16 @@ function readLocalStorageItem(key: string): string | null {
   return tryReadLocalStorageItem(key).value
 }
 
-function writeLocalStorageItem(key: string, value: string): void {
+function writeLocalStorageItem(key: string, value: string): boolean {
   try {
     if (typeof localStorage !== 'undefined') {
       localStorage.setItem(key, value)
+      return true
     }
   } catch {
     // Browser storage may be disabled while the HttpOnly cookie session remains usable.
   }
+  return false
 }
 
 function removeLocalStorageItem(key: string): void {
@@ -215,6 +267,17 @@ export function invalidateAuthSessionRequests(): number {
     refreshOperation = null
   }
   return authSessionGeneration
+}
+
+export function recordAuthCrossTabScopeTransition(userId?: string | null): void {
+  authCrossTabScopeTransitionSequence += 1
+  authCrossTabScopeTransitions.push({
+    sequence: authCrossTabScopeTransitionSequence,
+    userId,
+  })
+  if (authCrossTabScopeTransitions.length > maxAuthCrossTabScopeTransitions) {
+    authCrossTabScopeTransitions.shift()
+  }
 }
 
 function isRequestSignalAborted(signal: RequestInit['signal']): boolean {
@@ -309,6 +372,10 @@ function isPasswordChangeSuccessResponse(value: unknown): value is AuthApiRespon
   return value.data === null || (isRecord(value.data) && value.data.warning === true)
 }
 
+function isDefinitivePasswordChangeFailure(status: number, code?: string): boolean {
+  return code !== undefined && DEFINITIVE_PASSWORD_CHANGE_FAILURES.has(`${status}:${code}`)
+}
+
 async function readAuthApiError(response: Response, fallback = ''): Promise<AuthApiError | undefined> {
   const structuredError = await readStructuredJsonErrorDetails(response, fallback)
   if (structuredError) {
@@ -397,26 +464,164 @@ export function getStoredRefreshToken(): string | null {
 }
 
 export function getStoredUser(): User | null {
+  if (inMemorySessionUserWriteFailed && inMemorySessionUser) {
+    return inMemorySessionUser
+  }
+
   const storedUser = tryReadLocalStorageItem(USER_KEY)
   if (!storedUser.value) {
     if (storedUser.available) {
       inMemorySessionUser = null
+      inMemorySessionUserWriteFailed = false
     }
     return null
   }
   try {
     const user = normalizeStoredUser(JSON.parse(storedUser.value) as StoredUserPayload)
     inMemorySessionUser = user
+    inMemorySessionUserWriteFailed = false
     return user
   } catch {
     removeLocalStorageItem(USER_KEY)
     inMemorySessionUser = null
+    inMemorySessionUserWriteFailed = false
     return null
   }
 }
 
 function getKnownSessionUser(): User | null {
   return inMemorySessionUser ?? getStoredUser()
+}
+
+function hasStorageSnapshotChanged(
+  snapshot: LocalStorageReadResult | null,
+  current: LocalStorageReadResult,
+): boolean {
+  if (!current.available) {
+    return false
+  }
+  if (!snapshot?.available) {
+    return current.value !== null
+  }
+  return current.value !== snapshot.value
+}
+
+function getPasswordChangeScopeUser(): User | null {
+  if (!inMemorySessionUserWriteFailed) {
+    return getStoredUser() ?? inMemorySessionUser
+  }
+  if (!inMemorySessionUser) {
+    return null
+  }
+
+  const storedUser = tryReadLocalStorageItem(USER_KEY)
+  const crossTabSync = tryReadLocalStorageItem(AUTH_CROSS_TAB_SYNC_KEY)
+  if (
+    hasStorageSnapshotChanged(inMemorySessionUserWriteFailureUserSnapshot, storedUser)
+    || hasStorageSnapshotChanged(inMemorySessionUserWriteFailureSyncSnapshot, crossTabSync)
+  ) {
+    return null
+  }
+  return inMemorySessionUser
+}
+
+interface PasswordChangeScopeObservation {
+  crossTabSync: LocalStorageReadResult
+  transitionSequence: number
+}
+
+function getCrossTabScopeUserId(value: string | null): string | undefined {
+  if (!value) {
+    return undefined
+  }
+  try {
+    const signal: unknown = JSON.parse(value)
+    if (!isRecord(signal) || signal.version !== 1) {
+      return undefined
+    }
+    if (signal.type === 'cleared' || signal.type === 'session_updated') {
+      return isCanonicalNonEmptyString(signal.user_id) ? signal.user_id : undefined
+    }
+  } catch {
+    // Invalid synchronization records cannot identify an authentication scope.
+  }
+  return undefined
+}
+
+function doObservedCrossTabScopesMatch(
+  expectedUserId: string,
+  observation: PasswordChangeScopeObservation,
+): boolean {
+  if (authCrossTabScopeTransitionSequence === observation.transitionSequence) {
+    return true
+  }
+
+  const transitions = authCrossTabScopeTransitions.filter(
+    (transition) => transition.sequence > observation.transitionSequence,
+  )
+  if (
+    transitions.length === 0
+    || transitions[0]?.sequence !== observation.transitionSequence + 1
+    || transitions.at(-1)?.sequence !== authCrossTabScopeTransitionSequence
+  ) {
+    return false
+  }
+
+  return transitions.every((transition) => transition.userId === expectedUserId)
+}
+
+function getPasswordChangeObservedUserId(
+  expectedUserId: string,
+  observation: PasswordChangeScopeObservation,
+): string | null {
+  if (!doObservedCrossTabScopesMatch(expectedUserId, observation)) {
+    return null
+  }
+
+  const crossTabSync = tryReadLocalStorageItem(AUTH_CROSS_TAB_SYNC_KEY)
+  if (observation.crossTabSync.available && !crossTabSync.available) {
+    return null
+  }
+  if (hasStorageSnapshotChanged(observation.crossTabSync, crossTabSync)) {
+    if (getCrossTabScopeUserId(crossTabSync.value) !== expectedUserId) {
+      return null
+    }
+  }
+
+  if (!inMemorySessionUserWriteFailed) {
+    return (getStoredUser() ?? inMemorySessionUser)?.id === expectedUserId
+      ? expectedUserId
+      : null
+  }
+  if (!inMemorySessionUser) {
+    return null
+  }
+
+  const storedUser = tryReadLocalStorageItem(USER_KEY)
+  if (!hasStorageSnapshotChanged(inMemorySessionUserWriteFailureUserSnapshot, storedUser)) {
+    return inMemorySessionUser.id === expectedUserId ? expectedUserId : null
+  }
+  if (!storedUser.available || !storedUser.value) {
+    return null
+  }
+
+  try {
+    const observedUser = normalizeStoredUser(JSON.parse(storedUser.value) as StoredUserPayload)
+    return observedUser.id === inMemorySessionUser.id && observedUser.id === expectedUserId
+      ? expectedUserId
+      : null
+  } catch {
+    return null
+  }
+}
+
+function assertPasswordChangeAccountCurrent(
+  expectedUserId: string,
+  observation: PasswordChangeScopeObservation,
+): void {
+  if (getPasswordChangeObservedUserId(expectedUserId, observation) !== expectedUserId) {
+    throw createSupersededAuthError()
+  }
 }
 
 function normalizeUser(user: ApiUser): User {
@@ -485,7 +690,15 @@ function storeSessionUser(user: User): void {
   inMemorySessionUser = { ...user }
   clearLegacyTokenStorage()
   writeLocalStorageItem(SESSION_MARKER_KEY, '1')
-  writeLocalStorageItem(USER_KEY, JSON.stringify(user))
+  const storedUserBeforeWrite = tryReadLocalStorageItem(USER_KEY)
+  const crossTabSyncBeforeWrite = tryReadLocalStorageItem(AUTH_CROSS_TAB_SYNC_KEY)
+  inMemorySessionUserWriteFailed = !writeLocalStorageItem(USER_KEY, JSON.stringify(user))
+  inMemorySessionUserWriteFailureUserSnapshot = inMemorySessionUserWriteFailed
+    ? storedUserBeforeWrite
+    : null
+  inMemorySessionUserWriteFailureSyncSnapshot = inMemorySessionUserWriteFailed
+    ? crossTabSyncBeforeWrite
+    : null
 }
 
 function getAuthBroadcastChannel(): BroadcastChannel | null {
@@ -503,16 +716,25 @@ function getAuthBroadcastChannel(): BroadcastChannel | null {
   }
 }
 
-function publishAuthCrossTabSync(type: 'session_updated' | 'cleared', reason?: AuthClearedDetail['reason']): void {
+function publishAuthCrossTabSync(
+  type: 'session_updated' | 'cleared',
+  reason?: AuthClearedDetail['reason'],
+  scopeUserId?: string,
+): void {
   authCrossTabSyncSequence += 1
   const signal = {
     version: 1,
     type,
     ...(reason ? { reason } : {}),
+    ...(scopeUserId ? { user_id: scopeUserId } : {}),
     nonce: `${Date.now()}-${authCrossTabSyncSequence}-${Math.random().toString(36).slice(2)}`,
     source_id: AUTH_CROSS_TAB_SOURCE_ID,
   }
-  writeLocalStorageItem(AUTH_CROSS_TAB_SYNC_KEY, JSON.stringify(signal))
+  const serializedSignal = JSON.stringify(signal)
+  const signalWasStored = writeLocalStorageItem(AUTH_CROSS_TAB_SYNC_KEY, serializedSignal)
+  if (type === 'session_updated' && inMemorySessionUserWriteFailed && signalWasStored) {
+    inMemorySessionUserWriteFailureSyncSnapshot = { available: true, value: serializedSignal }
+  }
   try {
     getAuthBroadcastChannel()?.postMessage(signal)
   } catch {
@@ -527,17 +749,21 @@ function notifyAuthSessionUpdated(user: User): void {
       detail: { user },
     }))
   }
-  publishAuthCrossTabSync('session_updated')
+  publishAuthCrossTabSync('session_updated', undefined, user.id)
 }
 
 export function clearTokens(detail?: AuthClearedDetail): void {
+  const clearedUserId = getKnownSessionUser()?.id
   invalidateAuthSessionRequests()
   inMemorySessionUser = null
+  inMemorySessionUserWriteFailed = false
+  inMemorySessionUserWriteFailureUserSnapshot = null
+  inMemorySessionUserWriteFailureSyncSnapshot = null
   clearLegacyTokenStorage()
   removeLocalStorageItem(USER_KEY)
   removeLocalStorageItem(SESSION_MARKER_KEY)
   isDownloadSessionReady = true
-  publishAuthCrossTabSync('cleared', detail?.reason)
+  publishAuthCrossTabSync('cleared', detail?.reason, clearedUserId)
 
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent<AuthClearedDetail>(AUTH_CLEARED_EVENT, { detail }))
@@ -1143,7 +1369,7 @@ export async function login(username: string, password: string, options: AuthReq
   }
 
   storeSessionUser(data.user)
-  publishAuthCrossTabSync('session_updated')
+  publishAuthCrossTabSync('session_updated', undefined, data.user.id)
   const downloadSession = await syncDownloadSessionForUser(data.user, options, true, generation)
   if (downloadSession.authCleared) {
     throw new AuthError(
@@ -1208,50 +1434,102 @@ export async function logout(options: AuthRequestOptions = {}): Promise<AuthActi
 
 export async function changePassword(
   request: ChangePasswordRequest,
-  options: AuthRequestOptions = {},
+  options: PasswordChangeRequestOptions,
 ): Promise<AuthActionResult> {
-  const generation = invalidateAuthSessionRequests()
-  const response = await fetch(`${API_BASE}/auth/password`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    credentials: 'same-origin',
-    body: JSON.stringify(request),
-    ...(options.signal ? { signal: options.signal } : {}),
-  })
-  assertAuthGenerationCurrent(generation)
+  if (!options?.expectedUserId || getPasswordChangeScopeUser()?.id !== options.expectedUserId) {
+    throw new AuthError('登录会话已发生变化，请重新打开账户安全页面', 409, 'AUTH_SCOPE_CHANGED')
+  }
+
+  const scopeObservation: PasswordChangeScopeObservation = {
+    crossTabSync: tryReadLocalStorageItem(AUTH_CROSS_TAB_SYNC_KEY),
+    transitionSequence: authCrossTabScopeTransitionSequence,
+  }
+  invalidateAuthSessionRequests()
+  let response: Response
+  try {
+    response = await fetch(`${API_BASE}/auth/password`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      credentials: 'same-origin',
+      body: JSON.stringify({
+        ...request,
+        expected_user_id: options.expectedUserId,
+      }),
+      ...(options.signal ? { signal: options.signal } : {}),
+    })
+  } catch {
+    if (getPasswordChangeObservedUserId(options.expectedUserId, scopeObservation) !== options.expectedUserId) {
+      throw createSupersededAuthError()
+    }
+    clearTokens({
+      reason: 'password_change_unconfirmed',
+      message: PASSWORD_CHANGE_UNCONFIRMED_MESSAGE,
+    })
+    throw new AuthError(PASSWORD_CHANGE_UNCONFIRMED_MESSAGE, 0, 'PASSWORD_CHANGE_UNCONFIRMED')
+  }
+  assertPasswordChangeAccountCurrent(options.expectedUserId, scopeObservation)
 
   if (!response.ok) {
     let message = '修改密码失败'
     let code: string | undefined
     const error = await readAuthApiError(response, message)
-    assertAuthGenerationCurrent(generation)
+    assertPasswordChangeAccountCurrent(options.expectedUserId, scopeObservation)
     if (error?.message) message = error.message
     if (error?.code) code = error.code
+
+    if (!isDefinitivePasswordChangeFailure(response.status, code)) {
+      clearTokens({
+        reason: 'password_change_unconfirmed',
+        message: PASSWORD_CHANGE_UNCONFIRMED_MESSAGE,
+      })
+      throw new AuthError(
+        PASSWORD_CHANGE_UNCONFIRMED_MESSAGE,
+        response.status,
+        'PASSWORD_CHANGE_UNCONFIRMED',
+      )
+    }
+
+    if (response.status === 401 && code === 'USER_NOT_FOUND') {
+      clearTokens({ reason: 'missing', message: getMissingUserMessage(message) })
+    } else if (response.status === 401 && code && TERMINAL_PASSWORD_CHANGE_AUTH_CODES.has(code)) {
+      clearTokens({ reason: 'expired', message: '登录已过期，请重新登录' })
+    } else if (response.status === 403 && code === 'USER_DISABLED') {
+      clearTokens({ reason: 'disabled', message: getSessionEndedMessage(message) })
+    }
     throw new AuthError(message, response.status, code)
   }
 
   let body: AuthApiResponse<null | { warning: true }>
   try {
     const value: unknown = await response.json()
-    assertAuthGenerationCurrent(generation)
+    assertPasswordChangeAccountCurrent(options.expectedUserId, scopeObservation)
     if (!isPasswordChangeSuccessResponse(value)) {
       throw new Error(INVALID_PASSWORD_CHANGE_RESPONSE_MESSAGE)
     }
     body = value
   } catch (error) {
-    if (!isAuthGenerationCurrent(generation) || isAbortError(error)) {
+    if (getPasswordChangeObservedUserId(options.expectedUserId, scopeObservation) !== options.expectedUserId) {
       throw createSupersededAuthError()
     }
-    throw new AuthError(INVALID_PASSWORD_CHANGE_RESPONSE_MESSAGE, response.status)
-  } finally {
-    if (isAuthGenerationCurrent(generation)) {
-      clearTokens({ reason: 'password_changed' })
+    if (isAbortError(error)) {
+      clearTokens({
+        reason: 'password_change_unconfirmed',
+        message: PASSWORD_CHANGE_UNCONFIRMED_MESSAGE,
+      })
+      throw new AuthError(PASSWORD_CHANGE_UNCONFIRMED_MESSAGE, 0, 'PASSWORD_CHANGE_UNCONFIRMED')
     }
+    clearTokens({
+      reason: 'password_change_unconfirmed',
+      message: PASSWORD_CHANGE_UNCONFIRMED_MESSAGE,
+    })
+    throw new AuthError(INVALID_PASSWORD_CHANGE_RESPONSE_MESSAGE, response.status)
   }
 
-  return getAuthActionResult(response, body)
+  const result = getAuthActionResult(response, body)
+  clearTokens({ reason: result.warning ? 'password_change_warning' : 'password_changed' })
+  return result
 }
 
 // Get current user

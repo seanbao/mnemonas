@@ -217,9 +217,12 @@ Change password request:
 ```json
 {
   "old_password": "current_password",
-  "new_password": "new_secure_password"
+  "new_password": "new_secure_password",
+  "expected_user_id": "current_session_user_id"
 }
 ```
+
+`expected_user_id` is required and must match the current user ID in the authenticated request context. A mismatch returns `409 AUTH_SCOPE_CHANGED` without changing any account password.
 
 Change password response example:
 
@@ -230,6 +233,37 @@ Change password response example:
   "message": "password changed successfully"
 }
 ```
+
+After a successful change, the server increments the account credential version, revokes every active session for the account, and clears the access, refresh, and download cookies for the current request mode. The response does not issue replacement tokens, so the client must sign in again with the new password.
+
+When the request has been sent and the single-page application can still observe a transport interruption, in-app navigation, or a gateway or proxy failure response without a recognized MnemoNAS error code, the Web client treats the result as unconfirmed, clears browser authentication state, and displays sign-in guidance to try the new password first and the previous password only if the new password fails. A hard refresh, tab close, or browser-process termination can stop JavaScript before this handling runs, so immediate state clearing and guidance are not guaranteed; these interruptions must also be treated as unconfirmed outcomes.
+
+If the password changed but session revocation or authentication-state persistence could not be fully confirmed, the endpoint still returns HTTP 200, adds `Warning: 199 MnemoNAS "auth state persistence incomplete"`, and returns:
+
+```json
+{
+  "success": true,
+  "data": {
+    "warning": true
+  },
+  "message": "password changed with persistence warning"
+}
+```
+
+Password-change errors:
+
+| HTTP status | Code | Meaning |
+|---|---|---|
+| `400` | `MISSING_PASSWORD` | The current or new password is empty |
+| `400` | `MISSING_EXPECTED_USER_ID` | The request does not include `expected_user_id` |
+| `401` | `INVALID_PASSWORD` | The current password is incorrect |
+| `400` | `PASSWORD_TOO_SHORT` | The new password is shorter than 8 UTF-8 bytes or contains only whitespace |
+| `400` | `PASSWORD_TOO_LONG` | The new password exceeds 72 UTF-8 bytes |
+| `400` | `PASSWORD_UNCHANGED` | The new password matches the current password |
+| `409` | `AUTH_SCOPE_CHANGED` | `expected_user_id` does not match the current user in the authenticated request context |
+| `500` | `PASSWORD_ERROR` | The password state could not be updated |
+
+The authentication middleware can also return `MISSING_AUTH_HEADER`, `INVALID_AUTH_HEADER`, `INVALID_TOKEN`, `TOKEN_EXPIRED`, `TOKEN_REVOKED`, `USER_NOT_FOUND`, `USER_DISABLED`, or `TOKEN_STATE_UNAVAILABLE`. Apart from success and persistence-warning responses, the endpoint does not actively clear a valid session.
 
 The automatically created bootstrap administrator returns `must_change_password=true`. Successful login and session refresh retain the server-side `initial-password.txt` file so the only persistent copy of the bootstrap credential is not lost before password change. While the flag is `true`, the authenticated session can access only current-user information, password change, and logout endpoints; other protected endpoints return `403 PASSWORD_CHANGE_REQUIRED`. After the current user sets a password different from the current password through `POST /api/v1/auth/password`, the flag becomes `false`, the initial-password file is removed, and the credential-version change invalidates previous access and refresh tokens. Reusing the current password returns `400 PASSWORD_UNCHANGED`. An administrator reset for another user restores the required-change state; an administrator resetting their own password follows the self-change behavior.
 

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { AuthError } from '@/api/auth'
 import { PasswordChangeGate } from './PasswordChangeGate'
 
@@ -8,6 +8,7 @@ const logoutMock = vi.fn()
 const navigateMock = vi.fn()
 const businessPageRenderMock = vi.fn()
 const addToastMock = vi.fn()
+const initializeAuthMock = vi.fn()
 const authState = {
   user: {
     id: 'admin-1',
@@ -37,6 +38,9 @@ vi.mock('@heroui/react', async (importOriginal) => {
 })
 
 vi.mock('@/stores/auth', () => ({
+  useAuthStore: (selector: (state: { initialize: typeof initializeAuthMock }) => unknown) => selector({
+    initialize: initializeAuthMock,
+  }),
   useUser: () => authState.user,
 }))
 
@@ -80,6 +84,7 @@ describe('PasswordChangeGate', () => {
     }
     changePasswordMock.mockResolvedValue({ warning: false, message: 'password changed successfully' })
     logoutMock.mockResolvedValue({ warning: false, message: undefined })
+    initializeAuthMock.mockResolvedValue(undefined)
   })
 
   it('renders normal application content when no password change is required', () => {
@@ -103,6 +108,7 @@ describe('PasswordChangeGate', () => {
 
     expect(screen.getByRole('heading', { name: '必须修改密码' })).toBeInTheDocument()
     expect(screen.getByText(/完成修改前，文件和管理功能不可访问/)).toBeInTheDocument()
+    expect(screen.getByText(/此账户在所有设备上的登录都将退出/)).toBeInTheDocument()
     expect(screen.queryByText('normal business page')).not.toBeInTheDocument()
     expect(businessPageRenderMock).not.toHaveBeenCalled()
     expect(screen.queryByRole('button', { name: /关闭|取消/ })).not.toBeInTheDocument()
@@ -119,7 +125,7 @@ describe('PasswordChangeGate', () => {
       expect(changePasswordMock).toHaveBeenCalledWith({
         old_password: 'initial-password',
         new_password: multiBytePassword,
-      }, { signal: expect.any(AbortSignal) })
+      }, { expectedUserId: 'admin-1', signal: expect.any(AbortSignal) })
     })
     expect(navigateMock).toHaveBeenCalledWith('/login', { replace: true })
   })
@@ -136,8 +142,8 @@ describe('PasswordChangeGate', () => {
 
     await waitFor(() => {
       expect(addToastMock).toHaveBeenCalledWith({
-        title: '密码已修改，但认证状态持久化未完全确认',
-        description: '请使用新密码重新登录验证，并检查设备存储状态或服务日志。',
+        title: '密码已修改，请重新登录',
+        description: '设备未确认所有登录的注销状态已保存。请使用新密码重新登录，并检查其他设备是否已退出。',
         color: 'warning',
       })
     })
@@ -183,6 +189,8 @@ describe('PasswordChangeGate', () => {
     fireEvent.click(screen.getByRole('button', { name: '修改密码并重新登录' }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent(expectedMessage)
+    expect(screen.getByLabelText(_label)).toHaveFocus()
+    expect(screen.getByLabelText(_label)).toHaveAttribute('aria-invalid', 'true')
     expect(changePasswordMock).not.toHaveBeenCalled()
   })
 
@@ -248,7 +256,53 @@ describe('PasswordChangeGate', () => {
     expect(navigateMock).not.toHaveBeenCalled()
   })
 
-  it('keeps the safe client message for a malformed password-change response', async () => {
+  it('clears secrets and revalidates the session when the account scope changed', async () => {
+    changePasswordMock.mockRejectedValueOnce(new AuthError(
+      'authentication scope changed',
+      409,
+      'AUTH_SCOPE_CHANGED',
+    ))
+    renderGate()
+    fillPasswordForm('replacement-password')
+    fireEvent.click(screen.getByRole('button', { name: '显示当前密码' }))
+
+    fireEvent.click(screen.getByRole('button', { name: '修改密码并重新登录' }))
+
+    await waitFor(() => expect(initializeAuthMock).toHaveBeenCalledTimes(1))
+    expect(screen.getByLabelText('当前密码')).toHaveValue('')
+    expect(screen.getByLabelText('当前密码')).toHaveAttribute('type', 'password')
+    expect(screen.getByLabelText('新密码')).toHaveValue('')
+    expect(screen.getByLabelText('确认新密码')).toHaveValue('')
+    expect(addToastMock).toHaveBeenCalledWith({
+      title: '登录身份已发生变化',
+      description: '密码内容已清除，正在重新确认当前登录会话。',
+      color: 'warning',
+    })
+    expect(navigateMock).toHaveBeenCalledWith('/', { replace: true })
+  })
+
+  it('clears secrets when an in-flight request is superseded by another auth scope', async () => {
+    changePasswordMock.mockRejectedValueOnce(new DOMException('authentication scope changed', 'AbortError'))
+    renderGate()
+    fillPasswordForm('replacement-password')
+    fireEvent.click(screen.getByRole('button', { name: '显示当前密码' }))
+
+    fireEvent.click(screen.getByRole('button', { name: '修改密码并重新登录' }))
+
+    await waitFor(() => expect(initializeAuthMock).toHaveBeenCalledTimes(1))
+    expect(screen.getByLabelText('当前密码')).toHaveValue('')
+    expect(screen.getByLabelText('当前密码')).toHaveAttribute('type', 'password')
+    expect(screen.getByLabelText('新密码')).toHaveValue('')
+    expect(screen.getByLabelText('确认新密码')).toHaveValue('')
+    expect(addToastMock).toHaveBeenCalledWith({
+      title: '登录身份已发生变化',
+      description: '密码内容已清除，正在重新确认当前登录会话。',
+      color: 'warning',
+    })
+    expect(navigateMock).toHaveBeenCalledWith('/', { replace: true })
+  })
+
+  it('returns to login with actionable guidance for a malformed password-change success response', async () => {
     changePasswordMock.mockRejectedValueOnce(new AuthError(
       '修改密码响应无效',
       502,
@@ -259,14 +313,18 @@ describe('PasswordChangeGate', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '修改密码并重新登录' }))
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('修改密码响应无效')
-    expect(navigateMock).not.toHaveBeenCalled()
+    await waitFor(() => {
+      expect(addToastMock).toHaveBeenCalledWith({
+        title: '密码修改结果无法确认',
+        description: '服务器已接受请求，但返回结果不完整。请使用新密码重新登录；若无法登录，再尝试原密码。',
+        color: 'warning',
+      })
+    })
+    expect(navigateMock).toHaveBeenCalledWith('/login', { replace: true })
   })
 
   it.each([
     ['PASSWORD_TOO_SHORT', '新密码长度必须为 8 至 72 个 UTF-8 字节。'],
-    ['USER_DISABLED', '当前账户已被禁用，请退出后联系管理员。'],
-    ['TOKEN_EXPIRED', '登录会话已失效，请退出后重新登录。'],
   ])('maps the %s server error to a safe localized message', async (code, expectedMessage) => {
     changePasswordMock.mockRejectedValueOnce(new AuthError('server rejected password change', 400, code))
     renderGate()
@@ -278,6 +336,23 @@ describe('PasswordChangeGate', () => {
     expect(navigateMock).not.toHaveBeenCalled()
   })
 
+  it.each([
+    ['TOKEN_EXPIRED', '登录会话已失效', '请重新登录后再修改密码。'],
+    ['TOKEN_REVOKED', '登录会话已失效', '请重新登录后再修改密码。'],
+    ['USER_DISABLED', '当前账户已被禁用', '请联系管理员恢复账户后重新登录。'],
+  ])('leaves the blocking gate when the server returns terminal auth error %s', async (code, title, description) => {
+    changePasswordMock.mockRejectedValueOnce(new AuthError('terminal auth error', 401, code))
+    renderGate()
+    fillPasswordForm('replacement-password')
+
+    fireEvent.click(screen.getByRole('button', { name: '修改密码并重新登录' }))
+
+    await waitFor(() => {
+      expect(addToastMock).toHaveBeenCalledWith({ title, description, color: 'warning' })
+    })
+    expect(navigateMock).toHaveBeenCalledWith('/login', { replace: true })
+  })
+
   it('does not expose unexpected password-change failures', async () => {
     changePasswordMock.mockRejectedValueOnce(new Error('upstream secret detail'))
     renderGate()
@@ -285,7 +360,7 @@ describe('PasswordChangeGate', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '修改密码并重新登录' }))
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('密码修改失败，请检查网络后重试。')
+    expect(await screen.findByRole('alert')).toHaveTextContent('密码修改失败，请稍后重试。')
     expect(screen.queryByText('upstream secret detail')).not.toBeInTheDocument()
   })
 
@@ -329,6 +404,44 @@ describe('PasswordChangeGate', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('退出登录失败，请稍后重试。')
     expect(screen.getByRole('heading', { name: '必须修改密码' })).toBeInTheDocument()
     expect(businessPageRenderMock).not.toHaveBeenCalled()
+    expect(navigateMock).not.toHaveBeenCalled()
+  })
+
+  it('ignores a logout success that arrives after the gate unmounts', async () => {
+    let resolveLogout!: (result: { warning: boolean; message?: string }) => void
+    logoutMock.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveLogout = resolve
+    }))
+    const view = renderGate()
+    fireEvent.click(screen.getByRole('button', { name: '退出登录' }))
+    await waitFor(() => expect(logoutMock).toHaveBeenCalledTimes(1))
+
+    view.unmount()
+    await act(async () => {
+      resolveLogout({ warning: false })
+      await Promise.resolve()
+    })
+
+    expect(addToastMock).not.toHaveBeenCalled()
+    expect(navigateMock).not.toHaveBeenCalled()
+  })
+
+  it('ignores a logout failure that arrives after the gate unmounts', async () => {
+    let rejectLogout!: (error: Error) => void
+    logoutMock.mockImplementationOnce(() => new Promise((_resolve, reject) => {
+      rejectLogout = reject
+    }))
+    const view = renderGate()
+    fireEvent.click(screen.getByRole('button', { name: '退出登录' }))
+    await waitFor(() => expect(logoutMock).toHaveBeenCalledTimes(1))
+
+    view.unmount()
+    await act(async () => {
+      rejectLogout(new Error('network unavailable'))
+      await Promise.resolve()
+    })
+
+    expect(addToastMock).not.toHaveBeenCalled()
     expect(navigateMock).not.toHaveBeenCalled()
   })
 

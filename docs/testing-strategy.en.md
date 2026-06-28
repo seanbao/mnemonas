@@ -416,7 +416,7 @@ npm run test:e2e:quality
 npm run test:e2e:ui
 ```
 
-Playwright should cover desktop and mobile shells, navigation, file-page interactions, runtime console errors, the required password-change gate, and screenshot/layout checks for important views. `password-change-gate.spec.ts` runs only against the default isolated backend. It creates a dedicated user through an administrator, resets that user's password, and verifies the real gate and post-change sign-in flow.
+Playwright should cover desktop and mobile shells, navigation, file-page interactions, runtime console errors, the required password-change gate, and screenshot/layout checks for important views. `password-change-gate.spec.ts` runs only against the default isolated backend. It creates a dedicated user through an administrator, resets that user's password, and verifies the real gate, post-change sign-in, the standard user's Account Security entry from the user menu, and the complete voluntary password-change sign-in flow. Frontend unit tests also cover account-scope changes during password submission, authentication-state clearing after request interruption or gateway responses without a recognized error code, and field-level error focus.
 
 `npm run test:e2e:quality` runs `accessibility.spec.ts`, `layout-integrity.spec.ts`, `interaction-integrity.spec.ts`, and `consumer-visual.spec.ts`. The consumer visual regression fixes theme and dynamic data, disables animation, masks the user avatar, and caps desktop and mobile screenshot differences at `0.005`. Changed-file validation selects this command for TSX and CSS changes under `web/src`; use `npm run test:e2e` for the complete Playwright suite.
 

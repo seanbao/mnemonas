@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { Button, Avatar, Dropdown, DropdownTrigger, DropdownMenu, DropdownItem, addToast } from '@heroui/react'
 import { Search, Bell, Menu, RefreshCw } from 'lucide-react'
 import { useAuthStore, useIsAdmin, useUser } from '@/stores/auth'
+import { useSettingsDraftStore } from '@/stores/settingsDraft'
 import { useQueryClient } from '@tanstack/react-query'
 import { ThemeToggle } from '@/components/ThemeToggle'
 import { openUrlInNewTab } from '@/lib/utils'
@@ -21,10 +22,13 @@ export function Header({ onMenuClick }: HeaderProps) {
   const location = useLocation()
   const user = useUser()
   const isAdmin = useIsAdmin()
+  const authEnabled = useAuthStore((state) => state.authEnabled)
   const logout = useAuthStore((state) => state.logout)
+  const hasPendingSettingsChanges = useSettingsDraftStore((state) => state.hasPendingChanges)
   const queryClient = useQueryClient()
   const [searchQuery, setSearchQuery] = useState('')
   const [isRefreshing, setIsRefreshing] = useState(false)
+  const [isUserMenuOpen, setIsUserMenuOpen] = useState(false)
 
   const handleLogout = async () => {
     try {
@@ -45,6 +49,19 @@ export function Header({ onMenuClick }: HeaderProps) {
 
   const handleSettings = () => {
     navigate('/settings')
+  }
+
+  const handleAccountSecurity = () => {
+    if (hasPendingSettingsChanges) {
+      addToast({
+        title: '设置尚未保存',
+        description: '请先保存设置或重置当前更改，再修改账户密码。',
+        color: 'warning',
+      })
+      return
+    }
+    const returnTo = `${location.pathname}${location.search}${location.hash}`
+    navigate('/account/security', { state: { returnTo } })
   }
 
   const handleHelp = useCallback(() => {
@@ -156,7 +173,11 @@ export function Header({ onMenuClick }: HeaderProps) {
 
         <ThemeToggle />
 
-        <Dropdown placement="bottom-end">
+        <Dropdown
+          placement="bottom-end"
+          isOpen={isUserMenuOpen}
+          onOpenChange={setIsUserMenuOpen}
+        >
           <DropdownTrigger>
             <button
               type="button"
@@ -176,8 +197,10 @@ export function Header({ onMenuClick }: HeaderProps) {
               base: "data-[hover=true]:bg-content2 data-[hover=true]:text-foreground text-default-600",
             }}
             onAction={(key) => {
+              setIsUserMenuOpen(false)
               if (key === 'logout') handleLogout()
               if (key === 'settings') handleSettings()
+              if (key === 'security') handleAccountSecurity()
             }}
           >
             <DropdownItem key="profile" className="h-14 gap-2" textValue="当前用户">
@@ -192,6 +215,7 @@ export function Header({ onMenuClick }: HeaderProps) {
                 </div>
               </div>
             </DropdownItem>
+            {authEnabled ? <DropdownItem key="security">账户安全</DropdownItem> : null}
             {isAdmin ? <DropdownItem key="settings">设置</DropdownItem> : null}
             <DropdownItem key="help" onPress={handleHelp}>帮助文档</DropdownItem>
             <DropdownItem key="logout" className="text-rose data-[hover=true]:text-rose data-[hover=true]:bg-rose/10">

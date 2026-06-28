@@ -22,6 +22,7 @@ const ShareAccessPage = lazy(() => import('@/pages/ShareAccess').then((mod) => (
 const UsersPage = lazy(() => import('@/pages/Users').then((mod) => ({ default: mod.UsersPage })))
 const SearchPage = lazy(() => import('@/pages/Search').then((mod) => ({ default: mod.SearchPage })))
 const ActivityPage = lazy(() => import('@/pages/Activity').then((mod) => ({ default: mod.ActivityPage })))
+const AccountSecurityPage = lazy(() => import('@/pages/AccountSecurity').then((mod) => ({ default: mod.AccountSecurityPage })))
 
 function RouteFallback() {
   return (
@@ -149,6 +150,7 @@ function AppRoutes() {
             />
             <Route path="search" element={<SearchPage />} />
             <Route path="activity" element={<ActivityPage />} />
+            <Route path="account/security" element={<AccountSecurityPage />} />
             <Route
               path="settings"
               element={

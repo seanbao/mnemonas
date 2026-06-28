@@ -13,6 +13,7 @@ describe('shouldValidateSessionOnInitialRoute', () => {
     expect(shouldValidateSessionOnInitialRoute('/')).toBe(true)
     expect(shouldValidateSessionOnInitialRoute('/files')).toBe(true)
     expect(shouldValidateSessionOnInitialRoute('/settings')).toBe(true)
+    expect(shouldValidateSessionOnInitialRoute('/account/security')).toBe(true)
   })
 })
 

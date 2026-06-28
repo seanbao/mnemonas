@@ -360,7 +360,7 @@ func TestServer_RouteContract_AuthResponseFieldsAreDocumented(t *testing.T) {
 	}
 	fields := []string{
 		"username", "password", "refresh_token", "access_token", "expires_at", "token_type",
-		"user", "id", "email", "role", "groups", "home_dir", "old_password", "new_password", "data",
+		"user", "id", "email", "role", "groups", "home_dir", "expected_user_id", "old_password", "new_password", "data",
 	}
 
 	for _, doc := range docs {

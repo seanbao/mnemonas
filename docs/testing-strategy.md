@@ -420,7 +420,7 @@ npm run test:e2e:quality
 npm run test:e2e:ui
 ```
 
-Playwright 应覆盖桌面和移动端外壳、导航、文件页交互、运行时控制台错误、强制密码变更门禁，以及重要视图的截图和布局检查。`password-change-gate.spec.ts` 仅在默认隔离后端运行，通过管理员创建专用用户并重置密码，验证真实门禁及修改后重新登录流程。
+Playwright 应覆盖桌面和移动端外壳、导航、文件页交互、运行时控制台错误、强制密码变更门禁，以及重要视图的截图和布局检查。`password-change-gate.spec.ts` 仅在默认隔离后端运行，通过管理员创建专用用户并重置密码，验证真实门禁、修改后重新登录、普通用户从用户菜单进入账户安全，以及日常自助改密后再次登录的完整流程。前端单元测试还应覆盖改密期间的账户身份切换、请求中断或无已知错误码的网关响应所触发的认证状态清理，以及字段级错误焦点。
 
 `npm run test:e2e:quality` 运行 `accessibility.spec.ts`、`layout-integrity.spec.ts`、`interaction-integrity.spec.ts` 和 `consumer-visual.spec.ts`。消费级视觉回归固定主题与动态数据、禁用动画并遮罩用户头像，桌面端和移动端截图差异比例上限为 `0.005`。变更感知验证会为 `web/src` 下的 TSX 和 CSS 变更选择该命令；完整 Playwright 套件仍使用 `npm run test:e2e`。
 

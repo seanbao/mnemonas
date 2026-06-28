@@ -2,6 +2,7 @@
 # shellcheck disable=SC2317
 
 set -euo pipefail
+umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -102,10 +103,12 @@ json_login_payload() {
 }
 
 json_password_change_payload() {
-  local old_password=$1
-  local new_password=$2
+  local expected_user_id=$1
+  local old_password=$2
+  local new_password=$3
 
-  printf '{"old_password":%s,"new_password":%s}' \
+  printf '{"expected_user_id":%s,"old_password":%s,"new_password":%s}' \
+    "$(json_escape_string "$expected_user_id")" \
     "$(json_escape_string "$old_password")" \
     "$(json_escape_string "$new_password")"
 }
@@ -120,7 +123,7 @@ http_host_for_url() {
 }
 
 seed_e2e_fixtures() {
-  local login_response token share_response share_id protected_share_id disabled_share_id folder_share_id password_change_required
+  local login_response token user_id share_response share_id protected_share_id disabled_share_id folder_share_id password_change_required
   local protected_share_password="playwright-secret"
 
   if [[ ! -f "$E2E_PASSWORD_FILE" ]]; then
@@ -139,8 +142,9 @@ seed_e2e_fixtures() {
     -H 'Content-Type: application/json' \
     -d "$(json_login_payload "admin" "$password")")
   token=$(extract_json_field "$login_response" 'access_token')
-  if [[ -z "$token" ]]; then
-    echo "failed to retrieve E2E auth token" >&2
+  user_id=$(extract_json_field "$login_response" 'id')
+  if [[ -z "$token" || -z "$user_id" ]]; then
+    echo "failed to retrieve E2E auth token and user id" >&2
     return 1
   fi
 
@@ -150,7 +154,7 @@ seed_e2e_fixtures() {
     curl -sf -X POST "$NASD_BASE_URL/api/v1/auth/password" \
       -H "Authorization: Bearer $token" \
       -H 'Content-Type: application/json' \
-      -d "$(json_password_change_payload "$password" "$changed_password")" >/dev/null
+      -d "$(json_password_change_payload "$user_id" "$password" "$changed_password")" >/dev/null
     password=$changed_password
     printf 'Username: admin\nPassword: %s\n' "$password" > "$E2E_PASSWORD_FILE"
 
@@ -463,6 +467,7 @@ require_loopback_tcp_addr "$DATAPLANE_GRPC" "MNEMONAS_E2E_DATAPLANE_GRPC"
 NASD_BASE_URL="http://$(http_host_for_url "$NASD_HOST"):${NASD_PORT}"
 rm -rf "$BACKEND_ROOT"
 mkdir -p "$STORAGE_ROOT" "$LOG_DIR"
+chmod go-w "$E2E_ROOT" "$BACKEND_ROOT"
 
 cat > "$CONFIG_FILE" <<EOF
 [server]

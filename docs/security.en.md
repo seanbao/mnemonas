@@ -20,6 +20,7 @@ Notes:
 - Login, session refresh, and service restart retain `initial-password.txt`. The file is removed only after the corresponding administrator's password is successfully changed or reset.
 - Change the administrator password after first login. Until the bootstrap administrator changes it, the authenticated session can access only current-user information, password change, and logout endpoints; other product APIs remain unavailable.
 - New passwords must contain 8 through 72 UTF-8 bytes and must not consist only of whitespace.
+- When authentication is enabled, administrators, users, and guests can change their own password from Account Security in the Web user menu. The administrator Settings page links to the same entry point. The server verifies that the expected account declared by the request matches the authenticated context, preventing an old form from applying to a newly selected browser account. A successful change signs the account out on every device. When the client can observe an unconfirmed request outcome, it clears local authentication state and requires sign-in to verify the password.
 - WebDAV `auth_type = "users"` also rejects accounts that still require a password change; mounts become available after self-service password change succeeds.
 - The administrator Dashboard first-run check uses server-side account, initial-password-file, security-self-check, backup, and restore-verification evidence. It does not use browser-local checkboxes and does not replace pre-deployment `mnemonas-doctor` or cloud-firewall review.
 

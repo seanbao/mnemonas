@@ -980,7 +980,7 @@ func TestUserStore(t *testing.T) {
 		})
 
 		handler := NewHandler(store, NewTokenManager("rollback-test-secret", time.Minute, time.Hour))
-		body := fmt.Sprintf(`{"old_password":%q,"new_password":"changed-password-123"}`, initialPassword)
+		body := fmt.Sprintf(`{"expected_user_id":%q,"old_password":%q,"new_password":"changed-password-123"}`, admin.ID, initialPassword)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/password", strings.NewReader(body))
 		req = req.WithContext(context.WithValue(req.Context(), ContextKeyUser, admin))
 		rec := httptest.NewRecorder()
@@ -4577,7 +4577,8 @@ func TestAuthHandler(t *testing.T) {
 			t.Fatalf("disable change user error: %v", err)
 		}
 
-		req := httptest.NewRequest("POST", "/api/v1/auth/password", bytes.NewBufferString(`{"old_password":"password123","new_password":"newpassword456"}`))
+		body := fmt.Sprintf(`{"expected_user_id":%q,"old_password":"password123","new_password":"newpassword456"}`, disabledUser.ID)
+		req := httptest.NewRequest("POST", "/api/v1/auth/password", bytes.NewBufferString(body))
 		req = req.WithContext(context.WithValue(req.Context(), ContextKeyUser, disabledUser))
 		rec := httptest.NewRecorder()
 
@@ -4680,7 +4681,8 @@ func TestAuthHandler(t *testing.T) {
 		brokenHandler.HandleCreateUser(createRec, createReq)
 		assertInternalError(t, createRec, "CREATE_ERROR")
 
-		changeReq := httptest.NewRequest("POST", "/api/v1/auth/password", bytes.NewBufferString(`{"old_password":"password123","new_password":"newpassword456"}`))
+		changeBody := fmt.Sprintf(`{"expected_user_id":%q,"old_password":"password123","new_password":"newpassword456"}`, changeUser.ID)
+		changeReq := httptest.NewRequest("POST", "/api/v1/auth/password", bytes.NewBufferString(changeBody))
 		changeReq = changeReq.WithContext(context.WithValue(changeReq.Context(), ContextKeyUser, changeUser))
 		changeRec := httptest.NewRecorder()
 		brokenHandler.HandleChangePassword(changeRec, changeReq)
@@ -4795,7 +4797,8 @@ func TestAuthHandler(t *testing.T) {
 			t.Fatalf("expected warned create to commit user, got %v", err)
 		}
 
-		changeReq := httptest.NewRequest("POST", "/api/v1/auth/password", bytes.NewBufferString(`{"old_password":"password123","new_password":"newpassword456"}`))
+		changeBody := fmt.Sprintf(`{"expected_user_id":%q,"old_password":"password123","new_password":"newpassword456"}`, changeUser.ID)
+		changeReq := httptest.NewRequest("POST", "/api/v1/auth/password", bytes.NewBufferString(changeBody))
 		changeReq = changeReq.WithContext(context.WithValue(changeReq.Context(), ContextKeyUser, changeUser))
 		changeRec := httptest.NewRecorder()
 		warningHandler.HandleChangePassword(changeRec, changeReq)
@@ -4859,7 +4862,8 @@ func TestAuthHandler(t *testing.T) {
 			persistTokenSessionState = originalPersistTokenRevocations
 		}()
 
-		req := httptest.NewRequest("POST", "/api/v1/auth/password", bytes.NewBufferString(`{"old_password":"password123","new_password":"newpassword456"}`))
+		body := fmt.Sprintf(`{"expected_user_id":%q,"old_password":"password123","new_password":"newpassword456"}`, changeUser.ID)
+		req := httptest.NewRequest("POST", "/api/v1/auth/password", bytes.NewBufferString(body))
 		req = req.WithContext(context.WithValue(req.Context(), ContextKeyUser, changeUser))
 		rec := httptest.NewRecorder()
 
@@ -5284,6 +5288,149 @@ func TestAuthHandler(t *testing.T) {
 			t.Fatalf("expected TOKEN_REVOKED after deleting user, got %+v", envelope.Error)
 		}
 	})
+}
+
+func TestHandleChangePasswordRequiresExpectedUserID(t *testing.T) {
+	store, _, err := NewUserStore(filepath.Join(t.TempDir(), "users.json"))
+	if err != nil {
+		t.Fatalf("NewUserStore() error: %v", err)
+	}
+	user, err := store.Create("scope-required", "shared-password-123", "", RoleUser)
+	if err != nil {
+		t.Fatalf("Create(scope-required) error: %v", err)
+	}
+	before, err := store.GetByID(user.ID)
+	if err != nil {
+		t.Fatalf("GetByID(scope-required) before request error: %v", err)
+	}
+	handler := NewHandler(store, NewTokenManager("scope-required-secret-at-least-32-bytes", 15*time.Minute, 24*time.Hour))
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/auth/password",
+		strings.NewReader(`{"old_password":"shared-password-123","new_password":"replacement-password-456"}`),
+	)
+	request = request.WithContext(context.WithValue(request.Context(), ContextKeyUser, user))
+	response := httptest.NewRecorder()
+
+	handler.HandleChangePassword(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("missing expected user id status = %d, want %d: %s", response.Code, http.StatusBadRequest, response.Body.String())
+	}
+	var envelope ResponseEnvelope
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("unmarshal missing expected user id response error: %v", err)
+	}
+	if envelope.Error == nil || envelope.Error.Code != "MISSING_EXPECTED_USER_ID" {
+		t.Fatalf("missing expected user id error = %+v, want MISSING_EXPECTED_USER_ID", envelope.Error)
+	}
+	after, err := store.GetByID(user.ID)
+	if err != nil {
+		t.Fatalf("GetByID(scope-required) after request error: %v", err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("missing expected user id mutated account: got %+v, want %+v", after, before)
+	}
+}
+
+func TestHandleChangePasswordRejectsStaleExpectedUserAfterSessionSwitch(t *testing.T) {
+	store, _, err := NewUserStore(filepath.Join(t.TempDir(), "users.json"))
+	if err != nil {
+		t.Fatalf("NewUserStore() error: %v", err)
+	}
+	staleUser, err := store.Create("scope-stale", "shared-password-123", "", RoleUser)
+	if err != nil {
+		t.Fatalf("Create(scope-stale) error: %v", err)
+	}
+	currentUser, err := store.Create("scope-current", "shared-password-123", "", RoleUser)
+	if err != nil {
+		t.Fatalf("Create(scope-current) error: %v", err)
+	}
+	staleBefore, err := store.GetByID(staleUser.ID)
+	if err != nil {
+		t.Fatalf("GetByID(scope-stale) before request error: %v", err)
+	}
+	currentBefore, err := store.GetByID(currentUser.ID)
+	if err != nil {
+		t.Fatalf("GetByID(scope-current) before request error: %v", err)
+	}
+	tokenManager := NewTokenManager("scope-switch-secret-at-least-32-bytes", 15*time.Minute, 24*time.Hour)
+	tokenPair, err := tokenManager.GenerateTokenPair(currentUser)
+	if err != nil {
+		t.Fatalf("GenerateTokenPair(scope-current) error: %v", err)
+	}
+	handler := NewHandler(store, tokenManager)
+	body := fmt.Sprintf(
+		`{"expected_user_id":%q,"old_password":"shared-password-123","new_password":"replacement-password-456"}`,
+		staleUser.ID,
+	)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/password", strings.NewReader(body))
+	request = request.WithContext(context.WithValue(request.Context(), ContextKeyUser, currentUser))
+	response := httptest.NewRecorder()
+
+	handler.HandleChangePassword(response, request)
+
+	if response.Code != http.StatusConflict {
+		t.Fatalf("stale expected user status = %d, want %d: %s", response.Code, http.StatusConflict, response.Body.String())
+	}
+	var envelope ResponseEnvelope
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("unmarshal stale expected user response error: %v", err)
+	}
+	if envelope.Error == nil || envelope.Error.Code != "AUTH_SCOPE_CHANGED" {
+		t.Fatalf("stale expected user error = %+v, want AUTH_SCOPE_CHANGED", envelope.Error)
+	}
+	if got := response.Header().Values("Set-Cookie"); len(got) != 0 {
+		t.Fatalf("stale expected user response changed cookies: %v", got)
+	}
+	staleAfter, err := store.GetByID(staleUser.ID)
+	if err != nil {
+		t.Fatalf("GetByID(scope-stale) after request error: %v", err)
+	}
+	currentAfter, err := store.GetByID(currentUser.ID)
+	if err != nil {
+		t.Fatalf("GetByID(scope-current) after request error: %v", err)
+	}
+	if !reflect.DeepEqual(staleAfter, staleBefore) {
+		t.Fatalf("stale expected user request mutated stale account: got %+v, want %+v", staleAfter, staleBefore)
+	}
+	if !reflect.DeepEqual(currentAfter, currentBefore) {
+		t.Fatalf("stale expected user request mutated current account: got %+v, want %+v", currentAfter, currentBefore)
+	}
+	if _, err := tokenManager.ValidateAccessToken(tokenPair.AccessToken); err != nil {
+		t.Fatalf("stale expected user request revoked current session: %v", err)
+	}
+}
+
+func TestHandleChangePasswordAcceptsMatchingExpectedUserID(t *testing.T) {
+	store, _, err := NewUserStore(filepath.Join(t.TempDir(), "users.json"))
+	if err != nil {
+		t.Fatalf("NewUserStore() error: %v", err)
+	}
+	user, err := store.Create("scope-match", "shared-password-123", "", RoleUser)
+	if err != nil {
+		t.Fatalf("Create(scope-match) error: %v", err)
+	}
+	handler := NewHandler(store, NewTokenManager("scope-match-secret-at-least-32-bytes", 15*time.Minute, 24*time.Hour))
+	body := fmt.Sprintf(
+		`{"expected_user_id":%q,"old_password":"shared-password-123","new_password":"replacement-password-456"}`,
+		user.ID,
+	)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/password", strings.NewReader(body))
+	request = request.WithContext(context.WithValue(request.Context(), ContextKeyUser, user))
+	response := httptest.NewRecorder()
+
+	handler.HandleChangePassword(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("matching expected user status = %d, want %d: %s", response.Code, http.StatusOK, response.Body.String())
+	}
+	if _, err := store.VerifyCredentials(user.Username, "replacement-password-456"); err != nil {
+		t.Fatalf("matching expected user did not commit new password: %v", err)
+	}
+	if _, err := store.VerifyCredentials(user.Username, "shared-password-123"); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("matching expected user kept old password valid: %v", err)
+	}
 }
 
 func TestWriteSuccess_InvalidPayloadReturnsInternalServerError(t *testing.T) {
@@ -6070,7 +6217,7 @@ func TestChangePasswordRejectsUnchangedPasswordWithoutClearingRequirement(t *tes
 	}
 
 	handler := NewHandler(store, NewTokenManager("unchanged-password-secret-at-least-32-bytes", 15*time.Minute, 24*time.Hour))
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/password", strings.NewReader(fmt.Sprintf(`{"old_password":%q,"new_password":%q}`, bootstrapPassword, bootstrapPassword)))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/password", strings.NewReader(fmt.Sprintf(`{"expected_user_id":%q,"old_password":%q,"new_password":%q}`, admin.ID, bootstrapPassword, bootstrapPassword)))
 	request.Header.Set("Content-Type", "application/json")
 	request = request.WithContext(context.WithValue(request.Context(), ContextKeyUser, unchanged))
 	response := httptest.NewRecorder()

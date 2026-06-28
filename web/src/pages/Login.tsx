@@ -38,7 +38,24 @@ function getPostLoginRedirectPath(state: unknown): string {
   }
 
   const pathname = from.split(/[?#]/, 1)[0]
-  if (pathname === '/login' || pathname === '/s' || pathname.startsWith('/s/')) {
+  let decodedPathname: string
+  try {
+    decodedPathname = decodeURIComponent(pathname)
+  } catch {
+    return '/'
+  }
+
+  if (!decodedPathname.startsWith('/') || decodedPathname.startsWith('//')) {
+    return '/'
+  }
+
+  const normalizedPathname = decodedPathname.replace(/\/+$/, '').toLowerCase() || '/'
+  if (
+    normalizedPathname === '/login'
+    || normalizedPathname === '/account/security'
+    || normalizedPathname === '/s'
+    || normalizedPathname.startsWith('/s/')
+  ) {
     return '/'
   }
 
@@ -73,7 +90,7 @@ export function LoginPage() {
   const navigate = useNavigate()
   const location = useLocation()
   const isAuthenticated = useIsAuthenticated()
-  const { login, error, isLoading, clearError } = useAuthStore()
+  const { login, error, notice, isLoading, clearError } = useAuthStore()
   
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
@@ -241,6 +258,18 @@ export function LoginPage() {
                 <p className="text-default-500 mt-2">登录后管理文件、版本与分享</p>
               </div>
 
+              {notice && (
+                <div
+                  role="status"
+                  className={notice.color === 'warning'
+                    ? 'mb-4 rounded-lg border border-warning/25 bg-warning/10 px-4 py-3 text-sm text-default-700'
+                    : 'mb-4 rounded-lg border border-success/25 bg-success/10 px-4 py-3 text-sm text-default-700'}
+                >
+                  <p className="font-semibold text-foreground">{notice.title}</p>
+                  {notice.description && <p className="mt-1 leading-6">{notice.description}</p>}
+                </div>
+              )}
+
               {displayError && (
                 <div role="alert" className="rounded-lg border border-danger/20 bg-danger/5 px-4 py-3 text-sm text-danger">
                   {displayError}
@@ -304,6 +333,16 @@ export function LoginPage() {
                   />
                 </div>
 
+                <Button
+                  type="submit"
+                  className="btn-primary w-full rounded-lg"
+                  size="lg"
+                  isLoading={isLoading}
+                  startContent={!isLoading && <LogIn className="h-4 w-4" />}
+                >
+                  登录
+                </Button>
+
                 <div
                   role="note"
                   aria-label="账号恢复帮助"
@@ -328,16 +367,6 @@ export function LoginPage() {
                     <span className="sr-only">（在新标签页打开）</span>
                   </a>
                 </div>
-
-                <Button
-                  type="submit"
-                  className="btn-primary w-full rounded-lg"
-                  size="lg"
-                  isLoading={isLoading}
-                  startContent={!isLoading && <LogIn className="h-4 w-4" />}
-                >
-                  登录
-                </Button>
               </form>
 
               <Divider className="my-6" />

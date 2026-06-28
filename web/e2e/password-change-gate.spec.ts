@@ -19,6 +19,7 @@ import {
 
 const TEMPORARY_PASSWORD = 'Temporary-pass-123!'
 const REPLACEMENT_PASSWORD = 'Replacement-pass-456!'
+const FINAL_PASSWORD = 'Final-pass-789!'
 
 type CreateUserResponse = {
   success?: unknown
@@ -79,7 +80,7 @@ async function submitLogin(page: Page, username: string, password: string): Prom
 }
 
 test.describe('强制密码变更门禁', () => {
-  test('管理员重置密码后应阻断业务页面，完成修改后才允许进入', async ({ browser, page }, testInfo) => {
+  test('重置后的强制改密和登录后的自助改密均应重新验证账户', async ({ browser, page }, testInfo) => {
     test.skip(
       process.env.MNEMONAS_E2E_REUSE_EXISTING === '1',
       'This case mutates a dedicated account and runs only against the default isolated backend.',
@@ -137,6 +138,30 @@ test.describe('强制密码变更门禁', () => {
       await userPage.waitForURL(url => !url.pathname.includes('/login'))
       expect(await waitForAuthenticatedSurface(userPage)).toBe('app')
       await expect(userPage.getByRole('heading', { name: PASSWORD_CHANGE_GATE_HEADING })).toHaveCount(0)
+
+      await userPage.getByRole('button', { name: '打开用户菜单' }).click()
+      await expect(userPage.getByText('账户安全', { exact: true })).toBeVisible()
+      await userPage.getByText('账户安全', { exact: true }).click()
+      await expect(userPage).toHaveURL(/\/account\/security(?:[?#].*)?$/)
+      await expect(userPage.getByRole('menu', { name: '用户菜单' })).toBeHidden()
+      await expect(userPage.getByRole('heading', { name: '账户安全' })).toBeVisible()
+      await expect(userPage.getByText(/此账户在所有设备上的登录都会退出/)).toBeVisible()
+
+      await userPage.getByLabel('当前密码', { exact: true }).fill(REPLACEMENT_PASSWORD)
+      await expect(userPage.getByLabel('当前密码', { exact: true })).toHaveValue(REPLACEMENT_PASSWORD)
+      await userPage.getByLabel('新密码', { exact: true }).fill(FINAL_PASSWORD)
+      await expect(userPage.getByLabel('当前密码', { exact: true })).toHaveValue(REPLACEMENT_PASSWORD)
+      await expect(userPage.getByLabel('新密码', { exact: true })).toHaveValue(FINAL_PASSWORD)
+      await userPage.getByLabel('确认新密码', { exact: true }).fill(FINAL_PASSWORD)
+      await expect(userPage.getByLabel('当前密码', { exact: true })).toHaveValue(REPLACEMENT_PASSWORD)
+      await expect(userPage.getByLabel('新密码', { exact: true })).toHaveValue(FINAL_PASSWORD)
+      await expect(userPage.getByLabel('确认新密码', { exact: true })).toHaveValue(FINAL_PASSWORD)
+      await userPage.getByRole('button', { name: '修改密码并重新登录' }).click()
+
+      await expect(userPage).toHaveURL(/\/login(?:[?#].*)?$/)
+      await submitLogin(userPage, username, FINAL_PASSWORD)
+      await userPage.waitForURL(url => url.pathname === '/')
+      expect(await waitForAuthenticatedSurface(userPage)).toBe('app')
     } finally {
       await userContext?.close()
       if (userID) {

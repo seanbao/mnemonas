@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, act, fireEvent, waitFor } from '@testing-library/react'
 import React from 'react'
+import { useSettingsDraftStore } from '@/stores/settingsDraft'
 import { Header } from './Header'
 
 const refetchQueries = vi.fn().mockResolvedValue(undefined)
@@ -11,14 +12,17 @@ const openUrlInNewTabMock = vi.fn(() => true)
 const navigateMock = vi.fn()
 const logoutMock = vi.fn()
 let locationPathname = '/'
+let locationSearch = ''
+let locationHash = ''
+let authEnabled = true
 
 vi.mock('@tanstack/react-query', () => ({
   useQueryClient: () => ({ refetchQueries, clear: clearQueries }),
 }))
 
 vi.mock('@/stores/auth', () => ({
-  useAuthStore: (selector?: (state: { logout: typeof logoutMock }) => unknown) => {
-    const state = { logout: logoutMock }
+  useAuthStore: (selector?: (state: { authEnabled: boolean; logout: typeof logoutMock }) => unknown) => {
+    const state = { authEnabled, logout: logoutMock }
     return selector ? selector(state) : state
   },
   useUser: () => ({ username: 'admin', email: 'admin@local' }),
@@ -27,7 +31,7 @@ vi.mock('@/stores/auth', () => ({
 
 vi.mock('react-router-dom', () => ({
   useNavigate: () => navigateMock,
-  useLocation: () => ({ pathname: locationPathname }),
+  useLocation: () => ({ pathname: locationPathname, search: locationSearch, hash: locationHash }),
 }))
 
 vi.mock('@/components/ThemeToggle', () => ({
@@ -98,6 +102,10 @@ describe('Header', () => {
     openUrlInNewTabMock.mockReturnValue(true)
     logoutMock.mockResolvedValue({ warning: false, message: undefined })
     locationPathname = '/'
+    locationSearch = ''
+    locationHash = ''
+    authEnabled = true
+    useSettingsDraftStore.setState({ hasPendingChanges: false })
   })
 
   it('refetches active queries when refreshing data', async () => {
@@ -152,7 +160,15 @@ describe('Header', () => {
     render(<Header />)
 
     expect(screen.queryByText('设置')).toBeNull()
+    expect(screen.getByText('账户安全')).toBeTruthy()
     expect(screen.getByText('帮助文档')).toBeTruthy()
+  })
+
+  it('hides account security when password authentication is disabled', () => {
+    authEnabled = false
+    render(<Header />)
+
+    expect(screen.queryByText('账户安全')).toBeNull()
   })
 
   it('uses a localized accessible label for the user menu', () => {
@@ -264,6 +280,35 @@ describe('Header', () => {
     screen.getByRole('button', { name: '设置' }).click()
 
     expect(navigateMock).toHaveBeenCalledWith('/settings')
+  })
+
+  it('opens account security from the user menu', () => {
+    locationPathname = '/files'
+    locationSearch = '?path=%2Ffamily'
+    locationHash = '#recent'
+    render(<Header />)
+
+    screen.getByRole('button', { name: '账户安全' }).click()
+
+    expect(navigateMock).toHaveBeenCalledWith('/account/security', {
+      state: { returnTo: '/files?path=%2Ffamily#recent' },
+    })
+  })
+
+  it('keeps unsaved settings in place when account security is selected from the header', () => {
+    locationPathname = '/SETTINGS/'
+    locationSearch = '?tab=general'
+    useSettingsDraftStore.setState({ hasPendingChanges: true })
+    render(<Header />)
+
+    screen.getByRole('button', { name: '账户安全' }).click()
+
+    expect(navigateMock).not.toHaveBeenCalled()
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '设置尚未保存',
+      description: '请先保存设置或重置当前更改，再修改账户密码。',
+      color: 'warning',
+    })
   })
 
   it('clears cached queries when logout succeeds without warnings', async () => {

@@ -63,11 +63,11 @@ export async function waitForAuthenticatedSurface(
   page: Page,
   timeout = 10_000,
 ): Promise<Exclude<AuthSurface, 'login' | 'loading'>> {
-  let surface: Exclude<AuthSurface, 'loading'> = 'login'
+  let surface: AuthSurface = 'loading'
   await expect.poll(async () => {
-    surface = await waitForAuthSurface(page, 1000)
-    return surface
-  }, { timeout }).not.toBe('login')
+    surface = await waitForAuthSurface(page, 1000).catch(() => 'loading')
+    return surface === 'app' || surface === 'password-change'
+  }, { timeout }).toBe(true)
 
   return surface as Exclude<AuthSurface, 'login' | 'loading'>
 }

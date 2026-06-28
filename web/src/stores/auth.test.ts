@@ -14,7 +14,9 @@ import {
 const loginMock = vi.fn()
 const logoutMock = vi.fn()
 const getCurrentUserMock = vi.fn()
+const getStoredUserMock = vi.fn()
 const invalidateAuthSessionRequestsMock = vi.fn()
+const recordAuthCrossTabScopeTransitionMock = vi.fn()
 const acknowledgeSetupMock = vi.fn()
 const getSetupStatusMock = vi.fn()
 const clearQueryClientMock = vi.fn()
@@ -35,10 +37,13 @@ vi.mock('@/api/auth', () => ({
   AUTH_CROSS_TAB_SOURCE_ID: 'current-tab',
   AUTH_CROSS_TAB_SYNC_KEY: 'mnemonas:auth-cross-tab-sync',
   AUTH_SESSION_UPDATED_EVENT: 'mnemonas:auth-session-updated',
+  PASSWORD_CHANGE_UNCONFIRMED_MESSAGE: '密码修改结果无法确认。请先尝试使用新密码登录；若无法登录，再尝试原密码。',
   login: (...args: unknown[]) => loginMock(...args),
   logout: (...args: unknown[]) => logoutMock(...args),
   getCurrentUser: (...args: unknown[]) => getCurrentUserMock(...args),
+  getStoredUser: (...args: unknown[]) => getStoredUserMock(...args),
   invalidateAuthSessionRequests: (...args: unknown[]) => invalidateAuthSessionRequestsMock(...args),
+  recordAuthCrossTabScopeTransition: (...args: unknown[]) => recordAuthCrossTabScopeTransitionMock(...args),
 }))
 
 vi.mock('@/api/setup', () => ({
@@ -61,12 +66,14 @@ describe('authStore', () => {
       isAuthenticated: false,
       isLoading: true,
       error: null,
+      notice: null,
       authEnabled: true,
       shareEnabled: null,
     })
 
     logoutMock.mockResolvedValue({ warning: false, message: undefined })
     getCurrentUserMock.mockResolvedValue(null)
+    getStoredUserMock.mockReturnValue(null)
     acknowledgeSetupMock.mockResolvedValue({ success: true, message: 'ok' })
     getSetupStatusMock.mockResolvedValue({
       success: true,
@@ -340,9 +347,9 @@ describe('authStore', () => {
   })
 
   it.each([
-    ['logging out', 'logout'],
-    ['changing the password', 'password_changed'],
-  ])('clears authentication without an expiry error after %s', (_label, reason) => {
+    ['logging out', 'logout', null],
+    ['changing the password', 'password_changed', { title: '密码已修改，请重新登录', color: 'success' }],
+  ] as const)('clears authentication without an expiry error after %s', (_label, reason, notice) => {
     useAuthStore.setState({
       user: {
         id: 'user-1',
@@ -366,6 +373,7 @@ describe('authStore', () => {
     expect(state.user).toBeNull()
     expect(state.isAuthenticated).toBe(false)
     expect(state.error).toBeNull()
+    expect(state.notice).toEqual(notice)
     expect(clearQueryClientMock).toHaveBeenCalledTimes(1)
   })
 
@@ -394,6 +402,86 @@ describe('authStore', () => {
     expect(state.user).toBeNull()
     expect(state.isAuthenticated).toBe(false)
     expect(state.error).toBeNull()
+  })
+
+  it('shows deterministic sign-in guidance when another tab cannot confirm a password change', () => {
+    useAuthStore.setState({
+      user: {
+        id: 'user-1',
+        username: 'user',
+        role: 'user',
+        email: '',
+        homeDir: '/users/user',
+        mustChangePassword: false,
+      },
+      isAuthenticated: true,
+      isLoading: false,
+      error: null,
+      authEnabled: true,
+      shareEnabled: true,
+    })
+
+    window.dispatchEvent(new StorageEvent('storage', {
+      key: 'mnemonas:auth-cross-tab-sync',
+      newValue: JSON.stringify({
+        version: 1,
+        type: 'cleared',
+        reason: 'password_change_unconfirmed',
+        nonce: 'other-tab-password-change-unconfirmed',
+        user_id: 'user-1',
+      }),
+    }))
+
+    const state = useAuthStore.getState()
+    expect(clearQueryClientMock).toHaveBeenCalledTimes(1)
+    expect(state.user).toBeNull()
+    expect(state.isAuthenticated).toBe(false)
+    expect(state.error).toBeNull()
+    expect(state.notice).toEqual({
+      title: '密码修改结果无法确认',
+      description: '密码修改结果无法确认。请先尝试使用新密码登录；若无法登录，再尝试原密码。',
+      color: 'warning',
+    })
+  })
+
+  it('shows the persistence warning after another tab changes the password', () => {
+    useAuthStore.setState({
+      user: {
+        id: 'user-1',
+        username: 'user',
+        role: 'user',
+        email: '',
+        homeDir: '/users/user',
+        mustChangePassword: false,
+      },
+      isAuthenticated: true,
+      isLoading: false,
+      error: null,
+      notice: null,
+      authEnabled: true,
+      shareEnabled: true,
+    })
+
+    window.dispatchEvent(new StorageEvent('storage', {
+      key: 'mnemonas:auth-cross-tab-sync',
+      newValue: JSON.stringify({
+        version: 1,
+        type: 'cleared',
+        reason: 'password_change_warning',
+        nonce: 'other-tab-password-change-warning',
+        user_id: 'user-1',
+      }),
+    }))
+
+    const state = useAuthStore.getState()
+    expect(state.user).toBeNull()
+    expect(state.isAuthenticated).toBe(false)
+    expect(state.error).toBeNull()
+    expect(state.notice).toEqual({
+      title: '密码已修改，请重新登录',
+      description: '设备未确认所有登录的注销状态已保存。请使用新密码重新登录，并检查其他设备是否已退出。',
+      color: 'warning',
+    })
   })
 
   it('isolates cached queries and validates another tab session against the server', async () => {
@@ -434,9 +522,11 @@ describe('authStore', () => {
         version: 1,
         type: 'session_updated',
         nonce: 'other-tab-login',
+        user_id: 'admin-2',
       }),
     }))
 
+    expect(recordAuthCrossTabScopeTransitionMock).toHaveBeenCalledWith('admin-2')
     expect(clearQueryClientMock).toHaveBeenCalledTimes(1)
     expect(useAuthStore.getState()).toMatchObject({
       user: null,
@@ -496,6 +586,7 @@ describe('authStore', () => {
         type: 'session_updated',
         nonce: 'broadcast-login-storage-blocked',
         source_id: 'other-tab',
+        user_id: 'admin-2',
       })
 
       await vi.waitFor(() => {
@@ -577,6 +668,7 @@ describe('authStore', () => {
       reason: 'logout',
       nonce: 'broadcast-logout',
       source_id: 'other-tab',
+      user_id: 'user-1',
     })
 
     await vi.waitFor(() => {
@@ -589,6 +681,143 @@ describe('authStore', () => {
     })
     expect(clearQueryClientMock).toHaveBeenCalledTimes(1)
     channel.close()
+  })
+
+  it('does not apply a delayed clear for an older account to the current account', () => {
+    const currentUser = {
+      id: 'user-2',
+      username: 'second-user',
+      role: 'user' as const,
+      email: '',
+      homeDir: '/users/second-user',
+      mustChangePassword: false,
+    }
+    useAuthStore.setState({
+      user: currentUser,
+      isAuthenticated: true,
+      isLoading: false,
+      error: null,
+      authEnabled: true,
+      shareEnabled: true,
+    })
+    getStoredUserMock.mockReturnValue(currentUser)
+
+    window.dispatchEvent(new StorageEvent('storage', {
+      key: 'mnemonas:auth-cross-tab-sync',
+      newValue: JSON.stringify({
+        version: 1,
+        type: 'cleared',
+        reason: 'password_changed',
+        nonce: 'delayed-password-clear',
+        source_id: 'other-tab',
+        user_id: 'user-1',
+      }),
+    }))
+
+    expect(recordAuthCrossTabScopeTransitionMock).toHaveBeenCalledWith(null)
+    expect(clearQueryClientMock).not.toHaveBeenCalled()
+    expect(getCurrentUserMock).not.toHaveBeenCalled()
+    expect(useAuthStore.getState()).toMatchObject({
+      user: currentUser,
+      isAuthenticated: true,
+      isLoading: false,
+      error: null,
+    })
+  })
+
+  it('validates a delayed clear when store and storage identify different accounts', async () => {
+    const staleUser = {
+      id: 'user-1',
+      username: 'first-user',
+      role: 'user' as const,
+      email: '',
+      homeDir: '/users/first-user',
+      mustChangePassword: false,
+    }
+    const currentUser = {
+      id: 'user-2',
+      username: 'second-user',
+      role: 'user' as const,
+      email: '',
+      homeDir: '/users/second-user',
+      mustChangePassword: false,
+    }
+    useAuthStore.setState({
+      user: staleUser,
+      isAuthenticated: true,
+      isLoading: false,
+      error: null,
+      authEnabled: true,
+      shareEnabled: true,
+    })
+    getStoredUserMock.mockReturnValue(currentUser)
+    getCurrentUserMock.mockResolvedValueOnce(currentUser)
+
+    window.dispatchEvent(new StorageEvent('storage', {
+      key: 'mnemonas:auth-cross-tab-sync',
+      newValue: JSON.stringify({
+        version: 1,
+        type: 'cleared',
+        reason: 'password_changed',
+        nonce: 'delayed-clear-during-session-update',
+        source_id: 'other-tab',
+        user_id: 'user-1',
+      }),
+    }))
+
+    expect(recordAuthCrossTabScopeTransitionMock).toHaveBeenCalledWith(null)
+    await vi.waitFor(() => expect(getCurrentUserMock).toHaveBeenCalledWith({ signal: expect.any(AbortSignal) }))
+    await vi.waitFor(() => {
+      expect(useAuthStore.getState()).toMatchObject({
+        user: currentUser,
+        isAuthenticated: true,
+        isLoading: false,
+        error: null,
+      })
+    })
+  })
+
+  it('validates an accountless legacy clear without overwriting a known account', async () => {
+    const currentUser = {
+      id: 'user-2',
+      username: 'second-user',
+      role: 'user' as const,
+      email: '',
+      homeDir: '/users/second-user',
+      mustChangePassword: false,
+    }
+    useAuthStore.setState({
+      user: currentUser,
+      isAuthenticated: true,
+      isLoading: false,
+      error: null,
+      authEnabled: true,
+      shareEnabled: true,
+    })
+    getStoredUserMock.mockReturnValue(currentUser)
+    getCurrentUserMock.mockResolvedValueOnce(currentUser)
+
+    window.dispatchEvent(new StorageEvent('storage', {
+      key: 'mnemonas:auth-cross-tab-sync',
+      newValue: JSON.stringify({
+        version: 1,
+        type: 'cleared',
+        reason: 'logout',
+        nonce: 'legacy-accountless-clear',
+        source_id: 'other-tab',
+      }),
+    }))
+
+    expect(recordAuthCrossTabScopeTransitionMock).toHaveBeenCalledWith(null)
+    await vi.waitFor(() => expect(getCurrentUserMock).toHaveBeenCalledWith({ signal: expect.any(AbortSignal) }))
+    await vi.waitFor(() => {
+      expect(useAuthStore.getState()).toMatchObject({
+        user: currentUser,
+        isAuthenticated: true,
+        isLoading: false,
+        error: null,
+      })
+    })
   })
 
   it('fails closed when another tab session signal cannot be verified', async () => {
@@ -1088,6 +1317,23 @@ describe('authStore', () => {
     const state = useAuthStore.getState()
     expect(state.isLoading).toBe(false)
     expect(state.error).toBe('登录失败')
+  })
+
+  it('preserves unconfirmed password guidance when the first recovery login fails', async () => {
+    const notice = {
+      title: '密码修改结果无法确认',
+      description: '密码修改结果无法确认。请先尝试使用新密码登录；若无法登录，再尝试原密码。',
+      color: 'warning' as const,
+    }
+    useAuthStore.setState({ notice })
+    const authError = Object.assign(new Error('用户名或密码错误'), { name: 'AuthError' })
+    loginMock.mockRejectedValueOnce(authError)
+
+    await expect(useAuthStore.getState().login('admin', 'new-password')).rejects.toThrow('用户名或密码错误')
+
+    const state = useAuthStore.getState()
+    expect(state.error).toBe('用户名或密码错误')
+    expect(state.notice).toEqual(notice)
   })
 
   it('does not expose arbitrary Error messages from failed login attempts', async () => {

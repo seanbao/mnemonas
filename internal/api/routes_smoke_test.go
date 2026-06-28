@@ -21,6 +21,7 @@ type routeSmokeSession struct {
 	accessToken  string
 	refreshToken string
 	password     string
+	userID       string
 }
 
 func TestServer_RouteContract_SmokeRequestsDoNot500(t *testing.T) {
@@ -363,18 +364,22 @@ func loginRouteSmokeUser(t *testing.T, server *Server, username, password string
 		Data struct {
 			AccessToken  string `json:"access_token"`
 			RefreshToken string `json:"refresh_token"`
+			User         struct {
+				ID string `json:"id"`
+			} `json:"user"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
 		t.Fatalf("decode route smoke login response: %v", err)
 	}
-	if envelope.Data.AccessToken == "" || envelope.Data.RefreshToken == "" {
-		t.Fatalf("route smoke login did not return access and refresh tokens: %s", rec.Body.String())
+	if envelope.Data.AccessToken == "" || envelope.Data.RefreshToken == "" || envelope.Data.User.ID == "" {
+		t.Fatalf("route smoke login did not return access token, refresh token, and user id: %s", rec.Body.String())
 	}
 
 	return routeSmokeSession{
 		accessToken:  envelope.Data.AccessToken,
 		refreshToken: envelope.Data.RefreshToken,
+		userID:       envelope.Data.User.ID,
 	}
 }
 
@@ -496,7 +501,7 @@ func routeSmokeRequestBody(contract string, session routeSmokeSession) string {
 	case "POST /api/v1/auth/refresh":
 		return fmt.Sprintf(`{"refresh_token":%q}`, session.refreshToken)
 	case "POST /api/v1/auth/password":
-		return `{"old_password":"not-the-current-password","new_password":"route-smoke-password"}`
+		return fmt.Sprintf(`{"expected_user_id":%q,"old_password":"not-the-current-password","new_password":"route-smoke-password"}`, session.userID)
 	case "POST /api/v1/admin/users/":
 		return `{"username":"admin","password":"route-smoke-password","role":"admin"}`
 	case "POST /api/v1/admin/users/{id}/reset-password":
@@ -544,6 +549,7 @@ func TestRouteSmokeRequestBodiesAreValidJSON(t *testing.T) {
 		accessToken:  "access",
 		refreshToken: "refresh",
 		password:     "password",
+		userID:       "user-id",
 	}
 	for _, contract := range expectedRESTRouteContracts() {
 		body := routeSmokeRequestBody(contract, session)
