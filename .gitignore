@@ -75,3 +75,5 @@ output/
 # Local review notes
 docs/repo-review.md
 docs/review-progress.md
+docs/hardening-progress*.md
+docs/hardening-review-summary*.md

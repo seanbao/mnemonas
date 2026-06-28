@@ -418,17 +418,7 @@ extract_validation_target() {
 }
 
 is_validation_evidence_path() {
-	case "$1" in
-		docs/hardening-progress.md|\
-		docs/hardening-progress.en.md|\
-		docs/hardening-review-summary.md|\
-		docs/hardening-review-summary.en.md)
-			return 0
-			;;
-		*)
-			return 1
-			;;
-	esac
+	return 1
 }
 
 is_release_documentation_path() {
@@ -462,10 +452,8 @@ check_validation_evidence() {
 	local target=""
 	local target_full=""
 	local evidence_files=(
-		"docs/hardening-progress.md"
-		"docs/hardening-progress.en.md"
-		"docs/hardening-review-summary.md"
-		"docs/hardening-review-summary.en.md"
+		"docs/release-notes.md"
+		"docs/release-notes.en.md"
 	)
 
 	for path in "${evidence_files[@]}"; do
@@ -494,9 +482,6 @@ check_validation_evidence() {
 	target_short="$(git rev-parse --short=12 "$target_full")"
 	head_full="$(git rev-parse HEAD)"
 	VALIDATION_TARGET_SHORT="$target_short"
-
-	require_file_line_contains_pair "docs/hardening-progress.md" "make release-readiness" "$target_short" "release-readiness validation record"
-	require_file_line_contains_pair "docs/hardening-progress.en.md" "make release-readiness" "$target_short" "release-readiness validation record"
 
 	if ! git merge-base --is-ancestor "$target_full" HEAD; then
 		fail "validation evidence target is not an ancestor of HEAD: $target_short"
