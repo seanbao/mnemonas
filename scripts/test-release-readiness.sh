@@ -547,45 +547,6 @@ WebDAV compatibility report form: https://github.com/seanbao/mnemonas/issues/new
 EOF
 }
 
-write_validation_docs() {
-	local target="$1"
-
-	mkdir -p docs
-	cat >docs/hardening-progress.md <<EOF
-# 硬化进度台账
-
-| 日期 | 命令 | 结果 |
-|------|------|------|
-| 2026-06-18 | \`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master\` | 通过。覆盖验证目标 \`$target\` 的分支范围。 |
-| 2026-06-18 | \`make release-readiness\` | 通过。完整验证目标 \`$target\` 后仅有发布文档和验证证据文件变化。 |
-EOF
-
-	cat >docs/hardening-progress.en.md <<EOF
-# Hardening Progress Ledger
-
-| Date | Command | Result |
-| --- | --- | --- |
-| 2026-06-18 | \`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master\` | Passed. Covered validation target \`$target\` across the branch range. |
-| 2026-06-18 | \`make release-readiness\` | Passed. After full validation target \`$target\`, only release-documentation and validation-evidence files changed. |
-EOF
-
-	cat >docs/hardening-review-summary.md <<EOF
-# 硬化审查摘要
-
-| 项目 | 当前状态 |
-|------|----------|
-| 最近完整验证 | \`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master\` 在验证目标 \`$target\` 通过。 |
-EOF
-
-	cat >docs/hardening-review-summary.en.md <<EOF
-# Hardening Review Summary
-
-| Item | Current status |
-| --- | --- |
-| Latest broad validation | \`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master\` passed at validation target \`$target\`. |
-EOF
-}
-
 mkdir -p "$tmp/scripts"
 cp "$READINESS" "$tmp/scripts/release-readiness.sh"
 cp "$PLANNER" "$tmp/scripts/plan-hardening-commits.sh"
@@ -603,9 +564,7 @@ git add .
 git commit -q -m "docs: initial checklist"
 validation_target="$(git rev-parse --short=12 HEAD)"
 validation_target_full="$(git rev-parse "$validation_target^{commit}")"
-validation_target_short="$(git rev-parse --short=7 "$validation_target")"
 write_release_notes "$validation_target"
-write_validation_docs "$validation_target"
 git add docs
 git commit -q -m "docs: record validation evidence"
 
@@ -628,11 +587,9 @@ assert_file_contains "$output_dir/non-ancestor-base.err" "base ref is not an anc
 
 git checkout -q master
 git checkout -q -b mixed-validation-target-lengths
-sed -i.bak "s/${validation_target}/${validation_target_short}/" docs/hardening-review-summary.md
-rm -f docs/hardening-review-summary.md.bak
-sed -i.bak "s/${validation_target}/${validation_target_full}/" docs/hardening-review-summary.en.md
-rm -f docs/hardening-review-summary.en.md.bak
-git add docs/hardening-review-summary.md docs/hardening-review-summary.en.md
+sed -i.bak "s/${validation_target}/${validation_target_full}/" docs/release-notes.en.md
+rm -f docs/release-notes.en.md.bak
+git add docs/release-notes.en.md
 git commit -q -m "docs: mix validation target lengths"
 ./scripts/release-readiness.sh --base "$validation_target" >"$output_dir/mixed-validation-target-lengths.out" 2>"$output_dir/mixed-validation-target-lengths.err"
 assert_file_contains "$output_dir/mixed-validation-target-lengths.out" "[release-readiness] validation:"
@@ -640,25 +597,25 @@ assert_file_contains "$output_dir/mixed-validation-target-lengths.out" "only rel
 
 git checkout -q master
 git checkout -q -b missing-validation-evidence-file
-rm -f docs/hardening-review-summary.en.md
-git add -A docs/hardening-review-summary.en.md
+rm -f docs/release-notes.en.md
+git add -A docs/release-notes.en.md
 git commit -q -m "docs: remove validation evidence"
 if ./scripts/release-readiness.sh --base "$validation_target" >"$output_dir/missing-validation-evidence.out" 2>"$output_dir/missing-validation-evidence.err"; then
 	fail "release readiness accepted a missing validation evidence document"
 fi
-assert_file_contains "$output_dir/missing-validation-evidence.err" "missing validation evidence file: docs/hardening-review-summary.en.md"
+assert_file_contains "$output_dir/missing-validation-evidence.err" "missing validation evidence file: docs/release-notes.en.md"
 
 git checkout -q master
 git checkout -q -b missing-validation-target
 validation_tick="$(printf '\140')"
-sed -i.bak "s/validation target ${validation_tick}[^${validation_tick}]*${validation_tick}/validation target missing/" docs/hardening-review-summary.en.md
-rm -f docs/hardening-review-summary.en.md.bak
-git add docs/hardening-review-summary.en.md
+sed -i.bak "s/validation target ${validation_tick}[^${validation_tick}]*${validation_tick}/validation target missing/" docs/release-notes.en.md
+rm -f docs/release-notes.en.md.bak
+git add docs/release-notes.en.md
 git commit -q -m "docs: remove validation target"
 if ./scripts/release-readiness.sh --base "$validation_target" >"$output_dir/missing-validation-target.out" 2>"$output_dir/missing-validation-target.err"; then
 	fail "release readiness accepted validation evidence without a target"
 fi
-assert_file_contains "$output_dir/missing-validation-target.err" "validation evidence target not recorded in: docs/hardening-review-summary.en.md"
+assert_file_contains "$output_dir/missing-validation-target.err" "validation evidence target not recorded in: docs/release-notes.en.md"
 
 git checkout -q master
 git checkout -q -b missing-release-note-validation-target
@@ -669,21 +626,7 @@ git commit -q -m "docs: stale release note validation target"
 if ./scripts/release-readiness.sh --base "$validation_target" >"$output_dir/missing-release-note-validation-target.out" 2>"$output_dir/missing-release-note-validation-target.err"; then
 	fail "release readiness accepted release notes without the validation target"
 fi
-assert_file_contains "$output_dir/missing-release-note-validation-target.err" "docs/release-notes.en.md is missing required text"
-assert_file_contains "$output_dir/missing-release-note-validation-target.err" "$validation_target"
-
-git checkout -q master
-git checkout -q -b stale-hardening-progress-readiness-target
-sed -i.bak '/make release-readiness/s/'"$validation_target"'/000000000000/' docs/hardening-progress.en.md
-rm -f docs/hardening-progress.en.md.bak
-git add docs/hardening-progress.en.md
-git commit -q -m "docs: stale readiness validation target"
-if ./scripts/release-readiness.sh --base "$validation_target" >"$output_dir/stale-hardening-progress-readiness-target.out" 2>"$output_dir/stale-hardening-progress-readiness-target.err"; then
-	fail "release readiness accepted hardening progress without a current readiness validation record"
-fi
-assert_file_contains "$output_dir/stale-hardening-progress-readiness-target.err" "docs/hardening-progress.en.md is missing required release-readiness validation record"
-assert_file_contains "$output_dir/stale-hardening-progress-readiness-target.err" "make release-readiness"
-assert_file_contains "$output_dir/stale-hardening-progress-readiness-target.err" "$validation_target"
+assert_file_contains "$output_dir/missing-release-note-validation-target.err" "validation evidence target does not resolve: docs/release-notes.en.md records 000000000000"
 
 git checkout -q master
 git checkout -q -b release-docs

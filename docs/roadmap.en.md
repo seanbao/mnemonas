@@ -10,7 +10,7 @@ As of 2026-06-21, MnemoNAS already includes Web file management, WebDAV, version
 
 The current capability set can be summarized by track:
 
-- The roadmap records product judgment, capability boundaries, and next priorities. Completed hardening areas, validation evidence, and closeout items are tracked in the [Hardening progress ledger](hardening-progress.en.md), so the roadmap does not duplicate the full completion ledger.
+- The roadmap records product judgment, capability boundaries, and next priorities. Completed hardening areas, validation evidence, and release status should be tracked in CHANGELOG, the release notes draft, or the corresponding feature documentation, so the roadmap does not duplicate the full completion ledger.
 - Public access has a first baseline: reverse-proxy scripts, `mnemonas-public-setup`, `mnemonas-doctor --public-domain`, the Web public-access wizard, the security self-check API, certificate-renewal guidance, certificate-failure triage guidance, the Web settings flow, and E2E regression coverage. Public diagnostics check broad UFW allow rules for backend ports and consistently expand `~` in storage and WebDAV user-file paths.
 - Backup and restore include local jobs, command-backed restic/rclone remote targets, lightweight scheduling, automatic backup windows, retention checks, restore drills or remote checks, restore history, restore summaries, single-job restore progress steps, batch restore progress steps, post-restore read-only verification, post-restore cutover and rollback checklists, copyable restore cutover records, copyable batch-restore records with job context, backup targets, and retention-policy status, batch-restore cross-directory cutover candidates, batch-restore conflict-disposition records, batch restore attention reasons, Dashboard risk summaries, Web maintenance status, and Webhook/Telegram/WeCom/DingTalk/SMTP notifications for backup, explicit restore, restore verification, restore drill, and retention-check events.
 - Alerts and disk health include a saved-config `alert_test` entry point, directory-access and share-policy change events, soon-expiring share aggregate events, and `smartctl`-based SMART, temperature, missing-device, and serial-drift checks. These states are wired into the health page, diagnostic summaries, activity logs, and notifications.
@@ -159,6 +159,6 @@ The near-term roadmap does not prioritize:
 ## Maintenance Rules
 
 - Completed items should move to CHANGELOG or feature documentation rather than staying in the roadmap.
-- Completed hardening areas and validation evidence should be recorded in the [Hardening progress ledger](hardening-progress.en.md); the roadmap should keep only the status summaries that affect priority decisions.
+- Completed hardening areas and validation evidence should be recorded in CHANGELOG, the release notes draft, or the corresponding feature documentation; the roadmap should keep only the status summaries that affect priority decisions.
 - If the implementation strategy changes, update acceptance criteria rather than only renaming the feature.
 - Data-safety items should keep explicit failure modes and rollback strategies.
