@@ -45,6 +45,7 @@ import { formatBytes, cn, copyTextToClipboard, formatRelativeTime, normalizePath
 import { useBatchOperation, type BatchOperationResult } from '@/lib/useBatchOperation'
 import { GENERIC_ACTION_ERROR_DESCRIPTION, GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
 import { PageHeader } from '@/components/ui/PageHeader'
+import { useDestructiveDialogFocus } from '@/hooks/useDestructiveDialogFocus'
 import { useCanWrite, useUser } from '@/stores/auth'
 import {
   getPathConflictErrorToast,
@@ -53,34 +54,21 @@ import {
   getSharedQuotaExceededErrorToast,
 } from '@/lib/fileActionErrors'
 
-// Calculate days until auto-delete based on retention config
-function daysUntilDelete(deletedAt: string, retentionDays: number): number | null {
-  if (retentionDays <= 0) {
-    return null
-  }
-  const deleted = new Date(deletedAt)
-  const autoDelete = new Date(deleted.getTime() + retentionDays * 24 * 60 * 60 * 1000)
-  const now = new Date()
-  return Math.max(0, Math.ceil((autoDelete.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)))
+function daysUntilDelete(expiresAt: string): number {
+  const expiryTime = new Date(expiresAt).getTime()
+  return Math.max(0, Math.ceil((expiryTime - Date.now()) / (1000 * 60 * 60 * 24)))
 }
 
-function getAutoDeleteBadgeLabel(deletedAt: string, retentionDays: number | undefined, retentionEnabled: boolean | undefined): string | null {
-  if (retentionEnabled === undefined || retentionDays === undefined) {
-    return '自动清理设置未知'
+function getAutoDeleteBadgeLabel(item: TrashItem, trashAutoCleanupEnabled: boolean | undefined): string | null {
+  if (trashAutoCleanupEnabled === undefined) {
+    return '自动清理设置未知；容量不足时仍可能提前清理'
   }
 
-  if (!retentionEnabled) {
+  if (!trashAutoCleanupEnabled) {
     return null
   }
 
-  if (retentionDays === 0) {
-    return '已过期，等待清理'
-  }
-
-  const daysLeft = daysUntilDelete(deletedAt, retentionDays)
-  if (daysLeft === null) {
-    return '已过期，等待清理'
-  }
+  const daysLeft = daysUntilDelete(item.expiresAt)
   if (daysLeft > 7) {
     return null
   }
@@ -88,13 +76,82 @@ function getAutoDeleteBadgeLabel(deletedAt: string, retentionDays: number | unde
     return '已过期，等待清理'
   }
 
-  return `${daysLeft} 天后自动删除`
+  return `${daysLeft} 天后到期`
+}
+
+function getExistingTrashCleanupDescription(trashAutoCleanupEnabled: boolean | undefined): string {
+  if (trashAutoCleanupEnabled === undefined) {
+    return '现有项目自动清理设置未知，容量不足时仍可能提前清理'
+  }
+  if (!trashAutoCleanupEnabled) {
+    return '现有项目按到期时间自动清理未启用，容量不足时仍可能提前清理'
+  }
+  return '现有项目到期后由后台清理，容量不足时可能提前清理'
+}
+
+function getTrashPolicyLabel(
+  retentionEnabled: boolean | undefined,
+  retentionDays: number | undefined,
+  trashAutoCleanupEnabled: boolean | undefined,
+): string {
+  const existingCleanupDescription = getExistingTrashCleanupDescription(trashAutoCleanupEnabled)
+  if (retentionEnabled === undefined) {
+    return `当前删除方式未知 · ${existingCleanupDescription}`
+  }
+  if (!retentionEnabled) {
+    return `当前删除方式为永久删除，新删除项目不会进入回收站 · ${existingCleanupDescription}`
+  }
+  if (trashAutoCleanupEnabled === undefined) {
+    return '新删除项目会进入回收站 · 自动清理设置未知 · 容量不足时可能提前清理'
+  }
+  if (!trashAutoCleanupEnabled) {
+    return '新删除项目会进入回收站 · 按到期时间自动清理未启用 · 容量不足时仍可能提前清理'
+  }
+  if (retentionDays === undefined) {
+    return '新删除项目会进入回收站，到期时间未知 · 容量不足时可能提前清理'
+  }
+  if (retentionDays <= 0) {
+    return '新删除项目会进入回收站并立即到期 · 容量不足时可能提前清理'
+  }
+  return `新删除项目会进入回收站并在 ${retentionDays} 天后到期 · 容量不足时可能提前清理`
+}
+
+function getTrashEmptyStateDescription(retentionEnabled: boolean | undefined): string {
+  if (retentionEnabled === undefined) {
+    return '当前删除方式未知；新删除项目是否进入回收站暂不可确认'
+  }
+  if (!retentionEnabled) {
+    return '当前删除方式为永久删除；新删除项目不会进入回收站'
+  }
+  return '新删除项目会进入回收站，并按当前策略保留'
 }
 
 const trashUnavailableDescription = '文件系统当前不可用，请稍后重试'
 const missingTrashItemTitle = '回收站条目已不存在，已同步更新'
+const missingTrashBatchDescription = '已同步移除 {count} 个不存在回收站项目'
 const clipboardWriteFailureDescription = '请检查浏览器剪贴板权限。'
 const TRASH_RESTORE_ACTIVITY_LIMIT = 100
+
+type TrashBatchIntent = {
+  items: TrashItem[]
+  trashAutoCleanupEnabled: boolean | undefined
+}
+
+class MissingTrashItemSynchronizationError extends Error {
+  constructor() {
+    super(missingTrashItemTitle)
+    this.name = 'MissingTrashItemSynchronizationError'
+  }
+}
+
+type TrashBatchResultSummary = {
+  succeeded: number
+  missing: number
+  failed: number
+  missingItems: unknown[]
+  failedItems: unknown[]
+  failedErrors: unknown[]
+}
 
 function normalizeTrashPathFilter(value: string | null): string {
   const trimmed = value?.trim() ?? ''
@@ -208,6 +265,18 @@ function getMissingTrashItemResult(): ActionResult {
   }
 }
 
+function isMissingTrashItemResult(result: ActionResult): boolean {
+  return result.warning === true && result.message === missingTrashItemTitle
+}
+
+async function classifyTrashBatchAction(operation: () => Promise<ActionResult>): Promise<ActionResult> {
+  const result = await operation()
+  if (isMissingTrashItemResult(result)) {
+    throw new MissingTrashItemSynchronizationError()
+  }
+  return result
+}
+
 function getTrashBatchWarningMessage(result: ActionResult): string | undefined {
   return result.message === missingTrashItemTitle ? missingTrashItemTitle : undefined
 }
@@ -303,45 +372,108 @@ function getTrashActionErrorPresentation(
   }
 }
 
+function summarizeTrashBatchResult(result: BatchOperationResult): TrashBatchResultSummary {
+  const missingItems: unknown[] = []
+  const failedItems: unknown[] = []
+  const failedErrors: unknown[] = []
+
+  result.failedItems.forEach((item, index) => {
+    const error = result.failedErrors[index]
+    if (error instanceof MissingTrashItemSynchronizationError) {
+      missingItems.push(item)
+      return
+    }
+    failedItems.push(item)
+    failedErrors.push(error)
+  })
+
+  return {
+    succeeded: result.succeeded,
+    missing: missingItems.length,
+    failed: failedItems.length,
+    missingItems,
+    failedItems,
+    failedErrors,
+  }
+}
+
+function formatMissingTrashBatchDescription(count: number): string {
+  return missingTrashBatchDescription.replace('{count}', String(count))
+}
+
 function getTrashBatchActionToast(
   result: BatchOperationResult,
   titles: {
+    success: string
+    failure: string
     unavailable: string
     warning: string
     partial: string
   }
 ) {
-  if (result.failed === 0 && result.warningCount > 0) {
+  const summary = summarizeTrashBatchResult(result)
+  const missingDescription = summary.missing > 0
+    ? formatMissingTrashBatchDescription(summary.missing)
+    : undefined
+
+  if (summary.failed === 0 && summary.missing > 0) {
+    if (summary.succeeded === 0) {
+      return {
+        title: missingDescription!,
+        color: 'warning' as const,
+      }
+    }
     return {
-      title: result.warningMessages.find((message) => message === missingTrashItemTitle)
-        ?? titles.warning.replace('{count}', String(result.succeeded)),
+      title: (result.warningCount > 0 ? titles.warning : titles.success)
+        .replace('{count}', String(summary.succeeded)),
+      description: missingDescription,
       color: 'warning' as const,
     }
   }
 
-  if (result.succeeded === 0 && result.failedErrors.length > 0 && result.failedErrors.every((error) => {
+  if (summary.failed === 0 && result.warningCount > 0) {
+    return {
+      title: titles.warning.replace('{count}', String(summary.succeeded)),
+      color: 'warning' as const,
+    }
+  }
+
+  if (summary.succeeded === 0 && summary.failed > 0 && summary.failedErrors.every((error) => {
     return error instanceof ApiError && error.isUnavailable
   })) {
     return {
       title: titles.unavailable,
-      description: trashUnavailableDescription,
+      description: [missingDescription, trashUnavailableDescription].filter(Boolean).join('；'),
       color: 'warning' as const,
     }
   }
 
   const sharedFailureToast =
-    getSharedPathConflictErrorToast(result.failedErrors)
-    ?? getSharedQuotaExceededErrorToast(result.failedErrors)
+    getSharedPathConflictErrorToast(summary.failedErrors)
+    ?? getSharedQuotaExceededErrorToast(summary.failedErrors)
 
-  if (result.succeeded === 0 && sharedFailureToast) {
+  if (summary.succeeded === 0 && summary.missing === 0 && sharedFailureToast) {
     return sharedFailureToast
   }
 
-  if (result.succeeded > 0 && result.failed > 0 && sharedFailureToast) {
+  if (summary.missing > 0 && summary.failed > 0) {
+    const title = summary.succeeded > 0
+      ? titles.partial
+        .replace('{succeeded}', String(summary.succeeded))
+        .replace('{failed}', String(summary.failed))
+      : titles.failure.replace('{count}', String(summary.failed))
+    return {
+      title,
+      description: [missingDescription, sharedFailureToast?.description].filter(Boolean).join('；') || undefined,
+      color: 'warning' as const,
+    }
+  }
+
+  if (summary.succeeded > 0 && summary.failed > 0 && sharedFailureToast) {
     return {
       title: titles.partial
-        .replace('{succeeded}', String(result.succeeded))
-        .replace('{failed}', String(result.failed)),
+        .replace('{succeeded}', String(summary.succeeded))
+        .replace('{failed}', String(summary.failed)),
       description: sharedFailureToast.description,
       color: 'warning' as const,
     }
@@ -366,39 +498,37 @@ function getTrashItemParentPath(item: TrashItem): string {
 
 function getBatchRestoreAutoDeleteSummary(
   items: TrashItem[],
-  retentionDays: number | undefined,
-  retentionEnabled: boolean | undefined,
+  trashAutoCleanupEnabled: boolean | undefined,
 ): string {
   if (items.length === 0) {
     return '尚未选择项目'
   }
-  if (retentionEnabled === undefined || retentionDays === undefined) {
-    return '自动清理设置未知'
+  if (trashAutoCleanupEnabled === undefined) {
+    return '自动清理设置未知；容量不足时仍可能提前清理'
   }
-  if (!retentionEnabled) {
-    return '自动清理未启用'
+  if (!trashAutoCleanupEnabled) {
+    return '按到期时间自动清理未启用；容量不足时仍可能提前清理'
   }
 
-  const expiredCount = items.filter((item) => getAutoDeleteBadgeLabel(item.deletedAt, retentionDays, retentionEnabled) === '已过期，等待清理').length
+  const expiredCount = items.filter((item) => getAutoDeleteBadgeLabel(item, trashAutoCleanupEnabled) === '已过期，等待清理').length
   if (expiredCount > 0) {
-    return `${expiredCount} 项已过期，恢复前应尽快确认`
+    return `${expiredCount} 项已过期并等待清理；容量不足时仍可能提前清理`
   }
 
   const soonCount = items.filter((item) => {
-    const label = getAutoDeleteBadgeLabel(item.deletedAt, retentionDays, retentionEnabled)
+    const label = getAutoDeleteBadgeLabel(item, trashAutoCleanupEnabled)
     return Boolean(label && label !== '自动清理设置未知' && label !== '已过期，等待清理')
   }).length
   if (soonCount > 0) {
-    return `${soonCount} 项接近自动清理窗口`
+    return `${soonCount} 项接近到期时间；容量不足时仍可能提前清理`
   }
 
-  return '所选项目不在近期自动清理窗口内'
+  return '所选项目近期不会到期；容量不足时仍可能提前清理'
 }
 
 function formatTrashBatchRestoreReviewReport(
   items: TrashItem[],
-  retentionDays: number | undefined,
-  retentionEnabled: boolean | undefined,
+  trashAutoCleanupEnabled: boolean | undefined,
 ): string {
   const fileCount = items.filter((item) => !item.isDir).length
   const directoryCount = items.filter((item) => item.isDir).length
@@ -410,7 +540,7 @@ function formatTrashBatchRestoreReviewReport(
     `恢复项目：${items.length} 项（${directoryCount} 个目录，${fileCount} 个文件）`,
     `原始目录：${targetDirectories.length} 个目标目录`,
     `可见数据量：${formatBytes(totalSize)}`,
-    `自动清理：${getBatchRestoreAutoDeleteSummary(items, retentionDays, retentionEnabled)}`,
+    `自动清理：${getBatchRestoreAutoDeleteSummary(items, trashAutoCleanupEnabled)}`,
     '冲突处理：若原路径已存在同名文件、父目录不可写或配额不足，服务端会拒绝对应项目并保留在回收站。',
     '执行结果：成功项目会从回收站移除；失败项目会保持选中，便于继续处理。',
     '涉及目录：',
@@ -429,12 +559,10 @@ function TrashRestoreReviewItem({ label, value }: { label: string; value: string
 
 function TrashBatchRestoreReview({
   items,
-  retentionDays,
-  retentionEnabled,
+  trashAutoCleanupEnabled,
 }: {
   items: TrashItem[]
-  retentionDays: number | undefined
-  retentionEnabled: boolean | undefined
+  trashAutoCleanupEnabled: boolean | undefined
 }) {
   const fileCount = items.filter((item) => !item.isDir).length
   const directoryCount = items.filter((item) => item.isDir).length
@@ -444,7 +572,7 @@ function TrashBatchRestoreReview({
   const hiddenTargetCount = Math.max(0, targetDirectories.length - visibleTargets.length)
   const handleCopyReviewReport = async () => {
     try {
-      await copyTextToClipboard(formatTrashBatchRestoreReviewReport(items, retentionDays, retentionEnabled))
+      await copyTextToClipboard(formatTrashBatchRestoreReviewReport(items, trashAutoCleanupEnabled))
       addToast({ title: '批量恢复复核记录已复制', color: 'success' })
     } catch {
       addToast({
@@ -470,7 +598,7 @@ function TrashBatchRestoreReview({
         <TrashRestoreReviewItem label="恢复项目" value={`${items.length} 项 · ${directoryCount} 个目录 · ${fileCount} 个文件`} />
         <TrashRestoreReviewItem label="原始目录" value={`${targetDirectories.length} 个目标目录`} />
         <TrashRestoreReviewItem label="可见数据量" value={formatBytes(totalSize)} />
-        <TrashRestoreReviewItem label="自动清理" value={getBatchRestoreAutoDeleteSummary(items, retentionDays, retentionEnabled)} />
+        <TrashRestoreReviewItem label="自动清理" value={getBatchRestoreAutoDeleteSummary(items, trashAutoCleanupEnabled)} />
         <TrashRestoreReviewItem label="冲突处理" value="若原路径已存在同名文件、父目录不可写或配额不足，服务端会拒绝对应项目并保留在回收站。" />
         <TrashRestoreReviewItem label="执行结果" value="成功项目会从回收站移除；失败项目会保持选中，便于继续处理。" />
       </div>
@@ -500,8 +628,7 @@ function TrashRow({
   onSelect,
   onRestore,
   onDelete,
-  retentionDays,
-  retentionEnabled,
+  trashAutoCleanupEnabled,
   canWrite,
 }: {
   item: TrashItem
@@ -509,11 +636,10 @@ function TrashRow({
   onSelect: () => void
   onRestore: () => void
   onDelete: () => void
-  retentionDays: number | undefined
-  retentionEnabled: boolean | undefined
+  trashAutoCleanupEnabled: boolean | undefined
   canWrite: boolean
 }) {
-  const autoDeleteBadgeLabel = getAutoDeleteBadgeLabel(item.deletedAt, retentionDays, retentionEnabled)
+  const autoDeleteBadgeLabel = getAutoDeleteBadgeLabel(item, trashAutoCleanupEnabled)
   const isExpiredForCleanup = autoDeleteBadgeLabel === '已过期，等待清理'
   const autoDeleteBadgeColor = autoDeleteBadgeLabel === '自动清理设置未知'
     ? 'default'
@@ -610,12 +736,15 @@ export function TrashPage() {
   const trashQueryKey = useMemo(() => ['trash', authScopeKey] as const, [authScopeKey])
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set())
   const [actionItem, setActionItem] = useState<TrashItem | null>(null)
+  const [batchRestoreIntent, setBatchRestoreIntent] = useState<TrashBatchIntent | null>(null)
+  const [batchDeleteIntent, setBatchDeleteIntent] = useState<TrashBatchIntent | null>(null)
   const actionItemRef = useRef(actionItem)
   const restoreAbortControllerRef = useRef<AbortController | null>(null)
   const deleteAbortControllerRef = useRef<AbortController | null>(null)
   const emptyAbortControllerRef = useRef<AbortController | null>(null)
   const batchRestoreAbortControllerRef = useRef<AbortController | null>(null)
   const batchDeleteAbortControllerRef = useRef<AbortController | null>(null)
+  const deleteFocusFallbackRef = useRef<HTMLDivElement>(null)
 
   useLayoutEffect(() => {
     actionItemRef.current = actionItem
@@ -640,6 +769,11 @@ export function TrashPage() {
   const { isOpen: isBatchDeleteOpen, onOpen: onBatchDeleteOpen, onClose: onBatchDeleteClose } = useDisclosure()
   const { isOpen: isBatchRestoreOpen, onOpen: onBatchRestoreOpen, onClose: onBatchRestoreClose } = useDisclosure()
   const { isOpen: isEmptyOpen, onOpen: onEmptyOpen, onClose: onEmptyClose } = useDisclosure()
+  const {
+    initialFocusRef: deleteCancelButtonRef,
+    captureReturnFocus: captureDeleteReturnFocus,
+    setFallbackReturnFocus: setDeleteFallbackReturnFocus,
+  } = useDestructiveDialogFocus(isDeleteOpen)
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: trashQueryKey,
@@ -648,6 +782,9 @@ export function TrashPage() {
   })
 
   const items = useMemo(() => data?.items ?? [], [data?.items])
+  const retentionDays = data?.retentionDays
+  const retentionEnabled = data?.retentionEnabled
+  const trashAutoCleanupEnabled = data?.trashAutoCleanupEnabled
   const pathFilter = useMemo(() => normalizeTrashPathFilter(searchParams.get('path')), [searchParams])
   const visibleItems = useMemo(() => {
     return pathFilter ? items.filter((item) => trashItemMatchesPathFilter(item, pathFilter)) : items
@@ -724,21 +861,6 @@ export function TrashPage() {
         items,
         count: items.length,
         totalSize: items.reduce((sum, item) => sum + item.size, 0),
-      }
-    })
-  }, [queryClient, trashQueryKey])
-
-  const clearTrashCache = useCallback(() => {
-    queryClient.setQueryData<TrashListResponse>(trashQueryKey, (current) => {
-      if (!current) {
-        return current
-      }
-
-      return {
-        ...current,
-        items: [],
-        count: 0,
-        totalSize: 0,
       }
     })
   }, [queryClient, trashQueryKey])
@@ -867,6 +989,11 @@ export function TrashPage() {
         return
       }
       const id = variables.id
+      const focusFallback = deleteFocusFallbackRef.current
+      if (focusFallback) {
+        focusFallback.tabIndex = -1
+      }
+      setDeleteFallbackReturnFocus(focusFallback)
       removeTrashItemsFromCache([id])
       removeSelectedIds([id])
       queryClient.invalidateQueries({ queryKey: trashQueryKey })
@@ -898,9 +1025,7 @@ export function TrashPage() {
       if (variables.signal.aborted) {
         return
       }
-      clearTrashCache()
-      setSelectedItems(new Set())
-      queryClient.invalidateQueries({ queryKey: trashQueryKey })
+      void refetch()
       if (result.partial) {
         addToast({ title: `回收站已部分清空，删除 ${result.deletedCount} 项`, color: 'warning' })
       } else if (result.warning) {
@@ -952,7 +1077,9 @@ export function TrashPage() {
 
   // Batch restore using custom hook
   const { execute: executeBatchRestore, isLoading: isBatchRestoring } = useBatchOperation<string, ActionResult>({
-    operation: (id, context) => restoreTrashItem(id, { signal: context.signal }),
+    operation: (id, context) => classifyTrashBatchAction(
+      () => restoreTrashItem(id, { signal: context.signal })
+    ),
     messages: {
       success: '{count} 项恢复成功',
       failure: '{count} 项恢复失败',
@@ -960,13 +1087,19 @@ export function TrashPage() {
     },
     getWarningMessage: getTrashBatchWarningMessage,
     getToast: (result) => getTrashBatchActionToast(result, {
+      success: '{count} 项恢复成功',
+      failure: '{count} 项恢复失败',
       unavailable: '批量恢复暂不可用',
       warning: '已恢复 {count} 项，但存在警告',
       partial: '{succeeded} 项恢复成功，{failed} 项失败',
     }),
     onComplete: (result) => {
-      removeTrashItemsFromCache(result.succeededItems as string[])
-      setSelectedItems(new Set(result.failedItems as string[]))
+      const summary = summarizeTrashBatchResult(result)
+      removeTrashItemsFromCache([
+        ...(result.succeededItems as string[]),
+        ...(summary.missingItems as string[]),
+      ])
+      setSelectedItems(new Set(summary.failedItems as string[]))
       queryClient.invalidateQueries({ queryKey: trashQueryKey })
       queryClient.invalidateQueries({ queryKey: ['files'] })
     },
@@ -977,19 +1110,25 @@ export function TrashPage() {
       return
     }
     onBatchRestoreClose()
+    setBatchRestoreIntent(null)
   }, [isBatchRestoring, onBatchRestoreClose])
 
   const handleBatchRestoreClick = useCallback(() => {
     if (!canWrite) return
-    if (visibleSelectedItems.size === 0) return
+    if (selectedTrashItems.length === 0) return
+    setBatchRestoreIntent({
+      items: selectedTrashItems.map((item) => ({ ...item })),
+      trashAutoCleanupEnabled,
+    })
     onBatchRestoreOpen()
-  }, [canWrite, onBatchRestoreOpen, visibleSelectedItems.size])
+  }, [canWrite, onBatchRestoreOpen, selectedTrashItems, trashAutoCleanupEnabled])
 
   const handleConfirmBatchRestore = useCallback(async () => {
     if (!canWrite) return
-    const ids = Array.from(visibleSelectedItems)
+    if (!batchRestoreIntent) return
+    const restoreTargets = batchRestoreIntent.items
+    const ids = restoreTargets.map((item) => item.id)
     if (ids.length === 0) return
-    const restoreTargets = selectedTrashItems
     batchRestoreAbortControllerRef.current?.abort()
     const controller = new AbortController()
     batchRestoreAbortControllerRef.current = controller
@@ -1002,17 +1141,20 @@ export function TrashPage() {
       }
       if (!controller.signal.aborted) {
         onBatchRestoreClose()
+        setBatchRestoreIntent(null)
       }
     } finally {
       if (batchRestoreAbortControllerRef.current === controller) {
         batchRestoreAbortControllerRef.current = null
       }
     }
-  }, [canWrite, executeBatchRestore, onBatchRestoreClose, recordTrashRestoreReview, selectedTrashItems, visibleSelectedItems])
+  }, [batchRestoreIntent, canWrite, executeBatchRestore, onBatchRestoreClose, recordTrashRestoreReview])
 
   // Batch delete using custom hook
   const { execute: executeBatchDelete, isLoading: isBatchDeleting } = useBatchOperation<string, ActionResult>({
-    operation: (id, context) => deleteTrashItem(id, { signal: context.signal }),
+    operation: (id, context) => classifyTrashBatchAction(
+      () => deleteTrashItem(id, { signal: context.signal })
+    ),
     messages: {
       success: '{count} 项已永久删除',
       failure: '{count} 项永久删除失败',
@@ -1020,13 +1162,19 @@ export function TrashPage() {
     },
     getWarningMessage: getTrashBatchWarningMessage,
     getToast: (result) => getTrashBatchActionToast(result, {
+      success: '{count} 项已永久删除',
+      failure: '{count} 项永久删除失败',
       unavailable: '批量永久删除暂不可用',
       warning: '已永久删除 {count} 项，但存在警告',
       partial: '{succeeded} 项永久删除成功，{failed} 项失败',
     }),
     onComplete: (result) => {
-      removeTrashItemsFromCache(result.succeededItems as string[])
-      setSelectedItems(new Set(result.failedItems as string[]))
+      const summary = summarizeTrashBatchResult(result)
+      removeTrashItemsFromCache([
+        ...(result.succeededItems as string[]),
+        ...(summary.missingItems as string[]),
+      ])
+      setSelectedItems(new Set(summary.failedItems as string[]))
       queryClient.invalidateQueries({ queryKey: trashQueryKey })
     },
   })
@@ -1036,11 +1184,23 @@ export function TrashPage() {
       return
     }
     onBatchDeleteClose()
+    setBatchDeleteIntent(null)
   }, [isBatchDeleting, onBatchDeleteClose])
+
+  const handleBatchDeleteClick = useCallback(() => {
+    if (!canWrite) return
+    if (selectedTrashItems.length === 0) return
+    setBatchDeleteIntent({
+      items: selectedTrashItems.map((item) => ({ ...item })),
+      trashAutoCleanupEnabled,
+    })
+    onBatchDeleteOpen()
+  }, [canWrite, onBatchDeleteOpen, selectedTrashItems, trashAutoCleanupEnabled])
 
   const handleBatchDelete = useCallback(async () => {
     if (!canWrite) return
-    const ids = Array.from(visibleSelectedItems)
+    if (!batchDeleteIntent) return
+    const ids = batchDeleteIntent.items.map((item) => item.id)
     if (ids.length === 0) return
     batchDeleteAbortControllerRef.current?.abort()
     const controller = new AbortController()
@@ -1049,19 +1209,22 @@ export function TrashPage() {
       await executeBatchDelete(ids, { signal: controller.signal })
       if (!controller.signal.aborted) {
         onBatchDeleteClose()
+        setBatchDeleteIntent(null)
       }
     } finally {
       if (batchDeleteAbortControllerRef.current === controller) {
         batchDeleteAbortControllerRef.current = null
       }
     }
-  }, [canWrite, visibleSelectedItems, executeBatchDelete, onBatchDeleteClose])
+  }, [batchDeleteIntent, canWrite, executeBatchDelete, onBatchDeleteClose])
 
   const handleDeleteClick = useCallback((item: TrashItem) => {
     if (!canWrite) return
+    deleteFocusFallbackRef.current?.removeAttribute('tabindex')
+    captureDeleteReturnFocus()
     setActionItem(item)
     onDeleteOpen()
-  }, [canWrite, onDeleteOpen])
+  }, [canWrite, captureDeleteReturnFocus, onDeleteOpen])
 
   const handleRestoreClick = useCallback((item: TrashItem) => {
     if (!canWrite) return
@@ -1128,7 +1291,7 @@ export function TrashPage() {
     )
   }
 
-  if (error) {
+  if (error && !data) {
     const errorPresentation = getTrashLoadErrorPresentation(error)
 
     return (
@@ -1157,22 +1320,18 @@ export function TrashPage() {
   const totalSize = data?.totalSize ?? items.reduce((sum, item) => sum + item.size, 0)
   const itemCount = data?.count ?? items.length
   const visibleItemCount = visibleItems.length
-  const retentionDays = data?.retentionDays
-  const retentionEnabled = data?.retentionEnabled
-  const retentionKnown = retentionEnabled !== undefined || retentionDays !== undefined
-  const retentionLabel = !retentionKnown
-    ? '自动清理设置未知'
-    : retentionEnabled && retentionDays !== undefined
-      ? retentionDays <= 0
-        ? '立即过期，等待清理'
-        : `${retentionDays} 天后自动清理`
-      : '自动清理未启用'
+  const retentionLabel = getTrashPolicyLabel(retentionEnabled, retentionDays, trashAutoCleanupEnabled)
   const pageSubtitle = pathFilter
     ? `当前筛选 ${visibleItemCount} 项 / 共 ${itemCount} 项 · ${formatBytes(totalSize)} · ${retentionLabel}`
     : `${itemCount} 项 · ${formatBytes(totalSize)} · ${retentionLabel}`
 
   return (
-    <div className="flex h-full min-h-0 flex-col space-y-4 overflow-auto p-4 custom-scrollbar sm:p-6">
+    <div
+      ref={deleteFocusFallbackRef}
+      role="region"
+      aria-label="回收站内容"
+      className="flex h-full min-h-0 flex-col space-y-4 overflow-auto p-4 custom-scrollbar sm:p-6"
+    >
       {/* Header */}
       <PageHeader
         title="回收站"
@@ -1241,7 +1400,7 @@ export function TrashPage() {
             variant="flat"
             color="danger"
             startContent={<Trash2 size={14} />}
-            onPress={onBatchDeleteOpen}
+            onPress={handleBatchDeleteClick}
             isLoading={isBatchDeleting}
             className="rounded-lg"
           >
@@ -1285,8 +1444,7 @@ export function TrashPage() {
               key={item.id}
               item={item}
               isSelected={visibleSelectedItems.has(item.id)}
-              retentionDays={retentionDays}
-              retentionEnabled={retentionEnabled}
+              trashAutoCleanupEnabled={trashAutoCleanupEnabled}
               canWrite={canWrite}
               onSelect={() => {
                 if (!canWrite) return
@@ -1307,7 +1465,9 @@ export function TrashPage() {
             <EmptyState
               icon={Trash2}
               title={items.length > 0 && pathFilter ? '没有匹配的回收站条目' : '回收站是空的'}
-              description={items.length > 0 && pathFilter ? '当前路径筛选没有找到可恢复项目' : '删除的文件将按配置保留'}
+              description={items.length > 0 && pathFilter
+                ? '当前路径筛选没有找到可恢复项目'
+                : getTrashEmptyStateDescription(retentionEnabled)}
             />
           </div>
         )}
@@ -1317,6 +1477,8 @@ export function TrashPage() {
       <Modal 
         isOpen={isDeleteOpen} 
         onClose={handleCloseDeleteModal}
+        isDismissable={!deleteMutation.isPending}
+        isKeyboardDismissDisabled={deleteMutation.isPending}
         placement="center"
         size="md"
         classNames={{
@@ -1325,17 +1487,21 @@ export function TrashPage() {
           closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
         }}
       >
-        <ModalContent>
+        <ModalContent
+          aria-labelledby="trash-delete-dialog-title"
+          aria-describedby="trash-delete-dialog-description"
+          aria-busy={deleteMutation.isPending}
+        >
           <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
             <div className="w-10 h-10 rounded-lg bg-danger/10 text-danger flex items-center justify-center">
               <AlertTriangle size={20} />
             </div>
             <div>
-              <h3 className="text-lg font-semibold text-foreground">永久删除</h3>
+              <h3 id="trash-delete-dialog-title" className="text-lg font-semibold text-foreground">永久删除</h3>
               <p className="text-xs text-default-500 font-normal">此操作无法撤销</p>
             </div>
           </ModalHeader>
-          <ModalBody className="px-6 py-4">
+          <ModalBody id="trash-delete-dialog-description" className="px-6 py-4">
             <p className="text-foreground">确定要永久删除 <strong>{actionItem?.name}</strong> 吗？</p>
             <p className="text-xs text-default-500 mt-2">
               文件将被彻底删除，无法找回。
@@ -1343,6 +1509,8 @@ export function TrashPage() {
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
             <Button
+              ref={deleteCancelButtonRef}
+              autoFocus
               variant="flat"
               onPress={handleCloseDeleteModal}
               isDisabled={deleteMutation.isPending}
@@ -1385,15 +1553,14 @@ export function TrashPage() {
             </div>
           </ModalHeader>
           <ModalBody className="px-6 py-4">
-            <p className="text-foreground">确定要恢复已选择的 <strong>{selectedTrashItems.length}</strong> 项吗？</p>
+            <p className="text-foreground">确定要恢复已选择的 <strong>{batchRestoreIntent?.items.length ?? 0}</strong> 项吗？</p>
             <p className="text-xs text-default-500 mt-2">
               所选项目可能分布在多个原始目录。恢复前请确认目标路径、父目录权限和配额风险。
             </p>
             <div className="mt-4">
               <TrashBatchRestoreReview
-                items={selectedTrashItems}
-                retentionDays={retentionDays}
-                retentionEnabled={retentionEnabled}
+                items={batchRestoreIntent?.items ?? []}
+                trashAutoCleanupEnabled={batchRestoreIntent?.trashAutoCleanupEnabled}
               />
             </div>
           </ModalBody>
@@ -1410,7 +1577,7 @@ export function TrashPage() {
               color="success"
               onPress={handleConfirmBatchRestore}
               isLoading={isBatchRestoring}
-              isDisabled={selectedTrashItems.length === 0}
+              isDisabled={!batchRestoreIntent || batchRestoreIntent.items.length === 0}
               className="rounded-lg"
             >
               确认恢复
@@ -1423,6 +1590,8 @@ export function TrashPage() {
       <Modal
         isOpen={isBatchDeleteOpen}
         onClose={handleCloseBatchDeleteModal}
+        isDismissable={!isBatchDeleting}
+        isKeyboardDismissDisabled={isBatchDeleting}
         placement="center"
         size="md"
         classNames={{
@@ -1431,24 +1600,29 @@ export function TrashPage() {
           closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
         }}
       >
-        <ModalContent>
+        <ModalContent
+          aria-labelledby="trash-batch-delete-dialog-title"
+          aria-describedby="trash-batch-delete-dialog-description"
+          aria-busy={isBatchDeleting}
+        >
           <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
             <div className="w-10 h-10 rounded-lg bg-danger/10 text-danger flex items-center justify-center">
               <AlertTriangle size={20} />
             </div>
             <div>
-              <h3 className="text-lg font-semibold text-foreground">确认批量永久删除</h3>
+              <h3 id="trash-batch-delete-dialog-title" className="text-lg font-semibold text-foreground">确认批量永久删除</h3>
               <p className="text-xs text-default-500 font-normal">此操作无法撤销</p>
             </div>
           </ModalHeader>
-          <ModalBody className="px-6 py-4">
-            <p className="text-foreground">确定要永久删除已选择的 <strong>{visibleSelectedItems.size}</strong> 项吗？</p>
+          <ModalBody id="trash-batch-delete-dialog-description" className="px-6 py-4">
+            <p className="text-foreground">确定要永久删除已选择的 <strong>{batchDeleteIntent?.items.length ?? 0}</strong> 项吗？</p>
             <p className="text-xs text-default-500 mt-2">
               所选项目将从回收站中彻底移除，无法找回。
             </p>
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
             <Button
+              autoFocus
               variant="flat"
               onPress={handleCloseBatchDeleteModal}
               isDisabled={isBatchDeleting}
@@ -1460,6 +1634,7 @@ export function TrashPage() {
               color="danger"
               onPress={handleBatchDelete}
               isLoading={isBatchDeleting}
+              isDisabled={!batchDeleteIntent || batchDeleteIntent.items.length === 0}
               className="rounded-lg"
             >
               永久删除
@@ -1472,6 +1647,8 @@ export function TrashPage() {
       <Modal 
         isOpen={isEmptyOpen} 
         onClose={handleCloseEmptyModal}
+        isDismissable={!emptyMutation.isPending}
+        isKeyboardDismissDisabled={emptyMutation.isPending}
         placement="center"
         size="md"
         classNames={{
@@ -1480,17 +1657,21 @@ export function TrashPage() {
           closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
         }}
       >
-        <ModalContent>
+        <ModalContent
+          aria-labelledby="trash-empty-dialog-title"
+          aria-describedby="trash-empty-dialog-description"
+          aria-busy={emptyMutation.isPending}
+        >
           <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
             <div className="w-10 h-10 rounded-lg bg-danger/10 text-danger flex items-center justify-center">
               <AlertTriangle size={20} />
             </div>
             <div>
-              <h3 className="text-lg font-semibold text-foreground">清空回收站</h3>
+              <h3 id="trash-empty-dialog-title" className="text-lg font-semibold text-foreground">清空回收站</h3>
               <p className="text-xs text-default-500 font-normal">删除所有文件</p>
             </div>
           </ModalHeader>
-          <ModalBody className="px-6 py-4">
+          <ModalBody id="trash-empty-dialog-description" className="px-6 py-4">
             <p className="text-foreground">确定要清空回收站吗？</p>
             <p className="text-sm text-default-600 mt-2">
               将永久删除 {itemCount} 项，共 {formatBytes(totalSize)}。
@@ -1501,6 +1682,7 @@ export function TrashPage() {
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
             <Button
+              autoFocus
               variant="flat"
               onPress={handleCloseEmptyModal}
               isDisabled={emptyMutation.isPending}

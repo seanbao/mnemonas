@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { useQuery, useMutation } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { 
   Card, 
@@ -4207,6 +4207,7 @@ export function SettingsPage() {
   const user = useUser()
   const authEnabled = useAuthStore((state) => state.authEnabled)
   const setHasPendingSettingsChanges = useSettingsDraftStore((state) => state.setHasPendingChanges)
+  const queryClient = useQueryClient()
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const selectedTab = normalizeSettingsTab(searchParams.get('tab'))
@@ -4259,6 +4260,7 @@ export function SettingsPage() {
     request: UpdateSettingsRequest
     submittedSettings: SettingsDraft
     baseSettingsUpdatedAt: number
+    invalidatesFileDeletionQueries: boolean
     signal: AbortSignal
   }
   type DirectoryAccessCheckVariables = {
@@ -5272,6 +5274,10 @@ export function SettingsPage() {
       }
 
       addToast(getSettingsSaveSuccessToast(result.message, result.warning === true))
+      if (variables.invalidatesFileDeletionQueries) {
+        void queryClient.invalidateQueries({ queryKey: ['files'] })
+        void queryClient.invalidateQueries({ queryKey: ['trash'] })
+      }
       void refetch()
       if (selectedTab === 'general') {
         void refetchSecurityCheck()
@@ -5681,6 +5687,16 @@ export function SettingsPage() {
             : {}),
       },
     }
+    const savedSettings = savedSettingsOverride
+      ?? (settingsData?.data ? mapServerSettings(settingsData.data) : null)
+    const invalidatesFileDeletionQueries = savedSettings === null
+      || req.retention?.max_versions !== Number(savedSettings.maxVersions.trim())
+      || req.retention?.max_age !== savedSettings.maxAge.trim()
+      || req.retention?.min_free_space !== parseByteSize(savedSettings.minFreeSpace)
+      || req.retention?.gc_interval !== savedSettings.gcInterval.trim()
+      || req.trash?.enabled !== savedSettings.trashEnabled
+      || req.trash?.retention_days !== Number(savedSettings.trashRetentionDays.trim())
+      || req.trash?.max_size !== parseByteSize(savedSettings.trashMaxSize)
     saveSettingsAbortControllerRef.current?.abort()
     const controller = new AbortController()
     saveSettingsAbortControllerRef.current = controller
@@ -5688,6 +5704,7 @@ export function SettingsPage() {
       request: req,
       submittedSettings: { ...settings },
       baseSettingsUpdatedAt: settingsDataUpdatedAt,
+      invalidatesFileDeletionQueries,
       signal: controller.signal,
     })
   }

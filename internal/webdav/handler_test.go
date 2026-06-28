@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unsafe"
@@ -954,30 +955,82 @@ func TestHandler_PUT_IfNoneMatchMatchingETagFails(t *testing.T) {
 	}
 	etag := `"` + info.ContentHash + `"`
 
-	req := httptest.NewRequest("PUT", "/dav/files/existing.txt", strings.NewReader("updated"))
-	req.Header.Set("If-None-Match", etag)
-	w := httptest.NewRecorder()
+	for _, testCase := range []struct {
+		name      string
+		condition string
+	}{
+		{name: "strong", condition: etag},
+		{name: "weak", condition: "W/" + etag},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			req := httptest.NewRequest("PUT", "/dav/files/existing.txt", strings.NewReader("updated"))
+			req.Header.Set("If-None-Match", testCase.condition)
+			w := httptest.NewRecorder()
 
+			handler.ServeHTTP(w, req)
+
+			if w.Code != http.StatusPreconditionFailed {
+				t.Fatalf("PUT If-None-Match matching ETag status = %d, want %d", w.Code, http.StatusPreconditionFailed)
+			}
+			if !strings.Contains(w.Body.String(), errPreconditionFailed.Error()) {
+				t.Fatalf("expected precondition failed message, got %q", w.Body.String())
+			}
+
+			reader, err := fs.OpenFile(ctx, "/files/existing.txt")
+			if err != nil {
+				t.Fatalf("OpenFile(existing.txt) error: %v", err)
+			}
+			body, readErr := io.ReadAll(reader)
+			closeErr := reader.Close()
+			if readErr != nil {
+				t.Fatalf("ReadAll(existing.txt) error: %v", readErr)
+			}
+			if closeErr != nil {
+				t.Fatalf("Close(existing.txt) error: %v", closeErr)
+			}
+			if string(body) != "initial" {
+				t.Fatalf("expected existing file content to remain unchanged, got %q", string(body))
+			}
+		})
+	}
+}
+
+func TestHandler_PUT_WeakIfMatchDoesNotOverwrite(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/files"); err != nil {
+		t.Fatalf("Mkdir(/files) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/files/existing.txt", strings.NewReader("initial")); err != nil {
+		t.Fatalf("WriteFile(existing.txt) error: %v", err)
+	}
+	info, err := fs.Stat(ctx, "/files/existing.txt")
+	if err != nil {
+		t.Fatalf("Stat(existing.txt) error: %v", err)
+	}
+
+	req := httptest.NewRequest("PUT", "/dav/files/existing.txt", strings.NewReader("updated"))
+	req.Header.Set("If-Match", `W/"`+info.ContentHash+`"`)
+	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
 	if w.Code != http.StatusPreconditionFailed {
-		t.Fatalf("PUT If-None-Match matching ETag status = %d, want %d", w.Code, http.StatusPreconditionFailed)
+		t.Fatalf("PUT weak If-Match status = %d, want %d", w.Code, http.StatusPreconditionFailed)
 	}
-	if !strings.Contains(w.Body.String(), errPreconditionFailed.Error()) {
-		t.Fatalf("expected precondition failed message, got %q", w.Body.String())
-	}
-
 	reader, err := fs.OpenFile(ctx, "/files/existing.txt")
 	if err != nil {
 		t.Fatalf("OpenFile(existing.txt) error: %v", err)
 	}
-	defer reader.Close()
-	body, err := io.ReadAll(reader)
-	if err != nil {
-		t.Fatalf("ReadAll(existing.txt) error: %v", err)
+	body, readErr := io.ReadAll(reader)
+	closeErr := reader.Close()
+	if readErr != nil {
+		t.Fatalf("ReadAll(existing.txt) error: %v", readErr)
+	}
+	if closeErr != nil {
+		t.Fatalf("Close(existing.txt) error: %v", closeErr)
 	}
 	if string(body) != "initial" {
-		t.Fatalf("expected existing file content to remain unchanged, got %q", string(body))
+		t.Fatalf("existing file content = %q, want %q", string(body), "initial")
 	}
 }
 
@@ -1050,6 +1103,18 @@ func TestHandler_ConditionalGET(t *testing.T) {
 		}
 	})
 
+	t.Run("If-None-Match_WeakHit", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/dav/cond/file.txt", nil)
+		req.Header.Set("If-None-Match", "W/"+etag)
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusNotModified {
+			t.Errorf("status = %d, want %d", w.Code, http.StatusNotModified)
+		}
+	})
+
 	t.Run("If-None-Match_Miss", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/dav/cond/file.txt", nil)
 		req.Header.Set("If-None-Match", `"different-etag"`)
@@ -1086,6 +1151,18 @@ func TestHandler_ConditionalGET(t *testing.T) {
 		}
 		if !strings.Contains(w.Body.String(), errPreconditionFailed.Error()) {
 			t.Fatalf("expected precondition failed message, got %q", w.Body.String())
+		}
+	})
+
+	t.Run("If-Match_WeakFails", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/dav/cond/file.txt", nil)
+		req.Header.Set("If-Match", "W/"+etag)
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusPreconditionFailed {
+			t.Errorf("status = %d, want %d", w.Code, http.StatusPreconditionFailed)
 		}
 	})
 
@@ -1178,6 +1255,85 @@ func TestHandler_DELETE(t *testing.T) {
 	}
 }
 
+func TestHandler_DELETE_AvoidsTargetHashForUnconditionalAndMetadataOnlyRequests(t *testing.T) {
+	tests := []struct {
+		name   string
+		header string
+		value  func() string
+	}{
+		{name: "unconditional"},
+		{name: "depth only", header: "Depth", value: func() string { return "infinity" }},
+		{name: "if unmodified since only", header: "If-Unmodified-Since", value: func() string {
+			return time.Now().Add(time.Hour).UTC().Format(http.TimeFormat)
+		}},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			handler, fs, _ := setupTestHandler(t)
+			ctx := context.Background()
+			targetPath := "/delete-without-target-hash.opaque"
+			if err := fs.WriteFile(ctx, targetPath, strings.NewReader("delete me")); err != nil {
+				t.Fatalf("WriteFile() error: %v", err)
+			}
+
+			targetHashCalls := 0
+			setStorageHook(t, fs, "hashDeleteTargetFile", func(context.Context, string) (string, error) {
+				targetHashCalls++
+				return "", errors.New("unexpected delete target hash")
+			})
+
+			req := httptest.NewRequest(http.MethodDelete, "/dav"+targetPath, nil)
+			if testCase.header != "" {
+				req.Header.Set(testCase.header, testCase.value())
+			}
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+
+			if w.Code != http.StatusNoContent {
+				t.Fatalf("DELETE status = %d, want %d; body=%s", w.Code, http.StatusNoContent, w.Body.String())
+			}
+			if targetHashCalls != 0 {
+				t.Fatalf("delete target hash calls = %d, want 0", targetHashCalls)
+			}
+			if _, err := fs.Stat(ctx, targetPath); !errors.Is(err, storage.ErrNotFound) {
+				t.Fatalf("expected target to be deleted, got %v", err)
+			}
+		})
+	}
+}
+
+func TestHandler_DELETE_IfMatchUsesPublicETagForNonVersionedExtension(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+	targetPath := "/delete-etag.opaque"
+	if err := fs.WriteFile(ctx, targetPath, strings.NewReader("opaque content")); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	info, err := fs.Stat(ctx, targetPath)
+	if err != nil {
+		t.Fatalf("Stat() error: %v", err)
+	}
+	if info.Versioned {
+		t.Fatal("expected .opaque file not to be automatically versioned")
+	}
+	if info.ContentHash == "" {
+		t.Fatal("expected public file metadata to expose a content-hash ETag")
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/dav"+targetPath, nil)
+	req.Header.Set("If-Match", fmt.Sprintf(`"%s"`, info.ContentHash))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("DELETE If-Match status = %d, want %d; body=%s", w.Code, http.StatusNoContent, w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, targetPath); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected target to be deleted, got %v", err)
+	}
+}
+
 func TestHandler_DELETE_ReturnsNoContentWithWarningWhenPermanentDeleteSyncFailsAfterVisibleDelete(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -1190,13 +1346,13 @@ func TestHandler_DELETE_ReturnsNoContentWithWarningWhenPermanentDeleteSyncFailsA
 		t.Fatalf("WriteFile(file.txt) error: %v", err)
 	}
 
-	originalDelete := getStorageHook[func(context.Context, string) error](t, fs, "deleteWorkspacePath")
-	setStorageHook(t, fs, "deleteWorkspacePath", func(ctx context.Context, name string) error {
-		if err := originalDelete(ctx, name); err != nil {
+	originalDelete := getStorageHook[func(context.Context, string, func() error) error](t, fs, "deleteStagedWorkspacePath")
+	setStorageHook(t, fs, "deleteStagedWorkspacePath", func(ctx context.Context, name string, remove func() error) error {
+		if err := originalDelete(ctx, name, remove); err != nil {
 			return err
 		}
 		if name == "/deltest/file.txt" {
-			return workspace.WrapVisibleMutationWarning(errors.New("sync dir failed"))
+			return workspace.WrapVisibleMutationWarning(storage.ErrNotRegular)
 		}
 		return nil
 	})
@@ -1209,11 +1365,92 @@ func TestHandler_DELETE_ReturnsNoContentWithWarningWhenPermanentDeleteSyncFailsA
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("DELETE warning status = %d, want %d", w.Code, http.StatusNoContent)
 	}
-	if got := w.Header().Get("Warning"); got != webdavWorkspaceMutationWarningHeader {
-		t.Fatalf("warning header = %q, want %q", got, webdavWorkspaceMutationWarningHeader)
+	if got := w.Header().Values("Warning"); !reflect.DeepEqual(got, []string{webdavWorkspaceMutationWarningHeader}) {
+		t.Fatalf("warning headers = %q, want only %q", got, webdavWorkspaceMutationWarningHeader)
 	}
 	if _, err := fs.Stat(ctx, "/deltest/file.txt"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected file to remain deleted after warning, got %v", err)
+	}
+}
+
+func TestHandler_DELETE_ReturnsInternalServerErrorForPrecommitStageResidual(t *testing.T) {
+	handler, fs, tmpDir := setupTestHandler(t)
+	ctx := context.Background()
+	targetPath := "/deltest/file.txt"
+
+	fs.UpdateTrashSettings(false, 30, 0)
+	if err := fs.Mkdir(ctx, "/deltest"); err != nil {
+		t.Fatalf("Mkdir(deltest) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, targetPath, strings.NewReader("intended")); err != nil {
+		t.Fatalf("WriteFile(file.txt) error: %v", err)
+	}
+
+	originalDeleteIndex := getStorageHook[func(context.Context, string) error](t, fs, "deleteFileIndex")
+	setStorageHook(t, fs, "deleteFileIndex", func(ctx context.Context, name string) error {
+		if name != targetPath {
+			return originalDeleteIndex(ctx, name)
+		}
+		replacementPath := filepath.Join(tmpDir, "files", "deltest", "file.txt")
+		if err := os.WriteFile(replacementPath, []byte("replacement"), 0o600); err != nil {
+			return err
+		}
+		return storage.ErrNotRegular
+	})
+
+	req := httptest.NewRequest(http.MethodDelete, "/dav"+targetPath, nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("DELETE residual status = %d, want %d; body=%s", w.Code, http.StatusInternalServerError, w.Body.String())
+	}
+	if got := w.Header().Values("Warning"); len(got) != 0 {
+		t.Fatalf("DELETE residual warning headers = %q, want none", got)
+	}
+	replacement, err := os.ReadFile(filepath.Join(tmpDir, "files", "deltest", "file.txt"))
+	if err != nil || string(replacement) != "replacement" {
+		t.Fatalf("replacement content = %q, %v; want preserved", replacement, err)
+	}
+	stages, err := filepath.Glob(filepath.Join(tmpDir, "files", "deltest", ".mnemonas-delete-*.stage"))
+	if err != nil || len(stages) != 1 {
+		t.Fatalf("residual stages = %v, %v; want one", stages, err)
+	}
+}
+
+func TestHandler_DELETE_ReturnsNoContentWithCleanupWarningForCommittedStageResidual(t *testing.T) {
+	handler, fs, tmpDir := setupTestHandler(t)
+	ctx := context.Background()
+	targetPath := "/deltest/file.txt"
+
+	fs.UpdateTrashSettings(false, 30, 0)
+	if err := fs.Mkdir(ctx, "/deltest"); err != nil {
+		t.Fatalf("Mkdir(deltest) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, targetPath, strings.NewReader("delete me")); err != nil {
+		t.Fatalf("WriteFile(file.txt) error: %v", err)
+	}
+	setStorageHook(t, fs, "deleteStagedWorkspacePath", func(context.Context, string, func() error) error {
+		return workspace.WrapVisibleMutationWarning(storage.ErrNotRegular)
+	})
+
+	req := httptest.NewRequest(http.MethodDelete, "/dav"+targetPath, nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("DELETE committed residual status = %d, want %d; body=%s", w.Code, http.StatusNoContent, w.Body.String())
+	}
+	wantWarnings := []string{webdavDeleteCleanupWarningHeader, webdavWorkspaceMutationWarningHeader}
+	if got := w.Header().Values("Warning"); !reflect.DeepEqual(got, wantWarnings) {
+		t.Fatalf("warning headers = %q, want %q", got, wantWarnings)
+	}
+	if _, err := fs.Stat(ctx, targetPath); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("logical target after committed residual = %v, want not found", err)
+	}
+	residuals, err := filepath.Glob(filepath.Join(tmpDir, "files", "deltest", ".mnemonas-delete-*.quarantine", "content"))
+	if err != nil || len(residuals) != 1 {
+		t.Fatalf("quarantine residuals = %v, %v; want one", residuals, err)
 	}
 }
 
@@ -1246,8 +1483,8 @@ func TestHandler_DELETE_ReturnsNoContentWithWarningWhenTrashCapacityCleanupFails
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("DELETE cleanup warning status = %d, want %d", w.Code, http.StatusNoContent)
 	}
-	if got := w.Header().Get("Warning"); got != webdavTrashDeleteCleanupWarningHeader {
-		t.Fatalf("warning header = %q, want %q", got, webdavTrashDeleteCleanupWarningHeader)
+	if got := w.Header().Values("Warning"); !reflect.DeepEqual(got, []string{webdavTrashDeleteCleanupWarningHeader}) {
+		t.Fatalf("warning headers = %q, want only %q", got, webdavTrashDeleteCleanupWarningHeader)
 	}
 	if _, err := fs.Stat(ctx, "/deltest/file.txt"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected file to remain deleted after cleanup warning, got %v", err)
@@ -1287,8 +1524,8 @@ func TestHandler_DELETE_ReturnsNoContentWithWarningWhenPermanentDeleteCleanupFai
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("DELETE cleanup warning status = %d, want %d", w.Code, http.StatusNoContent)
 	}
-	if got := w.Header().Get("Warning"); got != webdavDeleteCleanupWarningHeader {
-		t.Fatalf("warning header = %q, want %q", got, webdavDeleteCleanupWarningHeader)
+	if got := w.Header().Values("Warning"); !reflect.DeepEqual(got, []string{webdavDeleteCleanupWarningHeader}) {
+		t.Fatalf("warning headers = %q, want only %q", got, webdavDeleteCleanupWarningHeader)
 	}
 	if _, err := fs.Stat(ctx, "/deltest/file.txt"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected file to remain deleted after cleanup warning, got %v", err)
@@ -1326,6 +1563,21 @@ func TestHandler_DELETE_ConditionalHeaders(t *testing.T) {
 		}
 	})
 
+	t.Run("WeakIfMatchPreventsDelete", func(t *testing.T) {
+		req := httptest.NewRequest("DELETE", "/dav/deltest/file.txt", nil)
+		req.Header.Set("If-Match", "W/"+etag)
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusPreconditionFailed {
+			t.Fatalf("DELETE weak If-Match status = %d, want %d", w.Code, http.StatusPreconditionFailed)
+		}
+		if _, err := fs.Stat(ctx, "/deltest/file.txt"); err != nil {
+			t.Fatalf("expected file to remain after weak If-Match DELETE, got %v", err)
+		}
+	})
+
 	t.Run("IfNoneMatchHitPreventsDelete", func(t *testing.T) {
 		req := httptest.NewRequest("DELETE", "/dav/deltest/file.txt", nil)
 		req.Header.Set("If-None-Match", etag)
@@ -1338,6 +1590,21 @@ func TestHandler_DELETE_ConditionalHeaders(t *testing.T) {
 		}
 		if _, err := fs.Stat(ctx, "/deltest/file.txt"); err != nil {
 			t.Fatalf("expected file to remain after failed If-None-Match DELETE, got %v", err)
+		}
+	})
+
+	t.Run("WeakIfNoneMatchHitPreventsDelete", func(t *testing.T) {
+		req := httptest.NewRequest("DELETE", "/dav/deltest/file.txt", nil)
+		req.Header.Set("If-None-Match", "W/"+etag)
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusPreconditionFailed {
+			t.Fatalf("DELETE weak If-None-Match status = %d, want %d", w.Code, http.StatusPreconditionFailed)
+		}
+		if _, err := fs.Stat(ctx, "/deltest/file.txt"); err != nil {
+			t.Fatalf("expected file to remain after weak If-None-Match DELETE, got %v", err)
 		}
 	})
 
@@ -1453,6 +1720,114 @@ func TestHandler_DELETE_IfMatchValidatesCurrentETagUnderLock(t *testing.T) {
 	}
 	if currentInfo.ContentHash == info.ContentHash {
 		t.Fatal("expected concurrent write to change the file hash")
+	}
+}
+
+func TestHandler_DELETE_IfMatchRevalidatesAfterExternalPreflightUnderStorageLock(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+	targetPath := "/deltest-storage-race/file.txt"
+
+	if err := fs.Mkdir(ctx, "/deltest-storage-race"); err != nil {
+		t.Fatalf("Mkdir(deltest-storage-race) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, targetPath, bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	info, err := fs.Stat(ctx, targetPath)
+	if err != nil {
+		t.Fatalf("Stat(v1) error: %v", err)
+	}
+	staleETag := `"` + info.ContentHash + `"`
+
+	originalHook := beforeWebDAVDeleteStorage
+	var hookErr error
+	beforeWebDAVDeleteStorage = func(gotHandler *Handler, gotPath string) {
+		if gotHandler == handler && gotPath == targetPath {
+			hookErr = fs.WriteFile(ctx, targetPath, bytes.NewReader([]byte("v2")))
+		}
+	}
+	t.Cleanup(func() {
+		beforeWebDAVDeleteStorage = originalHook
+	})
+
+	req := httptest.NewRequest(http.MethodDelete, "/dav/deltest-storage-race/file.txt", nil)
+	req.Header.Set("If-Match", staleETag)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if hookErr != nil {
+		t.Fatalf("concurrent storage writer error: %v", hookErr)
+	}
+	if w.Code != http.StatusPreconditionFailed {
+		t.Fatalf("DELETE stale If-Match after external preflight status = %d, want %d; body=%s", w.Code, http.StatusPreconditionFailed, w.Body.String())
+	}
+	file, err := fs.OpenFile(ctx, targetPath)
+	if err != nil {
+		t.Fatalf("OpenFile(current) error: %v", err)
+	}
+	content, readErr := io.ReadAll(file)
+	closeErr := file.Close()
+	if readErr != nil {
+		t.Fatalf("ReadAll(current) error: %v", readErr)
+	}
+	if closeErr != nil {
+		t.Fatalf("Close(current) error: %v", closeErr)
+	}
+	if got := string(content); got != "v2" {
+		t.Fatalf("current content = %q, want %q", got, "v2")
+	}
+}
+
+func TestHandler_DELETE_DepthValidatesCurrentTargetTypeUnderStorageLock(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+	targetPath := "/deltest-depth-race/target"
+
+	if err := fs.Mkdir(ctx, "/deltest-depth-race"); err != nil {
+		t.Fatalf("Mkdir(deltest-depth-race) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, targetPath, bytes.NewReader([]byte("file before preflight"))); err != nil {
+		t.Fatalf("WriteFile(target) error: %v", err)
+	}
+
+	originalHook := beforeWebDAVDeleteStorage
+	var hookErr error
+	beforeWebDAVDeleteStorage = func(gotHandler *Handler, gotPath string) {
+		if gotHandler != handler || gotPath != targetPath {
+			return
+		}
+		if err := fs.Delete(ctx, targetPath); err != nil {
+			hookErr = err
+			return
+		}
+		if err := fs.Mkdir(ctx, targetPath); err != nil {
+			hookErr = err
+			return
+		}
+		hookErr = fs.WriteFile(ctx, path.Join(targetPath, "child.txt"), strings.NewReader("new directory content"))
+	}
+	t.Cleanup(func() {
+		beforeWebDAVDeleteStorage = originalHook
+	})
+
+	req := httptest.NewRequest(http.MethodDelete, "/dav/deltest-depth-race/target", nil)
+	req.Header.Set("Depth", "0")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if hookErr != nil {
+		t.Fatalf("concurrent storage writer error: %v", hookErr)
+	}
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("DELETE Depth:0 after target became a directory status = %d, want %d; body=%s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+	for _, currentPath := range []string{targetPath, path.Join(targetPath, "child.txt")} {
+		if _, err := fs.Stat(ctx, currentPath); err != nil {
+			t.Fatalf("expected replacement path %s to remain after rejected DELETE: %v", currentPath, err)
+		}
 	}
 }
 
@@ -2087,9 +2462,9 @@ func TestHandler_COPY_DirectoryRollbackWarningDoesNotMaskCopyFailure(t *testing.
 		}
 		return originalUpdateFileIndex(ctx, name, size, modTime, hash)
 	})
-	originalDeleteWorkspacePath := getStorageHook[func(context.Context, string) error](t, fs, "deleteWorkspacePath")
-	setStorageHook(t, fs, "deleteWorkspacePath", func(ctx context.Context, name string) error {
-		if err := originalDeleteWorkspacePath(ctx, name); err != nil {
+	originalDeleteWorkspacePath := getStorageHook[func(context.Context, string, func() error) error](t, fs, "deleteStagedWorkspacePath")
+	setStorageHook(t, fs, "deleteStagedWorkspacePath", func(ctx context.Context, name string, remove func() error) error {
+		if err := originalDeleteWorkspacePath(ctx, name, remove); err != nil {
 			return err
 		}
 		if name == "/dst/copied-dir/root.txt" {
@@ -2550,6 +2925,11 @@ func TestHandler_MOVE_ConditionalHeaders(t *testing.T) {
 	if err := fs.WriteFile(ctx, "/movetest-conditions/orig.txt", bytes.NewReader([]byte("v2"))); err != nil {
 		t.Fatalf("WriteFile(updated orig) error: %v", err)
 	}
+	currentInfo, err := fs.Stat(ctx, "/movetest-conditions/orig.txt")
+	if err != nil {
+		t.Fatalf("Stat(updated orig) error: %v", err)
+	}
+	currentETag := `"` + currentInfo.ContentHash + `"`
 
 	t.Run("IfMatchMismatchPreventsMove", func(t *testing.T) {
 		req := httptest.NewRequest("MOVE", "/dav/movetest-conditions/orig.txt", nil)
@@ -2567,6 +2947,46 @@ func TestHandler_MOVE_ConditionalHeaders(t *testing.T) {
 		}
 		if _, err := fs.Stat(ctx, "/movetest-conditions/if-match.txt"); !errors.Is(err, storage.ErrNotFound) {
 			t.Fatalf("expected destination to remain absent after failed conditional MOVE, got %v", err)
+		}
+	})
+
+	t.Run("WeakIfMatchPreventsMove", func(t *testing.T) {
+		destination := "/movetest-conditions/weak-if-match.txt"
+		req := httptest.NewRequest("MOVE", "/dav/movetest-conditions/orig.txt", nil)
+		req.Header.Set("Destination", "http://example.com/dav"+destination)
+		req.Header.Set("If-Match", "W/"+currentETag)
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusPreconditionFailed {
+			t.Fatalf("MOVE weak If-Match status = %d, want %d", w.Code, http.StatusPreconditionFailed)
+		}
+		if _, err := fs.Stat(ctx, "/movetest-conditions/orig.txt"); err != nil {
+			t.Fatalf("expected source file to remain after weak If-Match MOVE, got %v", err)
+		}
+		if _, err := fs.Stat(ctx, destination); !errors.Is(err, storage.ErrNotFound) {
+			t.Fatalf("expected destination to remain absent after weak If-Match MOVE, got %v", err)
+		}
+	})
+
+	t.Run("WeakIfNoneMatchPreventsMove", func(t *testing.T) {
+		destination := "/movetest-conditions/weak-if-none-match.txt"
+		req := httptest.NewRequest("MOVE", "/dav/movetest-conditions/orig.txt", nil)
+		req.Header.Set("Destination", "http://example.com/dav"+destination)
+		req.Header.Set("If-None-Match", "W/"+currentETag)
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusPreconditionFailed {
+			t.Fatalf("MOVE weak If-None-Match status = %d, want %d", w.Code, http.StatusPreconditionFailed)
+		}
+		if _, err := fs.Stat(ctx, "/movetest-conditions/orig.txt"); err != nil {
+			t.Fatalf("expected source file to remain after weak If-None-Match MOVE, got %v", err)
+		}
+		if _, err := fs.Stat(ctx, destination); !errors.Is(err, storage.ErrNotFound) {
+			t.Fatalf("expected destination to remain absent after weak If-None-Match MOVE, got %v", err)
 		}
 	})
 
@@ -5857,6 +6277,165 @@ func TestHandler_UsersAuthDeleteDirectoryRejectsDeniedDescendantAccessRule(t *te
 	if _, err := fs.Stat(ctx, "/team/private/secret.txt"); err != nil {
 		t.Fatalf("expected denied descendant to remain after rejected DELETE: %v", err)
 	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("trash items after rejected DELETE = %d, want 0", len(items))
+	}
+}
+
+func TestHandler_UsersAuthConditionalDeleteAuthorizesDescendantsBeforeIfMatch(t *testing.T) {
+	handler, fs := setupUsersModeHandler(t, map[string]webDAVTestCredential{
+		"alice": {
+			password: "password123",
+			identity: UserIdentity{
+				Role:    webDAVRoleUser,
+				HomeDir: "/users/alice",
+			},
+		},
+	})
+	handler.directoryAccess = []DirectoryAccessRule{
+		{Path: "/team", WriteUsers: []string{"alice"}},
+		{Path: "/team/private", WriteUsers: []string{"bob"}},
+	}
+
+	ctx := context.Background()
+	for _, dir := range []string{"/team", "/team/private"} {
+		if err := fs.Mkdir(ctx, dir); err != nil {
+			t.Fatalf("Mkdir(%s) error: %v", dir, err)
+		}
+	}
+	if err := fs.WriteFile(ctx, "/team/private/secret.txt", strings.NewReader("secret")); err != nil {
+		t.Fatalf("WriteFile(secret) error: %v", err)
+	}
+
+	hashCalls := 0
+	setStorageHook(t, fs, "hashDeleteTargetFile", func(context.Context, string) (string, error) {
+		hashCalls++
+		return "", errors.New("unexpected target hash")
+	})
+	req := httptest.NewRequest(http.MethodDelete, "/dav/team", nil)
+	req.Header.Set("If-Match", `"wrong-etag"`)
+	setWebDAVTestBasicAuth(req, "alice")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("conditional DELETE with denied descendant status = %d, want %d; body=%s", w.Code, http.StatusForbidden, w.Body.String())
+	}
+	if hashCalls != 0 {
+		t.Fatalf("target hash calls = %d, want 0", hashCalls)
+	}
+	for _, targetPath := range []string{"/team", "/team/private", "/team/private/secret.txt"} {
+		if _, err := fs.Stat(ctx, targetPath); err != nil {
+			t.Fatalf("expected %s to remain after rejected DELETE: %v", targetPath, err)
+		}
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("trash items after rejected conditional DELETE = %d, want 0", len(items))
+	}
+}
+
+func TestHandler_UsersAuthDeleteRechecksTreeAfterConcurrentStorageWriter(t *testing.T) {
+	handler, fs := setupUsersModeHandler(t, map[string]webDAVTestCredential{
+		"alice": {
+			password: "password123",
+			identity: UserIdentity{
+				Role:    webDAVRoleUser,
+				HomeDir: "/users/alice",
+			},
+		},
+	})
+	handler.directoryAccess = []DirectoryAccessRule{
+		{Path: "/team", WriteUsers: []string{"alice"}},
+		{Path: "/team/private", WriteUsers: []string{"bob"}},
+	}
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/team"); err != nil {
+		t.Fatalf("Mkdir(/team) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/existing.txt", strings.NewReader("existing")); err != nil {
+		t.Fatalf("WriteFile(/team/existing.txt) error: %v", err)
+	}
+
+	originalHook := beforeWebDAVDeleteStorage
+	deleteReachedStorage := make(chan struct{})
+	releaseDelete := make(chan struct{})
+	var reachedOnce sync.Once
+	var releaseOnce sync.Once
+	beforeWebDAVDeleteStorage = func(gotHandler *Handler, targetPath string) {
+		if gotHandler != handler || targetPath != "/team" {
+			return
+		}
+		reachedOnce.Do(func() { close(deleteReachedStorage) })
+		<-releaseDelete
+	}
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(releaseDelete) })
+		beforeWebDAVDeleteStorage = originalHook
+	})
+
+	deleteDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		req := httptest.NewRequest(http.MethodDelete, "/dav/team", nil)
+		setWebDAVTestBasicAuth(req, "alice")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		deleteDone <- w
+	}()
+
+	select {
+	case <-deleteReachedStorage:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for WebDAV DELETE after its initial tree authorization")
+	}
+
+	writeDone := make(chan error, 1)
+	go func() {
+		if err := fs.Mkdir(ctx, "/team/private"); err != nil {
+			writeDone <- err
+			return
+		}
+		writeDone <- fs.WriteFile(ctx, "/team/private/secret.txt", strings.NewReader("secret"))
+	}()
+	select {
+	case err := <-writeDone:
+		if err != nil {
+			t.Fatalf("concurrent storage writer error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("concurrent storage writer was blocked by the WebDAV-only hierarchy lock")
+	}
+	releaseOnce.Do(func() { close(releaseDelete) })
+
+	var w *httptest.ResponseRecorder
+	select {
+	case w = <-deleteDone:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for WebDAV DELETE result")
+	}
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("DELETE after concurrent denied descendant status = %d, want %d; body=%s", w.Code, http.StatusForbidden, w.Body.String())
+	}
+	for _, targetPath := range []string{"/team", "/team/existing.txt", "/team/private", "/team/private/secret.txt"} {
+		if _, err := fs.Stat(ctx, targetPath); err != nil {
+			t.Fatalf("expected %s to remain after rejected DELETE: %v", targetPath, err)
+		}
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("trash items after concurrent rejected DELETE = %d, want 0", len(items))
+	}
 }
 
 func TestHandler_UsersAuthMoveDirectoryRejectsDeniedDestinationDescendantAccessRule(t *testing.T) {
@@ -7718,27 +8297,40 @@ func TestHandler_OnPathDeleted_ClearsLocksAndRestoresOnRollback(t *testing.T) {
 	}
 }
 
-func TestMatchETag(t *testing.T) {
-	h := &Handler{}
-
+func TestETagConditionMatching(t *testing.T) {
 	tests := []struct {
+		name      string
 		condition string
-		etag      string
-		want      bool
+		current   string
+		strong    bool
+		weak      bool
 	}{
-		{`"abc123"`, `"abc123"`, true},
-		{`"abc123"`, `"xyz789"`, false},
-		{`*`, `"anything"`, true},
-		{`"a", "b", "c"`, `"b"`, true},
-		{`"a", "b", "c"`, `"d"`, false},
-		{`W/"abc"`, `"abc"`, true},
-		{`"abc"`, `W/"abc"`, true},
+		{name: "exact strong", condition: `"abc123"`, current: `"abc123"`, strong: true, weak: true},
+		{name: "different opaque tags", condition: `"abc123"`, current: `"xyz789"`},
+		{name: "wildcard", condition: `*`, current: `W/"anything"`, strong: true, weak: true},
+		{name: "matching list", condition: `"a", "b", "c"`, current: `"b"`, strong: true, weak: true},
+		{name: "nonmatching list", condition: `"a", "b", "c"`, current: `"d"`},
+		{name: "comma inside opaque tag", condition: `"a,b", "c"`, current: `"a,b"`, strong: true, weak: true},
+		{name: "weak candidate", condition: `W/"abc"`, current: `"abc"`, weak: true},
+		{name: "weak current", condition: `"abc"`, current: `W/"abc"`, weak: true},
+		{name: "both weak", condition: `W/"abc"`, current: `W/"abc"`, weak: true},
+		{name: "weak match in list", condition: `"a", W/"b", "c"`, current: `"b"`, weak: true},
+		{name: "lowercase weak prefix is invalid", condition: `w/"abc"`, current: `"abc"`},
+		{name: "malformed trailing text", condition: `"abc" trailing`, current: `"abc"`},
+		{name: "wildcard mixed into list is invalid", condition: `"abc", *`, current: `"different"`},
+		{name: "leading comma is invalid", condition: `,"abc"`, current: `"abc"`},
+		{name: "trailing comma is invalid", condition: `"abc",`, current: `"abc"`},
+		{name: "empty list element is invalid", condition: `"abc",,"other"`, current: `"abc"`},
 	}
 
-	for _, tt := range tests {
-		got := h.matchETag(tt.condition, tt.etag)
-		if got != tt.want {
-			t.Errorf("matchETag(%q, %q) = %v, want %v", tt.condition, tt.etag, got, tt.want)
-		}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := matchStrongETag(testCase.condition, testCase.current); got != testCase.strong {
+				t.Errorf("matchStrongETag(%q, %q) = %v, want %v", testCase.condition, testCase.current, got, testCase.strong)
+			}
+			if got := matchWeakETag(testCase.condition, testCase.current); got != testCase.weak {
+				t.Errorf("matchWeakETag(%q, %q) = %v, want %v", testCase.condition, testCase.current, got, testCase.weak)
+			}
+		})
 	}
 }

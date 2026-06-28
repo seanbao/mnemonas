@@ -6,6 +6,7 @@ export interface FileItem {
   isDir: boolean
   size: number
   modTime: string
+  deleteIdentityToken: string | null
   etag?: string
   capabilities?: FileCapabilities
 }

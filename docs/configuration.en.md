@@ -296,14 +296,14 @@ directory_access_rules = [
 
 ## `[storage.retention]`
 
-Controls version cleanup.
+Controls the background retention sweep for file versions and expired Trash items. Version count, age, and free-space thresholds apply only to file versions.
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `max_versions` | int | `50` | Maximum versions per file; `0` means unlimited |
 | `max_age` | duration | `"2160h"` | Maximum version age; `0` keeps forever |
 | `min_free_space` | uint64 | `10737418240` | Minimum free bytes before forced cleanup |
-| `gc_interval` | duration | `"24h"` | Automatic cleanup interval; `"0"` disables it |
+| `gc_interval` | duration | `"24h"` | Background cleanup interval for versions and expired Trash items; `"0"` disables periodic cleanup |
 
 Priority:
 
@@ -317,10 +317,14 @@ Priority:
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | Enable trash instead of permanent delete |
-| `retention_days` | int | `30` | Days to keep trash items |
+| `retention_days` | int | `30` | Expiry interval assigned to new Trash items; an enabled `gc_interval` sweep removes expired items |
 | `max_size` | int64 | `10737418240` | Trash size limit in bytes |
 
-When new trash content would exceed `max_size`, older trash items are removed first. If the newest item is larger than the limit, it is still kept and total trash size may temporarily exceed the limit.
+Each item receives a persisted expiry when it enters Trash. Changing `retention_days` later does not rewrite existing items. Expiry makes an item eligible for the background sweep and is not a guaranteed minimum retention period.
+
+When new Trash content would exceed `max_size`, older items are removed first, including before their expiry. If the newest item is larger than the limit, it is still kept and total Trash size may temporarily exceed the limit.
+
+The deletion transaction based on object identity, no-replace rename, and handle-anchored quarantine is currently available on Linux and macOS. On other platforms, file listings report the deletion identity as `null`, observed delete intents are unavailable, and physical deletion fails closed where equivalent atomic primitives are absent. This limitation applies to both `trash` and `permanent` modes.
 
 The Web Trash page shows a cross-directory restore review before batch restore, covering affected directories, the auto-cleanup window, conflict handling, and execution results, with a copyable review record for pre-restore confirmation. After single-item or batch restore succeeds, the page associates matching `trash_restore` activity entries with an activity review record in the `restored` disposition state; unavailable activity logging or missing matching restore activity does not block the restore itself.
 

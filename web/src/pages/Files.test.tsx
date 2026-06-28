@@ -13,6 +13,7 @@ const mockUser = { id: 'u1', username: 'admin', role: 'admin' as const, email: '
 vi.mock('@/api/files', () => ({
   MAX_UPLOAD_FILE_SIZE_BYTES: 10 * 1024 * 1024 * 1024,
   MAX_UPLOAD_FILE_SIZE_LABEL: '10 GB',
+  MAX_DELETE_INTENT_TARGETS: 1000,
   ApiError: class ApiError extends Error {
     status: number
     code?: string
@@ -26,6 +27,7 @@ vi.mock('@/api/files', () => ({
     }
   },
   listFiles: vi.fn(),
+  createFileDeleteIntent: vi.fn(),
   deleteFile: vi.fn(),
   createDirectory: vi.fn(),
   uploadFile: vi.fn(),
@@ -112,6 +114,7 @@ vi.mock('@/components/share', () => ({
 import {
   ApiError,
   listFiles,
+  createFileDeleteIntent,
   createDirectory,
   deleteFile,
   moveFile,
@@ -124,6 +127,7 @@ import { listShares } from '@/api/share'
 import { checkFavorites, toggleFavorite } from '@/api/favorites'
 
 const mockListFiles = vi.mocked(listFiles)
+const mockCreateFileDeleteIntent = vi.mocked(createFileDeleteIntent)
 const mockCreateDirectory = vi.mocked(createDirectory)
 const mockDeleteFile = vi.mocked(deleteFile)
 const mockMoveFile = vi.mocked(moveFile)
@@ -134,6 +138,7 @@ const mockCheckFavorites = vi.mocked(checkFavorites)
 const mockToggleFavorite = vi.mocked(toggleFavorite)
 const mockListShares = vi.mocked(listShares)
 const successActionResult = { warning: false, message: undefined } as const
+const deleteIdentityToken = '5'.repeat(64)
 
 function warningActionResult(message: string) {
   return { warning: true, message } as const
@@ -222,10 +227,19 @@ function expectCopyFileCalledWithAbortSignal(fromPath: string, toPath: string): 
   return signal as AbortSignal
 }
 
-function expectDeleteFileCalledWithAbortSignal(path: string): AbortSignal {
+function expectDeleteFileCalledWithAbortSignal(
+  path: string,
+  expectedDeleteMode: 'trash' | 'permanent' = 'trash',
+  expectedDeletePolicyToken = '1'.repeat(64),
+  expectedDeleteTargetToken = '3'.repeat(64),
+): AbortSignal {
   const call = mockDeleteFile.mock.calls.find(([calledPath]) => calledPath === path)
   expect(call).toBeTruthy()
-  const signal = (call?.[1] as { signal?: AbortSignal } | undefined)?.signal
+  const options = call?.[1] as { expectedDeleteMode?: string; expectedDeletePolicyToken?: string; expectedDeleteTargetToken?: string; signal?: AbortSignal } | undefined
+  expect(options?.expectedDeleteMode).toBe(expectedDeleteMode)
+  expect(options?.expectedDeletePolicyToken).toBe(expectedDeletePolicyToken)
+  expect(options?.expectedDeleteTargetToken).toBe(expectedDeleteTargetToken)
+  const signal = options?.signal
   expect(signal).toBeInstanceOf(AbortSignal)
   expect(signal?.aborted).toBe(false)
   return signal as AbortSignal
@@ -263,6 +277,8 @@ async function clickFileAction(user: ReturnType<typeof userEvent.setup>, fileNam
   await user.click(await within(actionArea).findByRole('button', { name: actionName }))
 }
 
+const batchTrashConfirmName = /批量移入回收站 \d+ 个项目/
+
 describe('FilesPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -296,14 +312,43 @@ describe('FilesPage', () => {
       '/video.mp4': false,
     })
     mockToggleFavorite.mockResolvedValue({ isFavorited: true, warning: false, message: undefined })
+    mockCreateFileDeleteIntent.mockReset()
+    mockCreateFileDeleteIntent.mockImplementation(async (targets) => {
+      const latestListResult = mockListFiles.mock.results.at(-1)
+      const listResponse = latestListResult?.type === 'return'
+        ? await latestListResult.value
+        : undefined
+      return {
+        deleteMode: 'trash',
+        deletePolicyToken: '1'.repeat(64),
+        trashRetentionDays: 30,
+        trashAutoCleanupEnabled: true,
+        targets: targets.map((target) => {
+          const file = listResponse?.files.find((item) => item.path === target.path)
+          return {
+            name: file?.name ?? target.path.slice(target.path.lastIndexOf('/') + 1),
+            path: target.path,
+            isDir: file?.isDir ?? false,
+            size: file?.size ?? 0,
+            modTime: file?.modTime ?? '2024-01-02T00:00:00Z',
+            deleteIdentityToken: target.observedIdentityToken,
+            deleteTargetToken: '3'.repeat(64),
+          }
+        }),
+      }
+    })
     // Default mock response
     mockListFiles.mockResolvedValue({
       files: [
-        { name: 'documents', path: '/documents', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
-        { name: 'photo.jpg', path: '/photo.jpg', isDir: false, size: 1024000, modTime: '2024-01-02T00:00:00Z' },
-        { name: 'video.mp4', path: '/video.mp4', isDir: false, size: 10240000, modTime: '2024-01-03T00:00:00Z' },
+        { name: 'documents', path: '/documents', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
+        { name: 'photo.jpg', path: '/photo.jpg', isDir: false, size: 1024000, modTime: '2024-01-02T00:00:00Z', deleteIdentityToken },
+        { name: 'video.mp4', path: '/video.mp4', isDir: false, size: 10240000, modTime: '2024-01-03T00:00:00Z', deleteIdentityToken },
       ],
       path: '/',
+      deleteMode: 'trash',
+      deletePolicyToken: '1'.repeat(64),
+      trashRetentionDays: 30,
+      trashAutoCleanupEnabled: true,
     })
   })
 
@@ -1165,7 +1210,7 @@ describe('FilesPage', () => {
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }))
       })
 
-      expect(await screen.findByRole('heading', { name: '确认删除' })).toBeTruthy()
+      expect(await screen.findByRole('heading', { name: '移入回收站' })).toBeTruthy()
 
       firstRender.unmount()
       mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
@@ -1343,7 +1388,7 @@ describe('FilesPage', () => {
       expect(mockClipboardState.copy).not.toHaveBeenCalled()
       expect(mockClipboardState.cut).not.toHaveBeenCalled()
       expect(mockCopyFile).not.toHaveBeenCalled()
-      expect(screen.queryByRole('heading', { name: '批量删除' })).toBeFalsy()
+      expect(screen.queryByRole('heading', { name: '批量移入回收站' })).toBeFalsy()
       expect(screen.queryByLabelText('新名称')).toBeFalsy()
     })
 
@@ -1357,7 +1402,7 @@ describe('FilesPage', () => {
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }))
       })
 
-      expect(await screen.findByRole('heading', { name: '批量删除' })).toBeTruthy()
+      expect(await screen.findByRole('heading', { name: '批量移入回收站' })).toBeTruthy()
     })
 
     it('inverts an all-selected directory back to an empty selection', async () => {
@@ -1517,7 +1562,7 @@ describe('FilesPage', () => {
       mockListFiles
         .mockResolvedValueOnce({
           files: [
-            { name: 'photo.jpg', path: '/photo.jpg', isDir: false, size: 1024, modTime: '2024-01-02T00:00:00Z' },
+            { name: 'photo.jpg', path: '/photo.jpg', isDir: false, size: 1024, modTime: '2024-01-02T00:00:00Z', deleteIdentityToken },
           ],
           path: '/',
         })
@@ -1558,14 +1603,14 @@ describe('FilesPage', () => {
       mockListFiles
         .mockResolvedValueOnce({
           files: [
-            { name: 'photo.jpg', path: '/photo.jpg', isDir: false, size: 1024, modTime: '2024-01-02T00:00:00Z' },
-            { name: 'video.mp4', path: '/video.mp4', isDir: false, size: 2048, modTime: '2024-01-03T00:00:00Z' },
+            { name: 'photo.jpg', path: '/photo.jpg', isDir: false, size: 1024, modTime: '2024-01-02T00:00:00Z', deleteIdentityToken },
+            { name: 'video.mp4', path: '/video.mp4', isDir: false, size: 2048, modTime: '2024-01-03T00:00:00Z', deleteIdentityToken },
           ],
           path: '/',
         })
         .mockResolvedValueOnce({
           files: [
-            { name: 'photo.jpg', path: '/photo.jpg', isDir: false, size: 1024, modTime: '2024-01-02T00:00:00Z' },
+            { name: 'photo.jpg', path: '/photo.jpg', isDir: false, size: 1024, modTime: '2024-01-02T00:00:00Z', deleteIdentityToken },
           ],
           path: '/',
         })
@@ -1638,7 +1683,7 @@ describe('FilesPage', () => {
       await user.click(screen.getByRole('button', { name: '取消' }))
 
       await user.click(within(actionArea).getByText('删除'))
-      expect(await screen.findByRole('heading', { name: '确认删除' })).toBeTruthy()
+      expect(await screen.findByRole('heading', { name: '移入回收站' })).toBeTruthy()
       await user.click(screen.getByRole('button', { name: '取消' }))
 
       await user.click(within(actionArea).getByText('添加收藏'))
@@ -1663,6 +1708,7 @@ describe('FilesPage', () => {
             isDir: false,
             size: 1024,
             modTime: '2024-01-02T00:00:00Z',
+            deleteIdentityToken,
             capabilities: { read: true, concreteRead: true, write: false },
           },
         ],
@@ -1781,8 +1827,8 @@ describe('FilesPage', () => {
       expect(mockFilesStoreState.clearSelection).toHaveBeenCalled()
 
       menu = await openContextMenuFor('photo.jpg', { clientX: 190, clientY: 130 })
-      await user.click(within(menu).getByRole('menuitem', { name: '批量删除（进回收站）' }))
-      expect(screen.getByRole('heading', { name: '批量删除' })).toBeTruthy()
+      await user.click(within(menu).getByRole('menuitem', { name: '批量移入回收站' }))
+      expect(screen.getByRole('heading', { name: '批量移入回收站' })).toBeTruthy()
     })
 
     it('opens batch move and copy from the multi-selection custom context menu', async () => {
@@ -1838,7 +1884,7 @@ describe('FilesPage', () => {
 
       menu = await openContextMenuFor('photo.jpg', { clientX: 190, clientY: 130 })
       await user.click(within(menu).getByRole('menuitem', { name: '删除' }))
-      expect(await screen.findByRole('heading', { name: '确认删除' })).toBeTruthy()
+      expect(await screen.findByRole('heading', { name: '移入回收站' })).toBeTruthy()
     })
 
     it('shows failure toasts from custom context menu download and copy actions', async () => {
@@ -2176,10 +2222,10 @@ describe('FilesPage', () => {
       await clickFileAction(user, 'photo.jpg', '删除')
 
       await waitFor(() => {
-        expect(screen.getByRole('heading', { name: '确认删除' })).toBeTruthy()
+        expect(screen.getByRole('heading', { name: '移入回收站' })).toBeTruthy()
       })
 
-      await user.click(screen.getByRole('button', { name: '确认删除 photo.jpg' }))
+      await user.click(screen.getByRole('button', { name: '移入回收站 photo.jpg' }))
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
@@ -2189,9 +2235,29 @@ describe('FilesPage', () => {
       })
 
       await waitFor(() => {
-        expect(screen.queryByRole('heading', { name: '确认删除' })).toBeFalsy()
+        expect(screen.queryByRole('heading', { name: '移入回收站' })).toBeFalsy()
         expect(screen.queryByText('photo.jpg')).toBeFalsy()
         expect(screen.getByText('video.mp4')).toBeTruthy()
+      })
+    })
+
+    it('moves focus to the stable file region after a successful single delete removes its trigger', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.viewMode = 'grid'
+      mockDeleteFile.mockResolvedValueOnce(successActionResult)
+
+      render(<FilesPage />)
+
+      await screen.findByText('photo.jpg')
+      mockListFiles.mockImplementation(() => pendingFilesRefetch())
+      await clickFileAction(user, 'photo.jpg', '删除')
+      await user.click(await screen.findByRole('button', { name: '移入回收站 photo.jpg' }))
+
+      const focusFallback = screen.getByRole('region', { name: '文件上传区域' })
+      await waitFor(() => {
+        expect(screen.queryByRole('heading', { name: '移入回收站' })).toBeNull()
+        expect(screen.queryByText('photo.jpg')).toBeNull()
+        expect(focusFallback).toHaveFocus()
       })
     })
 
@@ -2210,10 +2276,10 @@ describe('FilesPage', () => {
       await clickFileAction(user, 'photo.jpg', '删除')
 
       await waitFor(() => {
-        expect(screen.getByRole('heading', { name: '确认删除' })).toBeTruthy()
+        expect(screen.getByRole('heading', { name: '移入回收站' })).toBeTruthy()
       })
 
-      await user.click(screen.getByRole('button', { name: '确认删除 photo.jpg' }))
+      await user.click(screen.getByRole('button', { name: '移入回收站 photo.jpg' }))
 
       let deleteSignal: AbortSignal | undefined
       await waitFor(() => {
@@ -2249,10 +2315,10 @@ describe('FilesPage', () => {
       await user.click(screen.getByText('批量删除'))
 
       await waitFor(() => {
-        expect(screen.getByText('删除全部')).toBeTruthy()
+        expect(screen.getByRole('button', { name: batchTrashConfirmName })).toBeTruthy()
       })
 
-      await user.click(screen.getByText('删除全部'))
+      await user.click(screen.getByRole('button', { name: batchTrashConfirmName }))
 
       await waitFor(() => {
         expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith(['/video.mp4'])
@@ -2261,9 +2327,426 @@ describe('FilesPage', () => {
       expect(mockFilesStoreState.clearSelection).not.toHaveBeenCalled()
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '批量删除部分完成',
-        description: '成功 1 个，失败 1 个',
+        description: '已移入回收站 1 项；失败 1 项',
         color: 'warning',
       })
+    })
+
+    it('moves focus to the stable file region after a successful batch delete removes the toolbar trigger', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
+      mockDeleteFile.mockResolvedValueOnce(successActionResult)
+
+      render(<FilesPage />)
+      await user.click(await screen.findByRole('button', { name: '批量删除' }))
+      await screen.findByRole('heading', { name: '批量移入回收站' })
+      mockFilesStoreState.clearSelection.mockImplementationOnce(() => {
+        mockFilesStoreState.selectedFiles = new Set()
+      })
+      await user.click(screen.getByRole('button', { name: batchTrashConfirmName }))
+
+      const focusFallback = screen.getByRole('region', { name: '文件上传区域' })
+      await waitFor(() => {
+        expect(screen.queryByRole('heading', { name: '批量移入回收站' })).toBeNull()
+        expect(screen.queryByRole('button', { name: '批量删除' })).toBeNull()
+        expect(focusFallback).toHaveFocus()
+      })
+    })
+
+    it('refreshes the list when a batch target identity changes during intent creation', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/video.mp4'])
+      mockCreateFileDeleteIntent.mockRejectedValueOnce(new ApiError(
+        'delete target changed',
+        409,
+        'DELETE_TARGET_CHANGED',
+      ))
+
+      render(<FilesPage />)
+      await user.click(await screen.findByRole('button', { name: '批量删除' }))
+
+      await waitFor(() => {
+        expect(mockListFiles).toHaveBeenCalledTimes(2)
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '删除目标已更改，批量删除已停止',
+          description: '2 项未删除；列表已刷新，请重新确认剩余删除目标。',
+          color: 'warning',
+        })
+      })
+      expect(screen.queryByRole('heading', { name: '批量移入回收站' })).toBeNull()
+      expect(mockDeleteFile).not.toHaveBeenCalled()
+    })
+
+    it('shows preparation state and suppresses duplicate batch intent requests', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const pendingIntent = createDeferred<Awaited<ReturnType<typeof createFileDeleteIntent>>>()
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/video.mp4'])
+      mockCreateFileDeleteIntent.mockImplementationOnce(() => pendingIntent.promise)
+
+      render(<FilesPage />)
+      const batchButton = await screen.findByRole('button', { name: '批量删除' })
+      await user.click(batchButton)
+
+      expect(await screen.findByRole('status')).toHaveTextContent('正在确认删除目标…')
+      expect(batchButton).toBeDisabled()
+      await user.click(batchButton)
+      expect(mockCreateFileDeleteIntent).toHaveBeenCalledTimes(1)
+
+      await act(async () => {
+        pendingIntent.resolve({
+          deleteMode: 'trash',
+          deletePolicyToken: '1'.repeat(64),
+          trashRetentionDays: 30,
+          trashAutoCleanupEnabled: true,
+          targets: ['/photo.jpg', '/video.mp4'].map((path) => ({
+            path,
+            name: path.slice(1),
+            isDir: false,
+            size: path === '/photo.jpg' ? 1024000 : 10240000,
+            modTime: path === '/photo.jpg' ? '2024-01-02T00:00:00Z' : '2024-01-03T00:00:00Z',
+            deleteIdentityToken,
+            deleteTargetToken: '3'.repeat(64),
+          })),
+        })
+        await pendingIntent.promise
+      })
+
+      expect(await screen.findByRole('heading', { name: '批量移入回收站' })).toBeTruthy()
+      expect(screen.queryByRole('status')).toBeNull()
+      const cancelButton = screen.getByRole('button', { name: '取消' })
+      await waitFor(() => expect(cancelButton).toHaveFocus())
+
+      await user.click(cancelButton)
+      await waitFor(() => {
+        expect(screen.queryByRole('heading', { name: '批量移入回收站' })).toBeNull()
+        expect(batchButton).toHaveFocus()
+      })
+    })
+
+    it('discards a pending batch intent when the same-size selection changes', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const pendingIntent = createDeferred<Awaited<ReturnType<typeof createFileDeleteIntent>>>()
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/video.mp4'])
+      mockCreateFileDeleteIntent.mockImplementationOnce(() => pendingIntent.promise)
+
+      const { rerender } = render(<FilesPage />)
+      await user.click(await screen.findByRole('button', { name: '批量删除' }))
+      expect(await screen.findByRole('status')).toHaveTextContent('正在确认删除目标…')
+
+      mockFilesStoreState.selectedFiles = new Set(['/video.mp4', '/documents'])
+      rerender(<FilesPage />)
+      await act(async () => {
+        pendingIntent.resolve({
+          deleteMode: 'trash',
+          deletePolicyToken: '1'.repeat(64),
+          trashRetentionDays: 30,
+          trashAutoCleanupEnabled: true,
+          targets: ['/photo.jpg', '/video.mp4'].map((path) => ({
+            path,
+            name: path.slice(1),
+            isDir: false,
+            size: 1024,
+            modTime: '2024-01-02T00:00:00Z',
+            deleteIdentityToken,
+            deleteTargetToken: '3'.repeat(64),
+          })),
+        })
+        await pendingIntent.promise
+      })
+
+      await waitFor(() => {
+        expect(screen.queryByRole('status')).toBeNull()
+        expect(screen.queryByRole('heading', { name: '批量移入回收站' })).toBeNull()
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '所选项目已更改',
+          description: '请按当前选择重新确认批量删除。',
+          color: 'warning',
+        })
+      })
+      expect(mockDeleteFile).not.toHaveBeenCalled()
+    })
+
+    it('discards a batch intent when a same-path target is replaced before the response', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const pendingIntent = createDeferred<Awaited<ReturnType<typeof createFileDeleteIntent>>>()
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/video.mp4'])
+      mockCreateFileDeleteIntent.mockImplementationOnce(() => pendingIntent.promise)
+
+      render(<FilesPage />)
+      await user.click(await screen.findByRole('button', { name: '批量删除' }))
+      expect(await screen.findByRole('status')).toHaveTextContent('正在确认删除目标…')
+
+      await act(async () => {
+        pendingIntent.resolve({
+          deleteMode: 'trash',
+          deletePolicyToken: '1'.repeat(64),
+          trashRetentionDays: 30,
+          trashAutoCleanupEnabled: true,
+          targets: [
+            {
+              path: '/photo.jpg',
+              name: 'photo.jpg',
+              isDir: true,
+              size: 0,
+              modTime: '2024-01-04T00:00:00.123456789Z',
+              deleteIdentityToken: '6'.repeat(64),
+              deleteTargetToken: '3'.repeat(64),
+            },
+            {
+              path: '/video.mp4',
+              name: 'video.mp4',
+              isDir: false,
+              size: 10240000,
+              modTime: '2024-01-03T00:00:00Z',
+              deleteIdentityToken,
+              deleteTargetToken: '3'.repeat(64),
+            },
+          ],
+        })
+        await pendingIntent.promise
+      })
+
+      await waitFor(() => {
+        expect(screen.queryByRole('status')).toBeNull()
+        expect(screen.queryByRole('heading', { name: '批量移入回收站' })).toBeNull()
+        expect(mockListFiles).toHaveBeenCalledTimes(2)
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '目标已变化，请重新选择/确认',
+          color: 'warning',
+        })
+      })
+      expect(mockCreateFileDeleteIntent).toHaveBeenCalledWith(
+        [
+          { path: '/photo.jpg', observedIdentityToken: deleteIdentityToken },
+          { path: '/video.mp4', observedIdentityToken: deleteIdentityToken },
+        ],
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      )
+      expect(mockDeleteFile).not.toHaveBeenCalled()
+    })
+
+    it('aborts a pending delete intent when navigation changes the current directory', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const pendingIntent = createDeferred<Awaited<ReturnType<typeof createFileDeleteIntent>>>()
+      mockFilesStoreState.viewMode = 'grid'
+      let intentSignal: AbortSignal | undefined
+      mockCreateFileDeleteIntent.mockImplementationOnce((_paths, options) => {
+        intentSignal = options?.signal
+        return pendingIntent.promise
+      })
+
+      const { rerender } = render(<FilesPage />)
+      await clickFileAction(user, 'photo.jpg', '删除')
+      expect(await screen.findByRole('status')).toHaveTextContent('正在确认删除目标…')
+
+      mockFilesStoreState.currentPath = '/documents'
+      mockLocationPathname = '/files/documents'
+      rerender(<FilesPage />)
+
+      await waitFor(() => {
+        expect(intentSignal?.aborted).toBe(true)
+        expect(screen.queryByRole('status')).toBeNull()
+      })
+      await act(async () => {
+        pendingIntent.resolve({
+          deleteMode: 'trash',
+          deletePolicyToken: '1'.repeat(64),
+          trashRetentionDays: 30,
+          trashAutoCleanupEnabled: true,
+          targets: [{
+            path: '/photo.jpg',
+            name: 'photo.jpg',
+            isDir: false,
+            size: 1024,
+            modTime: '2024-01-02T00:00:00Z',
+            deleteIdentityToken,
+            deleteTargetToken: '3'.repeat(64),
+          }],
+        })
+        await pendingIntent.promise
+      })
+      expect(screen.queryByRole('heading', { name: '移入回收站' })).toBeNull()
+      expect(mockDeleteFile).not.toHaveBeenCalled()
+    })
+
+    it('stops a batch at policy drift and preserves failures, conflict, and unattempted items', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const files = ['a.txt', 'b.txt', 'c.txt', 'd.txt'].map((name, index) => ({
+        name,
+        path: `/${name}`,
+        isDir: false,
+        size: index + 1,
+        modTime: `2024-01-0${index + 1}T00:00:00Z`,
+        deleteIdentityToken,
+      }))
+      mockFilesStoreState.selectedFiles = new Set(files.map((file) => file.path))
+      mockListFiles.mockResolvedValue({
+        files,
+        path: '/',
+        deleteMode: 'trash',
+        deletePolicyToken: '1'.repeat(64),
+        trashRetentionDays: 30,
+        trashAutoCleanupEnabled: true,
+      })
+      mockDeleteFile
+        .mockResolvedValueOnce(successActionResult)
+        .mockRejectedValueOnce(new Error('delete failed'))
+        .mockRejectedValueOnce(new ApiError('delete policy changed', 409, 'DELETE_POLICY_CHANGED'))
+
+      render(<FilesPage />)
+      await screen.findByText('批量删除')
+      await user.click(screen.getByText('批量删除'))
+
+      mockListFiles.mockResolvedValue({
+        files: files.slice(1),
+        path: '/',
+        deleteMode: 'trash',
+        deletePolicyToken: '2'.repeat(64),
+        trashRetentionDays: 0,
+        trashAutoCleanupEnabled: true,
+      })
+      await user.click(await screen.findByRole('button', { name: batchTrashConfirmName }))
+
+      await waitFor(() => {
+        expect(mockDeleteFile.mock.calls.map(([path]) => path)).toEqual(['/a.txt', '/b.txt', '/c.txt'])
+        expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith(['/b.txt', '/c.txt', '/d.txt'])
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '删除策略已更改，批量删除已停止',
+          description: '已移入回收站 1 项；3 项未删除；列表已刷新，请按当前删除策略重新确认。',
+          color: 'warning',
+        })
+      })
+
+      expect(mockDeleteFile).not.toHaveBeenCalledWith('/d.txt', expect.anything())
+      for (const [, options] of mockDeleteFile.mock.calls) {
+        expect(options).toEqual(expect.objectContaining({
+          expectedDeleteMode: 'trash',
+          expectedDeletePolicyToken: '1'.repeat(64),
+          expectedDeleteTargetToken: '3'.repeat(64),
+        }))
+      }
+      expect(screen.queryByRole('heading', { name: '批量移入回收站' })).toBeNull()
+      expect(screen.queryByText('a.txt')).toBeNull()
+    })
+
+    it('stops a batch at target drift and preserves the conflict and unattempted items', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const files = ['a.txt', 'b.txt', 'c.txt'].map((name, index) => ({
+        name,
+        path: `/${name}`,
+        isDir: false,
+        size: index + 1,
+        modTime: `2024-01-0${index + 1}T00:00:00Z`,
+        deleteIdentityToken,
+      }))
+      mockFilesStoreState.selectedFiles = new Set(files.map((file) => file.path))
+      mockListFiles.mockResolvedValue({
+        files,
+        path: '/',
+        deleteMode: 'trash',
+        deletePolicyToken: '1'.repeat(64),
+        trashRetentionDays: 30,
+        trashAutoCleanupEnabled: true,
+      })
+      mockDeleteFile
+        .mockResolvedValueOnce(successActionResult)
+        .mockRejectedValueOnce(new ApiError('delete target changed', 409, 'DELETE_TARGET_CHANGED'))
+
+      render(<FilesPage />)
+      await user.click(await screen.findByRole('button', { name: '批量删除' }))
+      mockListFiles.mockResolvedValue({
+        files: files.slice(1),
+        path: '/',
+        deleteMode: 'trash',
+        deletePolicyToken: '1'.repeat(64),
+        trashRetentionDays: 30,
+        trashAutoCleanupEnabled: true,
+      })
+      await user.click(await screen.findByRole('button', { name: batchTrashConfirmName }))
+
+      await waitFor(() => {
+        expect(mockDeleteFile.mock.calls.map(([path]) => path)).toEqual(['/a.txt', '/b.txt'])
+        expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith(['/b.txt', '/c.txt'])
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '删除目标已更改，批量删除已停止',
+          description: '已移入回收站 1 项；2 项未删除；列表已刷新，请重新确认剩余删除目标。',
+          color: 'warning',
+        })
+      })
+      expect(mockDeleteFile).not.toHaveBeenCalledWith('/c.txt', expect.anything())
+      expect(screen.queryByText('a.txt')).toBeNull()
+    })
+
+    it('keeps deletion disabled when a partial batch policy-drift refresh fails', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const files = ['a.txt', 'b.txt', 'c.txt'].map((name, index) => ({
+        name,
+        path: `/${name}`,
+        isDir: false,
+        size: index + 1,
+        modTime: `2024-01-0${index + 1}T00:00:00Z`,
+        deleteIdentityToken,
+      }))
+      mockFilesStoreState.selectedFiles = new Set(files.map((file) => file.path))
+      mockListFiles.mockResolvedValue({
+        files,
+        path: '/',
+        deleteMode: 'trash',
+        deletePolicyToken: '1'.repeat(64),
+        trashRetentionDays: 30,
+        trashAutoCleanupEnabled: true,
+      })
+      mockDeleteFile
+        .mockResolvedValueOnce(successActionResult)
+        .mockRejectedValueOnce(new ApiError('delete policy changed', 409, 'DELETE_POLICY_CHANGED'))
+
+      render(<FilesPage />)
+      await user.click(await screen.findByRole('button', { name: '批量删除' }))
+      mockListFiles.mockRejectedValue(new Error('refresh failed'))
+      await user.click(await screen.findByRole('button', { name: batchTrashConfirmName }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '删除策略已更改，批量删除已停止',
+          description: '已移入回收站 1 项；2 项未删除；删除策略刷新失败，删除操作保持停用。',
+          color: 'warning',
+        })
+        expect(screen.getByRole('alert')).toHaveTextContent('删除操作已停用')
+      })
+      expect(screen.getByRole('button', { name: '批量删除' })).toBeDisabled()
+      expect(mockCreateFileDeleteIntent).toHaveBeenCalledTimes(1)
+    })
+
+    it('keeps unknown-policy files readable while disabling toolbar, multi-select context, and keyboard deletion', async () => {
+      mockFilesStoreState.viewMode = 'grid'
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/video.mp4'])
+      mockListFiles.mockResolvedValue({
+        files: [
+          { name: 'photo.jpg', path: '/photo.jpg', isDir: false, size: 1024, modTime: '2024-01-02T00:00:00Z', deleteIdentityToken },
+          { name: 'video.mp4', path: '/video.mp4', isDir: false, size: 2048, modTime: '2024-01-03T00:00:00Z', deleteIdentityToken },
+        ],
+        path: '/',
+        deleteMode: 'unknown',
+        deletePolicyToken: null,
+        trashRetentionDays: null,
+        trashAutoCleanupEnabled: null,
+      })
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getAllByText('photo.jpg').length).toBeGreaterThan(0)
+      })
+      expect(screen.getByRole('button', { name: '批量删除' })).toBeDisabled()
+
+      const menu = await openContextMenuFor('photo.jpg')
+      expect(within(menu).getByRole('menuitem', { name: '批量删除（策略未知）' })).toBeDisabled()
+
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }))
+      })
+      expect(screen.queryByRole('heading', { name: /删除|回收站/ })).toBeNull()
+      expect(mockDeleteFile).not.toHaveBeenCalled()
     })
 
     it('shows danger toast and preserves selection when batch delete fully fails', async () => {
@@ -2282,10 +2765,10 @@ describe('FilesPage', () => {
       await user.click(screen.getByText('批量删除'))
 
       await waitFor(() => {
-        expect(screen.getByText('删除全部')).toBeTruthy()
+        expect(screen.getByRole('button', { name: batchTrashConfirmName })).toBeTruthy()
       })
 
-      await user.click(screen.getByText('删除全部'))
+      await user.click(screen.getByRole('button', { name: batchTrashConfirmName }))
 
       await waitFor(() => {
         expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith(['/photo.jpg', '/video.mp4'])
@@ -2315,10 +2798,10 @@ describe('FilesPage', () => {
       await user.click(screen.getByText('批量删除'))
 
       await waitFor(() => {
-        expect(screen.getByText('删除全部')).toBeTruthy()
+        expect(screen.getByRole('button', { name: batchTrashConfirmName })).toBeTruthy()
       })
 
-      await user.click(screen.getByText('删除全部'))
+      await user.click(screen.getByRole('button', { name: batchTrashConfirmName }))
 
       await waitFor(() => {
         expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith(['/photo.jpg', '/video.mp4'])
@@ -2352,10 +2835,10 @@ describe('FilesPage', () => {
       await user.click(screen.getByText('批量删除'))
 
       await waitFor(() => {
-        expect(screen.getByText('删除全部')).toBeTruthy()
+        expect(screen.getByRole('button', { name: batchTrashConfirmName })).toBeTruthy()
       })
 
-      await user.click(screen.getByText('删除全部'))
+      await user.click(screen.getByRole('button', { name: batchTrashConfirmName }))
 
       await waitFor(() => {
         expect(mockFilesStoreState.clearSelection).toHaveBeenCalled()
@@ -2363,12 +2846,12 @@ describe('FilesPage', () => {
 
       expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith([])
       expect(mockAddToast).toHaveBeenCalledWith({
-        title: '文件或文件夹已不存在，已同步更新',
+        title: '已同步移除 2 个不存在项目',
         color: 'warning',
       })
 
       await waitFor(() => {
-        expect(screen.queryByRole('heading', { name: '批量删除' })).toBeFalsy()
+        expect(screen.queryByRole('heading', { name: '批量移入回收站' })).toBeFalsy()
         expect(screen.queryByText('photo.jpg')).toBeFalsy()
         expect(screen.queryByText('video.mp4')).toBeFalsy()
         expect(screen.getByText('documents')).toBeTruthy()
@@ -2393,10 +2876,10 @@ describe('FilesPage', () => {
       await user.click(screen.getByText('批量删除'))
 
       await waitFor(() => {
-        expect(screen.getByText('删除全部')).toBeTruthy()
+        expect(screen.getByRole('button', { name: batchTrashConfirmName })).toBeTruthy()
       })
 
-      await user.click(screen.getByText('删除全部'))
+      await user.click(screen.getByRole('button', { name: batchTrashConfirmName }))
 
       await waitFor(() => {
         expectDeleteFileCalledWithAbortSignal('/photo.jpg')
@@ -2404,8 +2887,8 @@ describe('FilesPage', () => {
 
       await user.click(screen.getByRole('button', { name: '取消' }))
 
-      expect(screen.getByRole('heading', { name: '批量删除' })).toBeTruthy()
-      expect(screen.getByRole('button', { name: '删除全部' })).toBeTruthy()
+      expect(screen.getByRole('heading', { name: '批量移入回收站' })).toBeTruthy()
+      expect(screen.getByRole('button', { name: batchTrashConfirmName })).toBeTruthy()
 
       await act(async () => {
         pendingDelete.resolve(successActionResult)
@@ -2413,7 +2896,7 @@ describe('FilesPage', () => {
       })
 
       await waitFor(() => {
-        expect(screen.queryByRole('button', { name: '删除全部' })).toBeFalsy()
+        expect(screen.queryByRole('button', { name: batchTrashConfirmName })).toBeFalsy()
       })
     })
 
@@ -2435,10 +2918,10 @@ describe('FilesPage', () => {
       await user.click(screen.getByText('批量删除'))
 
       await waitFor(() => {
-        expect(screen.getByText('删除全部')).toBeTruthy()
+        expect(screen.getByRole('button', { name: batchTrashConfirmName })).toBeTruthy()
       })
 
-      await user.click(screen.getByText('删除全部'))
+      await user.click(screen.getByRole('button', { name: batchTrashConfirmName }))
 
       await waitFor(() => {
         expectDeleteFileCalledWithAbortSignal('/photo.jpg')
@@ -2446,8 +2929,8 @@ describe('FilesPage', () => {
 
       await user.click(screen.getByRole('button', { name: '取消' }))
 
-      expect(screen.getByRole('heading', { name: '批量删除' })).toBeTruthy()
-      expect(screen.getByRole('button', { name: '删除全部' })).toBeTruthy()
+      expect(screen.getByRole('heading', { name: '批量移入回收站' })).toBeTruthy()
+      expect(screen.getByRole('button', { name: batchTrashConfirmName })).toBeTruthy()
 
       await act(async () => {
         pendingDelete.reject(new Error('delete failed'))
@@ -2461,8 +2944,8 @@ describe('FilesPage', () => {
         })
       })
 
-      expect(screen.getByRole('heading', { name: '批量删除' })).toBeTruthy()
-      expect(screen.getByRole('button', { name: '删除全部' })).toBeTruthy()
+      expect(screen.getByRole('heading', { name: '批量移入回收站' })).toBeTruthy()
+      expect(screen.getByRole('button', { name: batchTrashConfirmName })).toBeTruthy()
     })
 
     it('aborts a pending batch delete request when the page unmounts', async () => {
@@ -2480,10 +2963,10 @@ describe('FilesPage', () => {
       await user.click(screen.getByText('批量删除'))
 
       await waitFor(() => {
-        expect(screen.getByText('删除全部')).toBeTruthy()
+        expect(screen.getByRole('button', { name: batchTrashConfirmName })).toBeTruthy()
       })
 
-      await user.click(screen.getByText('删除全部'))
+      await user.click(screen.getByRole('button', { name: batchTrashConfirmName }))
 
       let deleteSignal: AbortSignal | undefined
       await waitFor(() => {
@@ -2503,6 +2986,85 @@ describe('FilesPage', () => {
       expect(mockAddToast).not.toHaveBeenCalled()
       expect(mockFilesStoreState.clearSelection).toHaveBeenCalledTimes(clearSelectionCallsAfterUnmount)
       expect(mockFilesStoreState.setSelection).toHaveBeenCalledTimes(setSelectionCallsAfterUnmount)
+    })
+
+    it('settles completed batch items and resets deletion state when navigation aborts the next request', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const pendingSecondDelete = createDeferred<typeof successActionResult>()
+      const queryClient = new QueryClient({
+        defaultOptions: {
+          queries: { retry: false, gcTime: Infinity },
+          mutations: { retry: false },
+        },
+      })
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/video.mp4'])
+      mockDeleteFile
+        .mockResolvedValueOnce(successActionResult)
+        .mockImplementationOnce(() => pendingSecondDelete.promise)
+        .mockResolvedValueOnce(successActionResult)
+
+      const view = render(
+        <QueryClientProvider client={queryClient}>
+          <FilesPage />
+        </QueryClientProvider>
+      )
+
+      await user.click(await screen.findByRole('button', { name: '批量删除' }))
+      await user.click(await screen.findByRole('button', { name: batchTrashConfirmName }))
+
+      let secondDeleteSignal: AbortSignal | undefined
+      await waitFor(() => {
+        expect(mockDeleteFile).toHaveBeenCalledTimes(2)
+        secondDeleteSignal = mockDeleteFile.mock.calls[1]?.[1].signal
+      })
+
+      mockFilesStoreState.currentPath = '/documents'
+      mockFilesStoreState.selectedFiles = new Set(['/documents/new.txt'])
+      mockLocationPathname = '/files/documents'
+      mockListFiles.mockResolvedValue({
+        files: [{ name: 'new.txt', path: '/documents/new.txt', isDir: false, size: 1, modTime: '2024-01-04T00:00:00Z', deleteIdentityToken }],
+        path: '/documents',
+        deleteMode: 'trash',
+        deletePolicyToken: '1'.repeat(64),
+        trashRetentionDays: 30,
+        trashAutoCleanupEnabled: true,
+      })
+      view.rerender(
+        <QueryClientProvider client={queryClient}>
+          <FilesPage />
+        </QueryClientProvider>
+      )
+
+      expect(secondDeleteSignal?.aborted).toBe(true)
+      await act(async () => {
+        pendingSecondDelete.reject(new DOMException('batch delete aborted', 'AbortError'))
+        await Promise.resolve()
+      })
+
+      await waitFor(() => {
+        expect(screen.queryByRole('heading', { name: '批量移入回收站' })).toBeNull()
+      })
+
+      await user.click(await screen.findByRole('button', { name: '批量删除' }))
+      await user.click(await screen.findByRole('button', { name: batchTrashConfirmName }))
+      await waitFor(() => {
+        expect(mockDeleteFile).toHaveBeenCalledWith('/documents/new.txt', expect.objectContaining({ signal: expect.any(AbortSignal) }))
+      })
+
+      mockFilesStoreState.currentPath = '/'
+      mockFilesStoreState.selectedFiles = new Set()
+      mockLocationPathname = '/files'
+      mockListFiles.mockImplementation(() => pendingFilesRefetch())
+      view.rerender(
+        <QueryClientProvider client={queryClient}>
+          <FilesPage />
+        </QueryClientProvider>
+      )
+
+      await waitFor(() => {
+        const cachedRoot = queryClient.getQueryData<{ files: Array<{ path: string }> }>(['files', 'u1:admin:/', '/'])
+        expect(cachedRoot?.files.map((file) => file.path)).toEqual(['/documents', '/video.mp4'])
+      })
     })
 
     it('shows warning toast when batch download partially fails', async () => {
@@ -2893,11 +3455,12 @@ describe('FilesPage', () => {
       })
 
       await user.click(screen.getByText('批量删除'))
-      await user.click(await screen.findByText('删除全部'))
+      await user.click(await screen.findByRole('button', { name: batchTrashConfirmName }))
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
-          title: '已删除 1 个文件，但存在警告',
+          title: '已将 1 个项目移入回收站',
+          description: '1 项返回了服务端警告',
           color: 'warning',
         })
       })
@@ -2917,12 +3480,12 @@ describe('FilesPage', () => {
       })
 
       await user.click(screen.getByText('批量删除'))
-      await user.click(await screen.findByText('删除全部'))
+      await user.click(await screen.findByRole('button', { name: batchTrashConfirmName }))
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '批量删除部分完成',
-          description: '成功 1 个，失败 1 个',
+          description: '已移入回收站 1 项；失败 1 项；1 项带服务端警告',
           color: 'warning',
         })
       })
@@ -3585,12 +4148,12 @@ describe('FilesPage', () => {
     beforeEach(() => {
       mockListFiles.mockResolvedValue({
         files: [
-          { name: 'photo.jpg', path: '/photo.jpg', isDir: false, size: 1024, modTime: '2024-01-01T00:00:00Z' },
-          { name: 'video.mp4', path: '/video.mp4', isDir: false, size: 10240, modTime: '2024-01-02T00:00:00Z' },
-          { name: 'document.pdf', path: '/document.pdf', isDir: false, size: 2048, modTime: '2024-01-03T00:00:00Z' },
-          { name: 'music.mp3', path: '/music.mp3', isDir: false, size: 5120, modTime: '2024-01-04T00:00:00Z' },
-          { name: 'archive.zip', path: '/archive.zip', isDir: false, size: 8192, modTime: '2024-01-05T00:00:00Z' },
-          { name: 'code.ts', path: '/code.ts', isDir: false, size: 512, modTime: '2024-01-06T00:00:00Z' },
+          { name: 'photo.jpg', path: '/photo.jpg', isDir: false, size: 1024, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
+          { name: 'video.mp4', path: '/video.mp4', isDir: false, size: 10240, modTime: '2024-01-02T00:00:00Z', deleteIdentityToken },
+          { name: 'document.pdf', path: '/document.pdf', isDir: false, size: 2048, modTime: '2024-01-03T00:00:00Z', deleteIdentityToken },
+          { name: 'music.mp3', path: '/music.mp3', isDir: false, size: 5120, modTime: '2024-01-04T00:00:00Z', deleteIdentityToken },
+          { name: 'archive.zip', path: '/archive.zip', isDir: false, size: 8192, modTime: '2024-01-05T00:00:00Z', deleteIdentityToken },
+          { name: 'code.ts', path: '/code.ts', isDir: false, size: 512, modTime: '2024-01-06T00:00:00Z', deleteIdentityToken },
         ],
         path: '/',
       })
@@ -4065,7 +4628,7 @@ describe('FilesPage', () => {
   mockUser.homeDir = '/member-next'
   mockListFiles.mockResolvedValue({
     files: [
-      { name: 'photo.jpg', path: '/member-next/photo.jpg', isDir: false, size: 1024000, modTime: '2024-01-02T00:00:00Z' },
+      { name: 'photo.jpg', path: '/member-next/photo.jpg', isDir: false, size: 1024000, modTime: '2024-01-02T00:00:00Z', deleteIdentityToken },
     ],
     path: '/member-next',
   })
@@ -4124,7 +4687,7 @@ describe('FilesPage', () => {
     })
     queryClient.setQueryData(['files', '/member'], {
       files: [
-        { name: 'admin-secret.txt', path: '/member/admin-secret.txt', isDir: false, size: 10, modTime: '2024-01-01T00:00:00Z' },
+        { name: 'admin-secret.txt', path: '/member/admin-secret.txt', isDir: false, size: 10, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
       ],
       path: '/member',
     })

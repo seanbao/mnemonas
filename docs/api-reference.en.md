@@ -786,7 +786,8 @@ When auth is enabled, home-scoped non-admin users do not receive global disk, CA
 | --- | --- | --- |
 | `GET` | `/api/v1/files/{path}` | List directory or get file metadata |
 | `POST` | `/api/v1/files/{path}` | Upload or overwrite file |
-| `DELETE` | `/api/v1/files/{path}` | Delete to trash when trash is enabled |
+| `POST` | `/api/v1/files-delete-intents` | Capture an atomic confirmation snapshot of deletion targets and the current policy |
+| `DELETE` | `/api/v1/files/{path}` | Delete to Trash or permanently under a confirmed target snapshot and current policy |
 | `POST` | `/api/v1/files-move` | Move or rename resource |
 | `POST` | `/api/v1/files-copy` | Copy file or directory recursively |
 | `GET` | `/api/v1/download/{path}` | Authenticated file download or ZIP archive download |
@@ -806,6 +807,54 @@ List responses include `capabilities` for the current directory and for each ret
 - `write` means mutation actions are allowed for that path or container.
 
 For example, root may report `write: true` when upload or create operations are allowed under root while still reporting `concreteRead: false` because root itself is not a downloadable or copyable resource.
+
+Each real file or directory item also contains `deleteIdentityToken`. On Linux and macOS, this field is an opaque 64-character lowercase hexadecimal SHA-256 value bound to the filesystem device, inode, ctime, type and permission bits, size, and nanosecond modification time. Replacing a path with a new object changes the token even when the type, size, and modification time remain the same. The field is `null` when the platform cannot provide the required object identity; a delete intent cannot be created for that item.
+
+The top-level list `data` also includes the current delete policy:
+
+- `deleteMode`: `trash` moves an item to Trash, while `permanent` deletes it directly.
+- `deletePolicyToken`: the 64-character lowercase hexadecimal SHA-256 identifier for the complete current delete policy. This value is opaque and is not used to derive settings.
+- `trashRetentionDays`: the expiry interval assigned to new Trash items under the current policy. `0` makes a new item immediately eligible for cleanup.
+- `trashAutoCleanupEnabled`: whether the periodic retention sweep is enabled. When it is `false`, expired Trash items are not removed by a periodic task.
+
+Clients must treat these four fields as one policy snapshot. A client must not issue a delete request when the policy is missing or unrecognized. `deletePolicyToken` covers settings that change deletion consequences, including the delete mode, Trash retention period, background sweep interval, and Trash capacity limit.
+
+Deletion confirmation begins with `POST /api/v1/files-delete-intents`. The request body accepts only `targets`, with 1 to 1000 unique, non-root, non-nested targets. Each target must include `path` and the `observedIdentityToken` copied without modification from the same current list item:
+
+```json
+{
+  "targets": [
+    {
+      "path": "/documents/report.pdf",
+      "observedIdentityToken": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    },
+    {
+      "path": "/photos/2026",
+      "observedIdentityToken": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+    }
+  ]
+}
+```
+
+A missing, `null`, or empty `targets` value, a missing target field, an empty or malformed token, an uppercase or non-hexadecimal token, a duplicate or nested path, the legacy `paths` field, or any unknown field returns `400 Bad Request`. Under one filesystem read lock, the server checks the root object in this order: write access, mount boundary, file type, and observed identity. An identity mismatch returns `409 DELETE_TARGET_CHANGED` with only `path` in `details`; the server does not read file contents, traverse a directory, or mutate data. If the server cannot currently derive object identities, it returns `503 Service Unavailable`.
+
+The response returns `deleteMode`, `deletePolicyToken`, `trashRetentionDays`, `trashAutoCleanupEnabled`, and `targets` in request order. Each target contains `path`, `name`, `isDir`, `size`, UTC RFC 3339 nanosecond `modTime`, `deleteIdentityToken`, and `deleteTargetToken`; `deleteIdentityToken` equals the corresponding request `observedIdentityToken`. `deleteTargetToken` is an opaque 64-character lowercase hexadecimal value covering the target path and its complete current tree: entry paths, object identities, types, sizes, nanosecond modification times, and file contents. No partial confirmation result is returned when a target is absent, a parent has the wrong type, or the caller lacks write access to any target-tree entry. A target tree containing a symlink, FIFO, Unix socket, other non-regular file, or nested mount point below the workspace root returns `409 Conflict`. The nested-mount check includes bind mounts and targets located inside a nested mounted directory.
+
+`DELETE /api/v1/files/{path}` requires exactly one `expected_delete_mode`, one `expected_delete_policy_token`, and one `expected_delete_target_token` query parameter. The mode and both tokens must be copied without modification from the same delete-intent response. `expected_delete_mode` must be the strict value `trash` or `permanent`; both tokens must be 64-character lowercase hexadecimal values.
+
+A missing or empty `expected_delete_mode` returns `400 MISSING_EXPECTED_DELETE_MODE`. A duplicate value, malformed query encoding, case mismatch, surrounding whitespace, or unknown value returns `400 INVALID_EXPECTED_DELETE_MODE`. A missing or empty `expected_delete_policy_token` returns `400 MISSING_EXPECTED_DELETE_POLICY_TOKEN`. A duplicate value, incorrect length, uppercase or non-hexadecimal character, surrounding whitespace, or malformed query encoding returns `400 INVALID_EXPECTED_DELETE_POLICY_TOKEN`. A missing or empty `expected_delete_target_token` returns `400 MISSING_EXPECTED_DELETE_TARGET_TOKEN`. A duplicate value, incorrect length, uppercase or non-hexadecimal character, surrounding whitespace, or malformed query encoding returns `400 INVALID_EXPECTED_DELETE_TARGET_TOKEN`.
+
+Under one storage write lock, the server first compares the expected policy, then rechecks write access and the target token for every current tree entry, and finally performs the deletion. A complete-policy change returns `409 DELETE_POLICY_CHANGED`; `details` contains `expected_delete_mode`, `expected_delete_policy_token`, `actual_delete_mode`, `actual_delete_policy_token`, `trash_retention_days`, and `trash_auto_cleanup_enabled`. If the policy is unchanged but the target path, content, or tree has changed, the server returns `409 DELETE_TARGET_CHANGED`. When a current target token is available, `details` contains `path`, `expected_delete_target_token`, and `actual_delete_target_token`. If the confirmed target disappeared or a parent is no longer a directory, `details` contains `path` and `expected_delete_target_token` and omits the unavailable `actual_delete_target_token`. Mount-point and special-file conflicts remain their respective `409 Conflict` responses. Policy and target conflicts decided before atomic object capture do not commit workspace, index, version, share, favorite, Trash, or activity changes. The caller should refresh the list, obtain a new delete intent, and confirm again.
+
+After policy, target-token, or WebDAV-condition checks pass, the server captures the current object at a random stage under the same source parent with an atomic no-replace rename and continues from that path. Before commit, a Trash copy receives a complete manifest covering paths, types, sizes, permissions, object identities, and content hashes. Final physical cleanup moves the verified stage into a random quarantine with permissions no broader than mode `0700` and removes entries relative to a server-held directory handle. A new object created at the original logical path during this process is not copied, overwritten, or removed.
+
+If rollback cannot complete safely before logical commit, REST returns `500 INTERNAL_ERROR` and does not record delete activity. Internal stages, Trash metadata, or paired copies may remain for recovery, but host paths are not exposed in the API response. If logical deletion has committed but physical quarantine cleanup is incomplete, REST returns `200 OK` with `warning=true`; the `Warning` headers include `199 MnemoNAS "delete cleanup incomplete"`, delete activity contains `cleanup_warning=true`, and the server error log records the residual path. If a `trash`-mode target item has committed but the subsequent capacity cleanup is incomplete, the header is instead `199 MnemoNAS "trash delete cleanup incomplete"` and delete activity contains `trash_cleanup_warning=true`. Either result may also carry an applicable persistence warning and `persistence_warning=true`. A failure limited to the final directory sync after content removal carries only the persistence warning and does not claim cleanup residue. WebDAV returns `204 No Content` with the corresponding `Warning` headers for a committed result, and `500 Internal Server Error` for an uncommitted recovery residual.
+
+The server rereads the host mount table for delete-intent creation, deletion revalidation, before and after cross-root copying, before and after moving a source stage into quarantine, and immediately before recursive removal. An unreadable mount table, invalid mount path, or nested mount below the workspace root stops processing. A conflict before object capture returns `409 Conflict`; a captured object that cannot be rolled back safely becomes a recovery residual; the same condition after logical commit becomes a cleanup warning. A copied destination is removed only while its boundary remains verifiable and is otherwise retained to avoid crossing a new mount. The workspace root itself may be a mount point; this restriction applies only to nested mounts below it.
+
+The storage write lock serializes only operations performed through MnemoNAS. Direct filesystem writes by another process with the same UID, concurrent mounts by a privileged process, process crashes, and power loss are outside this atomic boundary. Object capture and no-replace rollback may change ctime or parent-directory timestamps. The server does not move or delete an unknown replacement and does not automatically remove internal stage or quarantine residue whose ownership cannot be verified.
+
+In `trash` mode, a file or complete directory tree is moved to Trash. After the persisted expiry associated with `trashRetentionDays` is reached, an enabled retention sweep removes it; a Trash capacity limit may permanently remove older items before expiry. In `permanent` mode, the item does not enter Trash and cannot be restored from it; deleting a non-empty directory in this mode returns `409 Conflict`.
 
 `GET /api/v1/download/{path}` returns file bytes by default. Supported query parameters:
 
@@ -939,6 +988,12 @@ Example response:
 | `DELETE` | `/api/v1/trash` | Empty trash |
 
 Trash visibility follows the current user's configured `home_dir` boundary.
+
+Every listed item includes its persisted `expiresAt` value. This RFC 3339 timestamp is assigned when the item enters Trash; changing `retentionDays` later does not rewrite existing item expiry. The list-level `retentionDays` describes only the current policy for new deletions, while `trashAutoCleanupEnabled` reports whether the background retention sweep is enabled. The size limit may still permanently remove older items before `expiresAt`.
+
+When the retention sweep is enabled, the same periodic task removes expired file versions and Trash items whose `expiresAt` has been reached. When it is disabled, items can still be removed explicitly through permanent-delete or empty-Trash endpoints.
+
+Permanent Trash deletion checks for nested mounts below the Trash root before staging and recursive removal. `DELETE /api/v1/trash/{id}` returns `409 Conflict` and preserves the item content and metadata when a nested mount exists or the mount table cannot be verified. If an empty-Trash request already deleted earlier items, the existing partial-success response contract still applies.
 
 `POST /api/v1/trash/{id}/restore` restores the item to its original path by default.
 
@@ -2350,6 +2405,8 @@ WebDAV access and method semantics:
 - The root example config keeps legacy global Basic Auth as a compatibility baseline; that mode uses service credentials from `[webdav]` or generated credentials in `secrets.json`.
 - Ancestor entries synthesized for nested grants are read-only navigation; writes still require a matching write grant.
 - Supported core methods include `OPTIONS`, `PROPFIND`, `GET`, `HEAD`, `PUT`, `DELETE`, `MKCOL`, `MOVE`, `COPY`, simplified `PROPPATCH`, simplified `LOCK`, and simplified `UNLOCK`.
+- HTTP conditional headers follow entity-tag comparison rules: `If-Match` uses strong comparison, so a weak entity-tag cannot satisfy it, while `If-None-Match` uses weak comparison. Both accept a standalone `*` or a strict comma-separated list of non-empty entity-tags. A conditional `DELETE` revalidates write access for the target tree under the storage write lock before it reads the required target attributes and evaluates the condition; failed authorization does not hash target content or delete the target.
+- WebDAV `DELETE` uses the same source-local stage, Trash-copy manifest, and quarantine cleanup as REST. An uncommitted residue that cannot be rolled back returns `500 Internal Server Error`. A logically committed deletion with incomplete physical quarantine cleanup returns `204 No Content` with `delete cleanup incomplete`; an incomplete subsequent capacity cleanup in `trash` mode instead uses `trash delete cleanup incomplete`. Either result may also carry an applicable persistence warning.
 - `MKCOL` returns `409 Conflict` when the direct parent directory does not exist, and returns `405 Method Not Allowed` with `Allow` when the target already exists.
 - Unsupported WebDAV methods return `405 Method Not Allowed` with an `Allow` response header listing the methods available to the current scope.
   Read-only mounts and read-only users list only `OPTIONS`, `GET`, `HEAD`, and `PROPFIND`.

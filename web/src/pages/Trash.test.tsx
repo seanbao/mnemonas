@@ -192,6 +192,26 @@ function createDeferred<T>() {
   return { promise, resolve, reject }
 }
 
+function futureTrashExpiry(days = 30): string {
+  return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString()
+}
+
+function trashTestItem(id: string, name: string, options: {
+  originalPath?: string
+  isDir?: boolean
+  size?: number
+} = {}) {
+  return {
+    id,
+    originalPath: options.originalPath ?? `/${name}`,
+    deletedAt: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
+    expiresAt: futureTrashExpiry(),
+    name,
+    isDir: options.isDir ?? false,
+    size: options.size ?? 1024,
+  }
+}
+
 async function selectTrashItem(user: ReturnType<typeof userEvent.setup>, name: string) {
   await user.click(screen.getByRole('checkbox', { name: `选择 ${name}` }))
 }
@@ -202,6 +222,12 @@ async function toggleAllTrashItems(user: ReturnType<typeof userEvent.setup>) {
 
 function getEmptyTrashConfirmButton() {
   return screen.getByRole('button', { name: '确认清空回收站' })
+}
+
+function getModalContent(labelledBy: string): HTMLElement {
+  const modalContent = document.querySelector(`[aria-labelledby="${labelledBy}"]`)
+  expect(modalContent).toBeInstanceOf(HTMLElement)
+  return modalContent as HTMLElement
 }
 
 async function clickEmptyTrashConfirm(user: ReturnType<typeof userEvent.setup>) {
@@ -278,6 +304,7 @@ describe('TrashPage', () => {
           id: 'item1',
           originalPath: '/deleted-file.txt',
           deletedAt: new Date(Date.now() - 1000 * 60 * 60).toISOString(), // 1 hour ago
+          expiresAt: futureTrashExpiry(),
           name: 'deleted-file.txt',
           isDir: false,
           size: 1024,
@@ -286,6 +313,7 @@ describe('TrashPage', () => {
           id: 'item2',
           originalPath: '/deleted-folder',
           deletedAt: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString(), // 1 day ago
+          expiresAt: futureTrashExpiry(),
           name: 'deleted-folder',
           isDir: true,
           size: 0,
@@ -293,6 +321,9 @@ describe('TrashPage', () => {
       ],
       count: 2,
       totalSize: 1024,
+      retentionEnabled: true,
+      retentionDays: 30,
+      trashAutoCleanupEnabled: true,
     })
   })
 
@@ -428,6 +459,7 @@ describe('TrashPage', () => {
           id: 'admin-item',
           originalPath: '/admin/secret.txt',
           deletedAt: '2024-01-15T10:00:00Z',
+          expiresAt: '2024-02-14T10:00:00Z',
           name: 'secret.txt',
           isDir: false,
           size: 128,
@@ -435,6 +467,7 @@ describe('TrashPage', () => {
       ],
       count: 1,
       totalSize: 128,
+      trashAutoCleanupEnabled: true,
     })
 
     render(
@@ -473,6 +506,8 @@ describe('TrashPage', () => {
         items: [],
         count: 0,
         totalSize: 0,
+        retentionEnabled: true,
+        trashAutoCleanupEnabled: true,
       })
       
       render(<TrashPage />)
@@ -482,11 +517,99 @@ describe('TrashPage', () => {
       })
     })
 
+    it.each([
+      {
+        caseName: 'enabled',
+        retentionEnabled: true,
+        description: '新删除项目会进入回收站，并按当前策略保留',
+      },
+      {
+        caseName: 'disabled',
+        retentionEnabled: false,
+        description: '当前删除方式为永久删除；新删除项目不会进入回收站',
+      },
+      {
+        caseName: 'unknown',
+        retentionEnabled: undefined,
+        description: '当前删除方式未知；新删除项目是否进入回收站暂不可确认',
+      },
+    ])('describes the $caseName delete policy in the empty state', async ({ retentionEnabled, description }) => {
+      mockListTrash.mockResolvedValue({
+        items: [],
+        count: 0,
+        totalSize: 0,
+        retentionEnabled,
+        trashAutoCleanupEnabled: true,
+      })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText(description)).toBeTruthy()
+      })
+    })
+
+    it('does not claim that new deletions enter trash when the current delete mode is permanent', async () => {
+      mockListTrash.mockResolvedValue({
+        items: [
+          {
+            id: 'item1',
+            originalPath: '/deleted-file.txt',
+            deletedAt: new Date(Date.now() - 1000).toISOString(),
+            expiresAt: futureTrashExpiry(),
+            name: 'deleted-file.txt',
+            isDir: false,
+            size: 1024,
+          },
+        ],
+        count: 1,
+        totalSize: 1024,
+        retentionEnabled: false,
+        retentionDays: 30,
+        trashAutoCleanupEnabled: true,
+      })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText(/当前删除方式为永久删除，新删除项目不会进入回收站/)).toBeTruthy()
+      })
+      expect(screen.queryByText(/新删除项目会进入回收站并在 30 天后到期/)).toBeNull()
+    })
+
+    it('labels the current delete mode as unknown without inferring trash behavior', async () => {
+      mockListTrash.mockResolvedValue({
+        items: [
+          {
+            id: 'item1',
+            originalPath: '/deleted-file.txt',
+            deletedAt: new Date(Date.now() - 1000).toISOString(),
+            expiresAt: futureTrashExpiry(),
+            name: 'deleted-file.txt',
+            isDir: false,
+            size: 1024,
+          },
+        ],
+        count: 1,
+        totalSize: 1024,
+        retentionDays: 30,
+        trashAutoCleanupEnabled: true,
+      })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText(/当前删除方式未知/)).toBeTruthy()
+      })
+      expect(screen.queryByText(/新删除项目会进入回收站/)).toBeNull()
+    })
+
     it('does not show empty trash button when empty', async () => {
       mockListTrash.mockResolvedValue({
         items: [],
         count: 0,
         totalSize: 0,
+        trashAutoCleanupEnabled: true,
       })
       
       render(<TrashPage />)
@@ -535,6 +658,7 @@ describe('TrashPage', () => {
               id: 'item1',
               originalPath: '/deleted-file.txt',
               deletedAt: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
+              expiresAt: futureTrashExpiry(),
               name: 'deleted-file.txt',
               isDir: false,
               size: 1024,
@@ -542,6 +666,7 @@ describe('TrashPage', () => {
           ],
           count: 1,
           totalSize: 1024,
+          trashAutoCleanupEnabled: true,
         })
 
       render(<TrashPage />)
@@ -626,13 +751,14 @@ describe('TrashPage', () => {
       })
     })
 
-    it('shows unknown retention copy when retention settings are missing', async () => {
+    it('shows an unknown current-policy expiry when retention days are missing', async () => {
       mockListTrash.mockResolvedValue({
         items: [
           {
             id: 'item1',
             originalPath: '/deleted-file.txt',
             deletedAt: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
+            expiresAt: futureTrashExpiry(),
             name: 'deleted-file.txt',
             isDir: false,
             size: 1024,
@@ -640,12 +766,14 @@ describe('TrashPage', () => {
         ],
         count: 1,
         totalSize: 1024,
+        retentionEnabled: true,
+        trashAutoCleanupEnabled: true,
       })
 
       render(<TrashPage />)
 
       await waitFor(() => {
-        expect(screen.getAllByText(/自动清理设置未知/).length).toBeGreaterThan(1)
+        expect(screen.getByText(/新删除项目会进入回收站，到期时间未知 · 容量不足时可能提前清理/)).toBeTruthy()
       })
     })
 
@@ -656,6 +784,7 @@ describe('TrashPage', () => {
             id: 'item1',
             originalPath: '/deleted-file.txt',
             deletedAt: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
+            expiresAt: futureTrashExpiry(),
             name: 'deleted-file.txt',
             isDir: false,
             size: 1024,
@@ -664,12 +793,14 @@ describe('TrashPage', () => {
             id: 'item2',
             originalPath: '/deleted-folder',
             deletedAt: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
+            expiresAt: futureTrashExpiry(),
             name: 'deleted-folder',
             isDir: true,
             size: 2048,
           },
         ],
         count: 2,
+        trashAutoCleanupEnabled: false,
       })
 
       render(<TrashPage />)
@@ -680,12 +811,14 @@ describe('TrashPage', () => {
     })
 
     it('shows immediate expiry copy when retention is enabled with zero days', async () => {
+      const now = Date.now()
       mockListTrash.mockResolvedValue({
         items: [
           {
             id: 'item1',
             originalPath: '/deleted-file.txt',
-            deletedAt: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
+            deletedAt: new Date(now - 1000 * 60 * 60).toISOString(),
+            expiresAt: new Date(now - 1000).toISOString(),
             name: 'deleted-file.txt',
             isDir: false,
             size: 1024,
@@ -695,24 +828,27 @@ describe('TrashPage', () => {
         totalSize: 1024,
         retentionEnabled: true,
         retentionDays: 0,
+        trashAutoCleanupEnabled: true,
       })
 
       render(<TrashPage />)
 
       await waitFor(() => {
-        expect(screen.getByText(/立即过期，等待清理/)).toBeTruthy()
+        expect(screen.getByText(/新删除项目会进入回收站并立即到期 · 容量不足时可能提前清理/)).toBeTruthy()
         expect(screen.getByText('已过期，等待清理')).toBeTruthy()
       })
       expect(screen.queryByText('自动清理未启用')).toBeNull()
     })
 
-    it('treats negative retention windows as immediately expired', async () => {
+    it('keeps an existing item expiry independent from a zero-day current policy', async () => {
+      const now = Date.now()
       mockListTrash.mockResolvedValue({
         items: [
           {
             id: 'item1',
             originalPath: '/deleted-file.txt',
-            deletedAt: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
+            deletedAt: new Date(now - 1000 * 60 * 60).toISOString(),
+            expiresAt: new Date(now + 5 * 24 * 60 * 60 * 1000).toISOString(),
             name: 'deleted-file.txt',
             isDir: false,
             size: 1024,
@@ -721,24 +857,27 @@ describe('TrashPage', () => {
         count: 1,
         totalSize: 1024,
         retentionEnabled: true,
-        retentionDays: -1,
+        retentionDays: 0,
+        trashAutoCleanupEnabled: true,
       })
 
       render(<TrashPage />)
 
       await waitFor(() => {
-        expect(screen.getByText(/立即过期，等待清理/)).toBeTruthy()
-        expect(screen.getByText('已过期，等待清理')).toBeTruthy()
+        expect(screen.getByText(/新删除项目会进入回收站并立即到期 · 容量不足时可能提前清理/)).toBeTruthy()
+        expect(screen.getByText('5 天后到期')).toBeTruthy()
       })
     })
 
     it('shows disabled retention copy without row countdown badges', async () => {
+      const now = Date.now()
       mockListTrash.mockResolvedValue({
         items: [
           {
             id: 'item1',
             originalPath: '/deleted-file.txt',
-            deletedAt: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
+            deletedAt: new Date(now - 1000 * 60 * 60).toISOString(),
+            expiresAt: new Date(now + 2 * 24 * 60 * 60 * 1000).toISOString(),
             name: 'deleted-file.txt',
             isDir: false,
             size: 1024,
@@ -746,8 +885,9 @@ describe('TrashPage', () => {
         ],
         count: 1,
         totalSize: 1024,
-        retentionEnabled: false,
+        retentionEnabled: true,
         retentionDays: 7,
+        trashAutoCleanupEnabled: false,
       })
 
       render(<TrashPage />)
@@ -755,42 +895,18 @@ describe('TrashPage', () => {
       await waitFor(() => {
         expect(screen.getByText(/自动清理未启用/)).toBeTruthy()
       })
-      expect(screen.queryByText(/天后自动删除/)).toBeNull()
+      expect(screen.queryByText('2 天后到期')).toBeNull()
     })
 
-    it('shows near auto-delete countdown badges when retention is within a week', async () => {
+    it('uses each item expiry instead of recalculating it from the current retention policy', async () => {
+      const now = Date.now()
       mockListTrash.mockResolvedValue({
         items: [
           {
             id: 'item1',
             originalPath: '/deleted-file.txt',
-            deletedAt: new Date(Date.now() - 1000).toISOString(),
-            name: 'deleted-file.txt',
-            isDir: false,
-            size: 1024,
-          },
-        ],
-        count: 1,
-        totalSize: 1024,
-        retentionEnabled: true,
-        retentionDays: 7,
-      })
-
-      render(<TrashPage />)
-
-      await waitFor(() => {
-        expect(screen.getByText(/7 天后自动清理/)).toBeTruthy()
-        expect(screen.getByText(/天后自动删除/)).toBeTruthy()
-      })
-    })
-
-    it('hides row countdown badges when auto-delete is more than a week away', async () => {
-      mockListTrash.mockResolvedValue({
-        items: [
-          {
-            id: 'item1',
-            originalPath: '/deleted-file.txt',
-            deletedAt: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
+            deletedAt: new Date(now - 29 * 24 * 60 * 60 * 1000).toISOString(),
+            expiresAt: new Date(now + 4 * 24 * 60 * 60 * 1000).toISOString(),
             name: 'deleted-file.txt',
             isDir: false,
             size: 1024,
@@ -800,23 +916,55 @@ describe('TrashPage', () => {
         totalSize: 1024,
         retentionEnabled: true,
         retentionDays: 30,
+        trashAutoCleanupEnabled: true,
       })
 
       render(<TrashPage />)
 
       await waitFor(() => {
-        expect(screen.getByText(/30 天后自动清理/)).toBeTruthy()
+        expect(screen.getByText('4 天后到期')).toBeTruthy()
+        expect(screen.getByText(/新删除项目会进入回收站并在 30 天后到期 · 容量不足时可能提前清理/)).toBeTruthy()
       })
-      expect(screen.queryByText(/天后自动删除/)).toBeNull()
+      expect(screen.queryByText('1 天后到期')).toBeNull()
     })
 
-    it('shows expired cleanup badge instead of zero-day countdown', async () => {
+    it('shows an expired item from its persisted expiry even when the current policy is longer', async () => {
+      const now = Date.now()
       mockListTrash.mockResolvedValue({
         items: [
           {
             id: 'item1',
             originalPath: '/deleted-file.txt',
-            deletedAt: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString(),
+            deletedAt: new Date(now - 1000).toISOString(),
+            expiresAt: new Date(now - 24 * 60 * 60 * 1000).toISOString(),
+            name: 'deleted-file.txt',
+            isDir: false,
+            size: 1024,
+          },
+        ],
+        count: 1,
+        totalSize: 1024,
+        retentionEnabled: true,
+        retentionDays: 30,
+        trashAutoCleanupEnabled: true,
+      })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('已过期，等待清理')).toBeTruthy()
+      })
+    })
+
+    it('does not claim automatic cleanup when the trash cleanup task is disabled', async () => {
+      const now = Date.now()
+      mockListTrash.mockResolvedValue({
+        items: [
+          {
+            id: 'item1',
+            originalPath: '/deleted-file.txt',
+            deletedAt: new Date(now - 1000).toISOString(),
+            expiresAt: new Date(now + 2 * 24 * 60 * 60 * 1000).toISOString(),
             name: 'deleted-file.txt',
             isDir: false,
             size: 1024,
@@ -826,6 +974,96 @@ describe('TrashPage', () => {
         totalSize: 1024,
         retentionEnabled: true,
         retentionDays: 7,
+        trashAutoCleanupEnabled: false,
+      })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText(/自动清理未启用/)).toBeTruthy()
+        expect(screen.getByText(/容量不足时仍可能提前清理/)).toBeTruthy()
+      })
+      expect(screen.queryByText('2 天后到期')).toBeNull()
+      expect(screen.queryByText(/天后自动清理/)).toBeNull()
+    })
+
+    it('shows near auto-delete countdown badges when retention is within a week', async () => {
+      const now = Date.now()
+      mockListTrash.mockResolvedValue({
+        items: [
+          {
+            id: 'item1',
+            originalPath: '/deleted-file.txt',
+            deletedAt: new Date(now - 1000).toISOString(),
+            expiresAt: new Date(now + 7 * 24 * 60 * 60 * 1000).toISOString(),
+            name: 'deleted-file.txt',
+            isDir: false,
+            size: 1024,
+          },
+        ],
+        count: 1,
+        totalSize: 1024,
+        retentionEnabled: true,
+        retentionDays: 7,
+        trashAutoCleanupEnabled: true,
+      })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText(/新删除项目会进入回收站并在 7 天后到期 · 容量不足时可能提前清理/)).toBeTruthy()
+        expect(screen.getByText('7 天后到期')).toBeTruthy()
+      })
+    })
+
+    it('hides row countdown badges when auto-delete is more than a week away', async () => {
+      const now = Date.now()
+      mockListTrash.mockResolvedValue({
+        items: [
+          {
+            id: 'item1',
+            originalPath: '/deleted-file.txt',
+            deletedAt: new Date(now - 1000 * 60 * 60).toISOString(),
+            expiresAt: new Date(now + 30 * 24 * 60 * 60 * 1000).toISOString(),
+            name: 'deleted-file.txt',
+            isDir: false,
+            size: 1024,
+          },
+        ],
+        count: 1,
+        totalSize: 1024,
+        retentionEnabled: true,
+        retentionDays: 30,
+        trashAutoCleanupEnabled: true,
+      })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText(/新删除项目会进入回收站并在 30 天后到期 · 容量不足时可能提前清理/)).toBeTruthy()
+      })
+      expect(screen.queryByText('30 天后到期')).toBeNull()
+    })
+
+    it('shows expired cleanup badge instead of zero-day countdown', async () => {
+      const now = Date.now()
+      mockListTrash.mockResolvedValue({
+        items: [
+          {
+            id: 'item1',
+            originalPath: '/deleted-file.txt',
+            deletedAt: new Date(now - 8 * 24 * 60 * 60 * 1000).toISOString(),
+            expiresAt: new Date(now - 24 * 60 * 60 * 1000).toISOString(),
+            name: 'deleted-file.txt',
+            isDir: false,
+            size: 1024,
+          },
+        ],
+        count: 1,
+        totalSize: 1024,
+        retentionEnabled: true,
+        retentionDays: 7,
+        trashAutoCleanupEnabled: true,
       })
 
       render(<TrashPage />)
@@ -833,7 +1071,7 @@ describe('TrashPage', () => {
       await waitFor(() => {
         expect(screen.getByText('已过期，等待清理')).toBeTruthy()
       })
-      expect(screen.queryByText('0 天后自动删除')).toBeNull()
+      expect(screen.queryByText('0 天后到期')).toBeNull()
     })
   })
 
@@ -995,6 +1233,7 @@ describe('TrashPage', () => {
             id: 'item1',
             originalPath: '/deleted-file.txt',
             deletedAt: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
+            expiresAt: futureTrashExpiry(),
             name: 'deleted-file.txt',
             isDir: false,
             size: 1024,
@@ -1003,6 +1242,7 @@ describe('TrashPage', () => {
             id: 'item2',
             originalPath: '/deleted-folder',
             deletedAt: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString(),
+            expiresAt: futureTrashExpiry(),
             name: 'deleted-folder',
             isDir: true,
             size: 0,
@@ -1010,6 +1250,7 @@ describe('TrashPage', () => {
         ],
         count: 2,
         totalSize: 1024,
+        trashAutoCleanupEnabled: false,
       })
       mockListTrash.mockImplementation(() => pendingTrashRefetch())
 
@@ -1067,6 +1308,7 @@ describe('TrashPage', () => {
             id: 'item1',
             originalPath: '/deleted-file.txt',
             deletedAt: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
+            expiresAt: futureTrashExpiry(),
             name: 'deleted-file.txt',
             isDir: false,
             size: 1024,
@@ -1075,6 +1317,7 @@ describe('TrashPage', () => {
             id: 'item2',
             originalPath: '/deleted-folder',
             deletedAt: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString(),
+            expiresAt: futureTrashExpiry(),
             name: 'deleted-folder',
             isDir: true,
             size: 0,
@@ -1082,6 +1325,7 @@ describe('TrashPage', () => {
         ],
         count: 2,
         totalSize: 1024,
+        trashAutoCleanupEnabled: false,
       })
       mockListTrash.mockImplementation(() => pendingTrashRefetch())
 
@@ -1133,16 +1377,23 @@ describe('TrashPage', () => {
         expect(screen.getByText('deleted-file.txt')).toBeTruthy()
       })
 
-      await user.click(screen.getByRole('button', { name: '永久删除 deleted-file.txt' }))
+      const deleteTrigger = screen.getByRole('button', { name: '永久删除 deleted-file.txt' })
+      await user.click(deleteTrigger)
 
       await waitFor(() => {
         expect(screen.getByText(/确定要永久删除/)).toBeTruthy()
       })
 
+      const dialog = getModalContent('trash-delete-dialog-title')
+      expect(dialog).toHaveAttribute('aria-describedby', 'trash-delete-dialog-description')
+      expect(dialog).toHaveAttribute('aria-busy', 'false')
+      expect(within(dialog).getByRole('button', { name: '取消' })).toHaveFocus()
+
       await user.click(screen.getByRole('button', { name: '取消' }))
 
       await waitFor(() => {
         expect(screen.queryByText(/确定要永久删除/)).toBeNull()
+        expect(deleteTrigger).toHaveFocus()
       })
     })
 
@@ -1166,6 +1417,31 @@ describe('TrashPage', () => {
 
       await waitFor(() => {
         expect(mockDeleteFromTrash).toHaveBeenCalledWith('item1', expect.objectContaining({ signal: expect.any(AbortSignal) }))
+      })
+    })
+
+    it('moves focus to the stable trash region after a successful delete removes its trigger', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockDeleteFromTrash.mockResolvedValue({ warning: false })
+
+      render(<TrashPage />)
+      await screen.findByText('deleted-file.txt')
+      mockListTrash.mockImplementation(() => pendingTrashRefetch())
+      await user.click(screen.getByRole('button', { name: '永久删除 deleted-file.txt' }))
+      await user.click(await screen.findByRole('button', { name: '永久删除' }))
+
+      const focusFallback = screen.getByRole('region', { name: '回收站内容' })
+      await waitFor(() => {
+        expect(screen.queryByText('deleted-file.txt')).toBeNull()
+        expect(screen.queryByText(/确定要永久删除/)).toBeNull()
+        expect(focusFallback).toHaveFocus()
+      })
+
+      const remainingTrigger = screen.getByRole('button', { name: '永久删除 deleted-folder' })
+      await user.click(remainingTrigger)
+      await user.click(await screen.findByRole('button', { name: '取消' }))
+      await waitFor(() => {
+        expect(remainingTrigger).toHaveFocus()
       })
     })
 
@@ -1211,6 +1487,7 @@ describe('TrashPage', () => {
             id: 'item1',
             originalPath: '/deleted-file.txt',
             deletedAt: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
+            expiresAt: futureTrashExpiry(),
             name: 'deleted-file.txt',
             isDir: false,
             size: 1024,
@@ -1219,6 +1496,7 @@ describe('TrashPage', () => {
             id: 'item2',
             originalPath: '/deleted-folder',
             deletedAt: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString(),
+            expiresAt: futureTrashExpiry(),
             name: 'deleted-folder',
             isDir: true,
             size: 0,
@@ -1226,6 +1504,7 @@ describe('TrashPage', () => {
         ],
         count: 2,
         totalSize: 1024,
+        trashAutoCleanupEnabled: false,
       })
       mockListTrash.mockImplementation(() => pendingTrashRefetch())
 
@@ -1308,6 +1587,13 @@ describe('TrashPage', () => {
       await waitFor(() => {
         expect(mockDeleteFromTrash).toHaveBeenCalledWith('item1', expect.objectContaining({ signal: expect.any(AbortSignal) }))
       })
+
+      const dialog = getModalContent('trash-delete-dialog-title')
+      await waitFor(() => {
+        expect(dialog).toHaveAttribute('aria-busy', 'true')
+      })
+      await user.keyboard('{Escape}')
+      expect(screen.getByText(/确定要永久删除/)).toBeTruthy()
 
       await user.click(screen.getByRole('button', { name: '取消' }))
 
@@ -1399,6 +1685,11 @@ describe('TrashPage', () => {
       await waitFor(() => {
         expect(screen.getByText('确定要清空回收站吗？')).toBeTruthy()
       })
+
+      const dialog = getModalContent('trash-empty-dialog-title')
+      expect(dialog).toHaveAttribute('aria-describedby', 'trash-empty-dialog-description')
+      expect(dialog).toHaveAttribute('aria-busy', 'false')
+      expect(within(dialog).getByRole('button', { name: '取消' })).toHaveFocus()
     })
 
     it('closes the empty trash modal when cancellation is allowed', async () => {
@@ -1446,7 +1737,36 @@ describe('TrashPage', () => {
       })
     })
 
-    it('shows warning toast when empty trash partially succeeds', async () => {
+    it.each(['pending', 'failed'] as const)(
+      'keeps cached items visible when a non-partial empty result has a %s refetch',
+      async (refetchState) => {
+        const user = userEvent.setup({ writeToClipboard: false })
+        mockEmptyTrash.mockResolvedValue({ deletedCount: 1, partial: false })
+
+        render(<TrashPage />)
+        await waitFor(() => {
+          expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+          expect(screen.getByText('deleted-folder')).toBeTruthy()
+        })
+        if (refetchState === 'pending') {
+          mockListTrash.mockImplementation(() => pendingTrashRefetch())
+        } else {
+          mockListTrash.mockRejectedValue(new Error('refetch failed'))
+        }
+
+        await user.click(screen.getByText('清空回收站'))
+        await clickEmptyTrashConfirm(user)
+
+        await waitFor(() => {
+          expect(mockAddToast).toHaveBeenCalledWith({ title: '已清空回收站，删除 1 项', color: 'success' })
+        })
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+        expect(screen.getByText('deleted-folder')).toBeTruthy()
+        expect(screen.queryByText('回收站是空的')).toBeNull()
+      },
+    )
+
+    it('keeps cached items visible while a partial empty-trash refetch is pending', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockEmptyTrash.mockResolvedValue({ deletedCount: 1, partial: true })
 
@@ -1454,7 +1774,9 @@ describe('TrashPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('清空回收站')).toBeTruthy()
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
       })
+      mockListTrash.mockImplementation(() => pendingTrashRefetch())
 
       await user.click(screen.getByText('清空回收站'))
 
@@ -1467,6 +1789,28 @@ describe('TrashPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({ title: '回收站已部分清空，删除 1 项', color: 'warning' })
       })
+      expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      expect(screen.getByText('deleted-folder')).toBeTruthy()
+    })
+
+    it('keeps cached items visible when a partial empty-trash refetch fails', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockEmptyTrash.mockResolvedValue({ deletedCount: 1, partial: true })
+
+      render(<TrashPage />)
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+      mockListTrash.mockRejectedValue(new Error('refetch failed'))
+
+      await user.click(screen.getByText('清空回收站'))
+      await clickEmptyTrashConfirm(user)
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '回收站已部分清空，删除 1 项', color: 'warning' })
+      })
+      expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      expect(screen.getByText('deleted-folder')).toBeTruthy()
     })
 
     it('shows warning toast when empty trash succeeds with cleanup warnings', async () => {
@@ -1547,6 +1891,13 @@ describe('TrashPage', () => {
       await waitFor(() => {
         expect(mockEmptyTrash).toHaveBeenCalled()
       })
+
+      const dialog = getModalContent('trash-empty-dialog-title')
+      await waitFor(() => {
+        expect(dialog).toHaveAttribute('aria-busy', 'true')
+      })
+      await user.keyboard('{Escape}')
+      expect(screen.getByText('确定要清空回收站吗？')).toBeTruthy()
 
       await user.click(screen.getByRole('button', { name: '取消' }))
 
@@ -1845,6 +2196,7 @@ describe('TrashPage', () => {
             id: 'item1',
             originalPath: '/deleted-file.txt',
             deletedAt: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
+            expiresAt: futureTrashExpiry(),
             name: 'deleted-file.txt',
             isDir: false,
             size: 1024,
@@ -1853,6 +2205,7 @@ describe('TrashPage', () => {
             id: 'item2',
             originalPath: '/deleted-folder',
             deletedAt: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString(),
+            expiresAt: futureTrashExpiry(),
             name: 'deleted-folder',
             isDir: true,
             size: 0,
@@ -1860,6 +2213,7 @@ describe('TrashPage', () => {
         ],
         count: 2,
         totalSize: 1024,
+        trashAutoCleanupEnabled: false,
       })
       mockListTrash.mockImplementation(() => pendingTrashRefetch())
 
@@ -2140,7 +2494,7 @@ describe('TrashPage', () => {
       expect(review.getByText('2 项 · 1 个目录 · 1 个文件')).toBeTruthy()
       expect(review.getByText('1 个目标目录')).toBeTruthy()
       expect(review.getByText('1 KB')).toBeTruthy()
-      expect(review.getByText('自动清理设置未知')).toBeTruthy()
+      expect(review.getByText('所选项目近期不会到期；容量不足时仍可能提前清理')).toBeTruthy()
       expect(review.getByText('若原路径已存在同名文件、父目录不可写或配额不足，服务端会拒绝对应项目并保留在回收站。')).toBeTruthy()
       expect(review.getByText('成功项目会从回收站移除；失败项目会保持选中，便于继续处理。')).toBeTruthy()
       expect(review.getByText('/')).toBeTruthy()
@@ -2150,6 +2504,127 @@ describe('TrashPage', () => {
 
       expect(screen.queryByText('确认批量恢复')).toBeNull()
       expect(mockBatchExecute).not.toHaveBeenCalled()
+    })
+
+    it('uses persisted item expiries in the batch restore review', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const now = Date.now()
+      mockListTrash.mockResolvedValue({
+        items: [
+          {
+            id: 'item1',
+            originalPath: '/deleted-file.txt',
+            deletedAt: new Date(now - 1000).toISOString(),
+            expiresAt: new Date(now - 24 * 60 * 60 * 1000).toISOString(),
+            name: 'deleted-file.txt',
+            isDir: false,
+            size: 1024,
+          },
+          {
+            id: 'item2',
+            originalPath: '/deleted-folder',
+            deletedAt: new Date(now - 1000).toISOString(),
+            expiresAt: new Date(now + 20 * 24 * 60 * 60 * 1000).toISOString(),
+            name: 'deleted-folder',
+            isDir: true,
+            size: 0,
+          },
+        ],
+        count: 2,
+        totalSize: 1024,
+        retentionDays: 30,
+        trashAutoCleanupEnabled: true,
+      })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+      await toggleAllTrashItems(user)
+      await openBatchRestoreReview(user)
+
+      const review = within(screen.getByLabelText('跨目录恢复执行前复核'))
+      expect(review.getByText('1 项已过期并等待清理；容量不足时仍可能提前清理')).toBeTruthy()
+    })
+
+    it.each([
+      {
+        caseName: 'unknown automatic cleanup state',
+        trashAutoCleanupEnabled: undefined,
+        expiresAt: futureTrashExpiry(30),
+        summary: '自动清理设置未知；容量不足时仍可能提前清理',
+      },
+      {
+        caseName: 'approaching expiry',
+        trashAutoCleanupEnabled: true,
+        expiresAt: futureTrashExpiry(2),
+        summary: '1 项接近到期时间；容量不足时仍可能提前清理',
+      },
+    ])('keeps capacity cleanup risk in the batch restore review for $caseName', async ({ trashAutoCleanupEnabled, expiresAt, summary }) => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockListTrash.mockResolvedValue({
+        items: [
+          {
+            id: 'item1',
+            originalPath: '/deleted-file.txt',
+            deletedAt: new Date(Date.now() - 1000).toISOString(),
+            expiresAt,
+            name: 'deleted-file.txt',
+            isDir: false,
+            size: 1024,
+          },
+        ],
+        count: 1,
+        totalSize: 1024,
+        retentionDays: 30,
+        trashAutoCleanupEnabled: trashAutoCleanupEnabled as boolean,
+      })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+      await selectTrashItem(user, 'deleted-file.txt')
+      await openBatchRestoreReview(user)
+
+      const review = within(screen.getByLabelText('跨目录恢复执行前复核'))
+      expect(review.getByText(summary)).toBeTruthy()
+    })
+
+    it('explains capacity cleanup without showing an expiry countdown when automatic cleanup is disabled', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const now = Date.now()
+      mockListTrash.mockResolvedValue({
+        items: [
+          {
+            id: 'item1',
+            originalPath: '/deleted-file.txt',
+            deletedAt: new Date(now - 1000).toISOString(),
+            expiresAt: new Date(now + 2 * 24 * 60 * 60 * 1000).toISOString(),
+            name: 'deleted-file.txt',
+            isDir: false,
+            size: 1024,
+          },
+        ],
+        count: 1,
+        totalSize: 1024,
+        retentionDays: 7,
+        trashAutoCleanupEnabled: false,
+      })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+      await selectTrashItem(user, 'deleted-file.txt')
+      await openBatchRestoreReview(user)
+
+      const review = within(screen.getByLabelText('跨目录恢复执行前复核'))
+      expect(review.getByText('按到期时间自动清理未启用；容量不足时仍可能提前清理')).toBeTruthy()
+      expect(screen.queryByText('2 天后到期')).toBeNull()
     })
 
     it('copies the batch restore cross-directory review record', async () => {
@@ -2183,7 +2658,7 @@ describe('TrashPage', () => {
       expect(report).toContain('恢复项目：2 项（1 个目录，1 个文件）')
       expect(report).toContain('原始目录：1 个目标目录')
       expect(report).toContain('可见数据量：1 KB')
-      expect(report).toContain('自动清理：自动清理设置未知')
+      expect(report).toContain('自动清理：所选项目近期不会到期；容量不足时仍可能提前清理')
       expect(report).toContain('冲突处理：若原路径已存在同名文件、父目录不可写或配额不足，服务端会拒绝对应项目并保留在回收站。')
       expect(report).toContain('执行结果：成功项目会从回收站移除；失败项目会保持选中，便于继续处理。')
       expect(report).toContain('- /')
@@ -2321,6 +2796,11 @@ describe('TrashPage', () => {
       await waitFor(() => {
         expect(screen.getByText('确认批量永久删除')).toBeTruthy()
       })
+
+      const dialog = getModalContent('trash-batch-delete-dialog-title')
+      expect(dialog).toHaveAttribute('aria-describedby', 'trash-batch-delete-dialog-description')
+      expect(dialog).toHaveAttribute('aria-busy', 'false')
+      expect(within(dialog).getByRole('button', { name: '取消' })).toHaveFocus()
 
       await user.click(screen.getByRole('button', { name: '取消' }))
 
@@ -2466,6 +2946,7 @@ describe('TrashPage', () => {
             id: 'item1',
             originalPath: '/deleted-file.txt',
             deletedAt: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
+            expiresAt: futureTrashExpiry(),
             name: 'deleted-file.txt',
             isDir: false,
             size: 1024,
@@ -2474,6 +2955,7 @@ describe('TrashPage', () => {
             id: 'item2',
             originalPath: '/deleted-folder',
             deletedAt: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString(),
+            expiresAt: futureTrashExpiry(),
             name: 'deleted-folder',
             isDir: true,
             size: 0,
@@ -2481,6 +2963,7 @@ describe('TrashPage', () => {
         ],
         count: 2,
         totalSize: 1024,
+        trashAutoCleanupEnabled: false,
       })
       mockListTrash.mockImplementation(() => pendingTrashRefetch())
 
@@ -2517,6 +3000,247 @@ describe('TrashPage', () => {
       })
     })
 
+    it('keeps the batch restore review and execution bound to the targets captured when the dialog opens', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const initialResponse = {
+        items: [
+          trashTestItem('item1', 'restore-a.txt', { originalPath: '/original-a/restore-a.txt' }),
+          trashTestItem('item2', 'restore-b.txt', { originalPath: '/original-b/restore-b.txt' }),
+        ],
+        count: 2,
+        totalSize: 2048,
+        retentionEnabled: true,
+        retentionDays: 30,
+        trashAutoCleanupEnabled: true,
+      }
+      mockListTrash.mockResolvedValue(initialResponse)
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false, gcTime: 0 } },
+      })
+
+      render(
+        <QueryClientProvider client={queryClient}>
+          <TrashPage />
+        </QueryClientProvider>
+      )
+
+      await waitFor(() => {
+        expect(screen.getByText('restore-a.txt')).toBeTruthy()
+      })
+      await selectTrashItem(user, 'restore-a.txt')
+      await openBatchRestoreReview(user)
+
+      const review = within(screen.getByLabelText('跨目录恢复执行前复核'))
+      expect(review.getByText('/original-a')).toBeTruthy()
+
+      act(() => {
+        queryClient.setQueryData(['trash', 'u1'], {
+          ...initialResponse,
+          items: [initialResponse.items[1]],
+          count: 1,
+          totalSize: 1024,
+        })
+      })
+
+      await waitFor(() => {
+        expect(screen.queryByText('restore-a.txt')).toBeNull()
+        expect(screen.getByText('restore-b.txt')).toBeTruthy()
+      })
+      expect(screen.getByText(/确定要恢复已选择的/).textContent).toContain('1 项')
+      expect(review.getByText('/original-a')).toBeTruthy()
+      expect(review.queryByText('/original-b')).toBeNull()
+
+      await user.click(screen.getByRole('button', { name: '确认恢复' }))
+
+      await waitFor(() => {
+        expect(mockBatchExecute).toHaveBeenCalledWith(['item1'])
+      })
+    })
+
+    it('keeps batch permanent delete bound to the targets captured when the dialog opens', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const initialResponse = {
+        items: [
+          trashTestItem('item1', 'delete-a.txt'),
+          trashTestItem('item2', 'delete-b.txt'),
+        ],
+        count: 2,
+        totalSize: 2048,
+        retentionEnabled: true,
+        retentionDays: 30,
+        trashAutoCleanupEnabled: true,
+      }
+      mockListTrash.mockResolvedValue(initialResponse)
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false, gcTime: 0 } },
+      })
+
+      render(
+        <QueryClientProvider client={queryClient}>
+          <TrashPage />
+        </QueryClientProvider>
+      )
+
+      await waitFor(() => {
+        expect(screen.getByText('delete-a.txt')).toBeTruthy()
+      })
+      await selectTrashItem(user, 'delete-a.txt')
+      await user.click(screen.getByRole('button', { name: '永久删除' }))
+
+      await screen.findByText('确认批量永久删除')
+      const dialog = getModalContent('trash-batch-delete-dialog-title')
+      expect(dialog.textContent).toContain('已选择的 1 项')
+
+      act(() => {
+        queryClient.setQueryData(['trash', 'u1'], {
+          ...initialResponse,
+          items: [initialResponse.items[1]],
+          count: 1,
+          totalSize: 1024,
+        })
+      })
+
+      await waitFor(() => {
+        expect(screen.queryByText('delete-a.txt')).toBeNull()
+        expect(screen.getByText('delete-b.txt')).toBeTruthy()
+      })
+      expect(dialog.textContent).toContain('已选择的 1 项')
+
+      await user.click(within(dialog).getByRole('button', { name: '永久删除' }))
+
+      await waitFor(() => {
+        expect(mockBatchExecute).toHaveBeenCalledWith(['item1'])
+      })
+    })
+
+    it('separates restored, missing, and failed items in a mixed batch restore', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockUseRealBatchOperation = true
+      mockRestoreFromTrash.mockImplementation(async (id: string) => {
+        if (id === 'item2') {
+          throw new ApiError('trash item not found', 404, 'Not Found', 'TRASH_NOT_FOUND')
+        }
+        if (id === 'item3') {
+          throw new Error('restore failed')
+        }
+        return { warning: false }
+      })
+      mockListActivity.mockResolvedValueOnce({
+        items: [
+          {
+            id: 'restore-actual',
+            timestamp: '2026-04-12T01:00:00Z',
+            action: 'trash_restore',
+            path: '/restored.txt',
+            user: 'admin',
+          },
+          {
+            id: 'restore-missing',
+            timestamp: '2026-04-12T01:01:00Z',
+            action: 'trash_restore',
+            path: '/missing.txt',
+            user: 'admin',
+          },
+        ],
+        total: 2,
+        limit: 100,
+        offset: 0,
+      })
+      mockListTrash.mockReset()
+      mockListTrash.mockResolvedValueOnce({
+        items: [
+          trashTestItem('item1', 'restored.txt'),
+          trashTestItem('item2', 'missing.txt'),
+          trashTestItem('item3', 'restore-error.txt'),
+        ],
+        count: 3,
+        totalSize: 3072,
+        retentionEnabled: true,
+        retentionDays: 30,
+        trashAutoCleanupEnabled: true,
+      })
+      mockListTrash.mockImplementation(() => pendingTrashRefetch())
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('restored.txt')).toBeTruthy()
+      })
+      await toggleAllTrashItems(user)
+      await clickBatchRestoreConfirm(user)
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '1 项恢复成功，1 项失败',
+          description: '已同步移除 1 个不存在回收站项目',
+          color: 'warning',
+        })
+      })
+      await waitFor(() => {
+        expect(screen.queryByText('restored.txt')).toBeNull()
+        expect(screen.queryByText('missing.txt')).toBeNull()
+        expect(screen.getByText('restore-error.txt')).toBeTruthy()
+        expect(screen.getByText(/已选择 1 项/)).toBeTruthy()
+      })
+      expect(mockCreateActivityReviewRecord).toHaveBeenCalledWith(expect.objectContaining({
+        path_samples: ['/restored.txt'],
+        activity_entry_ids: ['restore-actual'],
+      }), expect.objectContaining({ signal: expect.any(AbortSignal) }))
+    })
+
+    it('separates deleted, missing, and failed items in a mixed batch permanent delete', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockUseRealBatchOperation = true
+      mockDeleteFromTrash.mockImplementation(async (id: string) => {
+        if (id === 'item2') {
+          throw new ApiError('trash item not found', 404, 'Not Found', 'TRASH_NOT_FOUND')
+        }
+        if (id === 'item3') {
+          throw new Error('delete failed')
+        }
+        return { warning: false }
+      })
+      mockListTrash.mockReset()
+      mockListTrash.mockResolvedValueOnce({
+        items: [
+          trashTestItem('item1', 'deleted.txt'),
+          trashTestItem('item2', 'missing.txt'),
+          trashTestItem('item3', 'delete-error.txt'),
+        ],
+        count: 3,
+        totalSize: 3072,
+        retentionEnabled: true,
+        retentionDays: 30,
+        trashAutoCleanupEnabled: true,
+      })
+      mockListTrash.mockImplementation(() => pendingTrashRefetch())
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted.txt')).toBeTruthy()
+      })
+      await toggleAllTrashItems(user)
+      await user.click(screen.getByText('永久删除'))
+      await screen.findByText('确认批量永久删除')
+      const dialog = getModalContent('trash-batch-delete-dialog-title')
+      await user.click(within(dialog).getByRole('button', { name: '永久删除' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '1 项永久删除成功，1 项失败',
+          description: '已同步移除 1 个不存在回收站项目',
+          color: 'warning',
+        })
+      })
+      await waitFor(() => {
+        expect(screen.queryByText('deleted.txt')).toBeNull()
+        expect(screen.queryByText('missing.txt')).toBeNull()
+        expect(screen.getByText('delete-error.txt')).toBeTruthy()
+        expect(screen.getByText(/已选择 1 项/)).toBeTruthy()
+      })
+    })
+
     it('treats batch restore not-found results as already synchronized instead of keeping stale selections', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockUseRealBatchOperation = true
@@ -2534,6 +3258,7 @@ describe('TrashPage', () => {
             id: 'item1',
             originalPath: '/deleted-file.txt',
             deletedAt: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
+            expiresAt: futureTrashExpiry(),
             name: 'deleted-file.txt',
             isDir: false,
             size: 1024,
@@ -2542,6 +3267,7 @@ describe('TrashPage', () => {
             id: 'item2',
             originalPath: '/deleted-folder',
             deletedAt: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString(),
+            expiresAt: futureTrashExpiry(),
             name: 'deleted-folder',
             isDir: true,
             size: 0,
@@ -2549,6 +3275,7 @@ describe('TrashPage', () => {
         ],
         count: 2,
         totalSize: 1024,
+        trashAutoCleanupEnabled: false,
       })
       mockListTrash.mockImplementation(() => pendingTrashRefetch())
 

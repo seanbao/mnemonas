@@ -49,6 +49,7 @@ import { ApiError, listFiles, createDirectory } from '@/api/files'
 const mockListFiles = vi.mocked(listFiles)
 const mockCreateDirectory = vi.mocked(createDirectory)
 const successActionResult = { warning: false, message: undefined } as const
+const deleteIdentityToken = '5'.repeat(64)
 
 function warningActionResult(message: string) {
   return { warning: true, message } as const
@@ -123,7 +124,7 @@ describe('DirectoryPicker', () => {
     mockListFiles.mockResolvedValue({
       path: '/',
       files: [
-        { name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
+        { name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
       ],
     })
     mockCreateDirectory.mockResolvedValue(successActionResult)
@@ -134,7 +135,7 @@ describe('DirectoryPicker', () => {
     mockListFiles
       .mockResolvedValueOnce({
         path: '/',
-        files: [{ name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' }],
+        files: [{ name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken }],
       })
       .mockRejectedValueOnce(new Error('directory unavailable'))
       .mockResolvedValueOnce({
@@ -178,7 +179,7 @@ describe('DirectoryPicker', () => {
     mockListFiles
       .mockResolvedValueOnce({
         path: '/',
-        files: [{ name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' }],
+        files: [{ name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken }],
       })
       .mockResolvedValueOnce({
         path: '/docs',
@@ -205,7 +206,7 @@ describe('DirectoryPicker', () => {
     mockListFiles
       .mockResolvedValueOnce({
         path: '/',
-        files: [{ name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' }],
+        files: [{ name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken }],
       })
       .mockImplementationOnce((_path, options?: { signal?: AbortSignal }) => {
         expandedSignal = options?.signal
@@ -234,11 +235,11 @@ describe('DirectoryPicker', () => {
     mockListFiles
       .mockResolvedValueOnce({
         path: '/',
-        files: [{ name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' }],
+        files: [{ name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken }],
       })
       .mockResolvedValueOnce({
         path: '/docs',
-        files: [{ name: 'reports', path: '/docs/reports', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' }],
+        files: [{ name: 'reports', path: '/docs/reports', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken }],
       })
 
     renderPicker()
@@ -421,7 +422,7 @@ describe('DirectoryPicker', () => {
     })
     queryClient.setQueryData(['files', '/member'], {
       path: '/member',
-      files: [{ name: 'admin-secret', path: '/member/admin-secret', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' }],
+      files: [{ name: 'admin-secret', path: '/member/admin-secret', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken }],
     })
 
     render(
@@ -466,14 +467,14 @@ describe('DirectoryPicker', () => {
       .mockResolvedValueOnce({
         path: '/',
         files: [
-          { name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
+          { name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
         ],
       })
       .mockResolvedValueOnce({
         path: '/',
         files: [
-          { name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
-          { name: 'private', path: '/private', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
+          { name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
+          { name: 'private', path: '/private', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
         ],
       })
 
@@ -519,7 +520,7 @@ describe('DirectoryPicker', () => {
       .mockResolvedValueOnce({
         path: '/',
         files: [
-          { name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
+          { name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
         ],
       })
       .mockImplementationOnce((_path, options?: { signal?: AbortSignal }) => {
@@ -527,8 +528,8 @@ describe('DirectoryPicker', () => {
         return Promise.resolve({
           path: '/',
           files: [
-            { name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
-            { name: 'private', path: '/private', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
+            { name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
+            { name: 'private', path: '/private', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
           ],
         })
       })
@@ -584,7 +585,7 @@ describe('DirectoryPicker', () => {
       .mockResolvedValueOnce({
         path: '/',
         files: [
-          { name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
+          { name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
         ],
       })
       .mockImplementationOnce((_path, options?: { signal?: AbortSignal }) => {
@@ -736,7 +737,7 @@ describe('DirectoryPicker', () => {
     mockListFiles
       .mockResolvedValueOnce({
         path: '/',
-        files: [{ name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' }],
+        files: [{ name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken }],
       })
       .mockRejectedValueOnce(new ApiError('filesystem not initialized', 503, 'Service Unavailable', 'SERVICE_UNAVAILABLE'))
 
@@ -798,7 +799,7 @@ describe('DirectoryPicker', () => {
       .mockRejectedValueOnce(new Error('root unavailable'))
       .mockResolvedValueOnce({
         path: '/',
-        files: [{ name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' }],
+        files: [{ name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken }],
       })
 
     renderPicker()
@@ -851,7 +852,7 @@ describe('DirectoryPicker', () => {
     mockListFiles.mockResolvedValueOnce({
       path: '/tester',
       files: [
-        { name: 'docs', path: '/tester/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
+        { name: 'docs', path: '/tester/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
       ],
     })
 
@@ -873,7 +874,7 @@ describe('DirectoryPicker', () => {
     mockListFiles.mockResolvedValueOnce({
       path: '/team/projects',
       files: [
-        { name: 'drafts', path: '/team/projects/drafts', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
+        { name: 'drafts', path: '/team/projects/drafts', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
       ],
     })
 
@@ -897,7 +898,7 @@ describe('DirectoryPicker', () => {
     mockListFiles.mockResolvedValueOnce({
       path: '/tester',
       files: [
-        { name: 'docs', path: '/tester/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
+        { name: 'docs', path: '/tester/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
       ],
     })
 
@@ -940,8 +941,8 @@ describe('DirectoryPicker', () => {
         return {
           path: '/',
           files: [
-            { name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
-            { name: 'old', path: '/old', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
+            { name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
+            { name: 'old', path: '/old', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
           ],
         }
       }
@@ -1049,7 +1050,7 @@ describe('DirectoryPicker', () => {
 
   it('reloads a directory after reopen instead of using a stale older expansion result', async () => {
     const user = userEvent.setup({ writeToClipboard: false })
-    const firstLoad = createDeferred<{ path: string; files: { name: string; path: string; isDir: boolean; size: number; modTime: string }[] }>()
+    const firstLoad = createDeferred<{ path: string; files: { name: string; path: string; isDir: boolean; size: number; modTime: string; deleteIdentityToken: string | null }[] }>()
     let docsLoadCount = 0
     mockListFiles.mockImplementation((path) => {
       if (path === '/docs') {
@@ -1059,13 +1060,13 @@ describe('DirectoryPicker', () => {
         }
         return Promise.resolve({
           path: '/docs',
-          files: [{ name: 'fresh-child', path: '/docs/fresh-child', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' }],
+          files: [{ name: 'fresh-child', path: '/docs/fresh-child', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken }],
         }) as ReturnType<typeof listFiles>
       }
 
       return Promise.resolve({
         path: '/',
-        files: [{ name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' }],
+        files: [{ name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken }],
       }) as ReturnType<typeof listFiles>
     })
 
@@ -1096,7 +1097,7 @@ describe('DirectoryPicker', () => {
     await act(async () => {
       firstLoad.resolve({
         path: '/docs',
-        files: [{ name: 'stale-child', path: '/docs/stale-child', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' }],
+        files: [{ name: 'stale-child', path: '/docs/stale-child', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken }],
       })
       await firstLoad.promise
     })

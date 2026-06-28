@@ -3,11 +3,13 @@ package storage
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -30,6 +32,12 @@ type partialErrorReader struct {
 	data []byte
 	err  error
 	sent bool
+}
+
+type readerFunc func([]byte) (int, error)
+
+func (f readerFunc) Read(buffer []byte) (int, error) {
+	return f(buffer)
 }
 
 func TestWarningWrappersPreserveErrorSemantics(t *testing.T) {
@@ -100,9 +108,27 @@ func TestWarningWrappersPreserveErrorSemantics(t *testing.T) {
 	}
 }
 
+func TestStagedDeletePersistenceWarningsPreservesEveryPersistenceCause(t *testing.T) {
+	workspaceCause := errors.New("workspace durability failed")
+	storageCause := errors.New("storage durability failed")
+	cleanupCause := errors.New("cleanup failed")
+
+	warnings := stagedDeletePersistenceWarnings(errors.Join(
+		fmt.Errorf("workspace step: %w", workspace.WrapVisibleMutationWarning(workspaceCause)),
+		wrapVisibleMutationWarning(storageCause),
+		cleanupCause,
+	))
+	if !errors.Is(warnings, workspaceCause) || !errors.Is(warnings, storageCause) {
+		t.Fatalf("persistence warnings = %v, want both persistence causes", warnings)
+	}
+	if errors.Is(warnings, cleanupCause) {
+		t.Fatalf("persistence warnings = %v, unexpectedly retained cleanup cause", warnings)
+	}
+}
+
 func TestCleanupStorageTempPath_JoinsRemoveError(t *testing.T) {
-	tmpDir := t.TempDir()
-	busyDir := filepath.Join(tmpDir, "busy")
+	fs := setupManagedPathHelperFileSystem(t)
+	busyDir := filepath.Join(fs.workspace.Root(), "busy")
 	if err := os.Mkdir(busyDir, 0700); err != nil {
 		t.Fatalf("failed to create busy temp dir: %v", err)
 	}
@@ -110,14 +136,13 @@ func TestCleanupStorageTempPath_JoinsRemoveError(t *testing.T) {
 		t.Fatalf("failed to create busy temp child: %v", err)
 	}
 
-	root, err := os.OpenRoot(tmpDir)
+	root, rel, abs, err := fs.resolveStoragePathRoot(busyDir)
 	if err != nil {
-		t.Fatalf("failed to open root: %v", err)
+		t.Fatalf("resolveStoragePathRoot() error: %v", err)
 	}
-	defer root.Close()
 
 	operationErr := errors.New("copy failed")
-	err = cleanupStorageTempPath(root, "busy", operationErr)
+	err = errors.Join(operationErr, fs.cleanupStorageTempPath(root, rel, abs))
 	if err == nil {
 		t.Fatal("expected cleanup error")
 	}
@@ -152,6 +177,49 @@ func TestFileSystem_UpdateTrashSettings(t *testing.T) {
 	}
 	if fs.config.TrashRetentionDays != 3 || fs.config.MaxTrashSize != 128 {
 		t.Fatalf("unexpected updated trash settings: %+v", fs.config)
+	}
+}
+
+func TestFileSystem_CurrentDeletePolicyReturnsAtomicSnapshot(t *testing.T) {
+	fs := &FileSystem{config: &Config{RetentionSweepInterval: time.Hour}}
+
+	fs.UpdateTrashSettings(true, 14, 4096)
+	policy := fs.CurrentDeletePolicy()
+	if policy.Mode != DeleteModeTrash {
+		t.Fatalf("delete mode = %q, want %q", policy.Mode, DeleteModeTrash)
+	}
+	if policy.TrashRetentionDays != 14 {
+		t.Fatalf("trash retention days = %d, want 14", policy.TrashRetentionDays)
+	}
+	if !policy.TrashAutoCleanupEnabled {
+		t.Fatal("expected automatic trash cleanup to be enabled")
+	}
+	if policy.MaxTrashSize != 4096 {
+		t.Fatalf("max trash size = %d, want 4096", policy.MaxTrashSize)
+	}
+	if len(policy.Token) != sha256.Size*2 || policy.Token != strings.ToLower(policy.Token) {
+		t.Fatalf("delete policy token = %q, want 64 lowercase hexadecimal characters", policy.Token)
+	}
+	firstToken := policy.Token
+
+	fs.UpdateRuntimePolicySettings(RuntimePolicySettings{
+		MaxVersions:        3,
+		MaxVersionAge:      24 * time.Hour,
+		MinFreeSpace:       1024,
+		SweepInterval:      0,
+		TrashEnabled:       false,
+		TrashRetentionDays: 3,
+		MaxTrashSize:       128,
+	})
+	policy = fs.CurrentDeletePolicy()
+	if policy.Mode != DeleteModePermanent {
+		t.Fatalf("delete mode = %q, want %q", policy.Mode, DeleteModePermanent)
+	}
+	if policy.TrashRetentionDays != 3 || policy.TrashAutoCleanupEnabled || policy.MaxTrashSize != 128 {
+		t.Fatalf("unexpected updated delete policy: %+v", policy)
+	}
+	if policy.Token == firstToken {
+		t.Fatalf("delete policy token did not change after policy update: %q", policy.Token)
 	}
 }
 
@@ -1782,6 +1850,1097 @@ func TestFileSystem_Delete(t *testing.T) {
 	}
 }
 
+func TestFileSystem_DeleteWithExpectedPolicyRejectsModeMismatchWithoutMutation(t *testing.T) {
+	tests := []struct {
+		name         string
+		trashEnabled bool
+		expectedMode DeleteMode
+		actualMode   DeleteMode
+	}{
+		{name: "trash changed to permanent", trashEnabled: false, expectedMode: DeleteModeTrash, actualMode: DeleteModePermanent},
+		{name: "permanent changed to trash", trashEnabled: true, expectedMode: DeleteModePermanent, actualMode: DeleteModeTrash},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := setupFileSystem(t)
+			ctx := context.Background()
+			if err := fs.WriteFile(ctx, "/mode-mismatch.txt", bytes.NewReader([]byte("keep me"))); err != nil {
+				t.Fatalf("WriteFile() error: %v", err)
+			}
+
+			hookCalls := 0
+			fs.SetPathChangeHooks(nil, func(context.Context, string) (*PathDeleteHookResult, error) {
+				hookCalls++
+				return nil, nil
+			})
+			fs.UpdateTrashSettings(tt.expectedMode == DeleteModeTrash, 9, 4096)
+			expectedPolicy := fs.CurrentDeletePolicy()
+			fs.UpdateTrashSettings(tt.trashEnabled, 9, 4096)
+
+			err := fs.DeleteWithExpectedPolicy(ctx, "/mode-mismatch.txt", DeletePolicyExpectation{
+				Mode:  expectedPolicy.Mode,
+				Token: expectedPolicy.Token,
+			}, nil)
+			if !errors.Is(err, ErrDeletePolicyChanged) {
+				t.Fatalf("DeleteWithExpectedPolicy() error = %v, want ErrDeletePolicyChanged", err)
+			}
+			var changedErr *DeletePolicyChangedError
+			if !errors.As(err, &changedErr) {
+				t.Fatalf("DeleteWithExpectedPolicy() error type = %T, want *DeletePolicyChangedError", err)
+			}
+			if changedErr.Expected.Mode != tt.expectedMode || changedErr.Expected.Token != expectedPolicy.Token || changedErr.Actual.Mode != tt.actualMode || changedErr.Actual.TrashRetentionDays != 9 {
+				t.Fatalf("unexpected changed-mode error: %+v", changedErr)
+			}
+			if hookCalls != 0 {
+				t.Fatalf("delete hook calls = %d, want 0", hookCalls)
+			}
+			if _, err := fs.Stat(ctx, "/mode-mismatch.txt"); err != nil {
+				t.Fatalf("expected file to remain after mode mismatch, got %v", err)
+			}
+			items, err := fs.ListTrash(ctx)
+			if err != nil {
+				t.Fatalf("ListTrash() error: %v", err)
+			}
+			if len(items) != 0 {
+				t.Fatalf("trash items = %d, want 0", len(items))
+			}
+		})
+	}
+}
+
+func TestFileSystem_DeleteWithExpectedPolicyRejectsPolicyTokenDriftWithoutMutation(t *testing.T) {
+	tests := []struct {
+		name    string
+		initial RuntimePolicySettings
+		updated RuntimePolicySettings
+	}{
+		{
+			name:    "retention days changed",
+			initial: RuntimePolicySettings{SweepInterval: time.Hour, TrashEnabled: true, TrashRetentionDays: 30, MaxTrashSize: 4096},
+			updated: RuntimePolicySettings{SweepInterval: time.Hour, TrashEnabled: true, TrashRetentionDays: 0, MaxTrashSize: 4096},
+		},
+		{
+			name:    "automatic cleanup disabled",
+			initial: RuntimePolicySettings{SweepInterval: time.Hour, TrashEnabled: true, TrashRetentionDays: 30, MaxTrashSize: 4096},
+			updated: RuntimePolicySettings{SweepInterval: 0, TrashEnabled: true, TrashRetentionDays: 30, MaxTrashSize: 4096},
+		},
+		{
+			name:    "cleanup interval changed while enabled",
+			initial: RuntimePolicySettings{SweepInterval: 24 * time.Hour, TrashEnabled: true, TrashRetentionDays: 30, MaxTrashSize: 4096},
+			updated: RuntimePolicySettings{SweepInterval: time.Minute, TrashEnabled: true, TrashRetentionDays: 30, MaxTrashSize: 4096},
+		},
+		{
+			name:    "trash capacity changed",
+			initial: RuntimePolicySettings{SweepInterval: time.Hour, TrashEnabled: true, TrashRetentionDays: 30, MaxTrashSize: 4096},
+			updated: RuntimePolicySettings{SweepInterval: time.Hour, TrashEnabled: true, TrashRetentionDays: 30, MaxTrashSize: 8192},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := setupFileSystem(t)
+			ctx := context.Background()
+			fs.UpdateRuntimePolicySettings(tt.initial)
+			expectedPolicy := fs.CurrentDeletePolicy()
+			if expectedPolicy.Mode != DeleteModeTrash {
+				t.Fatalf("initial delete mode = %q, want trash", expectedPolicy.Mode)
+			}
+			if err := fs.WriteFile(ctx, "/policy-token-drift.txt", bytes.NewReader([]byte("keep me"))); err != nil {
+				t.Fatalf("WriteFile() error: %v", err)
+			}
+
+			hookCalls := 0
+			fs.SetPathChangeHooks(nil, func(context.Context, string) (*PathDeleteHookResult, error) {
+				hookCalls++
+				return nil, nil
+			})
+			fs.UpdateRuntimePolicySettings(tt.updated)
+			actualPolicy := fs.CurrentDeletePolicy()
+			if actualPolicy.Mode != DeleteModeTrash {
+				t.Fatalf("updated delete mode = %q, want trash", actualPolicy.Mode)
+			}
+			if actualPolicy.Token == expectedPolicy.Token {
+				t.Fatalf("delete policy token did not change: %q", actualPolicy.Token)
+			}
+
+			err := fs.DeleteWithExpectedPolicy(ctx, "/policy-token-drift.txt", DeletePolicyExpectation{
+				Mode:  expectedPolicy.Mode,
+				Token: expectedPolicy.Token,
+			}, nil)
+			if !errors.Is(err, ErrDeletePolicyChanged) {
+				t.Fatalf("DeleteWithExpectedPolicy() error = %v, want ErrDeletePolicyChanged", err)
+			}
+			var changedErr *DeletePolicyChangedError
+			if !errors.As(err, &changedErr) {
+				t.Fatalf("DeleteWithExpectedPolicy() error type = %T, want *DeletePolicyChangedError", err)
+			}
+			if changedErr.Actual.Token != actualPolicy.Token {
+				t.Fatalf("actual token in error = %q, want %q", changedErr.Actual.Token, actualPolicy.Token)
+			}
+			if hookCalls != 0 {
+				t.Fatalf("delete hook calls = %d, want 0", hookCalls)
+			}
+			if _, err := fs.Stat(ctx, "/policy-token-drift.txt"); err != nil {
+				t.Fatalf("file changed after policy token drift: %v", err)
+			}
+			items, err := fs.ListTrash(ctx)
+			if err != nil {
+				t.Fatalf("ListTrash() error: %v", err)
+			}
+			if len(items) != 0 {
+				t.Fatalf("trash items = %d, want 0", len(items))
+			}
+		})
+	}
+}
+
+func TestFileSystem_DeleteWithExpectedPolicyPermanentModeDoesNotDeadlock(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+	fs.UpdateTrashSettings(false, 30, 4096)
+	if err := fs.WriteFile(ctx, "/permanent-mode.txt", bytes.NewReader([]byte("delete me"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	policy := fs.CurrentDeletePolicy()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- fs.DeleteWithExpectedPolicy(ctx, "/permanent-mode.txt", DeletePolicyExpectation{Mode: policy.Mode, Token: policy.Token}, nil)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("DeleteWithExpectedPolicy() error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("DeleteWithExpectedMode() deadlocked in permanent mode")
+	}
+
+	if _, err := fs.Stat(ctx, "/permanent-mode.txt"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected permanently deleted file to be absent, got %v", err)
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("trash items = %d, want 0", len(items))
+	}
+}
+
+func TestFileSystem_DeleteWithExpectedPolicyLinearizesRuntimePolicyUpdate(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+	fs.UpdateRuntimePolicySettings(RuntimePolicySettings{
+		MaxVersions:        10,
+		MaxVersionAge:      30 * 24 * time.Hour,
+		SweepInterval:      time.Hour,
+		TrashEnabled:       false,
+		TrashRetentionDays: 30,
+		MaxTrashSize:       4096,
+	})
+	if err := fs.WriteFile(ctx, "/linearized-permanent-delete.txt", bytes.NewReader([]byte("delete me"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	expectedPolicy := fs.CurrentDeletePolicy()
+
+	originalDeleteWorkspacePath := fs.deleteStagedWorkspacePath
+	deletePointReached := make(chan struct{})
+	releaseDeletePoint := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseDelete := func() {
+		releaseOnce.Do(func() { close(releaseDeletePoint) })
+	}
+	defer releaseDelete()
+	fs.deleteStagedWorkspacePath = func(ctx context.Context, name string, remove func() error) error {
+		close(deletePointReached)
+		<-releaseDeletePoint
+		return originalDeleteWorkspacePath(ctx, name, remove)
+	}
+
+	deleteDone := make(chan error, 1)
+	go func() {
+		deleteDone <- fs.DeleteWithExpectedPolicy(ctx, "/linearized-permanent-delete.txt", DeletePolicyExpectation{Mode: expectedPolicy.Mode, Token: expectedPolicy.Token}, nil)
+	}()
+
+	select {
+	case <-deletePointReached:
+	case err := <-deleteDone:
+		t.Fatalf("delete completed before reaching the blocked workspace delete point: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the workspace delete point")
+	}
+
+	if fs.mu.TryLock() {
+		fs.mu.Unlock()
+		t.Fatal("delete released the filesystem write lock before the workspace mutation")
+	}
+
+	updateStarted := make(chan struct{})
+	updateDone := make(chan struct{})
+	go func() {
+		close(updateStarted)
+		fs.UpdateRuntimePolicySettings(RuntimePolicySettings{
+			MaxVersions:        3,
+			MaxVersionAge:      7 * 24 * time.Hour,
+			SweepInterval:      0,
+			TrashEnabled:       true,
+			TrashRetentionDays: 7,
+			MaxTrashSize:       8192,
+		})
+		close(updateDone)
+	}()
+	<-updateStarted
+
+	select {
+	case <-updateDone:
+		t.Fatal("runtime policy update completed while delete held the filesystem write lock")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	releaseDelete()
+	select {
+	case err := <-deleteDone:
+		if err != nil {
+			t.Fatalf("DeleteWithExpectedPolicy() error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for delete completion")
+	}
+	select {
+	case <-updateDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for runtime policy update")
+	}
+
+	policy := fs.CurrentDeletePolicy()
+	if policy.Mode != DeleteModeTrash || policy.TrashRetentionDays != 7 || policy.TrashAutoCleanupEnabled {
+		t.Fatalf("updated delete policy = %+v, want trash mode with seven-day retention and cleanup disabled", policy)
+	}
+	if _, err := fs.Stat(ctx, "/linearized-permanent-delete.txt"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("permanently deleted path status = %v, want ErrNotFound", err)
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("trash items = %d, want 0 because the in-flight delete used the matched permanent mode", len(items))
+	}
+}
+
+func TestFileSystem_DeleteAuthorizationLinearizesConcurrentDescendantWrite(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+	fs.UpdateRuntimePolicySettings(RuntimePolicySettings{
+		SweepInterval:      time.Hour,
+		TrashEnabled:       true,
+		TrashRetentionDays: 30,
+		MaxTrashSize:       1 << 20,
+	})
+	if err := fs.Mkdir(ctx, "/authorized-delete"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/authorized-delete/existing.txt", bytes.NewReader([]byte("existing"))); err != nil {
+		t.Fatalf("WriteFile(existing) error: %v", err)
+	}
+	policy := fs.CurrentDeletePolicy()
+
+	authorizerReachedLastEntry := make(chan struct{})
+	releaseAuthorizer := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() { close(releaseAuthorizer) })
+	}
+	defer release()
+	authorizedPaths := make([]string, 0, 2)
+	authorize := func(targetPath string) error {
+		authorizedPaths = append(authorizedPaths, targetPath)
+		if targetPath == "/authorized-delete/existing.txt" {
+			close(authorizerReachedLastEntry)
+			<-releaseAuthorizer
+		}
+		if targetPath == "/authorized-delete/denied.txt" {
+			return errors.New("denied descendant")
+		}
+		return nil
+	}
+
+	deleteDone := make(chan error, 1)
+	go func() {
+		deleteDone <- fs.DeleteWithExpectedPolicy(ctx, "/authorized-delete", DeletePolicyExpectation{Mode: policy.Mode, Token: policy.Token}, authorize)
+	}()
+	select {
+	case <-authorizerReachedLastEntry:
+	case err := <-deleteDone:
+		t.Fatalf("delete completed before locked authorization point: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for locked delete authorization")
+	}
+	if fs.mu.TryLock() {
+		fs.mu.Unlock()
+		t.Fatal("delete authorization did not retain the filesystem write lock")
+	}
+
+	writeStarted := make(chan struct{})
+	writeDone := make(chan error, 1)
+	go func() {
+		close(writeStarted)
+		writeDone <- fs.WriteFile(ctx, "/authorized-delete/denied.txt", bytes.NewReader([]byte("denied")))
+	}()
+	<-writeStarted
+	select {
+	case err := <-writeDone:
+		t.Fatalf("concurrent descendant write completed inside locked authorization boundary: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	release()
+	select {
+	case err := <-deleteDone:
+		if err != nil {
+			t.Fatalf("DeleteWithExpectedPolicy() error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for authorized delete")
+	}
+	select {
+	case err := <-writeDone:
+		if err != nil {
+			t.Fatalf("concurrent descendant write after delete error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for concurrent descendant writer")
+	}
+
+	if slices.Contains(authorizedPaths, "/authorized-delete/denied.txt") {
+		t.Fatalf("authorization snapshot unexpectedly included blocked concurrent path: %v", authorizedPaths)
+	}
+	if _, err := fs.Stat(ctx, "/authorized-delete/existing.txt"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleted original child status = %v, want ErrNotFound", err)
+	}
+	if _, err := fs.Stat(ctx, "/authorized-delete/denied.txt"); err != nil {
+		t.Fatalf("concurrent child should be created only after delete completed: %v", err)
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 || !items[0].IsDir {
+		t.Fatalf("trash items = %+v, want one directory", items)
+	}
+	var restorePaths []string
+	if err := fs.WalkTrashItemRestorePaths(ctx, items[0].ID, func(restoredPath string, _ bool, _ int64) error {
+		restorePaths = append(restorePaths, restoredPath)
+		return nil
+	}); err != nil {
+		t.Fatalf("WalkTrashItemRestorePaths() error: %v", err)
+	}
+	if slices.Contains(restorePaths, "/authorized-delete/denied.txt") {
+		t.Fatalf("concurrent denied child crossed into deleted tree snapshot: %v", restorePaths)
+	}
+}
+
+func TestFileSystem_DeleteWithExpectedPolicyAuthorizationRejectionHasNoSideEffects(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+	fs.UpdateRuntimePolicySettings(RuntimePolicySettings{
+		SweepInterval:      time.Hour,
+		TrashEnabled:       true,
+		TrashRetentionDays: 30,
+		MaxTrashSize:       1 << 20,
+	})
+	if err := fs.Mkdir(ctx, "/rejected-delete"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/rejected-delete/existing.txt", bytes.NewReader([]byte("keep me"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	policy := fs.CurrentDeletePolicy()
+
+	hookCalls := 0
+	fs.SetPathChangeHooks(nil, func(context.Context, string) (*PathDeleteHookResult, error) {
+		hookCalls++
+		return nil, nil
+	})
+	errDenied := errors.New("delete path denied")
+	err := fs.DeleteWithExpectedPolicy(ctx, "/rejected-delete", DeletePolicyExpectation{Mode: policy.Mode, Token: policy.Token}, func(targetPath string) error {
+		if targetPath == "/rejected-delete/existing.txt" {
+			return errDenied
+		}
+		return nil
+	})
+	if !errors.Is(err, errDenied) {
+		t.Fatalf("DeleteWithExpectedPolicy() error = %v, want %v", err, errDenied)
+	}
+	if hookCalls != 0 {
+		t.Fatalf("delete hook calls = %d, want 0", hookCalls)
+	}
+	for _, targetPath := range []string{"/rejected-delete", "/rejected-delete/existing.txt"} {
+		if _, err := fs.Stat(ctx, targetPath); err != nil {
+			t.Fatalf("Stat(%s) after authorization rejection error: %v", targetPath, err)
+		}
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("trash items after authorization rejection = %d, want 0", len(items))
+	}
+}
+
+func TestFileSystem_DeleteWithTargetValidatorUsesCurrentNormalizedRootSnapshot(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/target-snapshot"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/target-snapshot/file.txt", bytes.NewReader([]byte("current content"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	wantInfo, err := fs.Stat(ctx, "/target-snapshot/file.txt")
+	if err != nil {
+		t.Fatalf("Stat() error: %v", err)
+	}
+
+	errRejected := errors.New("target snapshot rejected")
+	var gotSnapshot DeleteTargetSnapshot
+	authorizerCalls := 0
+	err = fs.DeleteWithTargetValidator(ctx, "/target-snapshot//file.txt", func(snapshot DeleteTargetSnapshot) error {
+		gotSnapshot = snapshot
+		return errRejected
+	}, func(string) error {
+		authorizerCalls++
+		return nil
+	})
+	if !errors.Is(err, errRejected) {
+		t.Fatalf("DeleteWithTargetValidator() error = %v, want %v", err, errRejected)
+	}
+	if authorizerCalls != 1 {
+		t.Fatalf("authorizer calls = %d, want 1", authorizerCalls)
+	}
+	if got := gotSnapshot.Root.Path; got != "/target-snapshot/file.txt" {
+		t.Fatalf("snapshot root path = %q, want %q", got, "/target-snapshot/file.txt")
+	}
+	if gotSnapshot.Root.Name != wantInfo.Name || gotSnapshot.Root.IsDir != wantInfo.IsDir || gotSnapshot.Root.Size != wantInfo.Size || !gotSnapshot.Root.ModTime.Equal(wantInfo.ModTime) || gotSnapshot.Root.ContentHash != wantInfo.ContentHash {
+		t.Fatalf("snapshot root = %+v, want current info %+v", gotSnapshot.Root, *wantInfo)
+	}
+	if _, err := fs.Stat(ctx, "/target-snapshot/file.txt"); err != nil {
+		t.Fatalf("Stat() after validator rejection error: %v", err)
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("trash items after validator rejection = %d, want 0", len(items))
+	}
+}
+
+func TestFileSystem_DeleteWithTargetValidatorAuthorizesBeforeHashing(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	targetPath := "/target-authorization.bin"
+	if err := fs.WriteFile(ctx, targetPath, bytes.NewReader([]byte("keep"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	errDenied := errors.New("delete access denied")
+	hashCalls := 0
+	fs.hashDeleteTargetFile = func(context.Context, string) (string, error) {
+		hashCalls++
+		return "", errors.New("unexpected target hash")
+	}
+	validatorCalls := 0
+	err := fs.DeleteWithTargetValidator(ctx, targetPath, func(DeleteTargetSnapshot) error {
+		validatorCalls++
+		return nil
+	}, func(string) error {
+		return errDenied
+	})
+	if !errors.Is(err, errDenied) {
+		t.Fatalf("DeleteWithTargetValidator() error = %v, want %v", err, errDenied)
+	}
+	if hashCalls != 0 {
+		t.Fatalf("target hash calls = %d, want 0", hashCalls)
+	}
+	if validatorCalls != 0 {
+		t.Fatalf("validator calls = %d, want 0", validatorCalls)
+	}
+	if _, err := fs.Stat(ctx, targetPath); err != nil {
+		t.Fatalf("Stat() after authorization rejection error: %v", err)
+	}
+}
+
+func TestFileSystem_PrepareDeleteIntentsPreservesOrderAndSnapshotsCompleteTrees(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	for _, dir := range []string{"/empty", "/tree", "/tree/nested"} {
+		if err := fs.Mkdir(ctx, dir); err != nil {
+			t.Fatalf("Mkdir(%s) error: %v", dir, err)
+		}
+	}
+	if err := fs.WriteFile(ctx, "/tree/nested/child.bin", bytes.NewReader([]byte("child"))); err != nil {
+		t.Fatalf("WriteFile(child) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/file.bin", bytes.NewReader([]byte("file"))); err != nil {
+		t.Fatalf("WriteFile(file) error: %v", err)
+	}
+
+	var authorized []string
+	intent, err := fs.PrepareDeleteIntents(ctx, []string{"/file.bin", "/tree", "/empty"}, func(targetPath string) error {
+		authorized = append(authorized, targetPath)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("PrepareDeleteIntents() error: %v", err)
+	}
+	if len(intent.Targets) != 3 {
+		t.Fatalf("intent target count = %d, want 3", len(intent.Targets))
+	}
+	wantOrder := []string{"/file.bin", "/tree", "/empty"}
+	for i, wantPath := range wantOrder {
+		target := intent.Targets[i]
+		if target.Snapshot.Root.Path != wantPath {
+			t.Fatalf("target[%d] path = %q, want %q", i, target.Snapshot.Root.Path, wantPath)
+		}
+		if len(target.Token) != sha256.Size*2 || target.Token != strings.ToLower(target.Token) {
+			t.Fatalf("target[%d] token = %q, want lowercase SHA-256", i, target.Token)
+		}
+	}
+	if intent.Targets[0].Snapshot.Root.ContentHash == "" || len(intent.Targets[0].Snapshot.Entries) != 1 {
+		t.Fatalf("file snapshot = %+v, want one hashed file", intent.Targets[0].Snapshot)
+	}
+	if got := len(intent.Targets[1].Snapshot.Entries); got != 3 {
+		t.Fatalf("tree snapshot entries = %d, want root, nested directory, and child file", got)
+	}
+	if got := intent.Targets[1].Snapshot.Entries[2].ContentHash; got == "" {
+		t.Fatal("tree child content hash is empty")
+	}
+	if got := len(intent.Targets[2].Snapshot.Entries); got != 1 || !intent.Targets[2].Snapshot.Root.IsDir {
+		t.Fatalf("empty directory snapshot = %+v, want one directory entry", intent.Targets[2].Snapshot)
+	}
+	wantAuthorized := []string{"/file.bin", "/tree", "/tree/nested", "/tree/nested/child.bin", "/empty"}
+	if !slices.Equal(authorized, wantAuthorized) {
+		t.Fatalf("authorized paths = %v, want %v", authorized, wantAuthorized)
+	}
+}
+
+func TestFileSystem_PrepareDeleteIntentsRejectsInvalidTargetSets(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+
+	tests := []struct {
+		name  string
+		paths []string
+	}{
+		{name: "empty", paths: nil},
+		{name: "empty path", paths: []string{""}},
+		{name: "root", paths: []string{"/"}},
+		{name: "duplicate normalized path", paths: []string{"/tree", "/tree/"}},
+		{name: "ancestor then descendant", paths: []string{"/tree", "/tree/child"}},
+		{name: "descendant then ancestor", paths: []string{"/tree/child", "/tree"}},
+		{name: "over limit", paths: make([]string, MaxDeleteIntentTargets+1)},
+	}
+	for i := range tests[len(tests)-1].paths {
+		tests[len(tests)-1].paths[i] = fmt.Sprintf("/target-%d", i)
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := fs.PrepareDeleteIntents(ctx, testCase.paths, nil)
+			if !errors.Is(err, ErrInvalidDeleteIntent) {
+				t.Fatalf("PrepareDeleteIntents() error = %v, want ErrInvalidDeleteIntent", err)
+			}
+		})
+	}
+}
+
+func TestFileSystem_DeleteTargetSnapshotsAuthorizeBeforeHashAndStopAtDenial(t *testing.T) {
+	for _, operation := range []string{"prepare", "delete"} {
+		t.Run(operation, func(t *testing.T) {
+			fs := setupStandaloneFileSystem(t)
+			ctx := context.Background()
+			if err := fs.Mkdir(ctx, "/tree"); err != nil {
+				t.Fatalf("Mkdir(tree) error: %v", err)
+			}
+			for _, targetPath := range []string{"/tree/a-allowed.bin", "/tree/b-denied.bin", "/tree/c-after.bin"} {
+				if err := fs.WriteFile(ctx, targetPath, bytes.NewReader([]byte(targetPath))); err != nil {
+					t.Fatalf("WriteFile(%s) error: %v", targetPath, err)
+				}
+			}
+			intent, err := fs.PrepareDeleteIntents(ctx, []string{"/tree"}, nil)
+			if err != nil {
+				t.Fatalf("PrepareDeleteIntents(initial) error: %v", err)
+			}
+
+			var authorized []string
+			var hashed []string
+			fs.hashDeleteTargetFile = func(ctx context.Context, targetPath string) (string, error) {
+				hashed = append(hashed, targetPath)
+				return fs.hashWorkspaceFile(ctx, targetPath)
+			}
+			errDenied := errors.New("denied descendant")
+			authorize := func(targetPath string) error {
+				authorized = append(authorized, targetPath)
+				if targetPath == "/tree/b-denied.bin" {
+					return errDenied
+				}
+				return nil
+			}
+
+			switch operation {
+			case "prepare":
+				_, err = fs.PrepareDeleteIntents(ctx, []string{"/tree"}, authorize)
+			case "delete":
+				err = fs.DeleteWithExpectedPolicyAndTarget(ctx, "/tree", DeletePolicyExpectation{Mode: intent.Policy.Mode, Token: intent.Policy.Token}, intent.Targets[0].Token, authorize)
+			}
+			if !errors.Is(err, errDenied) {
+				t.Fatalf("%s error = %v, want denied descendant", operation, err)
+			}
+			wantAuthorized := []string{"/tree", "/tree/a-allowed.bin", "/tree/b-denied.bin"}
+			if !slices.Equal(authorized, wantAuthorized) {
+				t.Fatalf("authorized paths = %v, want %v", authorized, wantAuthorized)
+			}
+			if !slices.Equal(hashed, []string{"/tree/a-allowed.bin"}) {
+				t.Fatalf("hashed paths = %v, want only the authorized file before denial", hashed)
+			}
+			if _, err := fs.Stat(ctx, "/tree/c-after.bin"); err != nil {
+				t.Fatalf("tree changed after authorization denial: %v", err)
+			}
+		})
+	}
+}
+
+func TestDeleteTargetTokenIsDeterministicAndLengthPrefixed(t *testing.T) {
+	modTime := time.Unix(100, 200)
+	entries := []FileInfo{
+		{Path: "/root", Name: "root", IsDir: true, Size: 10, ModTime: modTime},
+		{Path: "/root/a", Name: "a", Size: 1, ModTime: modTime, ContentHash: "bc"},
+		{Path: "/root/ab", Name: "ab", Size: 1, ModTime: modTime, ContentHash: "c"},
+	}
+	snapshot := DeleteTargetSnapshot{Root: entries[0], Entries: entries}
+	shuffled := DeleteTargetSnapshot{Root: entries[0], Entries: []FileInfo{entries[2], entries[0], entries[1]}}
+	if got, want := deleteTargetToken(shuffled), deleteTargetToken(snapshot); got != want {
+		t.Fatalf("token changed with entry order: got %q want %q", got, want)
+	}
+
+	ambiguousWithoutLengths := DeleteTargetSnapshot{Root: entries[0], Entries: []FileInfo{
+		entries[0],
+		{Path: "/root/a", Name: "a", Size: 1, ModTime: modTime, ContentHash: "b"},
+		{Path: "/root/ab", Name: "ab", Size: 1, ModTime: modTime, ContentHash: "cc"},
+	}}
+	if deleteTargetToken(snapshot) == deleteTargetToken(ambiguousWithoutLengths) {
+		t.Fatal("length-prefixed token encoding did not distinguish different entry fields")
+	}
+}
+
+func TestFileSystem_DeleteTargetTokenTracksFileAndDirectoryDrift(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	if err := fs.WriteFile(ctx, "/file.bin", bytes.NewReader([]byte("first"))); err != nil {
+		t.Fatalf("WriteFile(first) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/tree"); err != nil {
+		t.Fatalf("Mkdir(tree) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/empty"); err != nil {
+		t.Fatalf("Mkdir(empty) error: %v", err)
+	}
+
+	prepareToken := func(targetPath string) string {
+		t.Helper()
+		intent, err := fs.PrepareDeleteIntents(ctx, []string{targetPath}, nil)
+		if err != nil {
+			t.Fatalf("PrepareDeleteIntents(%s) error: %v", targetPath, err)
+		}
+		return intent.Targets[0].Token
+	}
+
+	fileBefore := prepareToken("/file.bin")
+	if err := fs.WriteFile(ctx, "/file.bin", bytes.NewReader([]byte("other"))); err != nil {
+		t.Fatalf("WriteFile(overwrite) error: %v", err)
+	}
+	fileAfterOverwrite := prepareToken("/file.bin")
+	if fileAfterOverwrite == fileBefore {
+		t.Fatal("file overwrite did not change target token")
+	}
+	if err := fs.Delete(ctx, "/file.bin"); err != nil {
+		t.Fatalf("Delete(file) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/file.bin", bytes.NewReader([]byte("other"))); err != nil {
+		t.Fatalf("WriteFile(recreate) error: %v", err)
+	}
+	recreatedTime := time.Now().Add(2 * time.Hour)
+	if err := os.Chtimes(fs.workspace.FullPath("/file.bin"), recreatedTime, recreatedTime); err != nil {
+		t.Fatalf("Chtimes(recreated file) error: %v", err)
+	}
+	if got := prepareToken("/file.bin"); got == fileAfterOverwrite {
+		t.Fatal("file recreation did not change target token")
+	}
+
+	treeBefore := prepareToken("/tree")
+	if err := fs.WriteFile(ctx, "/tree/child.bin", bytes.NewReader([]byte("child"))); err != nil {
+		t.Fatalf("WriteFile(tree child) error: %v", err)
+	}
+	treeAfterAdd := prepareToken("/tree")
+	if treeAfterAdd == treeBefore {
+		t.Fatal("adding a directory descendant did not change target token")
+	}
+	if err := fs.WriteFile(ctx, "/tree/child.bin", bytes.NewReader([]byte("changed"))); err != nil {
+		t.Fatalf("WriteFile(modified child) error: %v", err)
+	}
+	if got := prepareToken("/tree"); got == treeAfterAdd {
+		t.Fatal("modifying a directory descendant did not change target token")
+	}
+
+	emptyBefore := prepareToken("/empty")
+	emptyTime := time.Now().Add(3 * time.Hour)
+	if err := os.Chtimes(fs.workspace.FullPath("/empty"), emptyTime, emptyTime); err != nil {
+		t.Fatalf("Chtimes(empty directory) error: %v", err)
+	}
+	if got := prepareToken("/empty"); got == emptyBefore {
+		t.Fatal("empty directory metadata change did not change target token")
+	}
+}
+
+func TestFileSystem_DeleteWithExpectedPolicyAndTargetRejectsStalePolicyBeforeTargetScan(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	if err := fs.WriteFile(ctx, "/stale-policy.bin", bytes.NewReader([]byte("keep"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	intent, err := fs.PrepareDeleteIntents(ctx, []string{"/stale-policy.bin"}, nil)
+	if err != nil {
+		t.Fatalf("PrepareDeleteIntents() error: %v", err)
+	}
+	fs.UpdateTrashSettings(intent.Policy.Mode != DeleteModeTrash, intent.Policy.TrashRetentionDays+1, intent.Policy.MaxTrashSize+1)
+
+	originalWalk := walkStorageDeleteTree
+	walkCalls := 0
+	walkStorageDeleteTree = func(ctx context.Context, ws *workspace.Workspace, root string, fn workspace.WalkFunc) error {
+		walkCalls++
+		return originalWalk(ctx, ws, root, fn)
+	}
+	t.Cleanup(func() { walkStorageDeleteTree = originalWalk })
+	hashCalls := 0
+	fs.hashDeleteTargetFile = func(context.Context, string) (string, error) {
+		hashCalls++
+		return "", errors.New("unexpected hash")
+	}
+	authorizerCalls := 0
+
+	err = fs.DeleteWithExpectedPolicyAndTarget(ctx, "/stale-policy.bin", DeletePolicyExpectation{Mode: intent.Policy.Mode, Token: intent.Policy.Token}, intent.Targets[0].Token, func(string) error {
+		authorizerCalls++
+		return nil
+	})
+	if !errors.Is(err, ErrDeletePolicyChanged) {
+		t.Fatalf("DeleteWithExpectedPolicyAndTarget() error = %v, want ErrDeletePolicyChanged", err)
+	}
+	if walkCalls != 0 || hashCalls != 0 || authorizerCalls != 0 {
+		t.Fatalf("stale policy performed target work: walk=%d hash=%d authorize=%d", walkCalls, hashCalls, authorizerCalls)
+	}
+}
+
+func TestFileSystem_DeleteWithExpectedPolicyRejectsStalePolicyBeforeAuthorizationWalk(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	if err := fs.WriteFile(ctx, "/generic-stale-policy.bin", bytes.NewReader([]byte("keep"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	policy := fs.CurrentDeletePolicy()
+	fs.UpdateTrashSettings(policy.Mode != DeleteModeTrash, policy.TrashRetentionDays+1, policy.MaxTrashSize+1)
+
+	originalWalk := walkStorageDeleteTree
+	walkCalls := 0
+	walkStorageDeleteTree = func(ctx context.Context, ws *workspace.Workspace, root string, fn workspace.WalkFunc) error {
+		walkCalls++
+		return originalWalk(ctx, ws, root, fn)
+	}
+	t.Cleanup(func() { walkStorageDeleteTree = originalWalk })
+	authorizerCalls := 0
+	err := fs.DeleteWithExpectedPolicy(ctx, "/generic-stale-policy.bin", DeletePolicyExpectation{Mode: policy.Mode, Token: policy.Token}, func(string) error {
+		authorizerCalls++
+		return nil
+	})
+	if !errors.Is(err, ErrDeletePolicyChanged) {
+		t.Fatalf("DeleteWithExpectedPolicy() error = %v, want ErrDeletePolicyChanged", err)
+	}
+	if walkCalls != 0 || authorizerCalls != 0 {
+		t.Fatalf("stale generic policy performed authorization work: walk=%d authorize=%d", walkCalls, authorizerCalls)
+	}
+}
+
+func TestFileSystem_DeleteWithExpectedPolicyAndTargetRejectsTargetDriftWithoutSideEffects(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	if err := fs.WriteFile(ctx, "/target-drift.bin", bytes.NewReader([]byte("before"))); err != nil {
+		t.Fatalf("WriteFile(before) error: %v", err)
+	}
+	intent, err := fs.PrepareDeleteIntents(ctx, []string{"/target-drift.bin"}, nil)
+	if err != nil {
+		t.Fatalf("PrepareDeleteIntents() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/target-drift.bin", bytes.NewReader([]byte("after"))); err != nil {
+		t.Fatalf("WriteFile(after) error: %v", err)
+	}
+
+	hookCalls := 0
+	fs.SetPathChangeHooks(nil, func(context.Context, string) (*PathDeleteHookResult, error) {
+		hookCalls++
+		return nil, nil
+	})
+	indexCalls := 0
+	originalDeleteIndex := fs.deleteFileIndex
+	fs.deleteFileIndex = func(ctx context.Context, targetPath string) error {
+		indexCalls++
+		return originalDeleteIndex(ctx, targetPath)
+	}
+
+	err = fs.DeleteWithExpectedPolicyAndTarget(ctx, "/target-drift.bin", DeletePolicyExpectation{Mode: intent.Policy.Mode, Token: intent.Policy.Token}, intent.Targets[0].Token, nil)
+	if !errors.Is(err, ErrDeleteTargetChanged) {
+		t.Fatalf("DeleteWithExpectedPolicyAndTarget() error = %v, want ErrDeleteTargetChanged", err)
+	}
+	var changedErr *DeleteTargetChangedError
+	if !errors.As(err, &changedErr) || changedErr.Path != "/target-drift.bin" || changedErr.ExpectedToken != intent.Targets[0].Token || changedErr.ActualToken == changedErr.ExpectedToken {
+		t.Fatalf("target changed error = %+v", changedErr)
+	}
+	if hookCalls != 0 || indexCalls != 0 {
+		t.Fatalf("target drift side effects: hook=%d index=%d", hookCalls, indexCalls)
+	}
+	data, err := fs.workspace.ReadFile(ctx, "/target-drift.bin")
+	if err != nil || string(data) != "after" {
+		t.Fatalf("workspace content after target drift = %q, %v", data, err)
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("trash items after target drift = %d, want 0", len(items))
+	}
+}
+
+func TestFileSystem_DeleteWithExpectedPolicyAndTargetMapsUnavailableTargetToDrift(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		targetPath string
+		setup      func(*testing.T, *FileSystem)
+		mutate     func(*testing.T, *FileSystem)
+	}{
+		{
+			name:       "target disappeared",
+			targetPath: "/disappeared.bin",
+			setup: func(t *testing.T, fs *FileSystem) {
+				if err := fs.WriteFile(context.Background(), "/disappeared.bin", bytes.NewReader([]byte("item"))); err != nil {
+					t.Fatalf("WriteFile() error: %v", err)
+				}
+			},
+			mutate: func(t *testing.T, fs *FileSystem) {
+				if err := os.Remove(fs.workspace.FullPath("/disappeared.bin")); err != nil {
+					t.Fatalf("Remove() error: %v", err)
+				}
+			},
+		},
+		{
+			name:       "parent replaced by file",
+			targetPath: "/parent/child.bin",
+			setup: func(t *testing.T, fs *FileSystem) {
+				if err := fs.Mkdir(context.Background(), "/parent"); err != nil {
+					t.Fatalf("Mkdir() error: %v", err)
+				}
+				if err := fs.WriteFile(context.Background(), "/parent/child.bin", bytes.NewReader([]byte("item"))); err != nil {
+					t.Fatalf("WriteFile() error: %v", err)
+				}
+			},
+			mutate: func(t *testing.T, fs *FileSystem) {
+				parentPath := fs.workspace.FullPath("/parent")
+				if err := os.RemoveAll(parentPath); err != nil {
+					t.Fatalf("RemoveAll(parent) error: %v", err)
+				}
+				if err := os.WriteFile(parentPath, []byte("replacement"), 0o600); err != nil {
+					t.Fatalf("WriteFile(parent replacement) error: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			fs := setupStandaloneFileSystem(t)
+			testCase.setup(t, fs)
+			intent, err := fs.PrepareDeleteIntents(context.Background(), []string{testCase.targetPath}, nil)
+			if err != nil {
+				t.Fatalf("PrepareDeleteIntents() error: %v", err)
+			}
+			testCase.mutate(t, fs)
+			err = fs.DeleteWithExpectedPolicyAndTarget(
+				context.Background(),
+				testCase.targetPath,
+				DeletePolicyExpectation{Mode: intent.Policy.Mode, Token: intent.Policy.Token},
+				intent.Targets[0].Token,
+				nil,
+			)
+			var changedErr *DeleteTargetChangedError
+			if !errors.As(err, &changedErr) || changedErr.Path != testCase.targetPath || changedErr.ExpectedToken != intent.Targets[0].Token || changedErr.ActualToken != "" {
+				t.Fatalf("DeleteWithExpectedPolicyAndTarget() error = %#v, want unavailable target drift", err)
+			}
+		})
+	}
+}
+
+func TestFileSystem_DeleteWithExpectedPolicyAndTargetPrioritizesPolicyDrift(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	if err := fs.WriteFile(ctx, "/both-drift.bin", bytes.NewReader([]byte("before"))); err != nil {
+		t.Fatalf("WriteFile(before) error: %v", err)
+	}
+	intent, err := fs.PrepareDeleteIntents(ctx, []string{"/both-drift.bin"}, nil)
+	if err != nil {
+		t.Fatalf("PrepareDeleteIntents() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/both-drift.bin", bytes.NewReader([]byte("after"))); err != nil {
+		t.Fatalf("WriteFile(after) error: %v", err)
+	}
+	fs.UpdateTrashSettings(intent.Policy.Mode != DeleteModeTrash, intent.Policy.TrashRetentionDays, intent.Policy.MaxTrashSize)
+
+	hashCalls := 0
+	fs.hashDeleteTargetFile = func(context.Context, string) (string, error) {
+		hashCalls++
+		return "", errors.New("unexpected hash")
+	}
+	err = fs.DeleteWithExpectedPolicyAndTarget(ctx, "/both-drift.bin", DeletePolicyExpectation{Mode: intent.Policy.Mode, Token: intent.Policy.Token}, intent.Targets[0].Token, nil)
+	if !errors.Is(err, ErrDeletePolicyChanged) || errors.Is(err, ErrDeleteTargetChanged) {
+		t.Fatalf("DeleteWithExpectedPolicyAndTarget() error = %v, want only ErrDeletePolicyChanged", err)
+	}
+	if hashCalls != 0 {
+		t.Fatalf("both-drift comparison hashed target %d times, want 0", hashCalls)
+	}
+}
+
+func TestHashReaderWithContextStopsAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	reads := 0
+	reader := readerFunc(func(buffer []byte) (int, error) {
+		reads++
+		if reads == 1 {
+			cancel()
+			copy(buffer, "chunk")
+			return len("chunk"), nil
+		}
+		return 0, io.EOF
+	})
+
+	_, err := hashReaderWithContext(ctx, reader)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("hashReaderWithContext() error = %v, want context.Canceled", err)
+	}
+	if reads != 1 {
+		t.Fatalf("reader calls after cancellation = %d, want 1", reads)
+	}
+}
+
+func TestFileSystem_PrepareDeleteIntentsReleasesReadLockAfterHashCancellation(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	if err := fs.WriteFile(context.Background(), "/cancel-intent.bin", strings.NewReader("content")); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	hashStarted := make(chan struct{})
+	fs.hashDeleteTargetFile = func(ctx context.Context, _ string) (string, error) {
+		close(hashStarted)
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	intentDone := make(chan error, 1)
+	go func() {
+		_, err := fs.PrepareDeleteIntents(ctx, []string{"/cancel-intent.bin"}, nil)
+		intentDone <- err
+	}()
+	<-hashStarted
+	cancel()
+
+	select {
+	case err := <-intentDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("PrepareDeleteIntents() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled delete intent did not stop hashing")
+	}
+
+	writeDone := make(chan error, 1)
+	go func() {
+		writeDone <- fs.WriteFile(context.Background(), "/after-cancel.bin", strings.NewReader("ok"))
+	}()
+	select {
+	case err := <-writeDone:
+		if err != nil {
+			t.Fatalf("WriteFile() after canceled intent error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled delete intent retained the filesystem read lock")
+	}
+}
+
+func TestFileSystem_ListTrashPreservesExpiresAtAfterRuntimePolicyUpdate(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+	fs.UpdateRuntimePolicySettings(RuntimePolicySettings{
+		MaxVersions:        10,
+		MaxVersionAge:      30 * 24 * time.Hour,
+		SweepInterval:      time.Hour,
+		TrashEnabled:       true,
+		TrashRetentionDays: 2,
+		MaxTrashSize:       4096,
+	})
+	if err := fs.WriteFile(ctx, "/persisted-expiration.txt", bytes.NewReader([]byte("trash me"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	policy := fs.CurrentDeletePolicy()
+	if err := fs.DeleteWithExpectedPolicy(ctx, "/persisted-expiration.txt", DeletePolicyExpectation{Mode: policy.Mode, Token: policy.Token}, nil); err != nil {
+		t.Fatalf("DeleteWithExpectedPolicy() error: %v", err)
+	}
+
+	before, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() before policy update error: %v", err)
+	}
+	if len(before) != 1 {
+		t.Fatalf("trash items before policy update = %d, want 1", len(before))
+	}
+	persistedExpiresAt := before[0].ExpiresAt
+	wantExpiresAt := before[0].DeletedAt.AddDate(0, 0, 2)
+	if !persistedExpiresAt.Equal(wantExpiresAt) {
+		t.Fatalf("persisted ExpiresAt = %s, want %s", persistedExpiresAt, wantExpiresAt)
+	}
+
+	fs.UpdateRuntimePolicySettings(RuntimePolicySettings{
+		MaxVersions:        3,
+		MaxVersionAge:      7 * 24 * time.Hour,
+		SweepInterval:      0,
+		TrashEnabled:       false,
+		TrashRetentionDays: 45,
+		MaxTrashSize:       8192,
+	})
+	after, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() after policy update error: %v", err)
+	}
+	if len(after) != 1 {
+		t.Fatalf("trash items after policy update = %d, want 1", len(after))
+	}
+	if after[0].ID != before[0].ID {
+		t.Fatalf("trash item ID after policy update = %q, want %q", after[0].ID, before[0].ID)
+	}
+	if !after[0].ExpiresAt.Equal(persistedExpiresAt) {
+		t.Fatalf("ExpiresAt after policy update = %s, want persisted value %s", after[0].ExpiresAt, persistedExpiresAt)
+	}
+}
+
 func TestFileSystem_Delete_RejectsSymlinkedTrashRootWithoutCreatingOutsideDir(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -1849,8 +3008,8 @@ func TestFileSystem_DeleteDirectoryWithSymlinkChildDoesNotLeaveTrashContent(t *t
 	}
 
 	err := fs.Delete(ctx, "/symlink-tree")
-	if !errors.Is(err, errStoragePathSymlink) {
-		t.Fatalf("Delete() error = %v, want errStoragePathSymlink", err)
+	if !errors.Is(err, ErrNotRegular) {
+		t.Fatalf("Delete() error = %v, want ErrNotRegular", err)
 	}
 	if _, statErr := fs.Stat(ctx, "/symlink-tree"); statErr != nil {
 		t.Fatalf("expected source directory to remain after rejected delete, got %v", statErr)
@@ -2177,6 +3336,9 @@ func TestFileSystem_Delete_ReturnsWarningWhenTrashCapacityCleanupFailsAfterVisib
 	var warningErr *TrashDeleteWarningError
 	if !errors.As(err, &warningErr) {
 		t.Fatalf("expected trash delete warning when capacity cleanup fails, got %v", err)
+	}
+	if isVisibleMutationWarning(err) {
+		t.Fatalf("capacity cleanup error was incorrectly marked as a persistence warning: %v", err)
 	}
 
 	itemsAfter, listErr := fs.ListTrash(ctx)
@@ -2790,9 +3952,9 @@ func TestFileSystem_PermanentDelete_ReturnsWarningWhenWorkspaceSyncFailsAfterDel
 		t.Fatalf("WriteFile() error: %v", err)
 	}
 
-	originalDelete := fs.deleteWorkspacePath
-	fs.deleteWorkspacePath = func(ctx context.Context, name string) error {
-		if err := originalDelete(ctx, name); err != nil {
+	originalDelete := fs.deleteStagedWorkspacePath
+	fs.deleteStagedWorkspacePath = func(ctx context.Context, name string, remove func() error) error {
+		if err := originalDelete(ctx, name, remove); err != nil {
 			return err
 		}
 		return workspace.WrapVisibleMutationWarning(errors.New("sync dir failed"))
@@ -2967,6 +4129,9 @@ func TestFileSystem_PermanentDelete_ReturnsWarningWhenVersionObjectCleanupFailsA
 	var warningErr *DeleteCleanupWarningError
 	if !errors.As(err, &warningErr) {
 		t.Fatalf("expected DeleteCleanupWarningError, got %v", err)
+	}
+	if isVisibleMutationWarning(err) {
+		t.Fatalf("version-object cleanup error was incorrectly marked as a persistence warning: %v", err)
 	}
 	if !strings.Contains(err.Error(), "failed to delete version objects") {
 		t.Fatalf("expected version object cleanup warning, got %v", err)
@@ -7326,7 +8491,7 @@ func TestFileSystem_WriteFile_ForcesRetentionSweepWhenFreeSpaceBelowThreshold(t 
 		}
 	}
 
-	fs.UpdateRetentionSettings(1, 365*24*time.Hour, ^uint64(0))
+	fs.UpdateRetentionSettings(1, 365*24*time.Hour, ^uint64(0), 0)
 	if err := fs.WriteFile(ctx, "/trigger.txt", bytes.NewReader([]byte("trigger"))); err != nil {
 		t.Fatalf("WriteFile(trigger) error: %v", err)
 	}
@@ -7354,7 +8519,7 @@ func TestFileSystem_WriteFile_DoesNotFailWhenForcedRetentionSweepFailsAfterCommi
 		}
 	}
 
-	fs.UpdateRetentionSettings(1, 365*24*time.Hour, ^uint64(0))
+	fs.UpdateRetentionSettings(1, 365*24*time.Hour, ^uint64(0), 0)
 	fs.deleteVersionObject = func(ctx context.Context, hash string) error {
 		return errors.New("delete version object failed")
 	}
@@ -7506,7 +8671,7 @@ func TestFileSystem_CleanupVersions_ZeroRetentionKeepsAllHistory(t *testing.T) {
 		}
 	}
 
-	fs.UpdateRetentionSettings(0, 0, 0)
+	fs.UpdateRetentionSettings(0, 0, 0, 0)
 	if err := fs.cleanupVersions(ctx, "/retention-unlimited.txt"); err != nil {
 		t.Fatalf("cleanupVersions() error: %v", err)
 	}
@@ -7541,7 +8706,7 @@ func TestFileSystem_CleanupVersions_RestoresMetadataWhenObjectDeleteFails(t *tes
 		t.Fatalf("expected current version plus three historical versions before cleanup, got %d", len(before))
 	}
 
-	fs.UpdateRetentionSettings(1, 365*24*time.Hour, 0)
+	fs.UpdateRetentionSettings(1, 365*24*time.Hour, 0, 0)
 	fs.deleteVersionObject = func(ctx context.Context, hash string) error {
 		return errors.New("delete version object failed")
 	}
@@ -7595,6 +8760,45 @@ func TestFileSystem_RunRetentionSweep_ReturnsContextCanceledBeforeListingPaths(t
 	err := fs.RunRetentionSweep(ctx)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestFileSystem_RunRetentionSweepContinuesTrashCleanupAfterVersionSweepFailure(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+	fs.UpdateTrashSettings(true, 0, 1<<20)
+	if err := fs.WriteFile(ctx, "/retention-domain-independence.txt", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/retention-domain-independence.txt", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/retention-domain-independence.txt"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+
+	versionSweepErr := errors.New("version sweep failed")
+	fs.listVersionPaths = func(context.Context) ([]string, error) {
+		return nil, versionSweepErr
+	}
+	fs.deleteVersionObject = func(context.Context, string) error {
+		return errors.New("version object cleanup failed")
+	}
+
+	err := fs.RunRetentionSweep(ctx)
+	if !errors.Is(err, versionSweepErr) {
+		t.Fatalf("RunRetentionSweep() error = %v, want version sweep error", err)
+	}
+	var trashWarning *TrashDeleteWarningError
+	if !errors.As(err, &trashWarning) {
+		t.Fatalf("RunRetentionSweep() error = %v, want TrashDeleteWarningError", err)
+	}
+	items, listErr := fs.ListTrash(ctx)
+	if listErr != nil {
+		t.Fatalf("ListTrash() error: %v", listErr)
+	}
+	if len(items) != 0 {
+		t.Fatalf("trash items after mixed-domain sweep = %d, want 0", len(items))
 	}
 }
 

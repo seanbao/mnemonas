@@ -45,7 +45,11 @@ func (m *RetentionMonitor) Start(ctx context.Context) {
 	cfg := m.cfg
 	m.mu.Unlock()
 
-	m.restartLocked(cfg)
+	m.restartLocked(cfg, func() {
+		if m.fs != nil {
+			m.fs.UpdateRetentionSettings(cfg.MaxVersions, cfg.MaxVersionAge, cfg.MinFreeSpace, cfg.SweepInterval)
+		}
+	})
 }
 
 func (m *RetentionMonitor) Stop() {
@@ -60,15 +64,32 @@ func (m *RetentionMonitor) UpdateConfig(cfg RetentionMonitorConfig) {
 	m.lifecycleMu.Lock()
 	defer m.lifecycleMu.Unlock()
 
-	if m.fs != nil {
-		m.fs.UpdateRetentionSettings(cfg.MaxVersions, cfg.MaxVersionAge, cfg.MinFreeSpace)
-	}
-	m.restartLocked(cfg)
+	m.restartLocked(cfg, func() {
+		if m.fs != nil {
+			m.fs.UpdateRetentionSettings(cfg.MaxVersions, cfg.MaxVersionAge, cfg.MinFreeSpace, cfg.SweepInterval)
+		}
+	})
 }
 
-func (m *RetentionMonitor) restartLocked(cfg RetentionMonitorConfig) {
+// UpdateConfigAndRuntimePolicy stops the active sweep, publishes the complete
+// runtime policy atomically, and then starts the replacement sweep loop.
+func (m *RetentionMonitor) UpdateConfigAndRuntimePolicy(cfg RetentionMonitorConfig, policy RuntimePolicySettings) {
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+
+	m.restartLocked(cfg, func() {
+		if m.fs != nil {
+			m.fs.UpdateRuntimePolicySettings(policy)
+		}
+	})
+}
+
+func (m *RetentionMonitor) restartLocked(cfg RetentionMonitorConfig, publishPolicy func()) {
 	m.stopLoopLocked()
 	m.wg.Wait()
+	if publishPolicy != nil {
+		publishPolicy()
+	}
 
 	m.mu.Lock()
 	m.cfg = cfg

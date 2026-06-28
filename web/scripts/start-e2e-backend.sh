@@ -80,6 +80,45 @@ elif isinstance(found, bool):
     -e "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p"
 }
 
+extract_file_delete_identity_token() {
+  local json="$1"
+  local target_path="$2"
+
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$json" | python3 -c '
+import json
+import sys
+
+target_path = sys.argv[1]
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+
+files = data.get("data", {}).get("files", []) if isinstance(data, dict) else []
+matches = [item for item in files if isinstance(item, dict) and item.get("path") == target_path]
+if len(matches) == 1 and isinstance(matches[0].get("deleteIdentityToken"), str):
+    sys.stdout.write(matches[0]["deleteIdentityToken"])
+' "$target_path" 2>/dev/null
+    return 0
+  fi
+
+  if command -v node >/dev/null 2>&1; then
+    printf '%s' "$json" | node -e '
+const fs = require("fs")
+const targetPath = process.argv[1]
+try {
+  const body = JSON.parse(fs.readFileSync(0, "utf8"))
+  const files = Array.isArray(body?.data?.files) ? body.data.files : []
+  const matches = files.filter((item) => item && item.path === targetPath)
+  if (matches.length === 1 && typeof matches[0].deleteIdentityToken === "string") {
+    process.stdout.write(matches[0].deleteIdentityToken)
+  }
+} catch {}
+' "$target_path" 2>/dev/null
+  fi
+}
+
 json_escape_string() {
   local value=$1
 
@@ -124,6 +163,8 @@ http_host_for_url() {
 
 seed_e2e_fixtures() {
   local login_response token user_id share_response share_id protected_share_id disabled_share_id folder_share_id password_change_required
+  local file_list_response observed_identity_token delete_intent_payload delete_intent_response
+  local delete_mode delete_policy_token echoed_identity_token delete_target_token
   local protected_share_password="playwright-secret"
 
   if [[ ! -f "$E2E_PASSWORD_FILE" ]]; then
@@ -245,8 +286,47 @@ seed_e2e_fixtures() {
   fi
   printf '%s\n' "$folder_share_id" > "$FOLDER_SHARE_ID_FILE"
 
-  curl -sf -X DELETE "$NASD_BASE_URL/api/v1/files/e2e-trash-fixture.txt" \
-    -H "Authorization: Bearer $token" >/dev/null
+  file_list_response=$(curl -sf "$NASD_BASE_URL/api/v1/files/" \
+    -H "Authorization: Bearer $token")
+  observed_identity_token=$(extract_file_delete_identity_token "$file_list_response" '/e2e-trash-fixture.txt')
+  if [[ ! "$observed_identity_token" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "failed to retrieve E2E delete identity token from the exact fixture listing" >&2
+    return 1
+  fi
+
+  delete_intent_payload=$(printf '{"targets":[{"path":%s,"observedIdentityToken":%s}]}' \
+    "$(json_escape_string '/e2e-trash-fixture.txt')" \
+    "$(json_escape_string "$observed_identity_token")")
+  delete_intent_response=$(curl -sf -X POST "$NASD_BASE_URL/api/v1/files-delete-intents" \
+    -H "Authorization: Bearer $token" \
+    -H 'Content-Type: application/json' \
+    -d "$delete_intent_payload")
+  delete_mode=$(extract_json_field "$delete_intent_response" 'deleteMode')
+  delete_policy_token=$(extract_json_field "$delete_intent_response" 'deletePolicyToken')
+  echoed_identity_token=$(extract_json_field "$delete_intent_response" 'deleteIdentityToken')
+  delete_target_token=$(extract_json_field "$delete_intent_response" 'deleteTargetToken')
+  if [[ "$delete_mode" != "trash" ]]; then
+    echo "E2E backend must use trash delete mode for the trash fixture" >&2
+    return 1
+  fi
+  if [[ ! "$delete_policy_token" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "failed to retrieve E2E delete policy token" >&2
+    return 1
+  fi
+  if [[ "$echoed_identity_token" != "$observed_identity_token" ]]; then
+    echo "E2E delete intent did not echo the observed identity token" >&2
+    return 1
+  fi
+  if [[ ! "$delete_target_token" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "failed to retrieve E2E delete target token" >&2
+    return 1
+  fi
+
+  curl -sf -G -X DELETE "$NASD_BASE_URL/api/v1/files/e2e-trash-fixture.txt" \
+    -H "Authorization: Bearer $token" \
+    --data-urlencode "expected_delete_mode=$delete_mode" \
+    --data-urlencode "expected_delete_policy_token=$delete_policy_token" \
+    --data-urlencode "expected_delete_target_token=$delete_target_token" >/dev/null
 }
 
 wait_for_url() {

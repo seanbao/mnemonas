@@ -294,3 +294,61 @@ func TestAuthorizeUserPathRejectsDirtyTargetBeforeHomeDirFallback(t *testing.T) 
 		t.Fatalf("authorizeUserReadPath(clean path) error = %v, want nil", err)
 	}
 }
+
+func TestDeletePathAuthorizerSnapshotAppliesExplicitRuleBeforeHomeFallback(t *testing.T) {
+	for _, homeDir := range []string{"", "/users/alice/../invalid"} {
+		t.Run(homeDir, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.Storage.DirectoryAccessRules = []config.DirectoryAccessRuleConfig{{
+				Path:       "/team",
+				WriteUsers: []string{"alice"},
+			}}
+			server := &Server{authEnabled: true, config: cfg}
+			ctx := context.WithValue(context.Background(), auth.ContextKeyUser, &auth.User{
+				Username: "alice",
+				Role:     auth.RoleUser,
+				HomeDir:  homeDir,
+			})
+
+			authorize, err := server.deletePathAuthorizerSnapshot(ctx)
+			if err != nil {
+				t.Fatalf("deletePathAuthorizerSnapshot() error = %v", err)
+			}
+			if err := authorize("/team/report.txt"); err != nil {
+				t.Fatalf("explicit write rule authorization error = %v, want nil", err)
+			}
+			if err := authorize("/unshared/report.txt"); !errors.Is(err, errPathOutsideHomeDir) {
+				t.Fatalf("home fallback authorization error = %v, want %v", err, errPathOutsideHomeDir)
+			}
+		})
+	}
+}
+
+func TestDeletePathAuthorizerSnapshotDoesNotObserveLaterRuleChanges(t *testing.T) {
+	cfg := config.Default()
+	cfg.Storage.DirectoryAccessRules = []config.DirectoryAccessRuleConfig{{
+		Path:       "/team",
+		WriteUsers: []string{"alice"},
+	}}
+	server := &Server{authEnabled: true, config: cfg}
+	ctx := context.WithValue(context.Background(), auth.ContextKeyUser, &auth.User{
+		Username: "alice",
+		Role:     auth.RoleUser,
+		HomeDir:  "/users/alice",
+	})
+
+	authorize, err := server.deletePathAuthorizerSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("deletePathAuthorizerSnapshot() error = %v", err)
+	}
+	updated := server.currentConfig()
+	updated.Storage.DirectoryAccessRules = []config.DirectoryAccessRuleConfig{{
+		Path:       "/team",
+		WriteUsers: []string{"bob"},
+	}}
+	server.storeConfig(updated)
+
+	if err := authorize("/team/report.txt"); err != nil {
+		t.Fatalf("captured authorizer observed later rule change: %v", err)
+	}
+}

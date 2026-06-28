@@ -50,6 +50,7 @@ func expectedRESTRouteContracts() []string {
 		"POST /api/v1/files/*",
 		"DELETE /api/v1/files/*",
 		"POST /api/v1/files-copy",
+		"POST /api/v1/files-delete-intents",
 		"POST /api/v1/files-move",
 		"GET /api/v1/maintenance/backups",
 		"POST /api/v1/maintenance/backups",

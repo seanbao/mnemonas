@@ -84,7 +84,9 @@ vi.mock('@/hooks', () => ({
 }))
 
 vi.mock('@/api/files', () => ({
+  MAX_DELETE_INTENT_TARGETS: 1000,
   listFiles: vi.fn(),
+  createFileDeleteIntent: vi.fn(),
   deleteFile: vi.fn(),
   createDirectory: vi.fn(),
   uploadFile: vi.fn(),
@@ -184,6 +186,10 @@ describe('FilesPage upload queue', () => {
     mockListFiles.mockResolvedValue({
       files: [],
       path: '/',
+      deleteMode: 'trash',
+      deletePolicyToken: '1'.repeat(64),
+      trashRetentionDays: 30,
+      trashAutoCleanupEnabled: true,
     })
     mockUploadFile.mockResolvedValue(successActionResult)
     mockCreateDirectory.mockResolvedValue(successActionResult)

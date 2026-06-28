@@ -95,7 +95,9 @@ vi.mock('@/hooks', () => ({
 }))
 
 vi.mock('@/api/files', () => ({
+  MAX_DELETE_INTENT_TARGETS: 1000,
   listFiles: vi.fn(),
+  createFileDeleteIntent: vi.fn(),
   deleteFile: vi.fn(),
   createDirectory: vi.fn(),
   uploadFile: vi.fn(),
@@ -156,10 +158,14 @@ describe('FilesPage sharing behavior', () => {
     mockListShares.mockResolvedValue([])
     mockListFiles.mockResolvedValue({
       files: [
-        { name: 'folder', path: '/folder', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
-        { name: 'video.mp4', path: '/video.mp4', isDir: false, size: 1024, modTime: '2024-01-02T00:00:00Z' },
+        { name: 'folder', path: '/folder', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken: '5'.repeat(64) },
+        { name: 'video.mp4', path: '/video.mp4', isDir: false, size: 1024, modTime: '2024-01-02T00:00:00Z', deleteIdentityToken: '5'.repeat(64) },
       ],
       path: '/',
+      deleteMode: 'trash',
+      deletePolicyToken: '1'.repeat(64),
+      trashRetentionDays: 30,
+      trashAutoCleanupEnabled: true,
     })
   })
 

@@ -36,7 +36,9 @@ vi.mock('@/api/files', () => ({
   },
   MAX_UPLOAD_FILE_SIZE_BYTES: 50 * 1024 * 1024,
   MAX_UPLOAD_FILE_SIZE_LABEL: '50 MB',
+  MAX_DELETE_INTENT_TARGETS: 1000,
   listFiles: vi.fn(),
+  createFileDeleteIntent: vi.fn(),
   deleteFile: vi.fn(),
   createDirectory: vi.fn(),
   uploadFile: vi.fn(),
@@ -111,15 +113,22 @@ vi.mock('@/components/share', () => ({
   ShareDialog: () => null,
 }))
 
-import { listFiles, downloadFile } from '@/api/files'
+import { listFiles, createFileDeleteIntent, downloadFile } from '@/api/files'
 import { checkFavorites, toggleFavorite } from '@/api/favorites'
 import { listShares } from '@/api/share'
 
 const mockListFiles = vi.mocked(listFiles)
+const mockCreateFileDeleteIntent = vi.mocked(createFileDeleteIntent)
 const mockDownloadFile = vi.mocked(downloadFile)
 const mockCheckFavorites = vi.mocked(checkFavorites)
 const mockToggleFavorite = vi.mocked(toggleFavorite)
 const mockListShares = vi.mocked(listShares)
+
+const defaultFiles = [
+  { name: 'documents', path: '/documents', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken: '5'.repeat(64) },
+  { name: 'photo.jpg', path: '/photo.jpg', isDir: false, size: 1024000, modTime: '2024-01-02T00:00:00Z', deleteIdentityToken: '5'.repeat(64) },
+  { name: 'video.mp4', path: '/video.mp4', isDir: false, size: 10240000, modTime: '2024-01-03T00:00:00Z', deleteIdentityToken: '5'.repeat(64) },
+]
 
 async function getFileActionArea(name: string) {
   const row = await screen.findByRole('group', { name: `${name} 文件项` })
@@ -159,13 +168,28 @@ describe('FilesPage list row actions', () => {
       '/video.mp4': false,
     })
     mockToggleFavorite.mockResolvedValue({ isFavorited: true, warning: false, message: undefined })
+    mockCreateFileDeleteIntent.mockReset()
+    mockCreateFileDeleteIntent.mockImplementation(async (requestedTargets) => {
+      const targets = requestedTargets.map((target) => {
+        const file = defaultFiles.find((candidate) => candidate.path === target.path)
+        if (!file) throw new Error(`Unexpected delete target: ${target.path}`)
+        return { ...file, deleteIdentityToken: target.observedIdentityToken, deleteTargetToken: '3'.repeat(64) }
+      })
+      return {
+        deleteMode: 'trash',
+        deletePolicyToken: '1'.repeat(64),
+        trashRetentionDays: 30,
+        trashAutoCleanupEnabled: true,
+        targets,
+      }
+    })
     mockListFiles.mockResolvedValue({
-      files: [
-        { name: 'documents', path: '/documents', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
-        { name: 'photo.jpg', path: '/photo.jpg', isDir: false, size: 1024000, modTime: '2024-01-02T00:00:00Z' },
-        { name: 'video.mp4', path: '/video.mp4', isDir: false, size: 10240000, modTime: '2024-01-03T00:00:00Z' },
-      ],
+      files: defaultFiles,
       path: '/',
+      deleteMode: 'trash',
+      deletePolicyToken: '1'.repeat(64),
+      trashRetentionDays: 30,
+      trashAutoCleanupEnabled: true,
     })
   })
 
@@ -281,7 +305,7 @@ describe('FilesPage list row actions', () => {
     await user.click(screen.getByRole('button', { name: '取消' }))
 
     await user.click(within(actionArea).getByText('删除'))
-    expect(await screen.findByRole('heading', { name: '确认删除' })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: '移入回收站' })).toBeTruthy()
     await user.click(screen.getByRole('button', { name: '取消' }))
 
     await user.click(within(actionArea).getByText('添加收藏'))

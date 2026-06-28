@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -487,13 +488,21 @@ func requireQuotaResponsePath(t *testing.T, body, wantPath string, forbiddenFrag
 }
 
 type fakeRetentionMonitor struct {
-	updateCount int
-	lastConfig  storage.RetentionMonitorConfig
+	updateCount  int
+	lastConfig   storage.RetentionMonitorConfig
+	lastPolicy   storage.RuntimePolicySettings
+	fs           *storage.FileSystem
+	policyBefore storage.DeletePolicy
 }
 
-func (m *fakeRetentionMonitor) UpdateConfig(cfg storage.RetentionMonitorConfig) {
+func (m *fakeRetentionMonitor) UpdateConfigAndRuntimePolicy(cfg storage.RetentionMonitorConfig, policy storage.RuntimePolicySettings) {
 	m.updateCount++
 	m.lastConfig = cfg
+	m.lastPolicy = policy
+	if m.fs != nil {
+		m.policyBefore = m.fs.CurrentDeletePolicy()
+		m.fs.UpdateRuntimePolicySettings(policy)
+	}
 }
 
 type fakeDiskHealthMonitor struct {
@@ -635,6 +644,67 @@ func setupTestServer(t *testing.T) (*Server, *storage.FileSystem, string) {
 	}
 
 	return server, fs, tmpDir
+}
+
+func deleteFileRequestURL(t *testing.T, fs *storage.FileSystem, requestPath string) string {
+	t.Helper()
+	policy := fs.CurrentDeletePolicy()
+	return deleteFileRequestURLWithExpectation(t, fs, requestPath, storage.DeletePolicyExpectation{
+		Mode:  policy.Mode,
+		Token: policy.Token,
+	})
+}
+
+func deleteFileRequestURLWithExpectation(t *testing.T, fs *storage.FileSystem, requestPath string, expected storage.DeletePolicyExpectation) string {
+	t.Helper()
+	parsed, err := url.Parse(requestPath)
+	if err != nil {
+		t.Fatalf("parse delete request path %q: %v", requestPath, err)
+	}
+	targetPath := strings.TrimPrefix(parsed.Path, "/api/v1/files")
+	intent, prepareErr := fs.PrepareDeleteIntents(context.Background(), []string{targetPath}, nil)
+	targetToken := strings.Repeat("0", sha256.Size*2)
+	if prepareErr == nil && len(intent.Targets) == 1 {
+		targetToken = intent.Targets[0].Token
+	}
+	return deleteFileRequestURLWithTokens(t, requestPath, expected, targetToken)
+}
+
+func deleteFileRequestURLWithTokens(t *testing.T, requestPath string, expected storage.DeletePolicyExpectation, targetToken string) string {
+	t.Helper()
+	parsed, err := url.Parse(requestPath)
+	if err != nil {
+		t.Fatalf("parse delete request path %q: %v", requestPath, err)
+	}
+	query := parsed.Query()
+	query.Set("expected_delete_mode", string(expected.Mode))
+	query.Set("expected_delete_policy_token", expected.Token)
+	query.Set("expected_delete_target_token", targetToken)
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
+func observedDeleteIntentRequestBody(t *testing.T, fs *storage.FileSystem, targetPaths ...string) []byte {
+	t.Helper()
+	targets := make([]prepareDeleteIntentTargetRequest, 0, len(targetPaths))
+	for _, targetPath := range targetPaths {
+		info, err := fs.Stat(context.Background(), targetPath)
+		if err != nil {
+			t.Fatalf("Stat(%s) for delete intent: %v", targetPath, err)
+		}
+		if !validDeletePolicyToken(info.DeleteIdentityToken) {
+			t.Fatalf("Stat(%s) delete identity token = %q", targetPath, info.DeleteIdentityToken)
+		}
+		targets = append(targets, prepareDeleteIntentTargetRequest{
+			Path:                  targetPath,
+			ObservedIdentityToken: info.DeleteIdentityToken,
+		})
+	}
+	body, err := json.Marshal(prepareDeleteIntentsRequest{Targets: targets})
+	if err != nil {
+		t.Fatalf("Marshal(delete intent targets) error: %v", err)
+	}
+	return body
 }
 
 func TestServer_PathChangeHooks_CallAdditionalListeners(t *testing.T) {
@@ -2104,6 +2174,12 @@ func TestServer_BuildMetadataUsesConfiguredValues(t *testing.T) {
 func TestServer_ListFiles(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
+	fs.UpdateRuntimePolicySettings(storage.RuntimePolicySettings{
+		SweepInterval:      time.Minute,
+		TrashEnabled:       false,
+		TrashRetentionDays: 12,
+		MaxTrashSize:       4096,
+	})
 
 	fs.Mkdir(ctx, "/testdir")
 	fs.WriteFile(ctx, "/testdir/file.txt", bytes.NewReader([]byte("test")))
@@ -2119,7 +2195,11 @@ func TestServer_ListFiles(t *testing.T) {
 		}
 		var payload struct {
 			Data struct {
-				Capabilities filePathCapabilities `json:"capabilities"`
+				Capabilities            filePathCapabilities `json:"capabilities"`
+				DeleteMode              storage.DeleteMode   `json:"deleteMode"`
+				DeletePolicyToken       string               `json:"deletePolicyToken"`
+				TrashRetentionDays      int                  `json:"trashRetentionDays"`
+				TrashAutoCleanupEnabled bool                 `json:"trashAutoCleanupEnabled"`
 			} `json:"data"`
 		}
 		if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
@@ -2127,6 +2207,12 @@ func TestServer_ListFiles(t *testing.T) {
 		}
 		if !payload.Data.Capabilities.Read || payload.Data.Capabilities.ConcreteRead || !payload.Data.Capabilities.Write {
 			t.Fatalf("root list capabilities = %+v, want navigation read/write without concrete read", payload.Data.Capabilities)
+		}
+		if payload.Data.DeleteMode != storage.DeleteModePermanent || payload.Data.TrashRetentionDays != 12 || !payload.Data.TrashAutoCleanupEnabled {
+			t.Fatalf("root list delete policy = mode %q, retention %d, auto cleanup %t", payload.Data.DeleteMode, payload.Data.TrashRetentionDays, payload.Data.TrashAutoCleanupEnabled)
+		}
+		if payload.Data.DeletePolicyToken != fs.CurrentDeletePolicy().Token || !validDeletePolicyToken(payload.Data.DeletePolicyToken) {
+			t.Fatalf("root list delete policy token = %q, want current lowercase SHA-256 token", payload.Data.DeletePolicyToken)
 		}
 	})
 
@@ -2688,6 +2774,461 @@ func TestServer_Activity_InvalidPaginationReturnsBadRequest(t *testing.T) {
 	}
 }
 
+func TestServer_PrepareDeleteIntentsReturnsPolicyAndTargetsInRequestOrder(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+	for _, dir := range []string{"/intent-tree", "/intent-tree/nested", "/intent-empty"} {
+		if err := fs.Mkdir(ctx, dir); err != nil {
+			t.Fatalf("Mkdir(%s) error: %v", dir, err)
+		}
+	}
+	if err := fs.WriteFile(ctx, "/intent-tree/nested/child.bin", strings.NewReader("child")); err != nil {
+		t.Fatalf("WriteFile(child) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/intent-file.bin", strings.NewReader("file")); err != nil {
+		t.Fatalf("WriteFile(file) error: %v", err)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/files/", nil)
+	listWriter := httptest.NewRecorder()
+	server.Router().ServeHTTP(listWriter, listReq)
+	if listWriter.Code != http.StatusOK {
+		t.Fatalf("list files status = %d, want %d; body=%s", listWriter.Code, http.StatusOK, listWriter.Body.String())
+	}
+	var listResponse struct {
+		Data struct {
+			Files []struct {
+				Path                string `json:"path"`
+				Name                string `json:"name"`
+				IsDir               bool   `json:"isDir"`
+				Size                int64  `json:"size"`
+				ModTime             string `json:"modTime"`
+				DeleteIdentityToken string `json:"deleteIdentityToken"`
+			} `json:"files"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(listWriter.Body.Bytes(), &listResponse); err != nil {
+		t.Fatalf("decode list files response: %v", err)
+	}
+	listedTargets := make(map[string]struct {
+		Name                string
+		IsDir               bool
+		Size                int64
+		ModTime             string
+		DeleteIdentityToken string
+	}, len(listResponse.Data.Files))
+	for _, file := range listResponse.Data.Files {
+		listedTargets[file.Path] = struct {
+			Name                string
+			IsDir               bool
+			Size                int64
+			ModTime             string
+			DeleteIdentityToken string
+		}{Name: file.Name, IsDir: file.IsDir, Size: file.Size, ModTime: file.ModTime, DeleteIdentityToken: file.DeleteIdentityToken}
+	}
+
+	requestPaths := []string{"/intent-file.bin", "/intent-tree", "/intent-empty"}
+	requestTargets := make([]prepareDeleteIntentTargetRequest, 0, len(requestPaths))
+	for _, targetPath := range requestPaths {
+		listed, ok := listedTargets[targetPath]
+		if !ok || !validDeletePolicyToken(listed.DeleteIdentityToken) {
+			t.Fatalf("listed target %s identity = %+v", targetPath, listed)
+		}
+		requestTargets = append(requestTargets, prepareDeleteIntentTargetRequest{
+			Path:                  targetPath,
+			ObservedIdentityToken: listed.DeleteIdentityToken,
+		})
+	}
+	requestBody, err := json.Marshal(prepareDeleteIntentsRequest{Targets: requestTargets})
+	if err != nil {
+		t.Fatalf("Marshal(delete intent request) error: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-delete-intents", bytes.NewReader(requestBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("prepare delete intents status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var response struct {
+		Data struct {
+			DeleteMode              storage.DeleteMode `json:"deleteMode"`
+			DeletePolicyToken       string             `json:"deletePolicyToken"`
+			TrashRetentionDays      int                `json:"trashRetentionDays"`
+			TrashAutoCleanupEnabled bool               `json:"trashAutoCleanupEnabled"`
+			Targets                 []struct {
+				Path                string `json:"path"`
+				Name                string `json:"name"`
+				IsDir               bool   `json:"isDir"`
+				Size                int64  `json:"size"`
+				ModTime             string `json:"modTime"`
+				DeleteIdentityToken string `json:"deleteIdentityToken"`
+				DeleteTargetToken   string `json:"deleteTargetToken"`
+			} `json:"targets"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode prepare delete intents response: %v", err)
+	}
+	policy := fs.CurrentDeletePolicy()
+	if response.Data.DeleteMode != policy.Mode || response.Data.DeletePolicyToken != policy.Token || response.Data.TrashRetentionDays != policy.TrashRetentionDays || response.Data.TrashAutoCleanupEnabled != policy.TrashAutoCleanupEnabled {
+		t.Fatalf("intent policy response = %+v, want %+v", response.Data, policy)
+	}
+	wantPaths := requestPaths
+	if len(response.Data.Targets) != len(wantPaths) {
+		t.Fatalf("intent target count = %d, want %d", len(response.Data.Targets), len(wantPaths))
+	}
+	for i, wantPath := range wantPaths {
+		target := response.Data.Targets[i]
+		if target.Path != wantPath || target.Name != path.Base(wantPath) {
+			t.Fatalf("target[%d] = %+v, want path %q", i, target, wantPath)
+		}
+		if _, err := time.Parse(time.RFC3339Nano, target.ModTime); err != nil || !validDeletePolicyToken(target.DeleteTargetToken) || !validDeletePolicyToken(target.DeleteIdentityToken) {
+			t.Fatalf("target[%d] metadata/token = %+v", i, target)
+		}
+		listed, ok := listedTargets[target.Path]
+		if !ok || listed.Name != target.Name || listed.IsDir != target.IsDir || listed.Size != target.Size || listed.ModTime != target.ModTime || listed.DeleteIdentityToken != target.DeleteIdentityToken {
+			t.Fatalf("target[%d] metadata = %+v, want list snapshot %+v", i, target, listed)
+		}
+	}
+	if response.Data.Targets[0].IsDir || !response.Data.Targets[1].IsDir || !response.Data.Targets[2].IsDir {
+		t.Fatalf("unexpected target types: %+v", response.Data.Targets)
+	}
+}
+
+func TestServer_ListFilesUsesNullWhenDeleteIdentityIsUnavailable(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	rec := httptest.NewRecorder()
+	server.writeListFilesResponse(context.Background(), rec, "/", []*storage.FileInfo{{
+		Path:    "/unsupported.txt",
+		Name:    "unsupported.txt",
+		ModTime: time.Unix(1_700_000_000, 0),
+	}}, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list files status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var response struct {
+		Data struct {
+			Files []map[string]any `json:"files"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	if len(response.Data.Files) != 1 {
+		t.Fatalf("list files = %+v", response.Data.Files)
+	}
+	value, exists := response.Data.Files[0]["deleteIdentityToken"]
+	if !exists || value != nil {
+		t.Fatalf("unavailable delete identity = %#v (present=%v), want null", value, exists)
+	}
+}
+
+func TestServer_PrepareDeleteIntentsRejectsSameMetadataReplacementIdentity(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		create func(string) error
+	}{
+		{
+			name: "file",
+			create: func(hostPath string) error {
+				return os.WriteFile(hostPath, []byte("same"), 0o600)
+			},
+		},
+		{
+			name: "directory",
+			create: func(hostPath string) error {
+				return os.Mkdir(hostPath, 0o700)
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			server, _, tmpDir := setupTestServer(t)
+			filesRoot := filepath.Join(tmpDir, "files")
+			targetPath := filepath.Join(filesRoot, "selected")
+			replacementPath := filepath.Join(filesRoot, "replacement")
+			if err := testCase.create(targetPath); err != nil {
+				t.Fatalf("create target: %v", err)
+			}
+			if err := testCase.create(replacementPath); err != nil {
+				t.Fatalf("create replacement: %v", err)
+			}
+			fixedTime := time.Unix(1_700_000_000, 123_456_789)
+			for _, hostPath := range []string{targetPath, replacementPath} {
+				if err := os.Chtimes(hostPath, fixedTime, fixedTime); err != nil {
+					t.Fatalf("Chtimes(%s) error: %v", hostPath, err)
+				}
+			}
+
+			listed := listFileDeleteIdentityForTest(t, server, "/selected")
+			asidePath := filepath.Join(filesRoot, "original")
+			if err := os.Rename(targetPath, asidePath); err != nil {
+				t.Fatalf("Rename(target aside) error: %v", err)
+			}
+			if err := os.Rename(replacementPath, targetPath); err != nil {
+				t.Fatalf("Rename(replacement) error: %v", err)
+			}
+
+			staleBody, err := json.Marshal(prepareDeleteIntentsRequest{Targets: []prepareDeleteIntentTargetRequest{{
+				Path:                  "/selected",
+				ObservedIdentityToken: listed.DeleteIdentityToken,
+			}}})
+			if err != nil {
+				t.Fatalf("Marshal(stale target) error: %v", err)
+			}
+			staleReq := httptest.NewRequest(http.MethodPost, "/api/v1/files-delete-intents", bytes.NewReader(staleBody))
+			staleReq.Header.Set("Content-Type", "application/json")
+			staleRec := httptest.NewRecorder()
+			server.Router().ServeHTTP(staleRec, staleReq)
+			if staleRec.Code != http.StatusConflict {
+				t.Fatalf("stale identity status = %d, want %d; body=%s", staleRec.Code, http.StatusConflict, staleRec.Body.String())
+			}
+			var apiErr APIError
+			if err := json.Unmarshal(staleRec.Body.Bytes(), &apiErr); err != nil {
+				t.Fatalf("decode stale identity error: %v", err)
+			}
+			details, ok := apiErr.Details.(map[string]any)
+			if apiErr.Code != ErrCodeDeleteTargetChanged || !ok || len(details) != 1 || details["path"] != "/selected" {
+				t.Fatalf("stale identity response = %+v", apiErr)
+			}
+
+			current := listFileDeleteIdentityForTest(t, server, "/selected")
+			if current.IsDir != listed.IsDir || current.Size != listed.Size || current.ModTime != listed.ModTime {
+				t.Fatalf("replacement metadata changed: listed=%+v current=%+v", listed, current)
+			}
+			if current.DeleteIdentityToken == listed.DeleteIdentityToken {
+				t.Fatalf("same-metadata replacement retained identity %q", current.DeleteIdentityToken)
+			}
+			currentReq := httptest.NewRequest(http.MethodPost, "/api/v1/files-delete-intents", bytes.NewReader(observedDeleteIntentRequestBodyFromListedTarget(t, current)))
+			currentReq.Header.Set("Content-Type", "application/json")
+			currentRec := httptest.NewRecorder()
+			server.Router().ServeHTTP(currentRec, currentReq)
+			if currentRec.Code != http.StatusOK {
+				t.Fatalf("current identity status = %d, want %d; body=%s", currentRec.Code, http.StatusOK, currentRec.Body.String())
+			}
+			if !strings.Contains(currentRec.Body.String(), current.DeleteIdentityToken) {
+				t.Fatalf("current identity response did not echo token: %s", currentRec.Body.String())
+			}
+		})
+	}
+}
+
+type listedDeleteIdentityTarget struct {
+	Path                string `json:"path"`
+	IsDir               bool   `json:"isDir"`
+	Size                int64  `json:"size"`
+	ModTime             string `json:"modTime"`
+	DeleteIdentityToken string `json:"deleteIdentityToken"`
+}
+
+func listFileDeleteIdentityForTest(t *testing.T, server *Server, targetPath string) listedDeleteIdentityTarget {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/files/", nil)
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list files status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var response struct {
+		Data struct {
+			Files []listedDeleteIdentityTarget `json:"files"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	for _, target := range response.Data.Files {
+		if target.Path == targetPath {
+			if !validDeletePolicyToken(target.DeleteIdentityToken) {
+				t.Fatalf("listed delete identity token = %q", target.DeleteIdentityToken)
+			}
+			return target
+		}
+	}
+	t.Fatalf("list response does not contain %s: %s", targetPath, rec.Body.String())
+	return listedDeleteIdentityTarget{}
+}
+
+func observedDeleteIntentRequestBodyFromListedTarget(t *testing.T, target listedDeleteIdentityTarget) []byte {
+	t.Helper()
+	body, err := json.Marshal(prepareDeleteIntentsRequest{Targets: []prepareDeleteIntentTargetRequest{{
+		Path:                  target.Path,
+		ObservedIdentityToken: target.DeleteIdentityToken,
+	}}})
+	if err != nil {
+		t.Fatalf("Marshal(listed delete target) error: %v", err)
+	}
+	return body
+}
+
+func TestServer_PrepareDeleteIntentsStrictRequestValidation(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	validToken := strings.Repeat("a", sha256.Size*2)
+	target := func(targetPath, token string) string {
+		return fmt.Sprintf(`{"path":%q,"observedIdentityToken":%q}`, targetPath, token)
+	}
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "missing targets", body: `{}`},
+		{name: "null targets", body: `{"targets":null}`},
+		{name: "empty targets", body: `{"targets":[]}`},
+		{name: "legacy paths", body: fmt.Sprintf(`{"paths":["/a"],"targets":[%s]}`, target("/a", validToken))},
+		{name: "empty target", body: `{"targets":[{}]}`},
+		{name: "empty path", body: fmt.Sprintf(`{"targets":[%s]}`, target("", validToken))},
+		{name: "root", body: fmt.Sprintf(`{"targets":[%s]}`, target("/", validToken))},
+		{name: "missing token", body: `{"targets":[{"path":"/a"}]}`},
+		{name: "null token", body: `{"targets":[{"path":"/a","observedIdentityToken":null}]}`},
+		{name: "short token", body: fmt.Sprintf(`{"targets":[%s]}`, target("/a", validToken[:len(validToken)-1]))},
+		{name: "uppercase token", body: fmt.Sprintf(`{"targets":[%s]}`, target("/a", strings.ToUpper(validToken)))},
+		{name: "nonhex token", body: fmt.Sprintf(`{"targets":[%s]}`, target("/a", strings.Repeat("z", sha256.Size*2)))},
+		{name: "token whitespace", body: fmt.Sprintf(`{"targets":[%s]}`, target("/a", " "+validToken))},
+		{name: "duplicate", body: fmt.Sprintf(`{"targets":[%s,%s]}`, target("/a", validToken), target("/a/", validToken))},
+		{name: "ancestor descendant", body: fmt.Sprintf(`{"targets":[%s,%s]}`, target("/a", validToken), target("/a/b", validToken))},
+		{name: "descendant ancestor", body: fmt.Sprintf(`{"targets":[%s,%s]}`, target("/a/b", validToken), target("/a", validToken))},
+		{name: "unknown top-level field", body: fmt.Sprintf(`{"targets":[%s],"extra":true}`, target("/a", validToken))},
+		{name: "unknown target field", body: fmt.Sprintf(`{"targets":[{"path":"/a","observedIdentityToken":%q,"extra":true}]}`, validToken)},
+		{name: "trailing json", body: fmt.Sprintf(`{"targets":[%s]}{}`, target("/a", validToken))},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/files-delete-intents", strings.NewReader(testCase.body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			server.Router().ServeHTTP(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("invalid intent status = %d, want %d; body=%s", w.Code, http.StatusBadRequest, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestServer_PrepareDeleteIntentsBatchLimitBoundary(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	request := func(count int) *httptest.ResponseRecorder {
+		targets := make([]prepareDeleteIntentTargetRequest, count)
+		for i := range targets {
+			targets[i] = prepareDeleteIntentTargetRequest{
+				Path:                  fmt.Sprintf("/missing-%04d", i),
+				ObservedIdentityToken: strings.Repeat("a", sha256.Size*2),
+			}
+		}
+		body, err := json.Marshal(prepareDeleteIntentsRequest{Targets: targets})
+		if err != nil {
+			t.Fatalf("Marshal(targets) error: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/files-delete-intents", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		server.Router().ServeHTTP(w, req)
+		return w
+	}
+
+	atLimit := request(storage.MaxDeleteIntentTargets)
+	if atLimit.Code != http.StatusNotFound {
+		t.Fatalf("at-limit intent status = %d, want %d to prove request passed validation; body=%s", atLimit.Code, http.StatusNotFound, atLimit.Body.String())
+	}
+	overLimit := request(storage.MaxDeleteIntentTargets + 1)
+	if overLimit.Code != http.StatusBadRequest {
+		t.Fatalf("over-limit intent status = %d, want %d; body=%s", overLimit.Code, http.StatusBadRequest, overLimit.Body.String())
+	}
+	if !strings.Contains(overLimit.Body.String(), strconv.Itoa(storage.MaxDeleteIntentTargets)) {
+		t.Fatalf("over-limit response does not report limit %d: %s", storage.MaxDeleteIntentTargets, overLimit.Body.String())
+	}
+}
+
+func TestServer_PrepareDeleteIntentsRejectsOutsideHomeBeforeExistenceLookup(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+	setUserHomeDirForTest(t, server, username, "/tester")
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/outside"); err != nil {
+		t.Fatalf("Mkdir(outside) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/outside/existing.bin", strings.NewReader("secret")); err != nil {
+		t.Fatalf("WriteFile(outside) error: %v", err)
+	}
+	hashCalls := 0
+	setStorageHook(t, fs, "hashDeleteTargetFile", func(context.Context, string) (string, error) {
+		hashCalls++
+		return "", errors.New("unexpected target hash")
+	})
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	var codes []string
+	var messages []string
+	for _, targetPath := range []string{"/outside/existing.bin", "/outside/missing.bin"} {
+		body, err := json.Marshal(prepareDeleteIntentsRequest{Targets: []prepareDeleteIntentTargetRequest{{
+			Path:                  targetPath,
+			ObservedIdentityToken: strings.Repeat("a", sha256.Size*2),
+		}}})
+		if err != nil {
+			t.Fatalf("Marshal() error: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/files-delete-intents", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		server.Router().ServeHTTP(w, req)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("outside-home intent for %s status = %d, want %d; body=%s", targetPath, w.Code, http.StatusForbidden, w.Body.String())
+		}
+		var apiErr APIError
+		if err := json.Unmarshal(w.Body.Bytes(), &apiErr); err != nil {
+			t.Fatalf("decode outside-home error: %v", err)
+		}
+		codes = append(codes, apiErr.Code)
+		messages = append(messages, apiErr.Message)
+	}
+	if !slices.Equal(codes, []string{ErrCodeForbidden, ErrCodeForbidden}) || messages[0] != messages[1] {
+		t.Fatalf("outside-home existence responses differ: codes=%v messages=%v", codes, messages)
+	}
+	if hashCalls != 0 {
+		t.Fatalf("outside-home intent hashed storage targets %d times, want 0", hashCalls)
+	}
+}
+
+func TestServer_PrepareDeleteIntentsStopsBeforeHashingDeniedDescendant(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+	setUserHomeDirForTest(t, server, username, "/tester")
+	setDirectoryAccessRulesForTest(t, server, []config.DirectoryAccessRuleConfig{
+		{Path: "/team", WriteUsers: []string{username}},
+		{Path: "/team/private", WriteUsers: []string{"other"}},
+	})
+	ctx := context.Background()
+	for _, dir := range []string{"/team", "/team/private"} {
+		if err := fs.Mkdir(ctx, dir); err != nil {
+			t.Fatalf("Mkdir(%s) error: %v", dir, err)
+		}
+	}
+	if err := fs.WriteFile(ctx, "/team/allowed.bin", strings.NewReader("allowed")); err != nil {
+		t.Fatalf("WriteFile(allowed) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/private/secret.bin", strings.NewReader("secret")); err != nil {
+		t.Fatalf("WriteFile(secret) error: %v", err)
+	}
+	var hashed []string
+	setStorageHook(t, fs, "hashDeleteTargetFile", func(_ context.Context, targetPath string) (string, error) {
+		hashed = append(hashed, targetPath)
+		return strings.Repeat("0", sha256.Size*2), nil
+	})
+
+	token := loginAndGetAccessToken(t, server, username, password)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-delete-intents", bytes.NewReader(observedDeleteIntentRequestBody(t, fs, "/team")))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("denied descendant intent status = %d, want %d; body=%s", w.Code, http.StatusForbidden, w.Body.String())
+	}
+	if slices.Contains(hashed, "/team/private/secret.bin") {
+		t.Fatalf("denied descendant content was hashed: %v", hashed)
+	}
+}
+
 func TestServer_DeleteFile(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
@@ -2695,7 +3236,7 @@ func TestServer_DeleteFile(t *testing.T) {
 	fs.Mkdir(ctx, "/delete")
 	fs.WriteFile(ctx, "/delete/file.txt", bytes.NewReader([]byte("delete me")))
 
-	req := httptest.NewRequest("DELETE", "/api/v1/files/delete/file.txt", nil)
+	req := httptest.NewRequest(http.MethodDelete, deleteFileRequestURL(t, fs, "/api/v1/files/delete/file.txt"), nil)
 	w := httptest.NewRecorder()
 
 	server.Router().ServeHTTP(w, req)
@@ -2710,6 +3251,614 @@ func TestServer_DeleteFile(t *testing.T) {
 	}
 }
 
+func TestServer_DeleteFile_RequiresExpectedDeleteMode(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+	if err := fs.WriteFile(ctx, "/missing-delete-mode.txt", strings.NewReader("keep")); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	token := fs.CurrentDeletePolicy().Token
+
+	for _, requestPath := range []string{
+		"/api/v1/files/missing-delete-mode.txt?expected_delete_policy_token=" + token,
+		"/api/v1/files/missing-delete-mode.txt?expected_delete_mode=&expected_delete_policy_token=" + token,
+	} {
+		req := httptest.NewRequest(http.MethodDelete, requestPath, nil)
+		w := httptest.NewRecorder()
+		server.Router().ServeHTTP(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("missing expected mode status = %d, want %d; body=%s", w.Code, http.StatusBadRequest, w.Body.String())
+		}
+		var apiErr APIError
+		if err := json.Unmarshal(w.Body.Bytes(), &apiErr); err != nil {
+			t.Fatalf("decode missing expected mode error: %v", err)
+		}
+		if apiErr.Code != ErrCodeMissingExpectedDeleteMode {
+			t.Fatalf("missing expected mode code = %q, want %q", apiErr.Code, ErrCodeMissingExpectedDeleteMode)
+		}
+		if _, err := fs.Stat(ctx, "/missing-delete-mode.txt"); err != nil {
+			t.Fatalf("file changed after missing expected mode: %v", err)
+		}
+	}
+}
+
+func TestServer_DeleteFile_RejectsInvalidExpectedDeleteMode(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+	if err := fs.WriteFile(ctx, "/invalid-delete-mode.txt", strings.NewReader("keep")); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	tokenQuery := "&expected_delete_policy_token=" + fs.CurrentDeletePolicy().Token
+	for _, query := range []string{
+		"expected_delete_mode=trash&expected_delete_mode=trash",
+		"expected_delete_mode=Trash",
+		"expected_delete_mode=%20trash",
+		"expected_delete_mode=unknown",
+	} {
+		req := httptest.NewRequest(http.MethodDelete, "/api/v1/files/invalid-delete-mode.txt?"+query+tokenQuery, nil)
+		w := httptest.NewRecorder()
+		server.Router().ServeHTTP(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("invalid expected mode %q status = %d, want %d; body=%s", query, w.Code, http.StatusBadRequest, w.Body.String())
+		}
+		var apiErr APIError
+		if err := json.Unmarshal(w.Body.Bytes(), &apiErr); err != nil {
+			t.Fatalf("decode invalid expected mode error: %v", err)
+		}
+		if apiErr.Code != ErrCodeInvalidExpectedDeleteMode {
+			t.Fatalf("invalid expected mode %q code = %q, want %q", query, apiErr.Code, ErrCodeInvalidExpectedDeleteMode)
+		}
+		if _, err := fs.Stat(ctx, "/invalid-delete-mode.txt"); err != nil {
+			t.Fatalf("file changed after invalid expected mode %q: %v", query, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/files/invalid-delete-mode.txt", nil)
+	req.URL.RawQuery = "expected_delete_mode=%ZZ" + tokenQuery
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("malformed expected mode status = %d, want %d; body=%s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+	var apiErr APIError
+	if err := json.Unmarshal(w.Body.Bytes(), &apiErr); err != nil {
+		t.Fatalf("decode malformed expected mode error: %v", err)
+	}
+	if apiErr.Code != ErrCodeInvalidExpectedDeleteMode {
+		t.Fatalf("malformed expected mode code = %q, want %q", apiErr.Code, ErrCodeInvalidExpectedDeleteMode)
+	}
+	if _, err := fs.Stat(ctx, "/invalid-delete-mode.txt"); err != nil {
+		t.Fatalf("file changed after malformed expected mode: %v", err)
+	}
+}
+
+func TestServer_DeleteFile_RequiresExpectedDeletePolicyToken(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+	if err := fs.WriteFile(ctx, "/missing-delete-policy-token.txt", strings.NewReader("keep")); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	for _, requestPath := range []string{
+		"/api/v1/files/missing-delete-policy-token.txt?expected_delete_mode=trash",
+		"/api/v1/files/missing-delete-policy-token.txt?expected_delete_mode=trash&expected_delete_policy_token=",
+	} {
+		req := httptest.NewRequest(http.MethodDelete, requestPath, nil)
+		w := httptest.NewRecorder()
+		server.Router().ServeHTTP(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("missing expected token status = %d, want %d; body=%s", w.Code, http.StatusBadRequest, w.Body.String())
+		}
+		var apiErr APIError
+		if err := json.Unmarshal(w.Body.Bytes(), &apiErr); err != nil {
+			t.Fatalf("decode missing expected token error: %v", err)
+		}
+		if apiErr.Code != ErrCodeMissingExpectedDeletePolicyToken {
+			t.Fatalf("missing expected token code = %q, want %q", apiErr.Code, ErrCodeMissingExpectedDeletePolicyToken)
+		}
+		if _, err := fs.Stat(ctx, "/missing-delete-policy-token.txt"); err != nil {
+			t.Fatalf("file changed after missing expected token: %v", err)
+		}
+	}
+}
+
+func TestServer_DeleteFile_RejectsInvalidExpectedDeletePolicyToken(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+	if err := fs.WriteFile(ctx, "/invalid-delete-policy-token.txt", strings.NewReader("keep")); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	validToken := fs.CurrentDeletePolicy().Token
+	tests := []struct {
+		name     string
+		rawQuery string
+	}{
+		{name: "duplicate", rawQuery: "expected_delete_mode=trash&expected_delete_policy_token=" + validToken + "&expected_delete_policy_token=" + validToken},
+		{name: "uppercase", rawQuery: "expected_delete_mode=trash&expected_delete_policy_token=" + strings.ToUpper(validToken)},
+		{name: "short", rawQuery: "expected_delete_mode=trash&expected_delete_policy_token=abc"},
+		{name: "nonhex", rawQuery: "expected_delete_mode=trash&expected_delete_policy_token=" + strings.Repeat("g", sha256.Size*2)},
+		{name: "malformed", rawQuery: "expected_delete_mode=trash&expected_delete_policy_token=%ZZ"},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodDelete, "/api/v1/files/invalid-delete-policy-token.txt", nil)
+			req.URL.RawQuery = testCase.rawQuery
+			w := httptest.NewRecorder()
+			server.Router().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("invalid expected token status = %d, want %d; body=%s", w.Code, http.StatusBadRequest, w.Body.String())
+			}
+			var apiErr APIError
+			if err := json.Unmarshal(w.Body.Bytes(), &apiErr); err != nil {
+				t.Fatalf("decode invalid expected token error: %v", err)
+			}
+			if apiErr.Code != ErrCodeInvalidExpectedDeletePolicyToken {
+				t.Fatalf("invalid expected token code = %q, want %q", apiErr.Code, ErrCodeInvalidExpectedDeletePolicyToken)
+			}
+			if _, err := fs.Stat(ctx, "/invalid-delete-policy-token.txt"); err != nil {
+				t.Fatalf("file changed after invalid expected token: %v", err)
+			}
+		})
+	}
+}
+
+func TestServer_DeleteFile_RequiresExpectedDeleteTargetToken(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+	if err := fs.WriteFile(ctx, "/missing-delete-target-token.bin", strings.NewReader("keep")); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	policy := fs.CurrentDeletePolicy()
+	baseQuery := "expected_delete_mode=" + string(policy.Mode) + "&expected_delete_policy_token=" + policy.Token
+	for _, rawQuery := range []string{baseQuery, baseQuery + "&expected_delete_target_token="} {
+		req := httptest.NewRequest(http.MethodDelete, "/api/v1/files/missing-delete-target-token.bin", nil)
+		req.URL.RawQuery = rawQuery
+		w := httptest.NewRecorder()
+		server.Router().ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("missing target token status = %d, want %d; body=%s", w.Code, http.StatusBadRequest, w.Body.String())
+		}
+		var apiErr APIError
+		if err := json.Unmarshal(w.Body.Bytes(), &apiErr); err != nil {
+			t.Fatalf("decode missing target token error: %v", err)
+		}
+		if apiErr.Code != ErrCodeMissingExpectedDeleteTargetToken {
+			t.Fatalf("missing target token code = %q, want %q", apiErr.Code, ErrCodeMissingExpectedDeleteTargetToken)
+		}
+		if _, err := fs.Stat(ctx, "/missing-delete-target-token.bin"); err != nil {
+			t.Fatalf("file changed after missing target token: %v", err)
+		}
+	}
+}
+
+func TestServer_DeleteFile_RejectsInvalidExpectedDeleteTargetToken(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+	if err := fs.WriteFile(ctx, "/invalid-delete-target-token.bin", strings.NewReader("keep")); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	policy := fs.CurrentDeletePolicy()
+	validToken := strings.Repeat("a", sha256.Size*2)
+	baseQuery := "expected_delete_mode=" + string(policy.Mode) + "&expected_delete_policy_token=" + policy.Token + "&expected_delete_target_token="
+	tests := []struct {
+		name     string
+		rawQuery string
+	}{
+		{name: "duplicate", rawQuery: baseQuery + validToken + "&expected_delete_target_token=" + validToken},
+		{name: "uppercase", rawQuery: baseQuery + strings.ToUpper(validToken)},
+		{name: "short", rawQuery: baseQuery + "abc"},
+		{name: "nonhex", rawQuery: baseQuery + strings.Repeat("g", sha256.Size*2)},
+		{name: "malformed", rawQuery: baseQuery + "%ZZ"},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodDelete, "/api/v1/files/invalid-delete-target-token.bin", nil)
+			req.URL.RawQuery = testCase.rawQuery
+			w := httptest.NewRecorder()
+			server.Router().ServeHTTP(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("invalid target token status = %d, want %d; body=%s", w.Code, http.StatusBadRequest, w.Body.String())
+			}
+			var apiErr APIError
+			if err := json.Unmarshal(w.Body.Bytes(), &apiErr); err != nil {
+				t.Fatalf("decode invalid target token error: %v", err)
+			}
+			if apiErr.Code != ErrCodeInvalidExpectedDeleteTargetToken {
+				t.Fatalf("invalid target token code = %q, want %q", apiErr.Code, ErrCodeInvalidExpectedDeleteTargetToken)
+			}
+			if _, err := fs.Stat(ctx, "/invalid-delete-target-token.bin"); err != nil {
+				t.Fatalf("file changed after invalid target token: %v", err)
+			}
+		})
+	}
+}
+
+func TestServer_DeleteFile_ExpectedPolicyParserPrecedence(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+	if err := fs.WriteFile(ctx, "/delete-parser-precedence.txt", strings.NewReader("keep")); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	validToken := fs.CurrentDeletePolicy().Token
+	tests := []struct {
+		name     string
+		rawQuery string
+		wantCode string
+	}{
+		{name: "missing mode before malformed token", rawQuery: "expected_delete_policy_token=%ZZ", wantCode: ErrCodeMissingExpectedDeleteMode},
+		{name: "invalid mode before malformed token", rawQuery: "expected_delete_mode=Trash&expected_delete_policy_token=%ZZ", wantCode: ErrCodeInvalidExpectedDeleteMode},
+		{name: "valid mode exposes malformed token", rawQuery: "expected_delete_mode=trash&expected_delete_policy_token=%ZZ", wantCode: ErrCodeInvalidExpectedDeletePolicyToken},
+		{name: "malformed mode before valid token", rawQuery: "expected_delete_mode=%ZZ&expected_delete_policy_token=" + validToken, wantCode: ErrCodeInvalidExpectedDeleteMode},
+		{name: "missing mode before malformed target", rawQuery: "expected_delete_policy_token=" + validToken + "&expected_delete_target_token=%ZZ", wantCode: ErrCodeMissingExpectedDeleteMode},
+		{name: "invalid policy before malformed target", rawQuery: "expected_delete_mode=trash&expected_delete_policy_token=ABC&expected_delete_target_token=%ZZ", wantCode: ErrCodeInvalidExpectedDeletePolicyToken},
+		{name: "valid policy exposes malformed target", rawQuery: "expected_delete_mode=trash&expected_delete_policy_token=" + validToken + "&expected_delete_target_token=%ZZ", wantCode: ErrCodeInvalidExpectedDeleteTargetToken},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodDelete, "/api/v1/files/delete-parser-precedence.txt", nil)
+			req.URL.RawQuery = testCase.rawQuery
+			w := httptest.NewRecorder()
+			server.Router().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("parser precedence status = %d, want %d; body=%s", w.Code, http.StatusBadRequest, w.Body.String())
+			}
+			var apiErr APIError
+			if err := json.Unmarshal(w.Body.Bytes(), &apiErr); err != nil {
+				t.Fatalf("decode parser precedence error: %v", err)
+			}
+			if apiErr.Code != testCase.wantCode {
+				t.Fatalf("parser precedence code = %q, want %q", apiErr.Code, testCase.wantCode)
+			}
+			if _, err := fs.Stat(ctx, "/delete-parser-precedence.txt"); err != nil {
+				t.Fatalf("file changed after parser rejection: %v", err)
+			}
+		})
+	}
+}
+
+func TestServer_DeleteFile_ParsesPolicyBeforeFilesystemAvailability(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	policy := fs.CurrentDeletePolicy()
+	server.fs = nil
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/files/unavailable.txt", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("missing mode with unavailable filesystem status = %d, want %d; body=%s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, deleteFileRequestURLWithExpectation(t, fs, "/api/v1/files/unavailable.txt", storage.DeletePolicyExpectation{Mode: policy.Mode, Token: policy.Token}), nil)
+	w = httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("valid policy with unavailable filesystem status = %d, want %d; body=%s", w.Code, http.StatusServiceUnavailable, w.Body.String())
+	}
+}
+
+func TestServer_DeleteFile_ReturnsDeletePolicyChangedWithoutMutation(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+	expectedPolicy := fs.CurrentDeletePolicy()
+	fs.UpdateRuntimePolicySettings(storage.RuntimePolicySettings{
+		SweepInterval:      0,
+		TrashEnabled:       false,
+		TrashRetentionDays: 9,
+		MaxTrashSize:       2048,
+	})
+	if err := fs.WriteFile(ctx, "/changed-delete-mode.txt", strings.NewReader("keep")); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, deleteFileRequestURLWithExpectation(t, fs, "/api/v1/files/changed-delete-mode.txt", storage.DeletePolicyExpectation{Mode: expectedPolicy.Mode, Token: expectedPolicy.Token}), nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("changed delete mode status = %d, want %d; body=%s", w.Code, http.StatusConflict, w.Body.String())
+	}
+	var apiErr APIError
+	if err := json.Unmarshal(w.Body.Bytes(), &apiErr); err != nil {
+		t.Fatalf("decode changed delete mode error: %v", err)
+	}
+	if apiErr.Code != ErrCodeDeletePolicyChanged {
+		t.Fatalf("changed delete policy code = %q, want %q", apiErr.Code, ErrCodeDeletePolicyChanged)
+	}
+	details, ok := apiErr.Details.(map[string]any)
+	if !ok {
+		t.Fatalf("changed delete mode details type = %T, want map", apiErr.Details)
+	}
+	actualPolicy := fs.CurrentDeletePolicy()
+	if details["expected_delete_mode"] != "trash" ||
+		details["expected_delete_policy_token"] != expectedPolicy.Token ||
+		details["actual_delete_mode"] != "permanent" ||
+		details["actual_delete_policy_token"] != actualPolicy.Token ||
+		details["trash_retention_days"] != float64(9) ||
+		details["trash_auto_cleanup_enabled"] != false {
+		t.Fatalf("unexpected changed delete mode details: %+v", details)
+	}
+	if _, err := fs.Stat(ctx, "/changed-delete-mode.txt"); err != nil {
+		t.Fatalf("file changed after delete mode conflict: %v", err)
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("trash items = %d, want 0", len(items))
+	}
+}
+
+func TestServer_DeleteFile_ReturnsDeletePolicyChangedForSameModePolicyDrift(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+	if err := fs.WriteFile(ctx, "/changed-delete-policy.txt", strings.NewReader("keep")); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	expectedPolicy := fs.CurrentDeletePolicy()
+	fs.UpdateRuntimePolicySettings(storage.RuntimePolicySettings{
+		SweepInterval:      time.Hour,
+		TrashEnabled:       true,
+		TrashRetentionDays: expectedPolicy.TrashRetentionDays + 1,
+		MaxTrashSize:       expectedPolicy.MaxTrashSize,
+	})
+	actualPolicy := fs.CurrentDeletePolicy()
+	if actualPolicy.Mode != expectedPolicy.Mode || actualPolicy.Token == expectedPolicy.Token {
+		t.Fatalf("policy drift setup failed: expected=%+v actual=%+v", expectedPolicy, actualPolicy)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, deleteFileRequestURLWithExpectation(t, fs, "/api/v1/files/changed-delete-policy.txt", storage.DeletePolicyExpectation{Mode: expectedPolicy.Mode, Token: expectedPolicy.Token}), nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("same-mode policy drift status = %d, want %d; body=%s", w.Code, http.StatusConflict, w.Body.String())
+	}
+	var apiErr APIError
+	if err := json.Unmarshal(w.Body.Bytes(), &apiErr); err != nil {
+		t.Fatalf("decode same-mode policy drift error: %v", err)
+	}
+	if apiErr.Code != ErrCodeDeletePolicyChanged {
+		t.Fatalf("same-mode policy drift code = %q, want %q", apiErr.Code, ErrCodeDeletePolicyChanged)
+	}
+	if _, err := fs.Stat(ctx, "/changed-delete-policy.txt"); err != nil {
+		t.Fatalf("file changed after same-mode policy conflict: %v", err)
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("trash items = %d, want 0", len(items))
+	}
+}
+
+func TestServer_DeleteFile_ReturnsDeleteTargetChangedWithoutMutation(t *testing.T) {
+	tests := []struct {
+		name       string
+		targetPath string
+		setup      func(*testing.T, *storage.FileSystem)
+		mutate     func(*testing.T, *storage.FileSystem)
+	}{
+		{
+			name:       "file overwritten",
+			targetPath: "/target-drift.bin",
+			setup: func(t *testing.T, fs *storage.FileSystem) {
+				if err := fs.WriteFile(context.Background(), "/target-drift.bin", strings.NewReader("before")); err != nil {
+					t.Fatalf("WriteFile(before) error: %v", err)
+				}
+			},
+			mutate: func(t *testing.T, fs *storage.FileSystem) {
+				if err := fs.WriteFile(context.Background(), "/target-drift.bin", strings.NewReader("after")); err != nil {
+					t.Fatalf("WriteFile(after) error: %v", err)
+				}
+			},
+		},
+		{
+			name:       "directory descendant added",
+			targetPath: "/target-tree",
+			setup: func(t *testing.T, fs *storage.FileSystem) {
+				if err := fs.Mkdir(context.Background(), "/target-tree"); err != nil {
+					t.Fatalf("Mkdir(target-tree) error: %v", err)
+				}
+			},
+			mutate: func(t *testing.T, fs *storage.FileSystem) {
+				if err := fs.WriteFile(context.Background(), "/target-tree/new.bin", strings.NewReader("new")); err != nil {
+					t.Fatalf("WriteFile(new descendant) error: %v", err)
+				}
+			},
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			server, fs, _ := setupTestServer(t)
+			testCase.setup(t, fs)
+			intent, err := fs.PrepareDeleteIntents(context.Background(), []string{testCase.targetPath}, nil)
+			if err != nil {
+				t.Fatalf("PrepareDeleteIntents() error: %v", err)
+			}
+			testCase.mutate(t, fs)
+
+			deleteIndexCalls := 0
+			originalDeleteIndex := getStorageHook[func(context.Context, string) error](t, fs, "deleteFileIndex")
+			setStorageHook(t, fs, "deleteFileIndex", func(ctx context.Context, targetPath string) error {
+				deleteIndexCalls++
+				return originalDeleteIndex(ctx, targetPath)
+			})
+			originalDeleteIndexPrefix := getStorageHook[func(context.Context, string) error](t, fs, "deleteFileIndexPrefix")
+			setStorageHook(t, fs, "deleteFileIndexPrefix", func(ctx context.Context, targetPath string) error {
+				deleteIndexCalls++
+				return originalDeleteIndexPrefix(ctx, targetPath)
+			})
+			deleteHookCalls := 0
+			originalDeleteHook := getStorageHook[func(context.Context, string) (*storage.PathDeleteHookResult, error)](t, fs, "onPathDeleted")
+			fs.SetPathChangeHooks(nil, func(ctx context.Context, targetPath string) (*storage.PathDeleteHookResult, error) {
+				deleteHookCalls++
+				if originalDeleteHook == nil {
+					return nil, nil
+				}
+				return originalDeleteHook(ctx, targetPath)
+			})
+
+			expectedPolicy := storage.DeletePolicyExpectation{Mode: intent.Policy.Mode, Token: intent.Policy.Token}
+			req := httptest.NewRequest(http.MethodDelete, deleteFileRequestURLWithTokens(t, "/api/v1/files"+testCase.targetPath, expectedPolicy, intent.Targets[0].Token), nil)
+			w := httptest.NewRecorder()
+			server.Router().ServeHTTP(w, req)
+
+			if w.Code != http.StatusConflict {
+				t.Fatalf("target drift status = %d, want %d; body=%s", w.Code, http.StatusConflict, w.Body.String())
+			}
+			var apiErr APIError
+			if err := json.Unmarshal(w.Body.Bytes(), &apiErr); err != nil {
+				t.Fatalf("decode target drift error: %v", err)
+			}
+			if apiErr.Code != ErrCodeDeleteTargetChanged {
+				t.Fatalf("target drift code = %q, want %q", apiErr.Code, ErrCodeDeleteTargetChanged)
+			}
+			details, ok := apiErr.Details.(map[string]any)
+			if !ok || len(details) != 3 || details["path"] != testCase.targetPath || details["expected_delete_target_token"] != intent.Targets[0].Token || details["actual_delete_target_token"] == intent.Targets[0].Token {
+				t.Fatalf("target drift details = %+v", apiErr.Details)
+			}
+			if _, err := fs.Stat(context.Background(), testCase.targetPath); err != nil {
+				t.Fatalf("target changed after rejected delete: %v", err)
+			}
+			items, err := fs.ListTrash(context.Background())
+			if err != nil {
+				t.Fatalf("ListTrash() error: %v", err)
+			}
+			if len(items) != 0 {
+				t.Fatalf("trash items after target drift = %d, want 0", len(items))
+			}
+			if deleteIndexCalls != 0 {
+				t.Fatalf("delete index calls after target drift = %d, want 0", deleteIndexCalls)
+			}
+			if deleteHookCalls != 0 {
+				t.Fatalf("delete hook calls after target drift = %d, want 0", deleteHookCalls)
+			}
+			if _, total := server.activity.List(10, 0, activity.ActionDelete, ""); total != 0 {
+				t.Fatalf("delete activity entries after target drift = %d, want 0", total)
+			}
+		})
+	}
+}
+
+func TestServer_DeleteFile_MapsUnavailableConfirmedTargetToTargetChanged(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		targetPath string
+		setup      func(*testing.T, *storage.FileSystem)
+		mutate     func(*testing.T, string)
+	}{
+		{
+			name:       "target disappeared",
+			targetPath: "/disappeared.bin",
+			setup: func(t *testing.T, fs *storage.FileSystem) {
+				if err := fs.WriteFile(context.Background(), "/disappeared.bin", strings.NewReader("item")); err != nil {
+					t.Fatalf("WriteFile() error: %v", err)
+				}
+			},
+			mutate: func(t *testing.T, filesRoot string) {
+				if err := os.Remove(filepath.Join(filesRoot, "disappeared.bin")); err != nil {
+					t.Fatalf("Remove() error: %v", err)
+				}
+			},
+		},
+		{
+			name:       "parent replaced by file",
+			targetPath: "/parent/child.bin",
+			setup: func(t *testing.T, fs *storage.FileSystem) {
+				if err := fs.Mkdir(context.Background(), "/parent"); err != nil {
+					t.Fatalf("Mkdir() error: %v", err)
+				}
+				if err := fs.WriteFile(context.Background(), "/parent/child.bin", strings.NewReader("item")); err != nil {
+					t.Fatalf("WriteFile() error: %v", err)
+				}
+			},
+			mutate: func(t *testing.T, filesRoot string) {
+				parentPath := filepath.Join(filesRoot, "parent")
+				if err := os.RemoveAll(parentPath); err != nil {
+					t.Fatalf("RemoveAll(parent) error: %v", err)
+				}
+				if err := os.WriteFile(parentPath, []byte("replacement"), 0o600); err != nil {
+					t.Fatalf("WriteFile(parent replacement) error: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			server, fs, tmpDir := setupTestServer(t)
+			testCase.setup(t, fs)
+			intent, err := fs.PrepareDeleteIntents(context.Background(), []string{testCase.targetPath}, nil)
+			if err != nil {
+				t.Fatalf("PrepareDeleteIntents() error: %v", err)
+			}
+			testCase.mutate(t, filepath.Join(tmpDir, "files"))
+			expectedPolicy := storage.DeletePolicyExpectation{Mode: intent.Policy.Mode, Token: intent.Policy.Token}
+			req := httptest.NewRequest(http.MethodDelete, deleteFileRequestURLWithTokens(t, "/api/v1/files"+testCase.targetPath, expectedPolicy, intent.Targets[0].Token), nil)
+			rec := httptest.NewRecorder()
+			server.Router().ServeHTTP(rec, req)
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("unavailable target status = %d, want %d; body=%s", rec.Code, http.StatusConflict, rec.Body.String())
+			}
+			var apiErr APIError
+			if err := json.Unmarshal(rec.Body.Bytes(), &apiErr); err != nil {
+				t.Fatalf("decode target drift error: %v", err)
+			}
+			details, ok := apiErr.Details.(map[string]any)
+			if apiErr.Code != ErrCodeDeleteTargetChanged || !ok || details["path"] != testCase.targetPath || details["expected_delete_target_token"] != intent.Targets[0].Token {
+				t.Fatalf("unavailable target response = %+v", apiErr)
+			}
+			if _, exists := details["actual_delete_target_token"]; exists {
+				t.Fatalf("unavailable target exposed an actual token: %+v", details)
+			}
+		})
+	}
+}
+
+func TestServer_DeleteFile_PrioritizesDeletePolicyChangedWhenPolicyAndTargetDrift(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+	if err := fs.WriteFile(ctx, "/both-drift.bin", strings.NewReader("before")); err != nil {
+		t.Fatalf("WriteFile(before) error: %v", err)
+	}
+	intent, err := fs.PrepareDeleteIntents(ctx, []string{"/both-drift.bin"}, nil)
+	if err != nil {
+		t.Fatalf("PrepareDeleteIntents() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/both-drift.bin", strings.NewReader("after")); err != nil {
+		t.Fatalf("WriteFile(after) error: %v", err)
+	}
+	fs.UpdateTrashSettings(intent.Policy.Mode != storage.DeleteModeTrash, intent.Policy.TrashRetentionDays+1, intent.Policy.MaxTrashSize+1)
+	expectedPolicy := storage.DeletePolicyExpectation{Mode: intent.Policy.Mode, Token: intent.Policy.Token}
+	req := httptest.NewRequest(http.MethodDelete, deleteFileRequestURLWithTokens(t, "/api/v1/files/both-drift.bin", expectedPolicy, intent.Targets[0].Token), nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("both-drift status = %d, want %d; body=%s", w.Code, http.StatusConflict, w.Body.String())
+	}
+	var apiErr APIError
+	if err := json.Unmarshal(w.Body.Bytes(), &apiErr); err != nil {
+		t.Fatalf("decode both-drift error: %v", err)
+	}
+	if apiErr.Code != ErrCodeDeletePolicyChanged {
+		t.Fatalf("both-drift code = %q, want %q", apiErr.Code, ErrCodeDeletePolicyChanged)
+	}
+	if _, err := fs.Stat(ctx, "/both-drift.bin"); err != nil {
+		t.Fatalf("both-drift file changed after rejection: %v", err)
+	}
+}
+
 func TestServer_DeleteFile_ReturnsWarningWhenPermanentDeleteSyncFailsAfterVisibleDelete(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
@@ -2721,15 +3870,15 @@ func TestServer_DeleteFile_ReturnsWarningWhenPermanentDeleteSyncFailsAfterVisibl
 		t.Fatalf("WriteFile(delete-warning.txt) error: %v", err)
 	}
 
-	originalDelete := getStorageHook[func(context.Context, string) error](t, fs, "deleteWorkspacePath")
-	setStorageHook(t, fs, "deleteWorkspacePath", func(ctx context.Context, name string) error {
-		if err := originalDelete(ctx, name); err != nil {
+	originalDelete := getStorageHook[func(context.Context, string, func() error) error](t, fs, "deleteStagedWorkspacePath")
+	setStorageHook(t, fs, "deleteStagedWorkspacePath", func(ctx context.Context, name string, remove func() error) error {
+		if err := originalDelete(ctx, name, remove); err != nil {
 			return err
 		}
-		return workspace.WrapVisibleMutationWarning(errors.New("sync dir failed"))
+		return workspace.WrapVisibleMutationWarning(&storage.DeleteTargetChangedError{Path: "/delete-warning.txt"})
 	})
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/files/delete-warning.txt", nil)
+	req := httptest.NewRequest(http.MethodDelete, deleteFileRequestURL(t, fs, "/api/v1/files/delete-warning.txt"), nil)
 	w := httptest.NewRecorder()
 
 	server.Router().ServeHTTP(w, req)
@@ -2737,8 +3886,9 @@ func TestServer_DeleteFile_ReturnsWarningWhenPermanentDeleteSyncFailsAfterVisibl
 	if w.Code != http.StatusOK {
 		t.Fatalf("delete warning status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
 	}
-	if got := w.Header().Get("Warning"); got != workspaceMutationWarningHeader {
-		t.Fatalf("warning header = %q, want %q", got, workspaceMutationWarningHeader)
+	warningValues := w.Header().Values("Warning")
+	if slices.Contains(warningValues, deleteCleanupWarningHeader) || !slices.Contains(warningValues, workspaceMutationWarningHeader) {
+		t.Fatalf("warning headers = %v, want only persistence warning", warningValues)
 	}
 	var envelope struct {
 		Success bool           `json:"success"`
@@ -2760,6 +3910,10 @@ func TestServer_DeleteFile_ReturnsWarningWhenPermanentDeleteSyncFailsAfterVisibl
 	if _, err := fs.Stat(ctx, "/delete-warning.txt"); err != storage.ErrNotFound {
 		t.Fatalf("expected file to remain deleted after warning response, got %v", err)
 	}
+	entries, total := server.activity.List(10, 0, activity.ActionDelete, "")
+	if total != 1 || len(entries) != 1 || entries[0].Details["cleanup_warning"] != "" || entries[0].Details["persistence_warning"] != "true" {
+		t.Fatalf("delete warning activity entries = %+v, total=%d", entries, total)
+	}
 }
 
 func TestServer_DeleteFile_ReturnsWarningWhenTrashCapacityCleanupFailsAfterVisibleDelete(t *testing.T) {
@@ -2774,13 +3928,13 @@ func TestServer_DeleteFile_ReturnsWarningWhenTrashCapacityCleanupFailsAfterVisib
 		t.Fatalf("Delete(old-trash.txt) error: %v", err)
 	}
 	setStorageHook(t, fs, "removeTrashMetadata", func(ctx context.Context, id string) error {
-		return errors.New("metadata delete failed")
+		return &storage.DeleteTargetChangedError{Path: "/delete-trash-warning.txt"}
 	})
 	if err := fs.WriteFile(ctx, "/delete-trash-warning.txt", bytes.NewReader([]byte("1234567"))); err != nil {
 		t.Fatalf("WriteFile(delete-trash-warning.txt) error: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/files/delete-trash-warning.txt", nil)
+	req := httptest.NewRequest(http.MethodDelete, deleteFileRequestURL(t, fs, "/api/v1/files/delete-trash-warning.txt"), nil)
 	w := httptest.NewRecorder()
 
 	server.Router().ServeHTTP(w, req)
@@ -2818,6 +3972,10 @@ func TestServer_DeleteFile_ReturnsWarningWhenTrashCapacityCleanupFailsAfterVisib
 	if len(items) != 2 {
 		t.Fatalf("expected both trash items to remain after cleanup warning, got %d", len(items))
 	}
+	entries, total := server.activity.List(10, 0, activity.ActionDelete, "")
+	if total != 1 || len(entries) != 1 || entries[0].Details["trash_cleanup_warning"] != "true" || entries[0].Details["persistence_warning"] != "" {
+		t.Fatalf("trash cleanup warning activity entries = %+v, total=%d", entries, total)
+	}
 }
 
 func TestServer_DeleteFile_ReturnsWarningWhenPermanentDeleteCleanupFailsAfterVisibleDelete(t *testing.T) {
@@ -2834,10 +3992,10 @@ func TestServer_DeleteFile_ReturnsWarningWhenPermanentDeleteCleanupFailsAfterVis
 		t.Fatalf("WriteFile(v2) error: %v", err)
 	}
 	setStorageHook(t, fs, "deleteVersionObject", func(ctx context.Context, hash string) error {
-		return errors.New("version object cleanup failed")
+		return &storage.DeleteTargetChangedError{Path: "/delete-cleanup-warning.txt"}
 	})
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/files/delete-cleanup-warning.txt", nil)
+	req := httptest.NewRequest(http.MethodDelete, deleteFileRequestURL(t, fs, "/api/v1/files/delete-cleanup-warning.txt"), nil)
 	w := httptest.NewRecorder()
 
 	server.Router().ServeHTTP(w, req)
@@ -2868,9 +4026,120 @@ func TestServer_DeleteFile_ReturnsWarningWhenPermanentDeleteCleanupFailsAfterVis
 	if _, err := fs.Stat(ctx, "/delete-cleanup-warning.txt"); err != storage.ErrNotFound {
 		t.Fatalf("expected file to remain deleted after cleanup warning response, got %v", err)
 	}
+	entries, total := server.activity.List(10, 0, activity.ActionDelete, "")
+	if total != 1 || len(entries) != 1 || entries[0].Details["cleanup_warning"] != "true" || entries[0].Details["persistence_warning"] != "" {
+		t.Fatalf("delete cleanup warning activity entries = %+v, total=%d", entries, total)
+	}
 }
 
-func TestServer_DeleteFile_ReturnsConflictWhenParentIsFile(t *testing.T) {
+func TestServer_DeleteFile_ReturnsSuccessWarningForCommittedStageResidual(t *testing.T) {
+	server, fs, tmpDir := setupTestServer(t)
+	ctx := context.Background()
+	const targetPath = "/delete-committed-stage-residual.txt"
+
+	fs.UpdateTrashSettings(false, 30, 0)
+	if err := fs.WriteFile(ctx, targetPath, strings.NewReader("delete me")); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	requestURL := deleteFileRequestURL(t, fs, "/api/v1/files"+targetPath)
+	setStorageHook(t, fs, "deleteStagedWorkspacePath", func(context.Context, string, func() error) error {
+		return workspace.WrapVisibleMutationWarning(storage.ErrNotRegular)
+	})
+
+	req := httptest.NewRequest(http.MethodDelete, requestURL, nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("committed residual status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	warningValues := w.Header().Values("Warning")
+	if !slices.Contains(warningValues, deleteCleanupWarningHeader) || !slices.Contains(warningValues, workspaceMutationWarningHeader) {
+		t.Fatalf("warning headers = %v, want cleanup and persistence warnings", warningValues)
+	}
+	var envelope struct {
+		Success bool           `json:"success"`
+		Message string         `json:"message"`
+		Data    map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode committed residual response: %v", err)
+	}
+	if !envelope.Success || envelope.Message != "file deleted with cleanup warning" {
+		t.Fatalf("unexpected committed residual response: %s", w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, targetPath); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("logical target after committed residual = %v, want not found", err)
+	}
+	residuals, err := filepath.Glob(filepath.Join(tmpDir, "files", ".mnemonas-delete-*.quarantine", "content"))
+	if err != nil || len(residuals) != 1 {
+		t.Fatalf("quarantine residuals = %v, %v; want one", residuals, err)
+	}
+	entries, total := server.activity.List(10, 0, activity.ActionDelete, "")
+	if total != 1 || len(entries) != 1 || entries[0].Details["cleanup_warning"] != "true" || entries[0].Details["persistence_warning"] != "true" {
+		t.Fatalf("committed residual activity entries = %+v, total=%d", entries, total)
+	}
+}
+
+func TestServer_DeleteFile_ReturnsRecoveryRequiredForResidualJoinedWithTargetChanged(t *testing.T) {
+	server, fs, tmpDir := setupTestServer(t)
+	ctx := context.Background()
+	const targetPath = "/delete-stage-residual.txt"
+
+	fs.UpdateTrashSettings(false, 30, 0)
+	if err := fs.WriteFile(ctx, targetPath, strings.NewReader("captured target")); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	requestURL := deleteFileRequestURL(t, fs, "/api/v1/files"+targetPath)
+	setStorageHook(t, fs, "deleteFileIndex", func(context.Context, string) error {
+		replacementPath := filepath.Join(tmpDir, "files", strings.TrimPrefix(targetPath, "/"))
+		if err := os.WriteFile(replacementPath, []byte("newer replacement"), 0o600); err != nil {
+			t.Fatalf("WriteFile(replacement) error: %v", err)
+		}
+		return &storage.DeleteTargetChangedError{Path: targetPath}
+	})
+
+	req := httptest.NewRequest(http.MethodDelete, requestURL, nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("residual delete status = %d, want %d; body=%s", w.Code, http.StatusInternalServerError, w.Body.String())
+	}
+	var apiErr APIError
+	if err := json.Unmarshal(w.Body.Bytes(), &apiErr); err != nil {
+		t.Fatalf("decode residual delete response: %v", err)
+	}
+	if apiErr.Code != ErrCodeInternal {
+		t.Fatalf("residual delete code = %q, want %q; body=%s", apiErr.Code, ErrCodeInternal, w.Body.String())
+	}
+	content, err := os.ReadFile(filepath.Join(tmpDir, "files", strings.TrimPrefix(targetPath, "/")))
+	if err != nil {
+		t.Fatalf("ReadFile(replacement) error: %v", err)
+	}
+	if string(content) != "newer replacement" {
+		t.Fatalf("replacement content = %q", content)
+	}
+	stages, err := filepath.Glob(filepath.Join(tmpDir, "files", ".mnemonas-delete-*.stage"))
+	if err != nil {
+		t.Fatalf("Glob(delete stages) error: %v", err)
+	}
+	if len(stages) != 1 {
+		t.Fatalf("delete stages = %v, want one recovery residual", stages)
+	}
+	stagedContent, err := os.ReadFile(stages[0])
+	if err != nil {
+		t.Fatalf("ReadFile(delete stage) error: %v", err)
+	}
+	if string(stagedContent) != "captured target" {
+		t.Fatalf("staged content = %q", stagedContent)
+	}
+	if _, total := server.activity.List(10, 0, activity.ActionDelete, ""); total != 0 {
+		t.Fatalf("delete activity entries after recovery-required outcome = %d, want 0", total)
+	}
+}
+
+func TestServer_DeleteFile_ReturnsTargetChangedWhenParentIsFile(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
 
@@ -2878,7 +4147,12 @@ func TestServer_DeleteFile_ReturnsConflictWhenParentIsFile(t *testing.T) {
 		t.Fatalf("WriteFile(delete-parent) error: %v", err)
 	}
 
-	req := httptest.NewRequest("DELETE", "/api/v1/files/delete-parent/child.txt", nil)
+	const expectedTargetToken = "0000000000000000000000000000000000000000000000000000000000000000"
+	policy := fs.CurrentDeletePolicy()
+	req := httptest.NewRequest(http.MethodDelete, deleteFileRequestURLWithTokens(t, "/api/v1/files/delete-parent/child.txt", storage.DeletePolicyExpectation{
+		Mode:  policy.Mode,
+		Token: policy.Token,
+	}, expectedTargetToken), nil)
 	w := httptest.NewRecorder()
 
 	server.Router().ServeHTTP(w, req)
@@ -2886,8 +4160,16 @@ func TestServer_DeleteFile_ReturnsConflictWhenParentIsFile(t *testing.T) {
 	if w.Code != http.StatusConflict {
 		t.Fatalf("delete file parent conflict status = %d, want %d", w.Code, http.StatusConflict)
 	}
-	if !strings.Contains(w.Body.String(), "parent path is not a directory") {
-		t.Fatalf("expected parent-not-directory conflict message, got %s", w.Body.String())
+	var apiErr APIError
+	if err := json.Unmarshal(w.Body.Bytes(), &apiErr); err != nil {
+		t.Fatalf("decode parent target-change response: %v", err)
+	}
+	if apiErr.Code != ErrCodeDeleteTargetChanged {
+		t.Fatalf("parent target-change code = %q, want %q; body=%s", apiErr.Code, ErrCodeDeleteTargetChanged, w.Body.String())
+	}
+	details, ok := apiErr.Details.(map[string]any)
+	if !ok || len(details) != 2 || details["path"] != "/delete-parent/child.txt" || details["expected_delete_target_token"] != expectedTargetToken {
+		t.Fatalf("parent target-change details = %+v", apiErr.Details)
 	}
 }
 
@@ -2904,7 +4186,7 @@ func TestServer_DeleteFile_DisablesSharesForDeletedPath(t *testing.T) {
 		t.Fatalf("Create(file share) error: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/files/docs/a.txt", nil)
+	req := httptest.NewRequest(http.MethodDelete, deleteFileRequestURL(t, server.fs, "/api/v1/files/docs/a.txt"), nil)
 	w := httptest.NewRecorder()
 
 	server.Router().ServeHTTP(w, req)
@@ -2950,7 +4232,7 @@ func TestServer_DeleteFile_ReturnsWarningWhenShareDisableSyncFailsAfterVisibleDe
 	})
 	defer restoreSync()
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/files/docs/a.txt", nil)
+	req := httptest.NewRequest(http.MethodDelete, deleteFileRequestURL(t, server.fs, "/api/v1/files/docs/a.txt"), nil)
 	w := httptest.NewRecorder()
 
 	server.Router().ServeHTTP(w, req)
@@ -2990,7 +4272,7 @@ func TestServer_DeleteFile_RemovesFavoritesForDeletedPath(t *testing.T) {
 		t.Fatalf("Add(/docs/sub) error: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/files/docs/a.txt", nil)
+	req := httptest.NewRequest(http.MethodDelete, deleteFileRequestURL(t, server.fs, "/api/v1/files/docs/a.txt"), nil)
 	w := httptest.NewRecorder()
 
 	server.Router().ServeHTTP(w, req)
@@ -3052,7 +4334,7 @@ func TestServer_DeleteFile_RollsBackWhenFavoriteCleanupFails(t *testing.T) {
 		_ = os.Chmod(favoritesDir, 0o755)
 	}()
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/files/docs/a.txt", nil)
+	req := httptest.NewRequest(http.MethodDelete, deleteFileRequestURL(t, fs, "/api/v1/files/docs/a.txt"), nil)
 	w := httptest.NewRecorder()
 
 	server.Router().ServeHTTP(w, req)
@@ -3344,7 +4626,7 @@ func TestServer_DeleteDirectory_RollbackRestoresChildIndexesWhenDeleteHookFails(
 		return nil, errors.New("favorite cleanup failed")
 	})
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/files/docs", nil)
+	req := httptest.NewRequest(http.MethodDelete, deleteFileRequestURL(t, fs, "/api/v1/files/docs"), nil)
 	w := httptest.NewRecorder()
 
 	server.Router().ServeHTTP(w, req)
@@ -3418,7 +4700,7 @@ func TestServer_DeleteFile_RollsBackWhenFavoriteCleanupFailsWithTrashDisabled(t 
 		_ = os.Chmod(favoritesDir, 0o755)
 	}()
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/files/docs/a.txt", nil)
+	req := httptest.NewRequest(http.MethodDelete, deleteFileRequestURL(t, fs, "/api/v1/files/docs/a.txt"), nil)
 	w := httptest.NewRecorder()
 
 	server.Router().ServeHTTP(w, req)
@@ -7979,6 +9261,12 @@ func TestStreamAPIResponse_ReturnsErrorAfterResponseStarts(t *testing.T) {
 func TestServer_Trash(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
+	fs.UpdateRuntimePolicySettings(storage.RuntimePolicySettings{
+		SweepInterval:      time.Minute,
+		TrashEnabled:       true,
+		TrashRetentionDays: 7,
+		MaxTrashSize:       1 << 20,
+	})
 
 	fs.Mkdir(ctx, "/trash-test")
 	fs.WriteFile(ctx, "/trash-test/file.txt", bytes.NewReader([]byte("content")))
@@ -8007,6 +9295,24 @@ func TestServer_Trash(t *testing.T) {
 		}
 		if _, ok := payload.Data["retentionDays"]; !ok {
 			t.Error("Response should include retentionDays")
+		}
+		if enabled, ok := payload.Data["trashAutoCleanupEnabled"].(bool); !ok || !enabled {
+			t.Fatalf("trashAutoCleanupEnabled = %v, want true", payload.Data["trashAutoCleanupEnabled"])
+		}
+		items, ok := payload.Data["items"].([]any)
+		if !ok || len(items) != 1 {
+			t.Fatalf("trash items = %#v, want one item", payload.Data["items"])
+		}
+		item, ok := items[0].(map[string]any)
+		if !ok {
+			t.Fatalf("trash item type = %T, want map", items[0])
+		}
+		expiresAt, ok := item["expiresAt"].(string)
+		if !ok || expiresAt == "" {
+			t.Fatalf("trash item expiresAt = %#v, want timestamp", item["expiresAt"])
+		}
+		if _, err := time.Parse(time.RFC3339, expiresAt); err != nil {
+			t.Fatalf("parse trash item expiresAt %q: %v", expiresAt, err)
 		}
 	})
 }
@@ -9960,7 +11266,7 @@ func TestServer_DeleteDirectoryRejectsDeniedDescendantAccessRule(t *testing.T) {
 	}
 
 	token := loginAndGetAccessToken(t, server, username, password)
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/files/team", nil)
+	req := httptest.NewRequest(http.MethodDelete, deleteFileRequestURL(t, fs, "/api/v1/files/team"), nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	rec := httptest.NewRecorder()
 	server.Router().ServeHTTP(rec, req)
@@ -9970,6 +11276,13 @@ func TestServer_DeleteDirectoryRejectsDeniedDescendantAccessRule(t *testing.T) {
 	}
 	if _, err := fs.Stat(ctx, "/team/private/secret.txt"); err != nil {
 		t.Fatalf("expected denied descendant to remain after rejected delete: %v", err)
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("trash items after rejected delete = %d, want 0", len(items))
 	}
 }
 
@@ -14071,9 +15384,23 @@ func TestServer_Trash_GetItem(t *testing.T) {
 			t.Errorf("GetTrashItem status = %d, want %d", w.Code, http.StatusOK)
 		}
 
-		body := w.Body.String()
-		if !strings.Contains(body, items[0].ID) {
-			t.Error("Response should contain item ID")
+		var payload struct {
+			Data struct {
+				ID        string `json:"id"`
+				ExpiresAt string `json:"expiresAt"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("decode trash item response: %v", err)
+		}
+		if payload.Data.ID != items[0].ID {
+			t.Fatalf("trash item ID = %q, want %q", payload.Data.ID, items[0].ID)
+		}
+		if payload.Data.ExpiresAt == "" {
+			t.Fatal("trash item response should include expiresAt")
+		}
+		if _, err := time.Parse(time.RFC3339, payload.Data.ExpiresAt); err != nil {
+			t.Fatalf("parse trash item expiresAt %q: %v", payload.Data.ExpiresAt, err)
 		}
 	})
 
@@ -14304,7 +15631,7 @@ func TestServer_Trash_Restore_RestoresLinkedSharesAndFavorites(t *testing.T) {
 		t.Fatalf("AddFavorite() error: %v", err)
 	}
 
-	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/v1/files/trash-restore-linked/report.txt", nil)
+	deleteReq := httptest.NewRequest(http.MethodDelete, deleteFileRequestURL(t, fs, "/api/v1/files/trash-restore-linked/report.txt"), nil)
 	deleteRec := httptest.NewRecorder()
 	server.Router().ServeHTTP(deleteRec, deleteReq)
 	if deleteRec.Code != http.StatusOK {
@@ -14385,7 +15712,7 @@ func TestServer_Trash_Restore_ReturnsWarningWhenShareRestoreSyncFailsAfterVisibl
 		t.Fatalf("AddFavorite() error: %v", err)
 	}
 
-	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/v1/files/trash-restore-warning/report.txt", nil)
+	deleteReq := httptest.NewRequest(http.MethodDelete, deleteFileRequestURL(t, fs, "/api/v1/files/trash-restore-warning/report.txt"), nil)
 	deleteRec := httptest.NewRecorder()
 	server.Router().ServeHTTP(deleteRec, deleteReq)
 	if deleteRec.Code != http.StatusOK {
@@ -14461,7 +15788,7 @@ func TestServer_Trash_Restore_PreservesRecreatedFavorite(t *testing.T) {
 		t.Fatalf("AddFavorite(original) error: %v", err)
 	}
 
-	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/v1/files/trash-restore-preserve-favorite/report.txt", nil)
+	deleteReq := httptest.NewRequest(http.MethodDelete, deleteFileRequestURL(t, fs, "/api/v1/files/trash-restore-preserve-favorite/report.txt"), nil)
 	deleteRec := httptest.NewRecorder()
 	server.Router().ServeHTTP(deleteRec, deleteReq)
 	if deleteRec.Code != http.StatusOK {
@@ -14525,7 +15852,7 @@ func TestServer_Trash_Restore_PreservesUpdatedShareMetadata(t *testing.T) {
 		t.Fatalf("CreateShare() error: %v", err)
 	}
 
-	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/v1/files/trash-restore-preserve-share/report.txt", nil)
+	deleteReq := httptest.NewRequest(http.MethodDelete, deleteFileRequestURL(t, fs, "/api/v1/files/trash-restore-preserve-share/report.txt"), nil)
 	deleteRec := httptest.NewRecorder()
 	server.Router().ServeHTTP(deleteRec, deleteReq)
 	if deleteRec.Code != http.StatusOK {
@@ -14898,7 +16225,7 @@ func TestServer_Trash_Restore_RollsBackLinkedSharesWhenFavoriteRestoreFails(t *t
 		t.Fatalf("AddFavorite() error: %v", err)
 	}
 
-	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/v1/files/trash-restore-rollback/report.txt", nil)
+	deleteReq := httptest.NewRequest(http.MethodDelete, deleteFileRequestURL(t, fs, "/api/v1/files/trash-restore-rollback/report.txt"), nil)
 	deleteRec := httptest.NewRecorder()
 	server.Router().ServeHTTP(deleteRec, deleteReq)
 	if deleteRec.Code != http.StatusOK {
@@ -14996,7 +16323,7 @@ func TestServer_Trash_RestoreToCustomPath_RewritesLinkedSharesAndFavorites(t *te
 		t.Fatalf("AddFavorite() error: %v", err)
 	}
 
-	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/v1/files/trash-restore-custom/notes.txt", nil)
+	deleteReq := httptest.NewRequest(http.MethodDelete, deleteFileRequestURL(t, fs, "/api/v1/files/trash-restore-custom/notes.txt"), nil)
 	deleteRec := httptest.NewRecorder()
 	server.Router().ServeHTTP(deleteRec, deleteReq)
 	if deleteRec.Code != http.StatusOK {
@@ -22090,9 +23417,10 @@ func TestServer_UpdateSettings_InvalidMaintenanceScrubRejected(t *testing.T) {
 }
 
 func TestServer_UpdateSettings_UpdatesRetentionMonitorConfig(t *testing.T) {
-	server, _, tmpDir := setupTestServer(t)
+	server, fs, tmpDir := setupTestServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
-	monitor := &fakeRetentionMonitor{}
+	before := fs.CurrentDeletePolicy()
+	monitor := &fakeRetentionMonitor{fs: fs}
 	server.retentionMonitor = monitor
 
 	body := `{"retention":{"max_versions":2,"max_age":"48h","min_free_space":2048,"gc_interval":"0"}}`
@@ -22120,8 +23448,58 @@ func TestServer_UpdateSettings_UpdatesRetentionMonitorConfig(t *testing.T) {
 	if monitor.lastConfig.SweepInterval != 0 {
 		t.Fatalf("expected gc_interval 0 to disable periodic sweep, got %s", monitor.lastConfig.SweepInterval)
 	}
+	if monitor.policyBefore.Token != before.Token {
+		t.Fatalf("filesystem policy changed before retention monitor transaction: before=%+v observed=%+v", before, monitor.policyBefore)
+	}
+	if monitor.lastPolicy.MaxVersions != 2 || monitor.lastPolicy.MaxVersionAge != 48*time.Hour || monitor.lastPolicy.MinFreeSpace != 2048 || monitor.lastPolicy.SweepInterval != 0 {
+		t.Fatalf("retention monitor runtime policy = %+v, want complete updated retention settings", monitor.lastPolicy)
+	}
 	if server.config.Storage.Retention.GCInterval != 0 {
 		t.Fatalf("expected in-memory gc_interval 0, got %s", server.config.Storage.Retention.GCInterval)
+	}
+}
+
+func TestServer_UpdateSettings_TrashOnlyUsesRetentionMonitorPolicyTransaction(t *testing.T) {
+	server, fs, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	before := fs.CurrentDeletePolicy()
+	monitor := &fakeRetentionMonitor{fs: fs}
+	server.retentionMonitor = monitor
+
+	body := `{"trash":{"retention_days":7,"max_size":4096}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("trash-only settings status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if monitor.updateCount != 1 {
+		t.Fatalf("retention monitor transaction count = %d, want 1", monitor.updateCount)
+	}
+	if monitor.policyBefore.Token != before.Token {
+		t.Fatalf("filesystem policy changed before trash-only monitor transaction: before=%+v observed=%+v", before, monitor.policyBefore)
+	}
+	cfg := server.currentConfig()
+	if monitor.lastConfig.MaxVersions != cfg.Storage.Retention.MaxVersions ||
+		monitor.lastConfig.MaxVersionAge != cfg.Storage.Retention.MaxAge ||
+		monitor.lastConfig.MinFreeSpace != cfg.Storage.Retention.MinFreeSpace ||
+		monitor.lastConfig.SweepInterval != cfg.Storage.Retention.GCInterval {
+		t.Fatalf("trash-only monitor config = %+v, want complete retained config %+v", monitor.lastConfig, cfg.Storage.Retention)
+	}
+	if monitor.lastPolicy.MaxVersions != cfg.Storage.Retention.MaxVersions ||
+		monitor.lastPolicy.MaxVersionAge != cfg.Storage.Retention.MaxAge ||
+		monitor.lastPolicy.MinFreeSpace != cfg.Storage.Retention.MinFreeSpace ||
+		monitor.lastPolicy.SweepInterval != cfg.Storage.Retention.GCInterval ||
+		monitor.lastPolicy.TrashEnabled != cfg.Storage.Trash.Enabled ||
+		monitor.lastPolicy.TrashRetentionDays != 7 ||
+		monitor.lastPolicy.MaxTrashSize != 4096 {
+		t.Fatalf("trash-only runtime policy = %+v, want complete updated settings", monitor.lastPolicy)
+	}
+	after := fs.CurrentDeletePolicy()
+	if after.TrashRetentionDays != 7 || after.MaxTrashSize != 4096 || after.Token == before.Token {
+		t.Fatalf("filesystem policy after trash-only transaction = %+v, before=%+v", after, before)
 	}
 }
 
@@ -25116,16 +26494,20 @@ func TestServer_DeleteFile_ErrorCases(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 
 	t.Run("DeleteNonExistent", func(t *testing.T) {
-		req := httptest.NewRequest("DELETE", "/api/v1/files/nonexistent/file.txt", nil)
+		req := httptest.NewRequest(http.MethodDelete, deleteFileRequestURL(t, fs, "/api/v1/files/nonexistent/file.txt"), nil)
 		w := httptest.NewRecorder()
 
 		server.Router().ServeHTTP(w, req)
 
-		if w.Code != http.StatusNotFound {
-			t.Fatalf("Delete nonexistent file status = %d, want %d", w.Code, http.StatusNotFound)
+		if w.Code != http.StatusConflict {
+			t.Fatalf("Delete nonexistent file status = %d, want %d", w.Code, http.StatusConflict)
 		}
-		if !strings.Contains(w.Body.String(), "resource not found") {
-			t.Fatalf("expected sanitized not-found response, got %s", w.Body.String())
+		var apiErr APIError
+		if err := json.Unmarshal(w.Body.Bytes(), &apiErr); err != nil {
+			t.Fatalf("decode missing target response: %v", err)
+		}
+		if apiErr.Code != ErrCodeDeleteTargetChanged {
+			t.Fatalf("missing target code = %q, want %q; body=%s", apiErr.Code, ErrCodeDeleteTargetChanged, w.Body.String())
 		}
 	})
 
@@ -25138,7 +26520,7 @@ func TestServer_DeleteFile_ErrorCases(t *testing.T) {
 			t.Fatalf("WriteFile() error: %v", err)
 		}
 
-		req := httptest.NewRequest("DELETE", "/api/v1/files/non-empty-dir", nil)
+		req := httptest.NewRequest(http.MethodDelete, deleteFileRequestURL(t, fs, "/api/v1/files/non-empty-dir"), nil)
 		w := httptest.NewRecorder()
 
 		server.Router().ServeHTTP(w, req)

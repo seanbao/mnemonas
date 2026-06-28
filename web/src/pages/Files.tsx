@@ -58,8 +58,10 @@ import { useFilesStore, type FileCapabilities, type FileItem } from '@/stores/fi
 import { useClipboardStore } from '@/stores/clipboard'
 import { useCanWrite, useShareEnabled, useUser } from '@/stores/auth'
 import { useContextMenu, useKeyboardShortcuts } from '@/hooks'
+import { useDestructiveDialogFocus } from '@/hooks/useDestructiveDialogFocus'
 import {
   listFiles,
+  createFileDeleteIntent,
   deleteFile,
   createDirectory,
   uploadFile,
@@ -69,8 +71,12 @@ import {
   ApiError,
   MAX_UPLOAD_FILE_SIZE_BYTES,
   MAX_UPLOAD_FILE_SIZE_LABEL,
+  MAX_DELETE_INTENT_TARGETS,
   type ActionResult,
+  type DeleteFileOptions,
+  type DeleteMode,
   type FileListResponse,
+  type FileDeleteTarget,
 } from '@/api/files'
 import { checkFavorites, toggleFavorite } from '@/api/favorites'
 import { listShares, ShareError } from '@/api/share'
@@ -238,7 +244,134 @@ type RenameMutationVariables = {
 
 type DeleteMutationVariables = {
   path: string
+  expectedDeleteMode: DeleteMode
+  expectedDeletePolicyToken: string
+  expectedDeleteTargetToken: string
   signal: AbortSignal
+}
+
+type KnownDeletePolicy = {
+  mode: DeleteMode
+  token: string
+  trashRetentionDays: number
+  trashAutoCleanupEnabled: boolean
+}
+
+type SingleDeleteIntent = {
+  target: FileDeleteTarget
+  policy: KnownDeletePolicy
+  directoryPath: string
+}
+
+type BatchDeleteIntent = {
+  targets: FileDeleteTarget[]
+  policy: KnownDeletePolicy
+  directoryPath: string
+}
+
+type DeleteTargetSnapshot = Pick<FileItem, 'path' | 'name' | 'isDir' | 'size' | 'modTime' | 'deleteIdentityToken'>
+
+function snapshotDeleteTarget(file: FileItem): DeleteTargetSnapshot {
+  return {
+    path: file.path,
+    name: file.name,
+    isDir: file.isDir,
+    size: file.size,
+    modTime: file.modTime,
+    deleteIdentityToken: file.deleteIdentityToken,
+  }
+}
+
+function deleteTargetMatchesSnapshot(target: FileDeleteTarget, snapshot: DeleteTargetSnapshot): boolean {
+  return target.path === snapshot.path
+    && target.name === snapshot.name
+    && target.isDir === snapshot.isDir
+    && target.size === snapshot.size
+    && target.modTime === snapshot.modTime
+    && target.deleteIdentityToken === snapshot.deleteIdentityToken
+}
+
+function deleteTargetsMatchSnapshots(targets: FileDeleteTarget[], snapshots: DeleteTargetSnapshot[]): boolean {
+  return targets.length === snapshots.length
+    && targets.every((target, index) => deleteTargetMatchesSnapshot(target, snapshots[index]!))
+}
+
+type BatchDeleteDriftSummary = {
+  mode: DeleteMode
+  deletedCount: number
+  synchronizedMissingCount: number
+  remainingCount: number
+}
+
+function isDeletePolicyChangedError(error: unknown): boolean {
+  return getErrorStatus(error) === 409 && getErrorCode(error) === 'DELETE_POLICY_CHANGED'
+}
+
+function isDeleteTargetChangedError(error: unknown): boolean {
+  return getErrorStatus(error) === 409 && getErrorCode(error) === 'DELETE_TARGET_CHANGED'
+}
+
+function getKnownDeletePolicy(intent: {
+  deleteMode: DeleteMode
+  deletePolicyToken: string
+  trashRetentionDays: number
+  trashAutoCleanupEnabled: boolean
+}): KnownDeletePolicy {
+  return {
+    mode: intent.deleteMode,
+    token: intent.deletePolicyToken,
+    trashRetentionDays: intent.trashRetentionDays,
+    trashAutoCleanupEnabled: intent.trashAutoCleanupEnabled,
+  }
+}
+
+function getDeleteActionLabel(mode: DeleteMode, batch = false): string {
+  if (mode === 'permanent') {
+    return batch ? '批量永久删除' : '永久删除'
+  }
+  return batch ? '批量移入回收站' : '移入回收站'
+}
+
+function getDeletePolicyDescription(policy: KnownDeletePolicy): string {
+  if (policy.mode === 'permanent') {
+    return '不会进入回收站，删除后无法恢复。此操作无法撤销。'
+  }
+
+  if (!policy.trashAutoCleanupEnabled) {
+    return '当前未启用按到期时间自动清理；回收站容量不足时，较早项目仍可能提前清理。'
+  }
+
+  if (policy.trashRetentionDays === 0) {
+    return '当前策略下，新删除项目会立即到期并等待后台清理；回收站容量不足时也可能提前清理。'
+  }
+
+  return `当前策略下，新删除项目将在 ${policy.trashRetentionDays} 天后到期；到期项目由后台清理周期处理，回收站容量不足时也可能提前清理。`
+}
+
+function getDeleteConsequence(mode: DeleteMode, batch = false): string {
+  if (mode === 'permanent') {
+    return batch
+      ? '选中项目不会进入回收站，删除后无法恢复。此操作无法撤销。'
+      : '文件不会进入回收站，删除后无法恢复。此操作无法撤销。'
+  }
+
+  return batch
+    ? '选中项目将移入回收站，不会立即永久删除。'
+    : '将移入回收站，不会立即永久删除。'
+}
+
+function getBatchDeleteDriftDescription(summary: BatchDeleteDriftSummary): string {
+  const parts: string[] = []
+  if (summary.deletedCount > 0) {
+    parts.push(summary.mode === 'trash'
+      ? `已移入回收站 ${summary.deletedCount} 项`
+      : `已永久删除 ${summary.deletedCount} 项`)
+  }
+  if (summary.synchronizedMissingCount > 0) {
+    parts.push(`已同步移除 ${summary.synchronizedMissingCount} 个不存在项目`)
+  }
+  parts.push(`${summary.remainingCount} 项未删除`)
+  return parts.join('；')
 }
 
 type FavoriteMutationVariables = {
@@ -695,6 +828,8 @@ function FileRow({
   shareActionLabel,
   isMultiSelection,
   canWrite,
+  canDelete,
+  deletePreparing,
   canShareFile,
   onSelect, 
   onOpen,
@@ -717,6 +852,8 @@ function FileRow({
   shareActionLabel: string
   isMultiSelection: boolean
   canWrite: boolean
+  canDelete: boolean
+  deletePreparing: boolean
   canShareFile: boolean
   onSelect: (e: React.MouseEvent) => void
   onOpen: () => void
@@ -901,13 +1038,14 @@ function FileRow({
                   查看版本历史
                 </DropdownItem>
               </DropdownSection>
-              {canWrite ? (
+              {canDelete ? (
                 <DropdownSection>
                   <DropdownItem 
                     key="delete" 
                     startContent={<Trash2 size={16} />}
                     className="text-rose data-[hover=true]:text-rose data-[hover=true]:bg-rose/10"
                     onPress={onDelete}
+                    isDisabled={deletePreparing}
                   >
                     删除
                   </DropdownItem>
@@ -975,6 +1113,8 @@ function FileCard({
   shareActionLabel,
   isMultiSelection,
   canWrite,
+  canDelete,
+  deletePreparing,
   canShareFile,
   onSelect,
   onOpen,
@@ -997,6 +1137,8 @@ function FileCard({
   shareActionLabel: string
   isMultiSelection: boolean
   canWrite: boolean
+  canDelete: boolean
+  deletePreparing: boolean
   canShareFile: boolean
   onSelect: (e: React.MouseEvent) => void
   onOpen: () => void
@@ -1162,13 +1304,14 @@ function FileCard({
                   查看版本历史
                 </DropdownItem>
               </DropdownSection>
-              {canWrite ? (
+              {canDelete ? (
                 <DropdownSection>
                   <DropdownItem 
                     key="delete" 
                     startContent={<Trash2 size={16} />}
                     className="text-rose data-[hover=true]:text-rose data-[hover=true]:bg-rose/10"
                     onPress={onDelete}
+                    isDisabled={deletePreparing}
                   >
                     删除
                   </DropdownItem>
@@ -1236,6 +1379,16 @@ export function FilesPage() {
   const { isOpen: isRenameOpen, onOpen: onRenameOpen, onClose: onRenameClose } = useDisclosure()
   const { isOpen: isDeleteOpen, onOpen: onDeleteOpen, onClose: onDeleteClose } = useDisclosure()
   const { isOpen: isBatchDeleteOpen, onOpen: onBatchDeleteOpen, onClose: onBatchDeleteClose } = useDisclosure()
+  const {
+    initialFocusRef: deleteCancelButtonRef,
+    captureReturnFocus: captureDeleteReturnFocus,
+    setFallbackReturnFocus: setDeleteFallbackReturnFocus,
+  } = useDestructiveDialogFocus(isDeleteOpen)
+  const {
+    initialFocusRef: batchDeleteCancelButtonRef,
+    captureReturnFocus: captureBatchDeleteReturnFocus,
+    setFallbackReturnFocus: setBatchDeleteFallbackReturnFocus,
+  } = useDestructiveDialogFocus(isBatchDeleteOpen)
   const { isOpen: isShareOpen, onOpen: onShareOpen, onClose: onShareClose } = useDisclosure()
   const [shareFile, setShareFile] = useState<FileItem | null>(null)
   
@@ -1256,7 +1409,11 @@ export function FilesPage() {
   const renameNameValidationError = getPathSegmentNameValidationError(renameValue, '请输入新名称')
   const displayedRenameNameValidationError = renameValue.trim() ? renameNameValidationError : null
   const [actionFile, setActionFile] = useState<FileItem | null>(null)
-  const [deleteTarget, setDeleteTarget] = useState<FileItem | null>(null)
+  const [deleteIntent, setDeleteIntent] = useState<SingleDeleteIntent | null>(null)
+  const [batchDeleteIntent, setBatchDeleteIntent] = useState<BatchDeleteIntent | null>(null)
+  const [isDeleteIntentPreparing, setIsDeleteIntentPreparing] = useState(false)
+  const [isBatchDeleteIntentPreparing, setIsBatchDeleteIntentPreparing] = useState(false)
+  const [deletePolicyRefreshRequired, setDeletePolicyRefreshRequired] = useState(false)
   const newFolderSessionRef = useRef(0)
   const currentNewFolderNameRef = useRef('')
   const createFolderAbortControllerRef = useRef<AbortController | null>(null)
@@ -1264,8 +1421,14 @@ export function FilesPage() {
   const currentRenameValueRef = useRef('')
   const currentRenameFileRef = useRef<FileItem | null>(null)
   const renameAbortControllerRef = useRef<AbortController | null>(null)
+  const deleteIntentAbortControllerRef = useRef<AbortController | null>(null)
+  const batchDeleteIntentAbortControllerRef = useRef<AbortController | null>(null)
   const deleteAbortControllerRef = useRef<AbortController | null>(null)
   const batchDeleteAbortControllerRef = useRef<AbortController | null>(null)
+  const deleteFocusFallbackRef = useRef<HTMLDivElement>(null)
+  const isMountedRef = useRef(true)
+  const deleteDialogCloseRef = useRef(onDeleteClose)
+  const batchDeleteDialogCloseRef = useRef(onBatchDeleteClose)
   const pasteAbortControllerRef = useRef<AbortController | null>(null)
   const favoriteAbortControllerRef = useRef<AbortController | null>(null)
   const lastSelectedIndexRef = useRef<number | null>(null)
@@ -1304,6 +1467,15 @@ export function FilesPage() {
   } = useFilesStore()
 
   const currentPathRef = useRef(currentPath)
+  const resetForPathRef = useRef<string | null>(null)
+  const selectedFilesRef = useRef(selectedFiles)
+
+  selectedFilesRef.current = selectedFiles
+
+  useEffect(() => {
+    deleteDialogCloseRef.current = onDeleteClose
+    batchDeleteDialogCloseRef.current = onBatchDeleteClose
+  }, [onBatchDeleteClose, onDeleteClose])
 
   useEffect(() => {
     currentPathRef.current = currentPath
@@ -1319,10 +1491,15 @@ export function FilesPage() {
 
   useEffect(() => {
     return () => {
+      isMountedRef.current = false
       createFolderAbortControllerRef.current?.abort()
       createFolderAbortControllerRef.current = null
       renameAbortControllerRef.current?.abort()
       renameAbortControllerRef.current = null
+      deleteIntentAbortControllerRef.current?.abort()
+      deleteIntentAbortControllerRef.current = null
+      batchDeleteIntentAbortControllerRef.current?.abort()
+      batchDeleteIntentAbortControllerRef.current = null
       deleteAbortControllerRef.current?.abort()
       deleteAbortControllerRef.current = null
       batchDeleteAbortControllerRef.current?.abort()
@@ -1410,7 +1587,26 @@ export function FilesPage() {
   }, [hasInvalidHomeDir, currentPath, location.pathname, navigate])
 
   useEffect(() => {
+    if (resetForPathRef.current === currentPath) {
+      return
+    }
+    resetForPathRef.current = currentPath
     lastSelectedIndexRef.current = null
+    deleteIntentAbortControllerRef.current?.abort()
+    deleteIntentAbortControllerRef.current = null
+    batchDeleteIntentAbortControllerRef.current?.abort()
+    batchDeleteIntentAbortControllerRef.current = null
+    deleteAbortControllerRef.current?.abort()
+    deleteAbortControllerRef.current = null
+    batchDeleteAbortControllerRef.current?.abort()
+    batchDeleteAbortControllerRef.current = null
+    setIsBatchDeleting(false)
+    setIsDeleteIntentPreparing(false)
+    setIsBatchDeleteIntentPreparing(false)
+    setDeleteIntent(null)
+    setBatchDeleteIntent(null)
+    deleteDialogCloseRef.current()
+    batchDeleteDialogCloseRef.current()
     clearSelection()
     setActiveFilePath(null)
     setFocusedIndex(-1)
@@ -1428,11 +1624,99 @@ export function FilesPage() {
     currentRenameFileRef.current = actionFile
   }, [actionFile])
 
-  const { data, isLoading, error, refetch } = useQuery({
+  const { data, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: filesQueryKey,
     queryFn: ({ signal }) => listFiles(currentPath, { signal }),
     enabled: currentPathAllowed,
   })
+
+  const deletePolicy = useMemo<KnownDeletePolicy | null>(() => {
+    if (!data || data.deleteMode === 'unknown') {
+      return null
+    }
+
+    return {
+      mode: data.deleteMode,
+      token: data.deletePolicyToken,
+      trashRetentionDays: data.trashRetentionDays,
+      trashAutoCleanupEnabled: data.trashAutoCleanupEnabled,
+    }
+  }, [data])
+  const deletePolicyAvailable = deletePolicy !== null && !deletePolicyRefreshRequired
+
+  const refreshDeletePolicyAfterDrift = useCallback((summary?: BatchDeleteDriftSummary) => {
+    void refetch().then((result) => {
+      if (result.error || !result.data || result.data.deleteMode === 'unknown') {
+        addToast({
+          title: summary ? '删除策略已更改，批量删除已停止' : '删除策略已更改，文件未删除',
+          description: summary
+            ? `${getBatchDeleteDriftDescription(summary)}；删除策略刷新失败，删除操作保持停用。`
+            : '暂时无法确认当前删除策略，删除操作保持停用。请重新加载后再确认。',
+          color: 'warning',
+        })
+        return
+      }
+
+      setDeletePolicyRefreshRequired(false)
+      addToast({
+        title: summary ? '删除策略已更改，批量删除已停止' : '删除策略已更改，文件未删除',
+        description: summary
+          ? `${getBatchDeleteDriftDescription(summary)}；列表已刷新，请按当前删除策略重新确认。`
+          : '列表已刷新，请按当前删除策略重新确认。',
+        color: 'warning',
+      })
+    })
+  }, [refetch])
+
+  const refreshFilesAfterTargetDrift = useCallback((summary?: BatchDeleteDriftSummary) => {
+    void refetch().then((result) => {
+      const title = summary ? '删除目标已更改，批量删除已停止' : '删除目标已更改，文件未删除'
+      if (result.error) {
+        addToast({
+          title,
+          description: summary
+            ? `${getBatchDeleteDriftDescription(summary)}；列表刷新失败，请重新加载后再次确认。`
+            : '列表刷新失败，请重新加载并再次确认删除目标。',
+          color: 'warning',
+        })
+        return
+      }
+
+      addToast({
+        title,
+        description: summary
+          ? `${getBatchDeleteDriftDescription(summary)}；列表已刷新，请重新确认剩余删除目标。`
+          : '列表已刷新，请重新确认删除目标。',
+        color: 'warning',
+      })
+    })
+  }, [refetch])
+
+  const discardReplacedDeleteIntent = useCallback(() => {
+    void refetch()
+    addToast({
+      title: '目标已变化，请重新选择/确认',
+      color: 'warning',
+    })
+  }, [refetch])
+
+  const handleRefreshDeletePolicy = useCallback(() => {
+    void refetch().then((result) => {
+      if (result.error || !result.data || result.data.deleteMode === 'unknown') {
+        addToast({
+          title: '删除策略仍不可确认',
+          description: result.error
+            ? getUserFacingErrorDescription(result.error, GENERIC_LOAD_ERROR_DESCRIPTION)
+            : '服务端未返回完整的删除策略。',
+          color: 'warning',
+        })
+        return
+      }
+
+      setDeletePolicyRefreshRequired(false)
+      addToast({ title: '删除策略已重新加载', color: 'success' })
+    })
+  }, [refetch])
 
   const removeFilesFromCache = useCallback((paths: string[]) => {
     if (paths.length === 0) {
@@ -1457,12 +1741,8 @@ export function FilesPage() {
     })
   }, [filesQueryKey, queryClient])
 
-  const deleteFileWithMissingSync = useCallback(async (path: string, options?: RequestInit) => {
-    return withMissingFileActionResult(() => options ? deleteFile(path, options) : deleteFile(path))
-  }, [])
-
-  const deleteSingleFileWithMissingSync = useCallback(async (path: string, options?: RequestInit) => {
-    return withMissingFileActionResult(() => options ? deleteFile(path, options) : deleteFile(path, {}))
+  const deleteFileWithMissingSync = useCallback(async (path: string, options: DeleteFileOptions) => {
+    return withMissingFileActionResult(() => deleteFile(path, options))
   }, [])
 
   const moveFileWithMissingSync = useCallback(async (fromPath: string, toPath: string, options?: { signal?: AbortSignal }) => {
@@ -1491,23 +1771,51 @@ export function FilesPage() {
 
   // Mutations (omitted for brevity, same as before)
   const deleteMutation = useMutation({
-    mutationFn: ({ path, signal }: DeleteMutationVariables) => deleteSingleFileWithMissingSync(path, { signal }),
+    mutationFn: ({ path, expectedDeleteMode, expectedDeletePolicyToken, expectedDeleteTargetToken, signal }: DeleteMutationVariables) => deleteFileWithMissingSync(path, {
+      expectedDeleteMode,
+      expectedDeletePolicyToken,
+      expectedDeleteTargetToken,
+      signal,
+    }),
     onSuccess: (result, variables) => {
       if (variables.signal.aborted) {
         return
       }
 
+      const focusFallback = deleteFocusFallbackRef.current
+      if (focusFallback) {
+        focusFallback.tabIndex = -1
+      }
+      setDeleteFallbackReturnFocus(focusFallback)
       removeFilesFromCache([variables.path])
       queryClient.invalidateQueries({ queryKey: filesQueryKey })
+      if (variables.expectedDeleteMode === 'trash' && !isMissingFileActionResult(result)) {
+        queryClient.invalidateQueries({ queryKey: ['trash'] })
+      }
       onDeleteClose()
-      setDeleteTarget(null)
+      setDeleteIntent(null)
       addToast(getFilesActionSuccessToast(result, {
-        success: '删除成功',
-        warning: '删除完成，但存在警告',
+        success: variables.expectedDeleteMode === 'trash' ? '已移入回收站' : '已永久删除',
+        warning: variables.expectedDeleteMode === 'trash' ? '已移入回收站，但存在警告' : '已永久删除，但存在警告',
       }))
     },
     onError: (error, variables) => {
       if (variables.signal.aborted || isAbortError(error)) {
+        return
+      }
+
+      if (isDeletePolicyChangedError(error)) {
+        setDeletePolicyRefreshRequired(true)
+        onDeleteClose()
+        setDeleteIntent(null)
+        refreshDeletePolicyAfterDrift()
+        return
+      }
+
+      if (isDeleteTargetChangedError(error)) {
+        onDeleteClose()
+        setDeleteIntent(null)
+        refreshFilesAfterTargetDrift()
         return
       }
 
@@ -1617,6 +1925,9 @@ export function FilesPage() {
   const canWriteFile = useCallback((file: FileItem): boolean => {
     return hasWriteCapability(canWrite, file.capabilities)
   }, [canWrite])
+  const canDeleteFile = useCallback((file: FileItem): boolean => {
+    return deletePolicyAvailable && file.deleteIdentityToken !== null && canWriteFile(file)
+  }, [canWriteFile, deletePolicyAvailable])
   const canUseFileSource = useCallback((file: FileItem): boolean => {
     return hasConcreteReadCapability(canWrite, file.capabilities)
   }, [canWrite])
@@ -1947,16 +2258,23 @@ export function FilesPage() {
 
   const handleDelete = useCallback(() => {
     if (deleteMutation.isPending) return
-    if (!deleteTarget) return
-    if (!canWriteFile(deleteTarget)) return
+    if (!deleteIntent) return
+    if (currentPathRef.current !== deleteIntent.directoryPath) {
+      onDeleteClose()
+      setDeleteIntent(null)
+      return
+    }
     const controller = new AbortController()
     deleteAbortControllerRef.current?.abort()
     deleteAbortControllerRef.current = controller
     deleteMutation.mutate({
-      path: deleteTarget.path,
+      path: deleteIntent.target.path,
+      expectedDeleteMode: deleteIntent.policy.mode,
+      expectedDeletePolicyToken: deleteIntent.policy.token,
+      expectedDeleteTargetToken: deleteIntent.target.deleteTargetToken,
       signal: controller.signal,
     })
-  }, [canWriteFile, deleteMutation, deleteTarget])
+  }, [deleteIntent, deleteMutation, onDeleteClose])
 
   const handleOpenNewFolderModal = useCallback(() => {
     if (!currentPathCanWrite) return
@@ -1978,11 +2296,147 @@ export function FilesPage() {
     onRenameOpen()
   }, [canWriteFile, onRenameOpen])
 
-  const handleOpenDeleteModal = useCallback((file: FileItem) => {
-    if (!canWriteFile(file)) return
-    setDeleteTarget(file)
-    onDeleteOpen()
-  }, [canWriteFile, onDeleteOpen])
+  const handleOpenDeleteModal = useCallback(async (file: FileItem) => {
+    const observedIdentityToken = file.deleteIdentityToken
+    if (!canDeleteFile(file) || observedIdentityToken === null) return
+    if (deleteIntentAbortControllerRef.current) return
+
+    deleteFocusFallbackRef.current?.removeAttribute('tabindex')
+    const menuTrigger = Array.from(document.querySelectorAll<HTMLElement>('[aria-label]'))
+      .find((element) => element.getAttribute('aria-label') === `${file.name} 操作菜单`)
+    captureDeleteReturnFocus(menuTrigger)
+    const directoryPath = currentPathRef.current
+    const targetSnapshot = snapshotDeleteTarget(file)
+    const controller = new AbortController()
+    deleteIntentAbortControllerRef.current = controller
+    setIsDeleteIntentPreparing(true)
+    try {
+      const intent = await createFileDeleteIntent([{
+        path: targetSnapshot.path,
+        observedIdentityToken,
+      }], { signal: controller.signal })
+      if (controller.signal.aborted || currentPathRef.current !== directoryPath) return
+      if (!deleteTargetMatchesSnapshot(intent.targets[0]!, targetSnapshot)) {
+        discardReplacedDeleteIntent()
+        return
+      }
+      setDeleteIntent({
+        target: intent.targets[0]!,
+        policy: getKnownDeletePolicy(intent),
+        directoryPath,
+      })
+      captureDeleteReturnFocus(menuTrigger)
+      onDeleteOpen()
+    } catch (error) {
+      if (controller.signal.aborted || isAbortError(error)) return
+      if (getErrorStatus(error) === 404) {
+        queryClient.invalidateQueries({ queryKey: filesQueryKey })
+        addToast({ title: '文件或文件夹已不存在，列表已刷新', color: 'warning' })
+        return
+      }
+      if (isDeleteTargetChangedError(error)) {
+        refreshFilesAfterTargetDrift()
+        return
+      }
+      addToast(getFilesActionErrorToast(error, {
+        unavailable: '删除确认暂不可用',
+        failure: '无法确认删除目标',
+      }))
+    } finally {
+      if (deleteIntentAbortControllerRef.current === controller) {
+        deleteIntentAbortControllerRef.current = null
+        setIsDeleteIntentPreparing(false)
+      }
+    }
+  }, [canDeleteFile, captureDeleteReturnFocus, discardReplacedDeleteIntent, filesQueryKey, onDeleteOpen, queryClient, refreshFilesAfterTargetDrift])
+
+  const handleOpenBatchDeleteModal = useCallback(async (returnFocusTarget?: Element) => {
+    if (!deletePolicyAvailable) {
+      addToast({ title: '删除策略不可确认，删除操作已停用', color: 'warning' })
+      return
+    }
+
+    const targets = sortedFiles.filter((file) => selectedFiles.has(file.path) && canDeleteFile(file))
+    if (targets.length === 0 || targets.length !== selectedFiles.size) {
+      addToast({ title: '所选项目不可删除', color: 'warning' })
+      return
+    }
+    if (targets.length > MAX_DELETE_INTENT_TARGETS) {
+      addToast({
+        title: '所选项目过多',
+        description: `单次最多确认 ${MAX_DELETE_INTENT_TARGETS} 个删除目标，请减少选择后重试。`,
+        color: 'warning',
+      })
+      return
+    }
+    if (batchDeleteIntentAbortControllerRef.current) return
+
+    deleteFocusFallbackRef.current?.removeAttribute('tabindex')
+    const returnFocusElement = returnFocusTarget instanceof HTMLElement ? returnFocusTarget : undefined
+    captureBatchDeleteReturnFocus(returnFocusElement)
+    const directoryPath = currentPathRef.current
+    const controller = new AbortController()
+    batchDeleteIntentAbortControllerRef.current = controller
+    setIsBatchDeleteIntentPreparing(true)
+    try {
+      const targetSnapshots = targets.map(snapshotDeleteTarget)
+      const requestedPaths = targets.map((file) => file.path)
+      const requestedTargets = targetSnapshots.map((target) => ({
+        path: target.path,
+        observedIdentityToken: target.deleteIdentityToken!,
+      }))
+      const intent = await createFileDeleteIntent(requestedTargets, { signal: controller.signal })
+      if (controller.signal.aborted || currentPathRef.current !== directoryPath) return
+      const currentSelection = selectedFilesRef.current
+      if (
+        currentSelection.size !== requestedPaths.length
+        || requestedPaths.some((path) => !currentSelection.has(path))
+      ) {
+        addToast({
+          title: '所选项目已更改',
+          description: '请按当前选择重新确认批量删除。',
+          color: 'warning',
+        })
+        return
+      }
+      if (!deleteTargetsMatchSnapshots(intent.targets, targetSnapshots)) {
+        discardReplacedDeleteIntent()
+        return
+      }
+      setBatchDeleteIntent({
+        targets: intent.targets,
+        policy: getKnownDeletePolicy(intent),
+        directoryPath,
+      })
+      captureBatchDeleteReturnFocus(returnFocusElement)
+      onBatchDeleteOpen()
+    } catch (error) {
+      if (controller.signal.aborted || isAbortError(error)) return
+      if (getErrorStatus(error) === 404) {
+        queryClient.invalidateQueries({ queryKey: filesQueryKey })
+        addToast({ title: '部分所选项目已不存在，列表已刷新', color: 'warning' })
+        return
+      }
+      if (isDeleteTargetChangedError(error)) {
+        refreshFilesAfterTargetDrift({
+          mode: deletePolicy!.mode,
+          deletedCount: 0,
+          synchronizedMissingCount: 0,
+          remainingCount: targets.length,
+        })
+        return
+      }
+      addToast(getFilesActionErrorToast(error, {
+        unavailable: '批量删除确认暂不可用',
+        failure: '无法确认批量删除目标',
+      }))
+    } finally {
+      if (batchDeleteIntentAbortControllerRef.current === controller) {
+        batchDeleteIntentAbortControllerRef.current = null
+        setIsBatchDeleteIntentPreparing(false)
+      }
+    }
+  }, [canDeleteFile, captureBatchDeleteReturnFocus, deletePolicy, deletePolicyAvailable, discardReplacedDeleteIntent, filesQueryKey, onBatchDeleteOpen, queryClient, refreshFilesAfterTargetDrift, selectedFiles, sortedFiles])
 
   const handleCloseRenameModal = useCallback(() => {
     if (renameMutation.isPending) return
@@ -1992,12 +2446,13 @@ export function FilesPage() {
   const handleCloseDeleteModal = useCallback(() => {
     if (deleteMutation.isPending) return
     onDeleteClose()
-    setDeleteTarget(null)
+    setDeleteIntent(null)
   }, [deleteMutation.isPending, onDeleteClose])
 
   const handleCloseBatchDeleteModal = useCallback(() => {
     if (isBatchDeleting) return
     onBatchDeleteClose()
+    setBatchDeleteIntent(null)
   }, [isBatchDeleting, onBatchDeleteClose])
 
   const handleViewVersions = useCallback((file: FileItem) => {
@@ -2375,42 +2830,117 @@ export function FilesPage() {
 
   // Batch delete handler
   const handleBatchDelete = useCallback(async () => {
-    const writableSelected = sortedFiles.filter((file) => selectedFiles.has(file.path) && canWriteFile(file))
-    if (writableSelected.length === 0 || writableSelected.length !== selectedFiles.size) {
-      addToast({ title: '所选项目不可删除', color: 'warning' })
+    if (isBatchDeleting) return
+    if (!batchDeleteIntent) {
+      addToast({ title: '删除策略不可确认，删除操作已停用', color: 'warning' })
       return
     }
+    if (currentPathRef.current !== batchDeleteIntent.directoryPath) {
+      onBatchDeleteClose()
+      setBatchDeleteIntent(null)
+      return
+    }
+
     batchDeleteAbortControllerRef.current?.abort()
     const controller = new AbortController()
     batchDeleteAbortControllerRef.current = controller
     const { signal } = controller
     setIsBatchDeleting(true)
-    const paths = writableSelected.map((file) => file.path)
-    let successCount = 0
+    const targets = batchDeleteIntent.targets
+    const paths = targets.map((target) => target.path)
+    let deletedCount = 0
+    let synchronizedMissingCount = 0
     let errorCount = 0
     const succeededPaths: string[] = []
     const failedPaths: string[] = []
     const failedErrors: unknown[] = []
-    const warningMessages: string[] = []
+    let serverWarningCount = 0
+    let succeededPathsSynchronized = false
+
+    const synchronizeSucceededPaths = () => {
+      if (succeededPathsSynchronized || succeededPaths.length === 0) {
+        return
+      }
+
+      succeededPathsSynchronized = true
+      const focusFallback = deleteFocusFallbackRef.current
+      if (focusFallback) {
+        focusFallback.tabIndex = -1
+      }
+      setBatchDeleteFallbackReturnFocus(focusFallback)
+      removeFilesFromCache(succeededPaths)
+      queryClient.invalidateQueries({ queryKey: filesQueryKey })
+      if (batchDeleteIntent.policy.mode === 'trash' && deletedCount > 0) {
+        queryClient.invalidateQueries({ queryKey: ['trash'] })
+      }
+    }
 
     try {
-      for (const path of paths) {
+      for (let index = 0; index < paths.length; index++) {
+        const target = targets[index]!
+        const path = target.path
         if (signal.aborted) {
           return
         }
 
         try {
-          const result = await deleteFileWithMissingSync(path, { signal })
+          const result = await deleteFileWithMissingSync(path, {
+            expectedDeleteMode: batchDeleteIntent.policy.mode,
+            expectedDeletePolicyToken: batchDeleteIntent.policy.token,
+            expectedDeleteTargetToken: target.deleteTargetToken,
+            signal,
+          })
+          succeededPaths.push(path)
+          if (isMissingFileActionResult(result)) {
+            synchronizedMissingCount++
+          } else {
+            deletedCount++
+            if (result.warning) {
+              serverWarningCount++
+            }
+          }
           if (signal.aborted) {
             return
           }
-          successCount++
-          succeededPaths.push(path)
-          if (result.warning) {
-            warningMessages.push(getActionWarningSummary(result))
-          }
         } catch (error) {
           if (signal.aborted || isAbortError(error)) {
+            return
+          }
+
+          if (isDeletePolicyChangedError(error)) {
+            const preservedPaths = Array.from(new Set([
+              ...failedPaths,
+              ...paths.slice(index),
+            ]))
+            synchronizeSucceededPaths()
+            setSelection(preservedPaths)
+            setDeletePolicyRefreshRequired(true)
+            onBatchDeleteClose()
+            setBatchDeleteIntent(null)
+            refreshDeletePolicyAfterDrift({
+              mode: batchDeleteIntent.policy.mode,
+              deletedCount,
+              synchronizedMissingCount,
+              remainingCount: preservedPaths.length,
+            })
+            return
+          }
+
+          if (isDeleteTargetChangedError(error)) {
+            const preservedPaths = Array.from(new Set([
+              ...failedPaths,
+              ...paths.slice(index),
+            ]))
+            synchronizeSucceededPaths()
+            setSelection(preservedPaths)
+            onBatchDeleteClose()
+            setBatchDeleteIntent(null)
+            refreshFilesAfterTargetDrift({
+              mode: batchDeleteIntent.policy.mode,
+              deletedCount,
+              synchronizedMissingCount,
+              remainingCount: preservedPaths.length,
+            })
             return
           }
 
@@ -2424,26 +2954,38 @@ export function FilesPage() {
         return
       }
 
-      removeFilesFromCache(succeededPaths)
-      queryClient.invalidateQueries({ queryKey: filesQueryKey })
+      synchronizeSucceededPaths()
 
       if (errorCount === 0) {
         onBatchDeleteClose()
+        setBatchDeleteIntent(null)
         clearSelection()
-        if (warningMessages.length > 0) {
-          addToast({
-            title: getSynchronizedWarningTitle(warningMessages) ?? `已删除 ${successCount} 个文件，但存在警告`,
-            color: 'warning',
-          })
-        } else {
-          addToast({ title: `成功删除 ${successCount} 个文件`, color: 'success' })
+        const completedParts: string[] = []
+        if (deletedCount > 0) {
+          completedParts.push(batchDeleteIntent.policy.mode === 'trash'
+            ? `已将 ${deletedCount} 个项目移入回收站`
+            : `已永久删除 ${deletedCount} 个项目`)
         }
+        if (synchronizedMissingCount > 0) {
+          completedParts.push(`已同步移除 ${synchronizedMissingCount} 个不存在项目`)
+        }
+        addToast({
+          title: completedParts.join('，') || '批量删除已完成',
+          description: serverWarningCount > 0 ? `${serverWarningCount} 项返回了服务端警告` : undefined,
+          color: synchronizedMissingCount > 0 || serverWarningCount > 0 ? 'warning' : 'success',
+        })
         return
       }
 
       setSelection(failedPaths)
+      setBatchDeleteIntent((current) => current
+        ? {
+            ...current,
+            targets: current.targets.filter((target) => failedPaths.includes(target.path)),
+          }
+        : null)
 
-      if (successCount === 0) {
+      if (deletedCount === 0 && synchronizedMissingCount === 0) {
         if (failedErrors.length > 0 && failedErrors.every(isFilesystemUnavailableError)) {
           addToast({
             title: '批量删除暂不可用',
@@ -2456,16 +2998,42 @@ export function FilesPage() {
         return
       }
 
-      addToast(getPartialBatchActionToast('批量删除部分完成', successCount, errorCount, warningMessages))
+      const partialParts: string[] = []
+      if (deletedCount > 0) {
+        partialParts.push(batchDeleteIntent.policy.mode === 'trash'
+          ? `已移入回收站 ${deletedCount} 项`
+          : `已永久删除 ${deletedCount} 项`)
+      }
+      if (synchronizedMissingCount > 0) {
+        partialParts.push(`已同步移除 ${synchronizedMissingCount} 个不存在项目`)
+      }
+      partialParts.push(`失败 ${errorCount} 项`)
+      if (serverWarningCount > 0) {
+        partialParts.push(`${serverWarningCount} 项带服务端警告`)
+      }
+      addToast({
+        title: '批量删除部分完成',
+        description: partialParts.join('；'),
+        color: 'warning',
+      })
     } finally {
-      if (batchDeleteAbortControllerRef.current === controller) {
+      if (!succeededPathsSynchronized && succeededPaths.length > 0) {
+        synchronizeSucceededPaths()
+        if (isMountedRef.current && currentPathRef.current === batchDeleteIntent.directoryPath) {
+          const succeededPathSet = new Set(succeededPaths)
+          setSelection(Array.from(selectedFilesRef.current).filter((path) => !succeededPathSet.has(path)))
+        }
+      }
+
+      const ownsController = batchDeleteAbortControllerRef.current === controller
+      if (ownsController) {
         batchDeleteAbortControllerRef.current = null
       }
-      if (!signal.aborted) {
+      if (isMountedRef.current && (ownsController || batchDeleteAbortControllerRef.current === null)) {
         setIsBatchDeleting(false)
       }
     }
-  }, [canWriteFile, selectedFiles, sortedFiles, deleteFileWithMissingSync, removeFilesFromCache, queryClient, clearSelection, onBatchDeleteClose, setSelection, filesQueryKey])
+  }, [batchDeleteIntent, clearSelection, deleteFileWithMissingSync, filesQueryKey, isBatchDeleting, onBatchDeleteClose, queryClient, refreshDeletePolicyAfterDrift, refreshFilesAfterTargetDrift, removeFilesFromCache, setBatchDeleteFallbackReturnFocus, setSelection])
 
   // Batch download handler
   const handleBatchDownload = useCallback(async () => {
@@ -2702,21 +3270,14 @@ export function FilesPage() {
 
   const handleKeyboardDelete = useCallback(() => {
     if (selectedFiles.size > 0) {
-      const writableSelected = sortedFiles.filter((file) => selectedFiles.has(file.path) && canWriteFile(file))
-      if (writableSelected.length === selectedFiles.size) {
-        onBatchDeleteOpen()
-      } else {
-        addToast({ title: '所选项目不可删除', color: 'warning' })
-      }
+      handleOpenBatchDeleteModal()
       return
     }
 
     const target = getFocusedOrActiveFile()
     if (!target) return
-    if (!canWriteFile(target.file)) return
-    setDeleteTarget(target.file)
-    onDeleteOpen()
-  }, [canWriteFile, getFocusedOrActiveFile, onBatchDeleteOpen, onDeleteOpen, selectedFiles, sortedFiles])
+    handleOpenDeleteModal(target.file)
+  }, [getFocusedOrActiveFile, handleOpenBatchDeleteModal, handleOpenDeleteModal, selectedFiles.size])
 
   const handleKeyboardRename = useCallback(() => {
     const target = selectedFiles.size === 1
@@ -2869,7 +3430,7 @@ export function FilesPage() {
 
   // Register keyboard shortcuts
   useKeyboardShortcuts({
-    onDelete: canWrite ? handleKeyboardDelete : undefined,
+    onDelete: canWrite && deletePolicyAvailable ? handleKeyboardDelete : undefined,
     onSelectAll: handleSelectAll,
     onEscape: handleKeyboardEscape,
     onCopy: canWrite ? handleKeyboardCopy : undefined,
@@ -2927,7 +3488,14 @@ export function FilesPage() {
   }, [selectedFiles, sortedFiles])
   const canMoveSelectedItems = selectedFileItems.length > 0 && selectedFileItems.every(canWriteFile)
   const canCopySelectedItems = selectedFileItems.length > 0 && selectedFileItems.every(canUseFileSource)
-  const canDeleteSelectedItems = canMoveSelectedItems
+  const canDeleteSelectedItems = selectedFileItems.length > 0
+    && selectedFileItems.length === selectedFiles.size
+    && selectedFileItems.every(canDeleteFile)
+  const deleteSelectionHint = !deletePolicyAvailable || !deletePolicy
+    ? '删除方式未知，删除操作已停用'
+    : deletePolicy.mode === 'trash'
+      ? '删除将移入回收站'
+      : '删除将永久移除，无法恢复'
   const totalCounts = useMemo(() => {
     let files = 0
     let folders = 0
@@ -3046,7 +3614,7 @@ export function FilesPage() {
     )
   }
 
-  if (error) {
+  if (error && !data) {
     const errorPresentation = getFilesLoadErrorPresentation(error)
     return (
       <div className="relative flex h-full min-h-0 overflow-hidden">
@@ -3072,6 +3640,7 @@ export function FilesPage() {
 
   return (
     <div 
+      ref={deleteFocusFallbackRef}
       role="region"
       aria-label="文件上传区域"
       className="relative flex h-full min-h-0 overflow-hidden"
@@ -3199,6 +3768,39 @@ export function FilesPage() {
         
         {/* Breadcrumbs */}
         <Breadcrumbs path={currentPath} onNavigate={navigateToFilePath} />
+
+        {canWrite && data && !deletePolicyAvailable && (
+          <div role="alert" className="mb-3 flex items-center gap-3 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-default-700">
+            <AlertCircle size={16} className="shrink-0 text-warning" />
+            <div className="min-w-0 flex-1">
+              <p className="font-medium">删除操作已停用</p>
+              <p className="text-xs text-default-600">
+                {deletePolicyRefreshRequired
+                  ? '检测到删除策略已更改，正在重新确认。为避免文件被永久删除，删除操作已停用。'
+                  : '无法确认当前删除策略。为避免文件被永久删除，删除操作已停用。'}
+              </p>
+            </div>
+            <Button
+              size="sm"
+              variant="bordered"
+              className="rounded-lg"
+              onPress={handleRefreshDeletePolicy}
+              isLoading={isFetching}
+            >
+              重新加载删除策略
+            </Button>
+          </div>
+        )}
+        {(isDeleteIntentPreparing || isBatchDeleteIntentPreparing) && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="mb-4 flex items-center gap-2 rounded-lg border border-divider bg-content1 px-4 py-3 text-sm text-default-600"
+          >
+            <span className="h-4 w-4 animate-spin rounded-full border-2 border-accent-primary border-t-transparent" aria-hidden="true" />
+            正在确认删除目标…
+          </div>
+        )}
         
         {/* Toolbar */}
         <div className="mb-4 rounded-lg border border-divider bg-content1/95 shadow-[var(--shadow-soft)]">
@@ -3259,8 +3861,9 @@ export function FilesPage() {
                       variant="flat"
                       className="rounded-lg"
                       startContent={<Trash2 size={16} />}
-                      onPress={onBatchDeleteOpen}
-                      isDisabled={!canDeleteSelectedItems}
+                      onPress={(event) => handleOpenBatchDeleteModal(event.target)}
+                      isDisabled={!canDeleteSelectedItems || isBatchDeleteIntentPreparing}
+                      isLoading={isBatchDeleteIntentPreparing}
                     >
                       批量删除
                     </Button>
@@ -3429,7 +4032,7 @@ export function FilesPage() {
           {hasSelection && (
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-divider px-3 pb-3 text-xs text-default-500">
               <span>下载将处理 {selectedCounts.files + selectedCounts.folders} 项</span>
-              <span>删除会进入回收站</span>
+              <span>{deleteSelectionHint}</span>
               {selectedCounts.folders > 0 && <span>文件夹会打包为 ZIP</span>}
             </div>
           )}
@@ -3543,6 +4146,8 @@ export function FilesPage() {
                         shareActionLabel={shareActionLabel}
                         isMultiSelection={hasMultiSelection}
                         canWrite={canWriteFile(file)}
+                        canDelete={canDeleteFile(file)}
+                        deletePreparing={isDeleteIntentPreparing}
                         canShareFile={canUseFileSource(file)}
                         onSelect={(e) => handleFileSelection(file, virtualItem.index, e, 'toggle')}
                         onOpen={() => handleFileOpen(file)}
@@ -3630,6 +4235,8 @@ export function FilesPage() {
                       shareActionLabel={shareActionLabel}
                       isMultiSelection={hasMultiSelection}
                       canWrite={canWriteFile(file)}
+                      canDelete={canDeleteFile(file)}
+                      deletePreparing={isDeleteIntentPreparing}
                       canShareFile={canUseFileSource(file)}
                       onSelect={(e) => handleFileSelection(file, index, e, 'toggle')}
                       onOpen={() => handleFileOpen(file)}
@@ -3768,6 +4375,8 @@ export function FilesPage() {
       <Modal
         isOpen={isDeleteOpen}
         onClose={handleCloseDeleteModal}
+        isDismissable={!deleteMutation.isPending}
+        isKeyboardDismissDisabled={deleteMutation.isPending}
         placement="center"
         size="md"
         classNames={{
@@ -3776,30 +4385,53 @@ export function FilesPage() {
           closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
         }}
       >
-        <ModalContent>
+        <ModalContent
+          aria-labelledby="single-delete-dialog-title"
+          aria-describedby="single-delete-dialog-description"
+          aria-busy={deleteMutation.isPending}
+        >
           <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
             <div className="w-10 h-10 rounded-lg bg-danger/10 text-danger flex items-center justify-center">
               <AlertCircle size={20} />
             </div>
             <div>
-              <h3 className="text-lg font-semibold text-foreground">确认删除</h3>
-              <p className="text-xs text-default-500 font-normal">文件将被移入回收站</p>
+              <h3 id="single-delete-dialog-title" className="text-lg font-semibold text-foreground">
+                {deleteIntent ? getDeleteActionLabel(deleteIntent.policy.mode) : '确认删除'}
+              </h3>
+              <p className="text-xs text-default-500 font-normal">
+                {deleteIntent?.policy.mode === 'permanent' ? '项目将被永久移除' : '项目将进入回收站'}
+              </p>
             </div>
           </ModalHeader>
           <ModalBody className="px-6 py-4">
-            <p className="text-default-600">确定要删除 <strong className="text-foreground">{deleteTarget?.name}</strong> 吗？</p>
-            <p className="text-xs text-default-500 mt-2">文件将被移入回收站，可在回收站中恢复。</p>
+            <div id="single-delete-dialog-description">
+              <p className="text-default-600">
+                确定要{deleteIntent?.policy.mode === 'permanent' ? '永久删除' : '将'}{' '}
+                <strong className="text-foreground">{deleteIntent?.target.name}</strong>
+                {deleteIntent?.policy.mode === 'trash' ? ' 移入回收站' : ''}吗？
+              </p>
+              {deleteIntent && (
+                <>
+                  <p className="text-xs text-default-500 mt-2">{getDeleteConsequence(deleteIntent.policy.mode)}</p>
+                  {deleteIntent.policy.mode === 'trash' && (
+                    <p className="text-xs text-default-500 mt-2">{getDeletePolicyDescription(deleteIntent.policy)}</p>
+                  )}
+                </>
+              )}
+            </div>
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
-            <Button variant="flat" onPress={handleCloseDeleteModal} isDisabled={deleteMutation.isPending} className="text-default-600 rounded-lg">取消</Button>
+            <Button ref={deleteCancelButtonRef} autoFocus variant="flat" onPress={handleCloseDeleteModal} isDisabled={deleteMutation.isPending} className="text-default-600 rounded-lg">取消</Button>
             <Button
               color="danger"
-              aria-label={deleteTarget ? `确认删除 ${deleteTarget.name}` : '确认删除'}
+              aria-label={deleteIntent
+                ? `${getDeleteActionLabel(deleteIntent.policy.mode)} ${deleteIntent.target.name}`
+                : '确认删除'}
               onPress={handleDelete}
               isLoading={deleteMutation.isPending}
               className="rounded-lg"
             >
-              删除
+              {deleteIntent ? getDeleteActionLabel(deleteIntent.policy.mode) : '删除'}
             </Button>
           </ModalFooter>
         </ModalContent>
@@ -3808,6 +4440,8 @@ export function FilesPage() {
       <Modal
         isOpen={isBatchDeleteOpen}
         onClose={handleCloseBatchDeleteModal}
+        isDismissable={!isBatchDeleting}
+        isKeyboardDismissDisabled={isBatchDeleting}
         placement="center"
         size="md"
         classNames={{
@@ -3816,23 +4450,52 @@ export function FilesPage() {
           closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
         }}
       >
-        <ModalContent>
+        <ModalContent
+          aria-labelledby="batch-delete-dialog-title"
+          aria-describedby="batch-delete-dialog-description"
+          aria-busy={isBatchDeleting}
+        >
           <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
             <div className="w-10 h-10 rounded-lg bg-danger/10 text-danger flex items-center justify-center">
               <Trash2 size={20} />
             </div>
             <div>
-              <h3 className="text-lg font-semibold text-foreground">批量删除</h3>
-              <p className="text-xs text-default-500 font-normal">选中文件将被移入回收站</p>
+              <h3 id="batch-delete-dialog-title" className="text-lg font-semibold text-foreground">
+                {batchDeleteIntent ? getDeleteActionLabel(batchDeleteIntent.policy.mode, true) : '批量删除'}
+              </h3>
+              <p className="text-xs text-default-500 font-normal">
+                {batchDeleteIntent?.policy.mode === 'permanent' ? '选中项目将被永久移除' : '选中项目将进入回收站'}
+              </p>
             </div>
           </ModalHeader>
           <ModalBody className="px-6 py-4">
-            <p className="text-default-600">确定要删除选中的 <strong className="text-foreground">{selectedFiles.size}</strong> 个文件吗？</p>
-            <p className="text-xs text-default-500 mt-2">文件将被移入回收站，可在回收站中恢复。</p>
+            <div id="batch-delete-dialog-description">
+              <p className="text-default-600">
+                确定要处理选中的 <strong className="text-foreground">{batchDeleteIntent?.targets.length ?? 0}</strong> 个项目吗？
+              </p>
+              {batchDeleteIntent && (
+                <>
+                  <p className="text-xs text-default-500 mt-2">{getDeleteConsequence(batchDeleteIntent.policy.mode, true)}</p>
+                  {batchDeleteIntent.policy.mode === 'trash' && (
+                    <p className="text-xs text-default-500 mt-2">{getDeletePolicyDescription(batchDeleteIntent.policy)}</p>
+                  )}
+                </>
+              )}
+            </div>
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
-            <Button variant="flat" onPress={handleCloseBatchDeleteModal} isDisabled={isBatchDeleting} className="text-default-600 rounded-lg">取消</Button>
-            <Button color="danger" onPress={handleBatchDelete} isLoading={isBatchDeleting} className="rounded-lg">删除全部</Button>
+            <Button ref={batchDeleteCancelButtonRef} autoFocus variant="flat" onPress={handleCloseBatchDeleteModal} isDisabled={isBatchDeleting} className="text-default-600 rounded-lg">取消</Button>
+            <Button
+              color="danger"
+              aria-label={batchDeleteIntent
+                ? `${getDeleteActionLabel(batchDeleteIntent.policy.mode, true)} ${batchDeleteIntent.targets.length} 个项目`
+                : '批量删除'}
+              onPress={handleBatchDelete}
+              isLoading={isBatchDeleting}
+              className="rounded-lg"
+            >
+              {batchDeleteIntent ? getDeleteActionLabel(batchDeleteIntent.policy.mode, true) : '批量删除'}
+            </Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
@@ -3963,12 +4626,16 @@ export function FilesPage() {
                     icon={<Trash2 size={16} />}
                     danger
                     onClick={() => {
-                      onBatchDeleteOpen()
+                      handleOpenBatchDeleteModal()
                       contextMenu.hide()
                     }}
-                    disabled={!canDeleteSelectedItems}
+                    disabled={!canDeleteSelectedItems || isBatchDeleteIntentPreparing}
                   >
-                    批量删除（进回收站）
+                    {deletePolicy?.mode === 'permanent'
+                      ? '批量永久删除'
+                      : deletePolicy?.mode === 'trash'
+                        ? '批量移入回收站'
+                        : '批量删除（策略未知）'}
                   </ContextMenuItem>
                 )}
               </ContextMenuSection>
@@ -4080,7 +4747,7 @@ export function FilesPage() {
                     查看版本历史
                   </ContextMenuItem>
                 </ContextMenuSection>
-                {canWriteFile(contextMenuFile) && (
+                {canDeleteFile(contextMenuFile) && (
                   <ContextMenuSection>
                     <ContextMenuItem
                       icon={<Trash2 size={16} />}
@@ -4089,6 +4756,7 @@ export function FilesPage() {
                         handleOpenDeleteModal(contextMenuFile)
                         contextMenu.hide()
                       }}
+                      disabled={isDeleteIntentPreparing}
                     >
                       删除
                     </ContextMenuItem>

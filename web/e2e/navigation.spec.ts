@@ -64,7 +64,7 @@ async function expectRouteSurface(page: Page, route: string): Promise<void> {
       break
     case '/trash':
       await expect(main.getByRole('heading', { name: '回收站' })).toBeVisible({ timeout: 5000 })
-      await expect(main.getByText(/项\s*·.*天后自动清理/i)).toBeVisible()
+      await expect(main.getByText(/项\s*·.*天后到期/i)).toBeVisible()
       break
     case '/versions':
       await expect(main.getByRole('heading', { name: '版本历史', exact: true })).toBeVisible({ timeout: 5000 })

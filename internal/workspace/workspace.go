@@ -297,6 +297,7 @@ var (
 	ErrAlreadyExists        = errors.New("already exists")
 	ErrNotDir               = errors.New("not a directory")
 	ErrIsDir                = errors.New("is a directory")
+	ErrNotRegular           = errors.New("not a regular file")
 	ErrFileTooLarge         = errors.New("file too large")
 	errWorkspaceRootSymlink = errors.New("workspace root must not be a symlink")
 )
@@ -339,11 +340,13 @@ func IsVisibleMutationWarning(err error) bool {
 
 // FileInfo represents file metadata
 type FileInfo struct {
-	Path    string
-	Name    string
-	IsDir   bool
-	Size    int64
-	ModTime time.Time
+	Path                string
+	Name                string
+	IsDir               bool
+	Mode                os.FileMode
+	Size                int64
+	ModTime             time.Time
+	DeleteIdentityToken string
 }
 
 // Workspace provides native file operations on a root directory
@@ -583,11 +586,13 @@ func (w *Workspace) Stat(ctx context.Context, name string) (*FileInfo, error) {
 	}
 
 	return &FileInfo{
-		Path:    CleanPath(name),
-		Name:    info.Name(),
-		IsDir:   info.IsDir(),
-		Size:    info.Size(),
-		ModTime: info.ModTime(),
+		Path:                CleanPath(name),
+		Name:                info.Name(),
+		IsDir:               info.IsDir(),
+		Mode:                info.Mode(),
+		Size:                info.Size(),
+		ModTime:             info.ModTime(),
+		DeleteIdentityToken: deleteIdentityToken(info),
 	}, nil
 }
 
@@ -646,11 +651,13 @@ func (w *Workspace) ReadDir(ctx context.Context, name string) ([]*FileInfo, erro
 
 		childPath := path.Join(CleanPath(name), entryName)
 		result = append(result, &FileInfo{
-			Path:    childPath,
-			Name:    entryName,
-			IsDir:   info.IsDir(),
-			Size:    info.Size(),
-			ModTime: info.ModTime(),
+			Path:                childPath,
+			Name:                entryName,
+			IsDir:               info.IsDir(),
+			Mode:                info.Mode(),
+			Size:                info.Size(),
+			ModTime:             info.ModTime(),
+			DeleteIdentityToken: deleteIdentityToken(info),
 		})
 	}
 
@@ -685,6 +692,46 @@ func (w *Workspace) OpenFile(ctx context.Context, name string) (*os.File, error)
 		return nil, ErrIsDir
 	}
 
+	return fileHandle, nil
+}
+
+// OpenRegularFile opens a regular file for reading without blocking on
+// special files such as FIFOs.
+func (w *Workspace) OpenRegularFile(ctx context.Context, name string) (*os.File, error) {
+	if err := validateWorkspaceName(name); err != nil {
+		return nil, err
+	}
+	fullPath := w.FullPath(name)
+	if err := w.validatePath(fullPath); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := afterValidateWorkspacePaths(); err != nil {
+		return nil, err
+	}
+
+	fileHandle, err := rootio.OpenRegularFileNoFollow(w.rootHandle, workspaceRootRelativeName(name))
+	if err != nil {
+		mappedErr := mapWorkspaceRootPathError(err)
+		if mappedErr != err {
+			return nil, mappedErr
+		}
+		info, statErr := w.rootHandle.Lstat(workspaceRootRelativeName(name))
+		if statErr == nil && info.Mode()&os.ModeSymlink == 0 {
+			if info.IsDir() {
+				return nil, ErrIsDir
+			}
+			if !info.Mode().IsRegular() {
+				return nil, ErrNotRegular
+			}
+		}
+		if errors.Is(err, syscall.EINVAL) {
+			return nil, ErrNotRegular
+		}
+		return nil, err
+	}
 	return fileHandle, nil
 }
 
@@ -1134,24 +1181,29 @@ type WalkFunc func(path string, info *FileInfo) error
 
 type workspaceWalkInternalFunc func(rootName, cleanPath string, info os.FileInfo) error
 
-func (w *Workspace) walkWithRootHandle(ctx context.Context, rootName, cleanPath string, fn workspaceWalkInternalFunc) error {
+func (w *Workspace) walkWithRootHandle(ctx context.Context, rootName, cleanPath string, rejectNonRegular bool, fn workspaceWalkInternalFunc) error {
 	entryInfo, err := w.rootHandle.Lstat(rootName)
 	if err != nil {
 		return mapWorkspaceRootPathError(err)
 	}
 	if entryInfo.Mode()&os.ModeSymlink != 0 {
-		return ErrNotFound
+		if !rejectNonRegular {
+			return ErrNotFound
+		}
 	}
 
-	return w.walkWorkspaceEntry(ctx, rootName, cleanPath, entryInfo, fn)
+	return w.walkWorkspaceEntry(ctx, rootName, cleanPath, entryInfo, rejectNonRegular, fn)
 }
 
-func (w *Workspace) walkWorkspaceEntry(ctx context.Context, rootName, cleanPath string, info os.FileInfo, fn workspaceWalkInternalFunc) error {
+func (w *Workspace) walkWorkspaceEntry(ctx context.Context, rootName, cleanPath string, info os.FileInfo, rejectNonRegular bool, fn workspaceWalkInternalFunc) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if err := fn(rootName, cleanPath, info); err != nil {
 		return err
+	}
+	if rejectNonRegular && !info.IsDir() && !info.Mode().IsRegular() {
+		return ErrNotRegular
 	}
 	if !info.IsDir() {
 		return nil
@@ -1185,12 +1237,12 @@ func (w *Workspace) walkWorkspaceEntry(ctx context.Context, rootName, cleanPath 
 		if err != nil {
 			return mapWorkspaceRootPathError(err)
 		}
-		if entryInfo.Mode()&os.ModeSymlink != 0 {
+		if entryInfo.Mode()&os.ModeSymlink != 0 && !rejectNonRegular {
 			continue
 		}
 
 		childCleanPath := path.Join(cleanPath, entryName)
-		if err := w.walkWorkspaceEntry(ctx, childRootName, childCleanPath, entryInfo, fn); err != nil {
+		if err := w.walkWorkspaceEntry(ctx, childRootName, childCleanPath, entryInfo, rejectNonRegular, fn); err != nil {
 			return err
 		}
 	}
@@ -1198,14 +1250,17 @@ func (w *Workspace) walkWorkspaceEntry(ctx context.Context, rootName, cleanPath 
 	return nil
 }
 
-// Walk walks the file tree rooted at root, calling fn for each file or directory
-func (w *Workspace) Walk(ctx context.Context, root string, fn WalkFunc) error {
+func (w *Workspace) walk(ctx context.Context, root string, rejectNonRegular bool, fn WalkFunc) error {
 	if err := validateWorkspaceName(root); err != nil {
 		return err
 	}
 	rootPath := w.FullPath(root)
 	rootClean := CleanPath(root)
-	if err := w.validatePath(rootPath); err != nil {
+	validatePath := rootPath
+	if rejectNonRegular {
+		validatePath = w.FullPath(path.Dir(rootClean))
+	}
+	if err := w.validatePath(validatePath); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
@@ -1215,15 +1270,29 @@ func (w *Workspace) Walk(ctx context.Context, root string, fn WalkFunc) error {
 		return err
 	}
 
-	return w.walkWithRootHandle(ctx, workspaceRootRelativeName(root), rootClean, func(_ string, cleanPath string, info os.FileInfo) error {
+	return w.walkWithRootHandle(ctx, workspaceRootRelativeName(root), rootClean, rejectNonRegular, func(_ string, cleanPath string, info os.FileInfo) error {
 		return fn(cleanPath, &FileInfo{
-			Path:    cleanPath,
-			Name:    info.Name(),
-			IsDir:   info.IsDir(),
-			Size:    info.Size(),
-			ModTime: info.ModTime(),
+			Path:                cleanPath,
+			Name:                info.Name(),
+			IsDir:               info.IsDir(),
+			Mode:                info.Mode(),
+			Size:                info.Size(),
+			ModTime:             info.ModTime(),
+			DeleteIdentityToken: deleteIdentityToken(info),
 		})
 	})
+}
+
+// Walk walks the file tree rooted at root, calling fn for each non-symlink
+// file or directory.
+func (w *Workspace) Walk(ctx context.Context, root string, fn WalkFunc) error {
+	return w.walk(ctx, root, false, fn)
+}
+
+// WalkStrict visits every entry without following symlinks and rejects
+// symlinks or other non-regular, non-directory entries after invoking fn.
+func (w *Workspace) WalkStrict(ctx context.Context, root string, fn WalkFunc) error {
+	return w.walk(ctx, root, true, fn)
 }
 
 // CleanupStaging removes incomplete workspace staging files.
@@ -1240,7 +1309,7 @@ func (w *Workspace) CleanupStaging(ctx context.Context) (files int, bytes int64,
 		size     int64
 	}
 	stagingFiles := make([]stagingFile, 0)
-	err = w.walkWithRootHandle(ctx, ".", "/", func(rootName, _ string, info os.FileInfo) error {
+	err = w.walkWithRootHandle(ctx, ".", "/", false, func(rootName, _ string, info os.FileInfo) error {
 		if info.IsDir() || !isWorkspaceStagingFile(info.Name()) {
 			return nil
 		}

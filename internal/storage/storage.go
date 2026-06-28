@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -31,16 +33,141 @@ import (
 
 // Common errors
 var (
-	ErrNotFound           = errors.New("not found")
-	ErrIsDir              = errors.New("path is a directory")
-	ErrNotDir             = errors.New("path is not a directory")
-	ErrDirNotEmpty        = errors.New("directory not empty")
-	ErrAlreadyExists      = errors.New("already exists")
-	ErrFileLocked         = errors.New("file is locked")
-	ErrFileTooLarge       = errors.New("file too large")
-	ErrVersionNotFound    = errors.New("version not found")
-	errStoragePathSymlink = errors.New("storage path contains symlink")
+	ErrNotFound                  = errors.New("not found")
+	ErrIsDir                     = errors.New("path is a directory")
+	ErrNotDir                    = errors.New("path is not a directory")
+	ErrNotRegular                = errors.New("path is not a regular file")
+	ErrDirNotEmpty               = errors.New("directory not empty")
+	ErrAlreadyExists             = errors.New("already exists")
+	ErrFileLocked                = errors.New("file is locked")
+	ErrFileTooLarge              = errors.New("file too large")
+	ErrVersionNotFound           = errors.New("version not found")
+	ErrDeletePolicyChanged       = errors.New("delete policy changed")
+	ErrDeleteTargetChanged       = errors.New("delete target changed")
+	ErrInvalidDeleteIntent       = errors.New("invalid delete intent")
+	ErrDeleteIdentityUnavailable = errors.New("delete identity verification unavailable")
+	errStoragePathSymlink        = errors.New("storage path contains symlink")
 )
+
+// MaxDeleteIntentTargets bounds one atomic delete-intent snapshot request.
+const MaxDeleteIntentTargets = 1000
+
+// DeleteMode identifies how a live path is deleted.
+type DeleteMode string
+
+const (
+	DeleteModeTrash     DeleteMode = "trash"
+	DeleteModePermanent DeleteMode = "permanent"
+)
+
+// Valid reports whether the delete mode is supported.
+func (m DeleteMode) Valid() bool {
+	return m == DeleteModeTrash || m == DeleteModePermanent
+}
+
+// DeletePolicy is an atomic snapshot of runtime deletion settings.
+type DeletePolicy struct {
+	Mode                    DeleteMode
+	TrashRetentionDays      int
+	TrashAutoCleanupEnabled bool
+	RetentionSweepInterval  time.Duration
+	MaxTrashSize            int64
+	Token                   string
+}
+
+// DeletePolicyExpectation identifies the deletion policy confirmed by a caller.
+type DeletePolicyExpectation struct {
+	Mode  DeleteMode
+	Token string
+}
+
+// DeletePolicyChangedError reports that the caller's confirmed deletion policy
+// no longer matches the runtime policy.
+type DeletePolicyChangedError struct {
+	Expected DeletePolicyExpectation
+	Actual   DeletePolicy
+}
+
+func (e *DeletePolicyChangedError) Error() string {
+	return fmt.Sprintf("%s: expected mode %q, actual mode %q", ErrDeletePolicyChanged, e.Expected.Mode, e.Actual.Mode)
+}
+
+func (e *DeletePolicyChangedError) Unwrap() error {
+	return ErrDeletePolicyChanged
+}
+
+// DeletePathAuthorizer validates one path in a deletion tree. Implementations
+// must not call FileSystem methods because the filesystem mutation lock is held.
+type DeletePathAuthorizer func(path string) error
+
+// DeleteTargetSnapshot describes the live root selected for deletion while the
+// filesystem mutation lock is held.
+type DeleteTargetSnapshot struct {
+	Root    FileInfo
+	Entries []FileInfo
+}
+
+// DeleteTargetSnapshotOptions controls the cost and scope of a target snapshot.
+type DeleteTargetSnapshotOptions struct {
+	IncludeDescendants bool
+	IncludeContentHash bool
+}
+
+// DeleteTargetValidator validates the current deletion target while the
+// filesystem mutation lock is held. Implementations must not call FileSystem
+// methods because the filesystem mutation lock is held.
+type DeleteTargetValidator func(DeleteTargetSnapshot) error
+
+// PreparedDeleteTarget is one target returned from an atomic delete-intent snapshot.
+type PreparedDeleteTarget struct {
+	Snapshot DeleteTargetSnapshot
+	Token    string
+}
+
+// ObservedDeleteTarget binds a requested path to the object identity returned
+// by a prior directory listing or stat operation.
+type ObservedDeleteTarget struct {
+	Path                  string
+	ObservedIdentityToken string
+}
+
+// DeleteIntentSnapshot contains one policy snapshot and the requested targets
+// captured under the same filesystem read lock.
+type DeleteIntentSnapshot struct {
+	Policy  DeletePolicy
+	Targets []PreparedDeleteTarget
+}
+
+// DeleteTargetChangedError reports that the live target tree no longer matches
+// the target token confirmed by a caller.
+type DeleteTargetChangedError struct {
+	Path          string
+	ExpectedToken string
+	ActualToken   string
+}
+
+func (e *DeleteTargetChangedError) Error() string {
+	return fmt.Sprintf("%s: %s", ErrDeleteTargetChanged, e.Path)
+}
+
+func (e *DeleteTargetChangedError) Unwrap() error {
+	return ErrDeleteTargetChanged
+}
+
+// DeleteIdentityChangedError reports that a selected path no longer names the
+// same filesystem object observed by the caller. Tokens are intentionally not
+// retained on the error so they cannot be disclosed through API details.
+type DeleteIdentityChangedError struct {
+	Path string
+}
+
+func (e *DeleteIdentityChangedError) Error() string {
+	return fmt.Sprintf("%s: %s", ErrDeleteTargetChanged, e.Path)
+}
+
+func (e *DeleteIdentityChangedError) Unwrap() error {
+	return ErrDeleteTargetChanged
+}
 
 // VisibleMutationWarningError reports that a storage mutation is already
 // externally visible, but the final durability step did not complete.
@@ -94,25 +221,32 @@ var movePathRemoveAll = func(root *os.Root, rel, abs string) error {
 }
 var beforeStorageWorkspaceWrite = func() error { return nil }
 var afterValidateStoragePaths = func() error { return nil }
+var afterStorageCopySourceStat = func(string) error { return nil }
 var createStorageCopyTempFile = createStorageTempFile
 var walkStorageWorkspace = func(ctx context.Context, ws *workspace.Workspace, root string, fn workspace.WalkFunc) error {
 	return ws.Walk(ctx, root, fn)
+}
+var walkStorageDeleteTree = func(ctx context.Context, ws *workspace.Workspace, root string, fn workspace.WalkFunc) error {
+	return ws.WalkStrict(ctx, root, fn)
 }
 var readMountInfo = func() ([]byte, error) {
 	return os.ReadFile("/proc/self/mountinfo")
 }
 
+var errDeleteSnapshotRootComplete = errors.New("delete snapshot root complete")
+
 const defaultMaxWriteSize int64 = 10 * 1024 * 1024 * 1024 // 10GB
 
 // FileInfo represents file metadata
 type FileInfo struct {
-	Path        string    `json:"path"`
-	Name        string    `json:"name"`
-	IsDir       bool      `json:"is_dir"`
-	Size        int64     `json:"size"`
-	ModTime     time.Time `json:"mod_time"`
-	ContentHash string    `json:"content_hash,omitempty"`
-	Versioned   bool      `json:"versioned"` // Whether this file has version management
+	Path                string    `json:"path"`
+	Name                string    `json:"name"`
+	IsDir               bool      `json:"is_dir"`
+	Size                int64     `json:"size"`
+	ModTime             time.Time `json:"mod_time"`
+	DeleteIdentityToken string    `json:"delete_identity_token,omitempty"`
+	ContentHash         string    `json:"content_hash,omitempty"`
+	Versioned           bool      `json:"versioned"` // Whether this file has version management
 }
 
 // VersionRef represents a version reference
@@ -129,6 +263,7 @@ type TrashItem struct {
 	OriginalPath string    `json:"original_path"`
 	Size         int64     `json:"size"`
 	DeletedAt    time.Time `json:"deleted_at"`
+	ExpiresAt    time.Time `json:"expires_at"`
 	IsDir        bool      `json:"is_dir"`
 	HadVersions  bool      `json:"had_versions"`
 	RestoreData  []byte    `json:"-"`
@@ -244,10 +379,23 @@ type Config struct {
 	MaxVersionedSize        int64
 
 	// Retention policy
+	MaxVersions            int
+	MaxVersionAge          time.Duration
+	MinFreeSpace           uint64
+	RetentionSweepInterval time.Duration
+	TrashEnabled           *bool
+	TrashRetentionDays     int
+	MaxTrashSize           int64
+}
+
+// RuntimePolicySettings contains retention and deletion settings that must be
+// published as one runtime snapshot.
+type RuntimePolicySettings struct {
 	MaxVersions        int
 	MaxVersionAge      time.Duration
 	MinFreeSpace       uint64
-	TrashEnabled       *bool
+	SweepInterval      time.Duration
+	TrashEnabled       bool
 	TrashRetentionDays int
 	MaxTrashSize       int64
 }
@@ -275,13 +423,15 @@ type FileSystem struct {
 	addFileVersion            func(ctx context.Context, path, hash string, size int64, comment string) error
 	deleteFileVersion         func(ctx context.Context, path, hash string) error
 	deleteVersionObject       func(ctx context.Context, hash string) error
+	hashDeleteTargetFile      func(ctx context.Context, path string) (string, error)
+	readDeleteMountPoints     func() ([]string, error)
 	addTrashMetadata          func(ctx context.Context, item *versionstore.TrashItem) error
 	updateTrashRestoreData    func(ctx context.Context, id string, restoreData []byte) error
 	removeTrashMetadata       func(ctx context.Context, id string) error
 	writeWorkspacePath        func(ctx context.Context, name string, data []byte) error
 	mkdirWorkspacePath        func(ctx context.Context, name string) error
 	copyWorkspacePath         func(ctx context.Context, oldName, newName string) error
-	deleteWorkspacePath       func(ctx context.Context, name string) error
+	deleteStagedWorkspacePath func(ctx context.Context, logicalName string, remove func() error) error
 	renameWorkspacePath       func(ctx context.Context, oldName, newName string) error
 	renameMetadataPath        func(ctx context.Context, oldName, newName string) error
 	renameHistoryMetadataPath func(ctx context.Context, oldName, newName string) error
@@ -308,7 +458,7 @@ func (fs *FileSystem) UpdateTrashSettings(enabled bool, retentionDays int, maxSi
 }
 
 // UpdateRetentionSettings applies version retention settings to the running filesystem.
-func (fs *FileSystem) UpdateRetentionSettings(maxVersions int, maxVersionAge time.Duration, minFreeSpace uint64) {
+func (fs *FileSystem) UpdateRetentionSettings(maxVersions int, maxVersionAge time.Duration, minFreeSpace uint64, sweepInterval time.Duration) {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
@@ -318,6 +468,65 @@ func (fs *FileSystem) UpdateRetentionSettings(maxVersions int, maxVersionAge tim
 	fs.config.MaxVersions = maxVersions
 	fs.config.MaxVersionAge = maxVersionAge
 	fs.config.MinFreeSpace = minFreeSpace
+	fs.config.RetentionSweepInterval = sweepInterval
+}
+
+// UpdateRuntimePolicySettings publishes retention and deletion settings atomically.
+func (fs *FileSystem) UpdateRuntimePolicySettings(settings RuntimePolicySettings) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	if fs.config == nil {
+		return
+	}
+	if fs.config.TrashEnabled == nil {
+		fs.config.TrashEnabled = new(bool)
+	}
+	fs.config.MaxVersions = settings.MaxVersions
+	fs.config.MaxVersionAge = settings.MaxVersionAge
+	fs.config.MinFreeSpace = settings.MinFreeSpace
+	fs.config.RetentionSweepInterval = settings.SweepInterval
+	*fs.config.TrashEnabled = settings.TrashEnabled
+	fs.config.TrashRetentionDays = settings.TrashRetentionDays
+	fs.config.MaxTrashSize = settings.MaxTrashSize
+}
+
+// CurrentDeletePolicy returns a consistent runtime deletion-policy snapshot.
+func (fs *FileSystem) CurrentDeletePolicy() DeletePolicy {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+
+	return fs.currentDeletePolicyLocked()
+}
+
+func (fs *FileSystem) currentDeletePolicyLocked() DeletePolicy {
+	policy := DeletePolicy{Mode: DeleteModeTrash}
+	if fs.config == nil {
+		policy.Token = deletePolicyToken(policy)
+		return policy
+	}
+	if fs.config.TrashEnabled != nil && !*fs.config.TrashEnabled {
+		policy.Mode = DeleteModePermanent
+	}
+	policy.TrashRetentionDays = fs.config.TrashRetentionDays
+	policy.TrashAutoCleanupEnabled = fs.config.RetentionSweepInterval > 0
+	policy.RetentionSweepInterval = fs.config.RetentionSweepInterval
+	policy.MaxTrashSize = fs.config.MaxTrashSize
+	policy.Token = deletePolicyToken(policy)
+	return policy
+}
+
+func deletePolicyToken(policy DeletePolicy) string {
+	hasher := sha256.New()
+	_, _ = fmt.Fprintf(hasher,
+		"version=1\nmode=%s\ntrash_retention_days=%d\ntrash_auto_cleanup_enabled=%t\nretention_sweep_interval_ns=%d\nmax_trash_size=%d\n",
+		policy.Mode,
+		policy.TrashRetentionDays,
+		policy.TrashAutoCleanupEnabled,
+		policy.RetentionSweepInterval.Nanoseconds(),
+		policy.MaxTrashSize,
+	)
+	return hex.EncodeToString(hasher.Sum(nil))
 }
 
 // UpdateVersioningSettings applies versioning policy settings to the running filesystem.
@@ -372,12 +581,14 @@ func (fs *FileSystem) SetPathChangeHooks(onRename func(ctx context.Context, oldP
 	fs.onPathDeleted = onDelete
 }
 
-// RunRetentionSweep applies version retention rules across all versioned files.
+// RunRetentionSweep applies version and trash retention rules.
 func (fs *FileSystem) RunRetentionSweep(ctx context.Context) error {
 	release := fs.beginMutation()
 	defer release()
 
-	return fs.runRetentionSweepLocked(ctx)
+	versionErr := fs.runRetentionSweepLocked(ctx)
+	_, trashErr := fs.cleanupExpiredTrashLocked(ctx)
+	return errors.Join(versionErr, trashErr)
 }
 
 // New creates a new FileSystem
@@ -504,7 +715,7 @@ func New(cfg *Config) (*FileSystem, error) {
 		writeWorkspacePath:        nil,
 		mkdirWorkspacePath:        ws.Mkdir,
 		copyWorkspacePath:         ws.Copy,
-		deleteWorkspacePath:       ws.Delete,
+		deleteStagedWorkspacePath: func(_ context.Context, _ string, remove func() error) error { return remove() },
 		renameWorkspacePath:       ws.Rename,
 		renameMetadataPath:        vs.RenamePath,
 		renameHistoryMetadataPath: vs.RenamePathHistory,
@@ -566,11 +777,12 @@ func (fs *FileSystem) Stat(ctx context.Context, name string) (*FileInfo, error) 
 	}
 
 	fileInfo := &FileInfo{
-		Path:    info.Path,
-		Name:    info.Name,
-		IsDir:   info.IsDir,
-		Size:    info.Size,
-		ModTime: info.ModTime,
+		Path:                info.Path,
+		Name:                info.Name,
+		IsDir:               info.IsDir,
+		Size:                info.Size,
+		ModTime:             info.ModTime,
+		DeleteIdentityToken: info.DeleteIdentityToken,
 	}
 	policy := fs.currentVersioningPolicy()
 
@@ -612,11 +824,12 @@ func (fs *FileSystem) ReadDir(ctx context.Context, name string) ([]*FileInfo, er
 			return nil, err
 		}
 		info := &FileInfo{
-			Path:    childPath,
-			Name:    childName,
-			IsDir:   e.IsDir,
-			Size:    e.Size,
-			ModTime: e.ModTime,
+			Path:                childPath,
+			Name:                childName,
+			IsDir:               e.IsDir,
+			Size:                e.Size,
+			ModTime:             e.ModTime,
+			DeleteIdentityToken: e.DeleteIdentityToken,
 		}
 		if !e.IsDir && policy != nil {
 			info.Versioned = policy.ShouldVersion(ctx, childPath, e.Size)
@@ -885,12 +1098,88 @@ func (fs *FileSystem) Mkdir(ctx context.Context, name string) error {
 	return nil
 }
 
-// Delete deletes a file or directory (soft delete to trash)
+// Delete deletes a file or directory using the current runtime policy.
 func (fs *FileSystem) Delete(ctx context.Context, name string) error {
-	if fs.config != nil && fs.config.TrashEnabled != nil && !*fs.config.TrashEnabled {
-		return fs.PermanentDelete(ctx, name)
+	return fs.delete(ctx, name, nil, DeleteTargetSnapshotOptions{}, nil, nil)
+}
+
+// DeleteWithPathAuthorizer deletes a path under the current runtime policy
+// after authorizing its complete live tree under the mutation lock.
+func (fs *FileSystem) DeleteWithPathAuthorizer(ctx context.Context, name string, authorize DeletePathAuthorizer) error {
+	return fs.delete(ctx, name, nil, DeleteTargetSnapshotOptions{}, nil, authorize)
+}
+
+// DeleteWithTargetValidator deletes a path under the current runtime policy
+// after validating its current root snapshot and complete live tree under the
+// same mutation lock.
+func (fs *FileSystem) DeleteWithTargetValidator(ctx context.Context, name string, validate DeleteTargetValidator, authorize DeletePathAuthorizer) error {
+	return fs.DeleteWithTargetValidatorOptions(ctx, name, DeleteTargetSnapshotOptions{IncludeContentHash: true}, validate, authorize)
+}
+
+// DeleteWithTargetValidatorOptions deletes a path after capturing the requested
+// root snapshot fields under the filesystem mutation lock.
+func (fs *FileSystem) DeleteWithTargetValidatorOptions(ctx context.Context, name string, options DeleteTargetSnapshotOptions, validate DeleteTargetValidator, authorize DeletePathAuthorizer) error {
+	return fs.delete(ctx, name, nil, options, validate, authorize)
+}
+
+// DeleteWithExpectedPolicy deletes a path only when the runtime policy still
+// matches the caller's confirmed policy and every live tree path is authorized.
+func (fs *FileSystem) DeleteWithExpectedPolicy(ctx context.Context, name string, expected DeletePolicyExpectation, authorize DeletePathAuthorizer) error {
+	return fs.delete(ctx, name, &expected, DeleteTargetSnapshotOptions{}, nil, authorize)
+}
+
+// PrepareDeleteIntents captures one deletion policy and every requested live
+// target tree under the same filesystem read lock.
+func (fs *FileSystem) PrepareDeleteIntents(ctx context.Context, names []string, authorize DeletePathAuthorizer) (DeleteIntentSnapshot, error) {
+	normalized, err := normalizeDeleteIntentPaths(names)
+	if err != nil {
+		return DeleteIntentSnapshot{}, err
+	}
+	targets := make([]ObservedDeleteTarget, 0, len(normalized))
+	for _, name := range normalized {
+		targets = append(targets, ObservedDeleteTarget{Path: name})
+	}
+	return fs.prepareDeleteIntents(ctx, targets, authorize)
+}
+
+// PrepareObservedDeleteIntents captures delete intents only when every path
+// still names the same filesystem object returned by a prior listing or stat.
+func (fs *FileSystem) PrepareObservedDeleteIntents(ctx context.Context, targets []ObservedDeleteTarget, authorize DeletePathAuthorizer) (DeleteIntentSnapshot, error) {
+	normalized, err := normalizeObservedDeleteIntentTargets(targets)
+	if err != nil {
+		return DeleteIntentSnapshot{}, err
+	}
+	return fs.prepareDeleteIntents(ctx, normalized, authorize)
+}
+
+func (fs *FileSystem) prepareDeleteIntents(ctx context.Context, targets []ObservedDeleteTarget, authorize DeletePathAuthorizer) (DeleteIntentSnapshot, error) {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+	if err := ctx.Err(); err != nil {
+		return DeleteIntentSnapshot{}, err
 	}
 
+	result := DeleteIntentSnapshot{
+		Policy:  fs.currentDeletePolicyLocked(),
+		Targets: make([]PreparedDeleteTarget, 0, len(targets)),
+	}
+	options := DeleteTargetSnapshotOptions{IncludeDescendants: true, IncludeContentHash: true}
+	for _, target := range targets {
+		snapshot, err := fs.deleteTargetSnapshotWithObservedIdentityLocked(ctx, target.Path, options, target.ObservedIdentityToken, authorize)
+		if err != nil {
+			return DeleteIntentSnapshot{}, err
+		}
+		result.Targets = append(result.Targets, PreparedDeleteTarget{
+			Snapshot: snapshot,
+			Token:    deleteTargetToken(snapshot),
+		})
+	}
+	return result, nil
+}
+
+// DeleteWithExpectedPolicyAndTarget deletes a path only when both the complete
+// runtime policy and complete live target tree still match the caller's intent.
+func (fs *FileSystem) DeleteWithExpectedPolicyAndTarget(ctx context.Context, name string, expectedPolicy DeletePolicyExpectation, expectedTargetToken string, authorize DeletePathAuthorizer) error {
 	release := fs.beginMutation()
 	defer release()
 
@@ -903,129 +1192,267 @@ func (fs *FileSystem) Delete(ctx context.Context, name string) error {
 		return err
 	}
 
-	// Get file info
-	info, err := fs.workspace.Stat(ctx, name)
+	policy := fs.currentDeletePolicyLocked()
+	if expectedPolicy.Mode != policy.Mode || expectedPolicy.Token != policy.Token {
+		return &DeletePolicyChangedError{Expected: expectedPolicy, Actual: policy}
+	}
+
+	snapshot, err := fs.deleteTargetSnapshotLocked(ctx, name, DeleteTargetSnapshotOptions{
+		IncludeDescendants: true,
+		IncludeContentHash: true,
+	}, authorize)
 	if err != nil {
-		if errors.Is(err, workspace.ErrNotFound) {
+		if errors.Is(err, ErrNotFound) || errors.Is(err, ErrNotDir) {
+			return &DeleteTargetChangedError{
+				Path:          name,
+				ExpectedToken: expectedTargetToken,
+			}
+		}
+		return err
+	}
+	actualTargetToken := deleteTargetToken(snapshot)
+	if expectedTargetToken != actualTargetToken {
+		return &DeleteTargetChangedError{
+			Path:          name,
+			ExpectedToken: expectedTargetToken,
+			ActualToken:   actualTargetToken,
+		}
+	}
+
+	return fs.deleteWithPolicyLocked(ctx, name, policy, snapshot)
+}
+
+func (fs *FileSystem) delete(ctx context.Context, name string, expected *DeletePolicyExpectation, snapshotOptions DeleteTargetSnapshotOptions, validate DeleteTargetValidator, authorize DeletePathAuthorizer) error {
+	release := fs.beginMutation()
+	defer release()
+
+	var err error
+	name, err = normalizeStorageWorkspacePath(name)
+	if err != nil {
+		return err
+	}
+	if err := rejectStorageRootMutation(name); err != nil {
+		return err
+	}
+	policy := fs.currentDeletePolicyLocked()
+	if expected != nil && (expected.Mode != policy.Mode || expected.Token != policy.Token) {
+		return &DeletePolicyChangedError{Expected: *expected, Actual: policy}
+	}
+	if err := fs.authorizeDeleteTreeLocked(ctx, name, authorize); err != nil {
+		return err
+	}
+	guardSnapshot, err := fs.deleteTargetSnapshotLocked(ctx, name, DeleteTargetSnapshotOptions{
+		IncludeDescendants: true,
+		IncludeContentHash: snapshotOptions.IncludeContentHash,
+	}, nil)
+	if err != nil {
+		return err
+	}
+	if validate != nil {
+		if err := validate(projectDeleteTargetSnapshot(guardSnapshot, snapshotOptions)); err != nil {
+			return err
+		}
+	}
+	return fs.deleteWithPolicyLocked(ctx, name, policy, guardSnapshot)
+}
+
+func (fs *FileSystem) deleteWithPolicyLocked(ctx context.Context, name string, policy DeletePolicy, snapshot DeleteTargetSnapshot) error {
+	return fs.deletePreparedWithPolicyLocked(ctx, name, policy, snapshot)
+}
+
+func (fs *FileSystem) deleteTargetSnapshotLocked(ctx context.Context, name string, options DeleteTargetSnapshotOptions, authorize DeletePathAuthorizer) (DeleteTargetSnapshot, error) {
+	return fs.deleteTargetSnapshotWithObservedIdentityLocked(ctx, name, options, "", authorize)
+}
+
+func (fs *FileSystem) deleteTargetSnapshotWithObservedIdentityLocked(ctx context.Context, name string, options DeleteTargetSnapshotOptions, observedIdentityToken string, authorize DeletePathAuthorizer) (DeleteTargetSnapshot, error) {
+	mountBoundary := fs.captureDeleteMountBoundary(fs.workspace.Root())
+	entries := make([]FileInfo, 0, 1)
+	appendEntry := func(filePath string, info *workspace.FileInfo) error {
+		if info == nil {
 			return ErrNotFound
 		}
-		if errors.Is(err, workspace.ErrNotDir) {
-			return ErrNotDir
-		}
-		return err
-	}
-
-	targetSize, hadVersions, err := fs.describeDeleteTarget(ctx, name, info)
-	if err != nil {
-		return err
-	}
-
-	rollbackInfo := &FileInfo{
-		IsDir:   info.IsDir,
-		Size:    targetSize,
-		ModTime: info.ModTime,
-	}
-
-	// Generate trash ID
-	id, err := generateID()
-	if err != nil {
-		return fmt.Errorf("generate trash ID: %w", err)
-	}
-
-	if !info.IsDir {
-		contentHash, hashErr := fs.hashWorkspaceFile(ctx, name)
-		if hashErr != nil {
-			return hashErr
-		}
-		rollbackInfo.ContentHash = contentHash
-	}
-
-	// Move file to trash
-	trashContentPath := path.Join(fs.trashRoot, id, "content")
-	fullPath := fs.workspace.FullPath(name)
-	var deleteWarning error
-	if err := fs.movePath(fullPath, trashContentPath); err != nil {
-		if isVisibleMutationWarning(err) {
-			deleteWarning = errors.Join(deleteWarning, fmt.Errorf("move deleted content to trash: %w", err))
-		} else {
-			return fmt.Errorf("failed to move to trash: %w", err)
-		}
-	}
-
-	// Add to trash database
-	trashItem := &versionstore.TrashItem{
-		ID:           id,
-		OriginalPath: name,
-		Size:         targetSize,
-		DeletedAt:    time.Now(),
-		ExpiresAt:    time.Now().AddDate(0, 0, fs.config.TrashRetentionDays),
-		IsDir:        info.IsDir,
-		HadVersions:  hadVersions,
-	}
-	if err := fs.versions.AddToTrash(ctx, trashItem); err != nil {
-		// Rollback: move back from trash
-		if rollbackErr := fs.movePath(trashContentPath, fullPath); rollbackErr != nil {
-			return errors.Join(
-				fmt.Errorf("failed to add to trash: %w", err),
-				fmt.Errorf("failed to rollback trash move: %w", rollbackErr),
-			)
-		}
-		return fmt.Errorf("failed to add to trash: %w", err)
-	}
-
-	// Remove from file index
-	if err := fs.deleteIndexEntriesForDeleteTarget(ctx, name, info.IsDir); err != nil {
-		if rollbackErr := fs.rollbackSoftDelete(ctx, name, rollbackInfo, id, trashContentPath, false); rollbackErr != nil {
-			return errors.Join(
-				fmt.Errorf("failed to delete file index: %w", err),
-				rollbackErr,
-			)
-		}
-		return fmt.Errorf("failed to delete file index: %w", err)
-	}
-	hookResult, err := fs.notifyPathDeleted(ctx, name)
-	if err != nil {
-		if workspace.IsVisibleMutationWarning(err) || isVisibleMutationWarning(err) {
-			deleteWarning = errors.Join(deleteWarning, fmt.Errorf("failed to sync delete hooks: %w", err))
-		} else {
-			if rollbackErr := fs.rollbackSoftDelete(ctx, name, rollbackInfo, id, trashContentPath, true); rollbackErr != nil {
-				return errors.Join(
-					fmt.Errorf("failed to sync delete hooks: %w", err),
-					rollbackErr,
-				)
+		if authorize != nil {
+			if err := authorize(filePath); err != nil {
+				return err
 			}
-			return fmt.Errorf("failed to sync delete hooks: %w", err)
 		}
-	}
-	if hookResult != nil && len(hookResult.RestoreData) > 0 {
-		if err := fs.updateTrashRestoreData(ctx, id, hookResult.RestoreData); err != nil {
-			var rollbackErrs []error
-			if rollbackErr := fs.rollbackSoftDelete(ctx, name, rollbackInfo, id, trashContentPath, true); rollbackErr != nil {
-				rollbackErrs = append(rollbackErrs, rollbackErr)
+		if filePath == name && observedIdentityToken != "" && info.DeleteIdentityToken == "" {
+			return ErrDeleteIdentityUnavailable
+		}
+		if err := mountBoundary.checkWorkspacePath(filePath); err != nil {
+			return err
+		}
+		if !info.IsDir && !info.Mode.IsRegular() {
+			return workspace.ErrNotRegular
+		}
+		if filePath == name && observedIdentityToken != "" {
+			if info.DeleteIdentityToken != observedIdentityToken {
+				return &DeleteIdentityChangedError{Path: name}
 			}
-			if hookResult.Rollback != nil {
-				if rollbackErr := hookResult.Rollback(); rollbackErr != nil {
-					rollbackErrs = append(rollbackErrs, fmt.Errorf("failed to rollback delete hooks: %w", rollbackErr))
+		}
+		entry := FileInfo{
+			Path:                filePath,
+			Name:                info.Name,
+			IsDir:               info.IsDir,
+			Size:                info.Size,
+			ModTime:             info.ModTime,
+			DeleteIdentityToken: info.DeleteIdentityToken,
+		}
+		if !info.IsDir {
+			if fs.policy != nil {
+				entry.Versioned = fs.policy.ShouldVersion(ctx, filePath, info.Size)
+			}
+			if options.IncludeContentHash {
+				contentHash, err := fs.deleteTargetFileHash(ctx, filePath)
+				if err != nil {
+					return err
 				}
+				entry.ContentHash = contentHash
 			}
-			if len(rollbackErrs) > 0 {
-				return errors.Join(append([]error{fmt.Errorf("failed to persist trash restore metadata: %w", err)}, rollbackErrs...)...)
-			}
-			return fmt.Errorf("failed to persist trash restore metadata: %w", err)
 		}
-	}
-	if err := fs.ensureTrashCapacityLocked(ctx, 0, id); err != nil {
-		cleanupWarning := wrapTrashDeleteWarning(fmt.Errorf("failed to enforce trash capacity: %w", err))
-		if deleteWarning != nil {
-			return errors.Join(wrapVisibleMutationWarning(deleteWarning), cleanupWarning)
-		}
-		return cleanupWarning
-	}
-	if deleteWarning != nil {
-		return wrapVisibleMutationWarning(deleteWarning)
+		entries = append(entries, entry)
+		return nil
 	}
 
-	return nil
+	if options.IncludeDescendants {
+		if err := walkStorageDeleteTree(ctx, fs.workspace, name, appendEntry); err != nil {
+			return DeleteTargetSnapshot{}, mapWorkspaceReadablePathError(err)
+		}
+	} else {
+		err := walkStorageDeleteTree(ctx, fs.workspace, name, func(filePath string, info *workspace.FileInfo) error {
+			if err := appendEntry(filePath, info); err != nil {
+				return err
+			}
+			return errDeleteSnapshotRootComplete
+		})
+		if err != nil && !errors.Is(err, errDeleteSnapshotRootComplete) {
+			return DeleteTargetSnapshot{}, mapWorkspaceReadablePathError(err)
+		}
+	}
+
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
+	for _, entry := range entries {
+		if entry.Path == name {
+			return DeleteTargetSnapshot{Root: entry, Entries: entries}, nil
+		}
+	}
+	return DeleteTargetSnapshot{}, ErrNotFound
+}
+
+func (fs *FileSystem) deleteTargetFileHash(ctx context.Context, name string) (string, error) {
+	if fs.hashDeleteTargetFile != nil {
+		return fs.hashDeleteTargetFile(ctx, name)
+	}
+	return fs.hashWorkspaceFile(ctx, name)
+}
+
+func deleteTargetToken(snapshot DeleteTargetSnapshot) string {
+	hasher := sha256.New()
+	writeDeleteTargetTokenString(hasher, "mnemonas-delete-target-v2")
+	writeDeleteTargetTokenString(hasher, snapshot.Root.Path)
+	entries := append([]FileInfo(nil), snapshot.Entries...)
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
+	writeDeleteTargetTokenUint64(hasher, uint64(len(entries)))
+	for _, entry := range entries {
+		writeDeleteTargetTokenString(hasher, entry.Path)
+		if entry.IsDir {
+			_, _ = hasher.Write([]byte{1})
+		} else {
+			_, _ = hasher.Write([]byte{0})
+		}
+		writeDeleteTargetTokenUint64(hasher, uint64(entry.Size))
+		writeDeleteTargetTokenUint64(hasher, uint64(entry.ModTime.UnixNano()))
+		writeDeleteTargetTokenString(hasher, entry.DeleteIdentityToken)
+		writeDeleteTargetTokenString(hasher, entry.ContentHash)
+	}
+	return hex.EncodeToString(hasher.Sum(nil))
+}
+
+func writeDeleteTargetTokenString(w io.Writer, value string) {
+	writeDeleteTargetTokenUint64(w, uint64(len(value)))
+	_, _ = io.WriteString(w, value)
+}
+
+func writeDeleteTargetTokenUint64(w io.Writer, value uint64) {
+	var encoded [8]byte
+	binary.BigEndian.PutUint64(encoded[:], value)
+	_, _ = w.Write(encoded[:])
+}
+
+func normalizeDeleteIntentPaths(names []string) ([]string, error) {
+	if len(names) == 0 || len(names) > MaxDeleteIntentTargets {
+		return nil, ErrInvalidDeleteIntent
+	}
+	normalized := make([]string, 0, len(names))
+	seen := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		if name == "" {
+			return nil, ErrInvalidDeleteIntent
+		}
+		cleanName, err := normalizeStorageWorkspacePath(name)
+		if err != nil || rejectStorageRootMutation(cleanName) != nil {
+			return nil, ErrInvalidDeleteIntent
+		}
+		if _, ok := seen[cleanName]; ok {
+			return nil, ErrInvalidDeleteIntent
+		}
+		for _, existing := range normalized {
+			if pathMatchesOrDescendant(existing, cleanName) || pathMatchesOrDescendant(cleanName, existing) {
+				return nil, ErrInvalidDeleteIntent
+			}
+		}
+		seen[cleanName] = struct{}{}
+		normalized = append(normalized, cleanName)
+	}
+	return normalized, nil
+}
+
+func normalizeObservedDeleteIntentTargets(targets []ObservedDeleteTarget) ([]ObservedDeleteTarget, error) {
+	if len(targets) == 0 || len(targets) > MaxDeleteIntentTargets {
+		return nil, ErrInvalidDeleteIntent
+	}
+	names := make([]string, 0, len(targets))
+	for _, target := range targets {
+		if !validDeleteIdentityToken(target.ObservedIdentityToken) {
+			return nil, ErrInvalidDeleteIntent
+		}
+		names = append(names, target.Path)
+	}
+	normalizedNames, err := normalizeDeleteIntentPaths(names)
+	if err != nil {
+		return nil, err
+	}
+	normalized := make([]ObservedDeleteTarget, 0, len(targets))
+	for i, target := range targets {
+		target.Path = normalizedNames[i]
+		normalized = append(normalized, target)
+	}
+	return normalized, nil
+}
+
+func validDeleteIdentityToken(token string) bool {
+	if len(token) != sha256.Size*2 {
+		return false
+	}
+	for _, character := range token {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func (fs *FileSystem) authorizeDeleteTreeLocked(ctx context.Context, name string, authorize DeletePathAuthorizer) error {
+	mountBoundary := fs.captureDeleteMountBoundary(fs.workspace.Root())
+	err := walkStorageDeleteTree(ctx, fs.workspace, name, func(filePath string, _ *workspace.FileInfo) error {
+		if authorize != nil {
+			if err := authorize(filePath); err != nil {
+				return err
+			}
+		}
+		return mountBoundary.checkWorkspacePath(filePath)
+	})
+	return mapWorkspaceReadablePathError(err)
 }
 
 func (fs *FileSystem) ensureTrashCapacityLocked(ctx context.Context, incomingSize int64, protectedIDs ...string) error {
@@ -1080,135 +1507,14 @@ func (fs *FileSystem) PermanentDelete(ctx context.Context, name string) error {
 	if err := rejectStorageRootMutation(name); err != nil {
 		return err
 	}
-	previousData, hadPreviousFile, err := fs.readExistingFileForRollback(ctx, name)
-	if err != nil && !errors.Is(err, ErrIsDir) {
+	snapshot, err := fs.deleteTargetSnapshotLocked(ctx, name, DeleteTargetSnapshotOptions{
+		IncludeDescendants: true,
+		IncludeContentHash: true,
+	}, nil)
+	if err != nil {
 		return err
 	}
-	hadPreviousDir := false
-
-	// Get file info
-	info, err := fs.workspace.Stat(ctx, name)
-	if err != nil {
-		if errors.Is(err, workspace.ErrNotFound) {
-			return ErrNotFound
-		}
-		return err
-	}
-
-	if info.IsDir {
-		hadPreviousDir = true
-		entries, err := fs.workspace.ReadDir(ctx, name)
-		if err != nil {
-			return err
-		}
-		if len(entries) > 0 {
-			return ErrDirNotEmpty
-		}
-	}
-
-	var versionHashes []string
-	if !info.IsDir {
-		versions, versionsErr := fs.versions.GetVersions(ctx, name)
-		if versionsErr != nil {
-			return versionsErr
-		}
-		versionHashes = make([]string, 0, len(versions))
-		for _, version := range versions {
-			versionHashes = append(versionHashes, version.Hash)
-		}
-	}
-
-	deleteWorkspacePath := fs.deleteWorkspacePath
-	if deleteWorkspacePath == nil {
-		deleteWorkspacePath = fs.workspace.Delete
-	}
-	var deleteWarning error
-
-	// Delete file
-	if err := deleteWorkspacePath(ctx, name); err != nil {
-		if workspace.IsVisibleMutationWarning(err) {
-			deleteWarning = err
-		} else {
-			return err
-		}
-	}
-
-	// Remove from file index
-	if err := fs.deleteFileIndex(ctx, name); err != nil {
-		if rollbackErr := fs.rollbackDeletedPath(ctx, name, hadPreviousFile, previousData, hadPreviousDir); rollbackErr != nil {
-			return errors.Join(
-				fmt.Errorf("failed to delete file index: %w", err),
-				fmt.Errorf("failed to rollback deleted path: %w", rollbackErr),
-			)
-		}
-		return fmt.Errorf("failed to delete file index: %w", err)
-	}
-	rollbackDeleteHook, err := fs.notifyPathDeleted(ctx, name)
-	if err != nil {
-		if workspace.IsVisibleMutationWarning(err) || isVisibleMutationWarning(err) {
-			deleteWarning = errors.Join(deleteWarning, fmt.Errorf("failed to sync delete hooks: %w", err))
-		} else {
-			if rollbackErr := fs.rollbackDeletedPath(ctx, name, hadPreviousFile, previousData, hadPreviousDir); rollbackErr != nil {
-				return errors.Join(
-					fmt.Errorf("failed to sync delete hooks: %w", err),
-					fmt.Errorf("failed to rollback deleted path: %w", rollbackErr),
-				)
-			}
-			if !info.IsDir {
-				if restoreIndexErr := fs.updateFileIndex(ctx, name, info.Size, info.ModTime, computeHash(previousData)); restoreIndexErr != nil {
-					return errors.Join(
-						fmt.Errorf("failed to sync delete hooks: %w", err),
-						fmt.Errorf("failed to restore file index after rollback: %w", restoreIndexErr),
-					)
-				}
-			}
-			return fmt.Errorf("failed to sync delete hooks: %w", err)
-		}
-	}
-
-	if !info.IsDir {
-		if err := fs.versions.DeleteVersions(ctx, name); err != nil {
-			var rollbackErr error
-			if rollbackDeleteHook != nil && rollbackDeleteHook.Rollback != nil {
-				rollbackErr = rollbackDeleteHook.Rollback()
-			}
-			if pathRollbackErr := fs.rollbackDeletedPath(ctx, name, hadPreviousFile, previousData, hadPreviousDir); pathRollbackErr != nil {
-				return errors.Join(
-					fmt.Errorf("failed to delete version metadata: %w", err),
-					wrapStorageStepError("rollback deleted-path hooks", rollbackErr),
-					fmt.Errorf("failed to rollback deleted path: %w", pathRollbackErr),
-				)
-			}
-			if restoreIndexErr := fs.updateFileIndex(ctx, name, info.Size, info.ModTime, computeHash(previousData)); restoreIndexErr != nil {
-				return errors.Join(
-					fmt.Errorf("failed to delete version metadata: %w", err),
-					wrapStorageStepError("rollback deleted-path hooks", rollbackErr),
-					fmt.Errorf("failed to restore file index after rollback: %w", restoreIndexErr),
-				)
-			}
-			if rollbackErr != nil {
-				return errors.Join(
-					fmt.Errorf("failed to delete version metadata: %w", err),
-					wrapStorageStepError("rollback deleted-path hooks", rollbackErr),
-				)
-			}
-			return fmt.Errorf("failed to delete version metadata: %w", err)
-		}
-
-		objectDeleteErr := fs.deleteUnreferencedVersionObjects(ctx, versionHashes)
-		if objectDeleteErr != nil {
-			cleanupWarning := wrapDeleteCleanupWarning(fmt.Errorf("failed to delete version objects: %w", objectDeleteErr))
-			if deleteWarning != nil {
-				return errors.Join(wrapVisibleMutationWarning(deleteWarning), cleanupWarning)
-			}
-			return cleanupWarning
-		}
-	}
-	if deleteWarning != nil {
-		return wrapVisibleMutationWarning(deleteWarning)
-	}
-
-	return nil
+	return fs.deletePreparedWithPolicyLocked(ctx, name, DeletePolicy{Mode: DeleteModePermanent}, snapshot)
 }
 
 // Rename renames/moves a file or directory
@@ -1474,6 +1780,9 @@ func mapWorkspaceReadablePathError(err error) error {
 	if errors.Is(err, workspace.ErrIsDir) {
 		return ErrIsDir
 	}
+	if errors.Is(err, workspace.ErrNotRegular) {
+		return ErrNotRegular
+	}
 	return err
 }
 
@@ -1554,29 +1863,65 @@ func (fs *FileSystem) GetVersion(ctx context.Context, name, hash string) (io.Rea
 }
 
 func (fs *FileSystem) hashWorkspaceFile(ctx context.Context, name string) (string, error) {
-	reader, err := fs.workspace.OpenFile(ctx, name)
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	reader, err := fs.workspace.OpenRegularFile(ctx, name)
 	if err != nil {
 		return "", mapWorkspaceReadablePathError(err)
 	}
 	defer reader.Close()
 
-	return hashOpenWorkspaceFile(reader)
+	return hashOpenWorkspaceFileContext(ctx, reader)
 }
 
 func hashOpenWorkspaceFile(reader *os.File) (string, error) {
+	return hashOpenWorkspaceFileContext(context.Background(), reader)
+}
+
+func hashOpenWorkspaceFileContext(ctx context.Context, reader *os.File) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if _, err := reader.Seek(0, io.SeekStart); err != nil {
 		return "", err
 	}
 
+	hash, err := hashReaderWithContext(ctx, reader)
+	if err != nil {
+		return "", err
+	}
+	if _, err := reader.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+
+	return hash, nil
+}
+
+func hashReaderWithContext(ctx context.Context, reader io.Reader) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	hasher := blake3.New()
-	if _, err := io.Copy(hasher, reader); err != nil {
+	if _, err := io.Copy(hasher, contextCheckingReader{ctx: ctx, reader: reader}); err != nil {
 		return "", err
 	}
-	if _, err := reader.Seek(0, io.SeekStart); err != nil {
+	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-
 	return fmt.Sprintf("%x", hasher.Sum(nil)), nil
+}
+
+type contextCheckingReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextCheckingReader) Read(buffer []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(buffer)
 }
 
 // RestoreVersion restores a file to a specific version
@@ -1782,6 +2127,7 @@ func (fs *FileSystem) ListTrash(ctx context.Context) ([]*TrashItem, error) {
 			OriginalPath: item.OriginalPath,
 			Size:         item.Size,
 			DeletedAt:    item.DeletedAt,
+			ExpiresAt:    item.ExpiresAt,
 			IsDir:        item.IsDir,
 			HadVersions:  item.HadVersions,
 			RestoreData:  item.RestoreData,
@@ -1809,6 +2155,7 @@ func (fs *FileSystem) GetTrashItem(ctx context.Context, id string) (*TrashItem, 
 		OriginalPath: item.OriginalPath,
 		Size:         item.Size,
 		DeletedAt:    item.DeletedAt,
+		ExpiresAt:    item.ExpiresAt,
 		IsDir:        item.IsDir,
 		HadVersions:  item.HadVersions,
 		RestoreData:  item.RestoreData,
@@ -1845,18 +2192,22 @@ func (fs *FileSystem) WalkTrashItemRestorePaths(ctx context.Context, id string, 
 		return errStoragePathSymlink
 	}
 
+	mountBoundary := fs.captureDeleteMountBoundary(fs.trashRoot)
 	originalRoot := path.Clean(item.OriginalPath)
 	if err := fn(originalRoot, info.IsDir(), info.Size()); err != nil {
+		return err
+	}
+	if err := mountBoundary.checkHostPath(filepath.Join(fs.trashRoot, contentRel)); err != nil {
 		return err
 	}
 	if !info.IsDir() {
 		return nil
 	}
 
-	return fs.walkTrashContentRestorePaths(ctx, contentRel, contentRel, originalRoot, fn)
+	return fs.walkTrashContentRestorePaths(ctx, mountBoundary, contentRel, contentRel, originalRoot, fn)
 }
 
-func (fs *FileSystem) walkTrashContentRestorePaths(ctx context.Context, contentRootRel, currentRel, originalRoot string, fn func(restoredPath string, isDir bool, size int64) error) error {
+func (fs *FileSystem) walkTrashContentRestorePaths(ctx context.Context, mountBoundary deleteMountBoundary, contentRootRel, currentRel, originalRoot string, fn func(restoredPath string, isDir bool, size int64) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -1906,8 +2257,11 @@ func (fs *FileSystem) walkTrashContentRestorePaths(ctx context.Context, contentR
 		if err := fn(restoredPath, info.IsDir(), info.Size()); err != nil {
 			return err
 		}
+		if err := mountBoundary.checkHostPath(filepath.Join(fs.trashRoot, childRel)); err != nil {
+			return err
+		}
 		if info.IsDir() {
-			if err := fs.walkTrashContentRestorePaths(ctx, contentRootRel, childRel, originalRoot, fn); err != nil {
+			if err := fs.walkTrashContentRestorePaths(ctx, mountBoundary, contentRootRel, childRel, originalRoot, fn); err != nil {
 				return err
 			}
 		}
@@ -2305,6 +2659,11 @@ func (fs *FileSystem) EmptyTrash(ctx context.Context) (int, error) {
 func (fs *FileSystem) CleanupExpiredTrash(ctx context.Context) (int, error) {
 	release := fs.beginMutation()
 	defer release()
+
+	return fs.cleanupExpiredTrashLocked(ctx)
+}
+
+func (fs *FileSystem) cleanupExpiredTrashLocked(ctx context.Context) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -2442,6 +2801,9 @@ func (fs *FileSystem) cleanupDeletedTrashVersions(ctx context.Context, item *ver
 
 func (fs *FileSystem) deleteTrashItem(ctx context.Context, item *versionstore.TrashItem) error {
 	trashItemPath := path.Join(fs.trashRoot, item.ID)
+	if err := fs.captureDeleteMountBoundary(fs.trashRoot).checkHostTree(trashItemPath); err != nil {
+		return err
+	}
 	stageID, err := generateID()
 	if err != nil {
 		return fmt.Errorf("generate trash staging ID for %s: %w", item.ID, err)
@@ -2663,6 +3025,91 @@ type diskMountDetails struct {
 	MountOptions   string
 }
 
+type mountInfoEntry struct {
+	MountPoint     string
+	FileSystemType string
+	MountSource    string
+	MountOptions   string
+}
+
+type deleteMountBoundary struct {
+	root        string
+	mountPoints map[string]struct{}
+	err         error
+}
+
+func (fs *FileSystem) captureDeleteMountBoundary(root string) deleteMountBoundary {
+	reader := fs.readDeleteMountPoints
+	if reader == nil {
+		reader = currentDeleteMountPoints
+	}
+	mountPoints, err := reader()
+	if err != nil {
+		return deleteMountBoundary{err: fmt.Errorf("read mount table: %w", err)}
+	}
+	if len(mountPoints) == 0 {
+		return deleteMountBoundary{err: errors.New("mount table is empty")}
+	}
+
+	cleanRoot, err := normalizeStorageHostPath(root)
+	if err != nil {
+		return deleteMountBoundary{err: err}
+	}
+	boundary := deleteMountBoundary{
+		root:        cleanRoot,
+		mountPoints: make(map[string]struct{}),
+	}
+	for _, mountPoint := range mountPoints {
+		if mountPoint == "" {
+			return deleteMountBoundary{err: errors.New("mount table contains an empty mount point")}
+		}
+		if !filepath.IsAbs(mountPoint) || strings.IndexByte(mountPoint, 0) >= 0 {
+			return deleteMountBoundary{err: fmt.Errorf("invalid mount point %q", mountPoint)}
+		}
+		cleanMountPoint := filepath.Clean(mountPoint)
+		if cleanMountPoint == cleanRoot || !pathWithinMount(cleanMountPoint, cleanRoot) {
+			continue
+		}
+		boundary.mountPoints[cleanMountPoint] = struct{}{}
+	}
+	return boundary
+}
+
+func (b deleteMountBoundary) checkWorkspacePath(workspacePath string) error {
+	cleanWorkspacePath := workspace.CleanPath(workspacePath)
+	hostPath := b.root
+	if cleanWorkspacePath != "/" {
+		hostPath = filepath.Join(b.root, filepath.FromSlash(strings.TrimPrefix(cleanWorkspacePath, "/")))
+	}
+	return b.checkHostPath(hostPath)
+}
+
+func (b deleteMountBoundary) checkHostPath(hostPath string) error {
+	if b.err != nil {
+		return fmt.Errorf("%w: deletion mount boundary could not be verified: %v", ErrNotRegular, b.err)
+	}
+	hostPath = filepath.Clean(hostPath)
+	for mountPoint := range b.mountPoints {
+		if pathWithinMount(hostPath, mountPoint) {
+			return fmt.Errorf("%w: deletion target crosses mount point %s", ErrNotRegular, mountPoint)
+		}
+	}
+	return nil
+}
+
+func (b deleteMountBoundary) checkHostTree(hostRoot string) error {
+	if b.err != nil {
+		return fmt.Errorf("%w: deletion mount boundary could not be verified: %v", ErrNotRegular, b.err)
+	}
+	hostRoot = filepath.Clean(hostRoot)
+	for mountPoint := range b.mountPoints {
+		if pathWithinMount(mountPoint, hostRoot) || pathWithinMount(hostRoot, mountPoint) {
+			return fmt.Errorf("%w: deletion target crosses mount point %s", ErrNotRegular, mountPoint)
+		}
+	}
+	return nil
+}
+
 func diskMountDetailsForPath(root string, magic uint64) diskMountDetails {
 	mountInfo, err := readMountInfo()
 	if err == nil {
@@ -2691,48 +3138,23 @@ func diskMountDetailsFromMountInfo(root string, mountInfo []byte) (diskMountDeta
 	}
 	target = filepath.Clean(target)
 
+	entries, err := parseMountInfo(mountInfo)
+	if err != nil {
+		return diskMountDetails{}, err
+	}
 	bestMountLen := -1
 	bestDetails := diskMountDetails{}
-	for _, line := range strings.Split(string(mountInfo), "\n") {
-		if strings.TrimSpace(line) == "" {
+	for _, entry := range entries {
+		if !pathWithinMount(target, entry.MountPoint) {
 			continue
 		}
-		separator := strings.Index(line, " - ")
-		if separator < 0 {
-			continue
-		}
-		mountFields := strings.Fields(line[:separator])
-		fsFields := strings.Fields(line[separator+3:])
-		if len(mountFields) < 5 || len(fsFields) < 1 {
-			continue
-		}
-		mountPoint, err := unescapeMountInfoPath(mountFields[4])
-		if err != nil {
-			continue
-		}
-		mountPoint = filepath.Clean(mountPoint)
-		if !pathWithinMount(target, mountPoint) {
-			continue
-		}
-		if len(mountPoint) > bestMountLen {
-			mountSource := ""
-			if len(fsFields) >= 2 {
-				if decoded, err := unescapeMountInfoPath(fsFields[1]); err == nil {
-					mountSource = decoded
-				} else {
-					mountSource = fsFields[1]
-				}
-			}
-			mountOptions := ""
-			if len(mountFields) >= 6 {
-				mountOptions = mountFields[5]
-			}
-			bestMountLen = len(mountPoint)
+		if len(entry.MountPoint) > bestMountLen {
+			bestMountLen = len(entry.MountPoint)
 			bestDetails = diskMountDetails{
-				FileSystemType: strings.ToLower(fsFields[0]),
-				MountPoint:     mountPoint,
-				MountSource:    mountSource,
-				MountOptions:   mountOptions,
+				FileSystemType: entry.FileSystemType,
+				MountPoint:     entry.MountPoint,
+				MountSource:    entry.MountSource,
+				MountOptions:   entry.MountOptions,
 			}
 		}
 	}
@@ -2740,6 +3162,54 @@ func diskMountDetailsFromMountInfo(root string, mountInfo []byte) (diskMountDeta
 		return diskMountDetails{}, fmt.Errorf("mount info did not contain path %s", target)
 	}
 	return bestDetails, nil
+}
+
+func mountPointsFromMountInfo(mountInfo []byte) ([]string, error) {
+	entries, err := parseMountInfo(mountInfo)
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) == 0 {
+		return nil, errors.New("mountinfo contains no mount entries")
+	}
+	mountPoints := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		mountPoints = append(mountPoints, entry.MountPoint)
+	}
+	return mountPoints, nil
+}
+
+func parseMountInfo(mountInfo []byte) ([]mountInfoEntry, error) {
+	entries := make([]mountInfoEntry, 0)
+	for lineNumber, line := range strings.Split(string(mountInfo), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		separator := strings.Index(line, " - ")
+		if separator < 0 {
+			return nil, fmt.Errorf("invalid mountinfo line %d: missing separator", lineNumber+1)
+		}
+		mountFields := strings.Fields(line[:separator])
+		fsFields := strings.Fields(line[separator+3:])
+		if len(mountFields) < 6 || len(fsFields) < 2 {
+			return nil, fmt.Errorf("invalid mountinfo line %d: missing fields", lineNumber+1)
+		}
+		mountPoint, err := unescapeMountInfoPath(mountFields[4])
+		if err != nil {
+			return nil, fmt.Errorf("invalid mountinfo line %d mount point: %w", lineNumber+1, err)
+		}
+		mountSource, err := unescapeMountInfoPath(fsFields[1])
+		if err != nil {
+			return nil, fmt.Errorf("invalid mountinfo line %d mount source: %w", lineNumber+1, err)
+		}
+		entries = append(entries, mountInfoEntry{
+			MountPoint:     filepath.Clean(mountPoint),
+			FileSystemType: strings.ToLower(fsFields[0]),
+			MountSource:    mountSource,
+			MountOptions:   mountFields[5],
+		})
+	}
+	return entries, nil
 }
 
 func pathWithinMount(target, mountPoint string) bool {
@@ -3020,7 +3490,7 @@ func (fs *FileSystem) runRetentionSweepLocked(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	paths, err := fs.versions.ListVersionPaths(ctx)
+	paths, err := fs.listVersionPaths(ctx)
 	if err != nil {
 		return fmt.Errorf("list version paths: %w", err)
 	}
@@ -3048,38 +3518,6 @@ func (fs *FileSystem) shouldForceRetentionSweepLocked() bool {
 	}
 
 	return stats.AvailableBytes < fs.config.MinFreeSpace
-}
-
-func (fs *FileSystem) describeDeleteTarget(ctx context.Context, name string, info *workspace.FileInfo) (int64, bool, error) {
-	if !info.IsDir {
-		versions, err := fs.getVersions(ctx, name)
-		if err != nil {
-			return 0, false, fmt.Errorf("failed to read version metadata: %w", err)
-		}
-		return info.Size, len(versions) > 0, nil
-	}
-
-	var totalSize int64
-	if err := walkStorageWorkspace(ctx, fs.workspace, name, func(_ string, entry *workspace.FileInfo) error {
-		if entry != nil && !entry.IsDir {
-			totalSize += entry.Size
-		}
-		return nil
-	}); err != nil {
-		return 0, false, err
-	}
-
-	versionPaths, err := fs.listVersionPaths(ctx)
-	if err != nil {
-		return 0, false, fmt.Errorf("failed to list version metadata paths: %w", err)
-	}
-	for _, versionPath := range versionPaths {
-		if pathMatchesOrDescendant(name, versionPath) {
-			return totalSize, true, nil
-		}
-	}
-
-	return totalSize, false, nil
 }
 
 func (fs *FileSystem) deleteIndexEntriesForDeleteTarget(ctx context.Context, name string, isDir bool) error {
@@ -3195,6 +3633,10 @@ type storagePathRoot struct {
 	handle  *os.Root
 }
 
+func storagePreservedMode(mode os.FileMode) os.FileMode {
+	return mode.Perm() | mode&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky)
+}
+
 func normalizeStorageHostPath(target string) (string, error) {
 	cleaned := filepath.Clean(target)
 	if !filepath.IsAbs(cleaned) {
@@ -3285,13 +3727,6 @@ func createStorageTempFile(root *os.Root, parentName, prefix string) (*os.File, 
 	return nil, "", errors.New("failed to allocate unique temp file")
 }
 
-func cleanupStorageTempPath(root *os.Root, tmpPath string, operationErr error) error {
-	if removeErr := root.Remove(tmpPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-		return errors.Join(operationErr, fmt.Errorf("cleanup temp file %s: %w", tmpPath, removeErr))
-	}
-	return operationErr
-}
-
 func validateStoragePath(target string) error {
 	cleaned, err := normalizeStorageHostPath(target)
 	if err != nil {
@@ -3362,32 +3797,43 @@ func syncCreatedStorageManagedDirs(root *storagePathRoot, createdDirs []string) 
 	return nil
 }
 
-func cleanupCreatedStorageManagedDirs(root *storagePathRoot, createdDirs []string) {
-	for _, dir := range createdDirs {
-		if dir == "." {
-			continue
-		}
-		if err := root.handle.Remove(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
-			break
-		}
-	}
-}
-
-func cleanupCreatedStorageManagedTrees(root *storagePathRoot, createdDirs []string) error {
+func (fs *FileSystem) cleanupCreatedStorageManagedTrees(root *storagePathRoot, createdDirs []string) error {
 	var cleanupErr error
 	for _, dir := range createdDirs {
 		if dir == "." {
 			continue
 		}
+		absDir := storageAbsolutePath(root, dir)
+		if err := fs.captureDeleteMountBoundary(root.absRoot).checkHostTree(absDir); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("cleanup created directory %s: %w", absDir, err))
+			break
+		}
 		if err := rootio.RemoveAllNoFollow(root.handle, dir); err != nil && !errors.Is(err, os.ErrNotExist) {
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("cleanup created directory %s: %w", storageAbsolutePath(root, dir), mapStorageRootPathError(err)))
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("cleanup created directory %s: %w", absDir, mapStorageRootPathError(err)))
 			break
 		}
 	}
 	return cleanupErr
 }
 
-func ensureStorageManagedDirTracked(root *storagePathRoot, absDir string, perm os.FileMode) ([]string, error) {
+func (fs *FileSystem) cleanupStorageTempPath(root *storagePathRoot, tmpRel, tmpAbs string) error {
+	if err := fs.captureDeleteMountBoundary(root.absRoot).checkHostTree(tmpAbs); err != nil {
+		return fmt.Errorf("cleanup temp file %s: %w", tmpRel, err)
+	}
+	if err := root.handle.Remove(tmpRel); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("cleanup temp file %s: %w", tmpRel, mapStorageRootPathError(err))
+	}
+	return nil
+}
+
+func (fs *FileSystem) checkStorageCopyMountBoundaries(srcRoot *storagePathRoot, srcAbs string, dstRoot *storagePathRoot, dstAbs string) error {
+	return errors.Join(
+		fs.captureDeleteMountBoundary(srcRoot.absRoot).checkHostTree(srcAbs),
+		fs.captureDeleteMountBoundary(dstRoot.absRoot).checkHostTree(dstAbs),
+	)
+}
+
+func (fs *FileSystem) ensureStorageManagedDirTracked(root *storagePathRoot, absDir string, perm os.FileMode) ([]string, error) {
 	relDir, ok := storageRelativePath(root.absRoot, absDir)
 	if !ok {
 		return nil, fmt.Errorf("managed directory %q is outside storage root %q", absDir, root.absRoot)
@@ -3398,12 +3844,12 @@ func ensureStorageManagedDirTracked(root *storagePathRoot, absDir string, perm o
 
 	createdDirs, err := rootio.MkdirAllNoFollowTracked(root.handle, relDir, perm)
 	if err != nil {
-		cleanupCreatedStorageManagedDirs(root, createdDirs)
-		return nil, mapStorageRootPathError(err)
+		cleanupErr := fs.cleanupCreatedStorageManagedTrees(root, createdDirs)
+		return nil, errors.Join(mapStorageRootPathError(err), cleanupErr)
 	}
 	if err := syncCreatedStorageManagedDirs(root, createdDirs); err != nil {
-		cleanupCreatedStorageManagedDirs(root, createdDirs)
-		return nil, err
+		cleanupErr := fs.cleanupCreatedStorageManagedTrees(root, createdDirs)
+		return nil, errors.Join(err, cleanupErr)
 	}
 	return createdDirs, nil
 }
@@ -3487,10 +3933,26 @@ func (fs *FileSystem) copyFile(src, dst string) error {
 		return err
 	}
 
-	return fs.copyFileBetweenRoots(srcRoot, srcRel, srcAbs, dstRoot, dstRel, dstAbs)
+	checkCopyMountBoundaries := func() error {
+		return fs.checkStorageCopyMountBoundaries(srcRoot, srcAbs, dstRoot, dstAbs)
+	}
+	if err := checkCopyMountBoundaries(); err != nil {
+		return err
+	}
+	if err := fs.copyFileBetweenRoots(srcRoot, srcRel, srcAbs, dstRoot, dstRel, dstAbs); err != nil {
+		return err
+	}
+	if err := checkCopyMountBoundaries(); err != nil {
+		cleanupErr := fs.removeCopiedMoveDestination(dstRoot, dstRel, dstAbs)
+		return errors.Join(err, cleanupErr)
+	}
+	return nil
 }
 
 func (fs *FileSystem) copyFileBetweenRoots(srcRoot *storagePathRoot, srcRel, srcAbs string, dstRoot *storagePathRoot, dstRel, dstAbs string) error {
+	if err := fs.checkStorageCopyMountBoundaries(srcRoot, srcAbs, dstRoot, dstAbs); err != nil {
+		return err
+	}
 	srcInfo, err := srcRoot.handle.Lstat(srcRel)
 	if err != nil {
 		return mapStorageRootPathError(err)
@@ -3498,67 +3960,85 @@ func (fs *FileSystem) copyFileBetweenRoots(srcRoot *storagePathRoot, srcRel, src
 	if srcInfo.Mode()&os.ModeSymlink != 0 {
 		return errStoragePathSymlink
 	}
+	if !srcInfo.Mode().IsRegular() {
+		return ErrNotRegular
+	}
+	if err := afterStorageCopySourceStat(srcAbs); err != nil {
+		return err
+	}
+	if err := fs.checkStorageCopyMountBoundaries(srcRoot, srcAbs, dstRoot, dstAbs); err != nil {
+		return err
+	}
 
-	srcFile, err := rootio.OpenFileNoFollow(srcRoot.handle, srcRel, os.O_RDONLY, 0)
+	srcFile, err := rootio.OpenRegularFileNoFollow(srcRoot.handle, srcRel)
 	if err != nil {
-		return mapStorageRootPathError(err)
+		mappedErr := mapStorageRootPathError(err)
+		if mappedErr != err {
+			return mappedErr
+		}
+		currentInfo, statErr := srcRoot.handle.Lstat(srcRel)
+		if statErr == nil && currentInfo.Mode()&os.ModeSymlink == 0 && !currentInfo.Mode().IsRegular() {
+			return ErrNotRegular
+		}
+		if errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENXIO) {
+			return ErrNotRegular
+		}
+		return err
 	}
 	defer srcFile.Close()
 	dstParentRel := filepath.Dir(dstRel)
-	createdDirs, err := ensureStorageManagedDirTracked(dstRoot, filepath.Dir(dstAbs), 0755)
+	createdDirs, err := fs.ensureStorageManagedDirTracked(dstRoot, filepath.Dir(dstAbs), 0755)
 	if err != nil {
 		return err
+	}
+	if err := fs.checkStorageCopyMountBoundaries(srcRoot, srcAbs, dstRoot, dstAbs); err != nil {
+		cleanupErr := fs.cleanupCreatedStorageManagedTrees(dstRoot, createdDirs)
+		return errors.Join(err, cleanupErr)
 	}
 
 	dstFile, tmpRel, err := createStorageCopyTempFile(dstRoot.handle, dstParentRel, ".storage-copy-")
 	if err != nil {
-		cleanupCreatedStorageManagedDirs(dstRoot, createdDirs)
-		return err
+		cleanupErr := fs.cleanupCreatedStorageManagedTrees(dstRoot, createdDirs)
+		return errors.Join(err, cleanupErr)
 	}
+	tmpAbs := storageAbsolutePath(dstRoot, tmpRel)
 	defer func() {
-		_ = dstRoot.handle.Remove(tmpRel)
+		_ = fs.cleanupStorageTempPath(dstRoot, tmpRel, tmpAbs)
 	}()
-	if err := dstFile.Chmod(srcInfo.Mode().Perm()); err != nil {
+	abortTempCopy := func(cause error) error {
+		tempCleanupErr := fs.cleanupStorageTempPath(dstRoot, tmpRel, tmpAbs)
+		createdDirsCleanupErr := fs.cleanupCreatedStorageManagedTrees(dstRoot, createdDirs)
+		return errors.Join(cause, tempCleanupErr, createdDirsCleanupErr)
+	}
+	if err := dstFile.Chmod(storagePreservedMode(srcInfo.Mode())); err != nil {
 		dstFile.Close()
-		cleanupCreatedStorageManagedDirs(dstRoot, createdDirs)
-		return cleanupStorageTempPath(dstRoot.handle, tmpRel, err)
+		return abortTempCopy(err)
 	}
 
 	_, err = io.Copy(dstFile, srcFile)
 	if err != nil {
 		dstFile.Close()
-		cleanupCreatedStorageManagedDirs(dstRoot, createdDirs)
-		return cleanupStorageTempPath(dstRoot.handle, tmpRel, err)
+		return abortTempCopy(err)
 	}
 	if err := dstFile.Sync(); err != nil {
 		dstFile.Close()
-		cleanupCreatedStorageManagedDirs(dstRoot, createdDirs)
-		return cleanupStorageTempPath(dstRoot.handle, tmpRel, err)
+		return abortTempCopy(err)
 	}
 	if err := dstFile.Close(); err != nil {
-		cleanupCreatedStorageManagedDirs(dstRoot, createdDirs)
-		return cleanupStorageTempPath(dstRoot.handle, tmpRel, err)
+		return abortTempCopy(err)
 	}
 
-	tmpAbs := storageAbsolutePath(dstRoot, tmpRel)
 	if err := rootio.RenamePathIntoDirNoFollow(tmpAbs, filepath.Dir(dstAbs), filepath.Base(dstRel)); err != nil {
-		cleanupCreatedStorageManagedDirs(dstRoot, createdDirs)
-		return cleanupStorageTempPath(dstRoot.handle, tmpRel, mapStorageCreateTargetError(err))
+		return abortTempCopy(mapStorageCreateTargetError(err))
 	}
 	if err := syncManagedStorageDir(dstRoot.handle, dstParentRel, filepath.Dir(dstAbs)); err != nil {
-		if rollbackErr := dstRoot.handle.Remove(dstRel); rollbackErr != nil {
-			return errors.Join(
-				fmt.Errorf("failed to sync copied file: %w", err),
-				fmt.Errorf("failed to rollback copied file: %w", mapStorageRootPathError(rollbackErr)),
-			)
-		}
-		if rollbackSyncErr := syncManagedStorageDir(dstRoot.handle, dstParentRel, filepath.Dir(dstAbs)); rollbackSyncErr != nil {
-			return errors.Join(
-				fmt.Errorf("failed to sync copied file: %w", err),
-				fmt.Errorf("failed to sync copy rollback: %w", rollbackSyncErr),
-			)
-		}
-		return fmt.Errorf("failed to sync copied file: %w", err)
+		cleanupErr := fs.removeCopiedMoveDestination(dstRoot, dstRel, dstAbs)
+		createdDirsCleanupErr := fs.cleanupCreatedStorageManagedTrees(dstRoot, createdDirs)
+		return errors.Join(
+			fmt.Errorf("failed to sync copied file: %w", err),
+			cleanupErr,
+			createdDirsCleanupErr,
+		)
 	}
 
 	return nil
@@ -3579,13 +4059,22 @@ func (fs *FileSystem) readExistingFileForRollback(ctx context.Context, name stri
 		return nil, false, ErrIsDir
 	}
 
-	data, err := fs.workspace.ReadFile(ctx, name)
+	reader, err := fs.workspace.OpenRegularFile(ctx, name)
 	if err != nil {
 		mappedErr := mapWorkspaceReadablePathError(err)
 		if errors.Is(mappedErr, ErrNotDir) || isPathNotDirError(err) {
 			return nil, false, ErrNotDir
 		}
 		return nil, false, mappedErr
+	}
+	defer reader.Close()
+
+	data, err := io.ReadAll(contextCheckingReader{ctx: ctx, reader: reader})
+	if err == nil {
+		err = ctx.Err()
+	}
+	if err != nil {
+		return nil, false, err
 	}
 	return data, true, nil
 }
@@ -3710,16 +4199,6 @@ func (fs *FileSystem) rollbackWriteVersion(ctx context.Context, name, hash strin
 	return rollbackErr
 }
 
-func (fs *FileSystem) rollbackDeletedPath(ctx context.Context, name string, hadPreviousFile bool, previousData []byte, hadPreviousDir bool) error {
-	if hadPreviousFile {
-		return fs.workspace.WriteFile(ctx, name, previousData)
-	}
-	if hadPreviousDir {
-		return fs.workspace.Mkdir(ctx, name)
-	}
-	return nil
-}
-
 func (fs *FileSystem) restoreDeletedIndexEntries(ctx context.Context, name string, info *FileInfo) error {
 	if info == nil {
 		return nil
@@ -3740,31 +4219,6 @@ func (fs *FileSystem) restoreDeletedIndexEntries(ctx context.Context, name strin
 	return fs.updateFileIndex(ctx, name, info.Size, info.ModTime, hash)
 }
 
-func (fs *FileSystem) rollbackSoftDelete(ctx context.Context, name string, info *FileInfo, id, trashContentPath string, restoreIndex bool) error {
-	fullPath := fs.workspace.FullPath(name)
-	rollbackErr := fs.movePath(trashContentPath, fullPath)
-	metadataErr := fs.versions.RemoveFromTrash(ctx, id)
-	var restoreTrashContentErr error
-	if rollbackErr == nil && metadataErr != nil {
-		restoreTrashContentErr = fs.restoreTrashContent(fullPath, trashContentPath, info.IsDir)
-	}
-	if rollbackErr == nil && metadataErr == nil {
-		fs.cleanupTrashItemDir(path.Join(fs.trashRoot, id))
-	}
-
-	var restoreIndexErr error
-	if restoreIndex && rollbackErr == nil && metadataErr == nil {
-		restoreIndexErr = fs.restoreDeletedIndexEntries(ctx, name, info)
-	}
-
-	return errors.Join(
-		wrapStorageStepError("rollback deleted content", rollbackErr),
-		wrapStorageStepError("rollback trash metadata", metadataErr),
-		wrapStorageStepError("restore trash content", restoreTrashContentErr),
-		wrapStorageStepError("restore file index", restoreIndexErr),
-	)
-}
-
 func wrapStorageStepError(step string, err error) error {
 	if err == nil {
 		return nil
@@ -3772,14 +4226,10 @@ func wrapStorageStepError(step string, err error) error {
 	return fmt.Errorf("failed to %s: %w", step, err)
 }
 
-func (fs *FileSystem) restoreTrashContent(src, dst string, isDir bool) error {
-	if isDir {
-		return fs.copyDir(src, dst)
-	}
-	return fs.copyFile(src, dst)
-}
-
 func (fs *FileSystem) removeTrashPathDurably(trashPath string) (bool, error) {
+	if err := fs.captureDeleteMountBoundary(fs.trashRoot).checkHostTree(trashPath); err != nil {
+		return false, err
+	}
 	root, relPath, _, err := fs.resolveStoragePathRoot(trashPath)
 	if err != nil {
 		return false, err
@@ -3799,6 +4249,9 @@ func (fs *FileSystem) removeTrashPathDurably(trashPath string) (bool, error) {
 }
 
 func (fs *FileSystem) cleanupTrashStagingDir(stagedTrashPath string) {
+	if fs.captureDeleteMountBoundary(fs.trashRoot).checkHostTree(stagedTrashPath) != nil {
+		return
+	}
 	root, relPath, _, err := fs.resolveStoragePathRoot(stagedTrashPath)
 	if err != nil {
 		return
@@ -3814,6 +4267,9 @@ func (fs *FileSystem) cleanupTrashStagingDir(stagedTrashPath string) {
 }
 
 func (fs *FileSystem) cleanupTrashItemDir(trashItemPath string) {
+	if fs.captureDeleteMountBoundary(fs.trashRoot).checkHostTree(trashItemPath) != nil {
+		return
+	}
 	root, relPath, _, err := fs.resolveStoragePathRoot(trashItemPath)
 	if err != nil {
 		return
@@ -3843,8 +4299,14 @@ func (fs *FileSystem) movePath(src, dst string) error {
 	if err != nil {
 		return err
 	}
+	checkMoveMountBoundaries := func() error {
+		return fs.checkStorageCopyMountBoundaries(srcRoot, srcAbs, dstRoot, dstAbs)
+	}
+	if err := checkMoveMountBoundaries(); err != nil {
+		return err
+	}
 
-	createdParentDirs, err := ensureStorageManagedDirTracked(dstRoot, filepath.Dir(dstAbs), 0755)
+	createdParentDirs, err := fs.ensureStorageManagedDirTracked(dstRoot, filepath.Dir(dstAbs), 0755)
 	if err != nil {
 		return err
 	}
@@ -3852,14 +4314,32 @@ func (fs *FileSystem) movePath(src, dst string) error {
 		if len(createdParentDirs) == 0 {
 			return cause
 		}
-		if cleanupErr := cleanupCreatedStorageManagedTrees(dstRoot, createdParentDirs); cleanupErr != nil {
+		if cleanupErr := fs.cleanupCreatedStorageManagedTrees(dstRoot, createdParentDirs); cleanupErr != nil {
 			return errors.Join(cause, cleanupErr)
 		}
 		return cause
 	}
+	if err := checkMoveMountBoundaries(); err != nil {
+		return abortMove(err)
+	}
 
 	if srcRoot.handle == dstRoot.handle {
 		if err := movePathRename(srcRoot.handle, srcRel, dstRel, srcAbs, dstAbs); err == nil {
+			if mountErr := checkMoveMountBoundaries(); mountErr != nil {
+				if rollbackErr := movePathRename(srcRoot.handle, dstRel, srcRel, dstAbs, srcAbs); rollbackErr != nil {
+					return abortMove(errors.Join(
+						mountErr,
+						fmt.Errorf("failed to rollback renamed path after mount boundary changed: %w", mapStorageRootPathError(rollbackErr)),
+					))
+				}
+				if rollbackSyncErr := syncStorageManagedRenameDirs(dstRoot, dstRel, srcRoot, srcRel); rollbackSyncErr != nil {
+					return abortMove(errors.Join(
+						mountErr,
+						fmt.Errorf("failed to sync mount-boundary rollback path: %w", rollbackSyncErr),
+					))
+				}
+				return abortMove(mountErr)
+			}
 			if syncErr := syncStorageManagedRenameDirs(srcRoot, srcRel, dstRoot, dstRel); syncErr != nil {
 				if rollbackErr := movePathRename(srcRoot.handle, dstRel, srcRel, dstAbs, srcAbs); rollbackErr != nil {
 					return errors.Join(
@@ -3880,7 +4360,9 @@ func (fs *FileSystem) movePath(src, dst string) error {
 			return abortMove(mappedErr)
 		}
 	}
-
+	if err := checkMoveMountBoundaries(); err != nil {
+		return abortMove(err)
+	}
 	info, statErr := srcRoot.handle.Lstat(srcRel)
 	if statErr != nil {
 		return abortMove(mapStorageRootPathError(statErr))
@@ -3893,6 +4375,10 @@ func (fs *FileSystem) movePath(src, dst string) error {
 		if err := fs.copyDirBetweenRoots(srcRoot, srcRel, srcAbs, dstRoot, dstRel, dstAbs); err != nil {
 			return abortMove(err)
 		}
+		if err := checkMoveMountBoundaries(); err != nil {
+			cleanupErr := fs.removeCopiedMoveDestination(dstRoot, dstRel, dstAbs)
+			return abortMove(errors.Join(err, cleanupErr))
+		}
 		if err := movePathRemoveAll(srcRoot.handle, srcRel, srcAbs); err != nil {
 			return fmt.Errorf("failed to remove copied source directory: %w", mapStorageRootPathError(err))
 		}
@@ -3902,11 +4388,29 @@ func (fs *FileSystem) movePath(src, dst string) error {
 	if err := fs.copyFileBetweenRoots(srcRoot, srcRel, srcAbs, dstRoot, dstRel, dstAbs); err != nil {
 		return abortMove(err)
 	}
+	if err := checkMoveMountBoundaries(); err != nil {
+		cleanupErr := fs.removeCopiedMoveDestination(dstRoot, dstRel, dstAbs)
+		return abortMove(errors.Join(err, cleanupErr))
+	}
 	if err := movePathRemove(srcRoot.handle, srcRel, srcAbs); err != nil {
-		_ = movePathRemove(dstRoot.handle, dstRel, dstAbs)
-		return abortMove(mapStorageRootPathError(err))
+		cleanupErr := fs.removeCopiedMoveDestination(dstRoot, dstRel, dstAbs)
+		return abortMove(errors.Join(mapStorageRootPathError(err), cleanupErr))
 	}
 	return syncRemovedStorageSourceDir(srcRoot, srcRel)
+}
+
+func (fs *FileSystem) removeCopiedMoveDestination(root *storagePathRoot, rel, abs string) error {
+	if err := fs.captureDeleteMountBoundary(root.absRoot).checkHostTree(abs); err != nil {
+		return fmt.Errorf("failed to verify copied destination cleanup: %w", err)
+	}
+	if err := rootio.RemoveAllNoFollow(root.handle, rel); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("failed to cleanup copied destination: %w", mapStorageRootPathError(err))
+	}
+	parentRel := filepath.Dir(rel)
+	if err := syncManagedStorageDir(root.handle, parentRel, storageAbsolutePath(root, parentRel)); err != nil {
+		return fmt.Errorf("failed to sync copied destination cleanup: %w", err)
+	}
+	return nil
 }
 
 func syncRemovedStorageSourceDir(root *storagePathRoot, rel string) error {
@@ -3941,10 +4445,26 @@ func (fs *FileSystem) copyDir(src, dst string) error {
 		return err
 	}
 
-	return fs.copyDirBetweenRoots(srcRoot, srcRel, srcAbs, dstRoot, dstRel, dstAbs)
+	checkCopyMountBoundaries := func() error {
+		return fs.checkStorageCopyMountBoundaries(srcRoot, srcAbs, dstRoot, dstAbs)
+	}
+	if err := checkCopyMountBoundaries(); err != nil {
+		return err
+	}
+	if err := fs.copyDirBetweenRoots(srcRoot, srcRel, srcAbs, dstRoot, dstRel, dstAbs); err != nil {
+		return err
+	}
+	if err := checkCopyMountBoundaries(); err != nil {
+		cleanupErr := fs.removeCopiedMoveDestination(dstRoot, dstRel, dstAbs)
+		return errors.Join(err, cleanupErr)
+	}
+	return nil
 }
 
 func (fs *FileSystem) copyDirBetweenRoots(srcRoot *storagePathRoot, srcRel, srcAbs string, dstRoot *storagePathRoot, dstRel, dstAbs string) error {
+	if err := fs.checkStorageCopyMountBoundaries(srcRoot, srcAbs, dstRoot, dstAbs); err != nil {
+		return err
+	}
 	srcInfo, err := srcRoot.handle.Lstat(srcRel)
 	if err != nil {
 		return mapStorageRootPathError(err)
@@ -3953,26 +4473,30 @@ func (fs *FileSystem) copyDirBetweenRoots(srcRoot *storagePathRoot, srcRel, srcA
 		return errStoragePathSymlink
 	}
 
-	createdDirs, err := ensureStorageManagedDirTracked(dstRoot, filepath.Dir(dstAbs), 0755)
+	createdDirs, err := fs.ensureStorageManagedDirTracked(dstRoot, filepath.Dir(dstAbs), 0755)
 	if err != nil {
 		return err
 	}
+	if err := fs.checkStorageCopyMountBoundaries(srcRoot, srcAbs, dstRoot, dstAbs); err != nil {
+		cleanupErr := fs.cleanupCreatedStorageManagedTrees(dstRoot, createdDirs)
+		return errors.Join(err, cleanupErr)
+	}
 	if err := rootio.MkdirNoFollow(dstRoot.handle, dstRel, srcInfo.Mode().Perm()); err != nil {
-		cleanupCreatedStorageManagedDirs(dstRoot, createdDirs)
-		return mapStorageCreateTargetError(err)
+		cleanupErr := fs.cleanupCreatedStorageManagedTrees(dstRoot, createdDirs)
+		return errors.Join(mapStorageCreateTargetError(err), cleanupErr)
 	}
 	createdDirs = append([]string{dstRel}, createdDirs...)
 	abortCopy := func(cause error) error {
 		if len(createdDirs) == 0 {
 			return cause
 		}
-		if cleanupErr := rootio.RemoveAllNoFollow(dstRoot.handle, dstRel); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
-			cause = errors.Join(cause, fmt.Errorf("failed to cleanup copied directory: %w", mapStorageRootPathError(cleanupErr)))
-		}
-		if cleanupErr := cleanupCreatedStorageManagedTrees(dstRoot, createdDirs); cleanupErr != nil {
+		if cleanupErr := fs.cleanupCreatedStorageManagedTrees(dstRoot, createdDirs); cleanupErr != nil {
 			cause = errors.Join(cause, cleanupErr)
 		}
 		return cause
+	}
+	if err := fs.checkStorageCopyMountBoundaries(srcRoot, srcAbs, dstRoot, dstAbs); err != nil {
+		return abortCopy(err)
 	}
 	if err := syncManagedStorageDir(dstRoot.handle, filepath.Dir(dstRel), filepath.Dir(dstAbs)); err != nil {
 		return abortCopy(fmt.Errorf("failed to sync copied directory: %w", err))
@@ -3982,7 +4506,7 @@ func (fs *FileSystem) copyDirBetweenRoots(srcRoot *storagePathRoot, srcRel, srcA
 	if err != nil {
 		return abortCopy(mapStorageRootPathError(err))
 	}
-	if err := dstDir.Chmod(srcInfo.Mode().Perm()); err != nil {
+	if err := dstDir.Chmod(storagePreservedMode(srcInfo.Mode())); err != nil {
 		_ = dstDir.Close()
 		return abortCopy(mapStorageRootPathError(err))
 	}

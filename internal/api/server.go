@@ -654,7 +654,7 @@ type alertStatsProvider interface {
 }
 
 type RetentionMonitor interface {
-	UpdateConfig(cfg storage.RetentionMonitorConfig)
+	UpdateConfigAndRuntimePolicy(cfg storage.RetentionMonitorConfig, policy storage.RuntimePolicySettings)
 }
 
 type DiskHealthMonitor interface {
@@ -1947,9 +1947,11 @@ func (s *Server) setupRoutes() {
 
 		// File operations requiring bodies
 		if s.authEnabled {
+			r.With(requireWriteAccess).Post("/files-delete-intents", s.handlePrepareDeleteIntents)
 			r.With(requireWriteAccess).Post("/files-move", s.handleMoveFile)
 			r.With(requireWriteAccess).Post("/files-copy", s.handleCopyFile)
 		} else {
+			r.Post("/files-delete-intents", s.handlePrepareDeleteIntents)
 			r.Post("/files-move", s.handleMoveFile)
 			r.Post("/files-copy", s.handleCopyFile)
 		}
@@ -2525,6 +2527,10 @@ func (s *Server) respondTreeMutationPreflightError(w http.ResponseWriter, action
 		Conflict(w, "parent path is not a directory")
 		return
 	}
+	if errors.Is(err, storage.ErrNotRegular) {
+		Conflict(w, "resource type conflict")
+		return
+	}
 	if isStorageNotFound(err) {
 		s.respondNotFound(w, action, err)
 		return
@@ -2880,15 +2886,21 @@ func (s *Server) filePathCapabilities(ctx context.Context, targetPath string, na
 }
 
 func (s *Server) writeListFilesResponse(ctx context.Context, w http.ResponseWriter, filePath string, files []*storage.FileInfo, navigationRead bool) {
+	deletePolicy := s.fs.CurrentDeletePolicy()
 	items := make([]map[string]any, 0, len(files))
 	for _, f := range files {
+		var deleteIdentityToken any
+		if f.DeleteIdentityToken != "" {
+			deleteIdentityToken = f.DeleteIdentityToken
+		}
 		item := map[string]any{
-			"name":         path.Base(f.Path),
-			"path":         f.Path,
-			"isDir":        f.IsDir,
-			"size":         f.Size,
-			"modTime":      f.ModTime.Format(time.RFC3339),
-			"capabilities": s.filePathCapabilities(ctx, f.Path, true),
+			"name":                path.Base(f.Path),
+			"path":                f.Path,
+			"isDir":               f.IsDir,
+			"size":                f.Size,
+			"modTime":             f.ModTime.UTC().Format(time.RFC3339Nano),
+			"deleteIdentityToken": deleteIdentityToken,
+			"capabilities":        s.filePathCapabilities(ctx, f.Path, true),
 		}
 		if !f.IsDir && f.ContentHash != "" {
 			item["hash"] = f.ContentHash
@@ -2898,9 +2910,13 @@ func (s *Server) writeListFilesResponse(ctx context.Context, w http.ResponseWrit
 	}
 
 	NewAPIResponse(map[string]any{
-		"path":         filePath,
-		"capabilities": s.filePathCapabilities(ctx, filePath, navigationRead),
-		"files":        items,
+		"path":                    filePath,
+		"capabilities":            s.filePathCapabilities(ctx, filePath, navigationRead),
+		"deleteMode":              deletePolicy.Mode,
+		"deletePolicyToken":       deletePolicy.Token,
+		"trashRetentionDays":      deletePolicy.TrashRetentionDays,
+		"trashAutoCleanupEnabled": deletePolicy.TrashAutoCleanupEnabled,
+		"files":                   items,
 	}).Write(w, http.StatusOK)
 }
 
@@ -3168,6 +3184,149 @@ func (s *Server) handleCreateDirectory(w http.ResponseWriter, r *http.Request) {
 	}).WithMessage("directory created successfully").Write(w, http.StatusCreated)
 }
 
+type prepareDeleteIntentsRequest struct {
+	Targets []prepareDeleteIntentTargetRequest `json:"targets"`
+}
+
+type prepareDeleteIntentTargetRequest struct {
+	Path                  string `json:"path"`
+	ObservedIdentityToken string `json:"observedIdentityToken"`
+}
+
+type preparedDeleteIntentTargetResponse struct {
+	Path                string `json:"path"`
+	Name                string `json:"name"`
+	IsDir               bool   `json:"isDir"`
+	Size                int64  `json:"size"`
+	ModTime             string `json:"modTime"`
+	DeleteIdentityToken string `json:"deleteIdentityToken"`
+	DeleteTargetToken   string `json:"deleteTargetToken"`
+}
+
+func (s *Server) handlePrepareDeleteIntents(w http.ResponseWriter, r *http.Request) {
+	var req prepareDeleteIntentsRequest
+	if err := decodeJSONBody(r, &req); err != nil {
+		BadRequest(w, "invalid delete intent request")
+		return
+	}
+	targets, err := normalizeDeleteIntentRequestTargets(req.Targets)
+	if err != nil {
+		if len(req.Targets) > storage.MaxDeleteIntentTargets {
+			BadRequest(w, fmt.Sprintf("targets must contain at most %d entries", storage.MaxDeleteIntentTargets))
+			return
+		}
+		BadRequest(w, "invalid delete intent targets")
+		return
+	}
+
+	deleteAuthorizer, err := s.deletePathAuthorizerSnapshot(r.Context())
+	if err != nil {
+		respondPathAccessError(w, err)
+		return
+	}
+	if deleteAuthorizer != nil {
+		for _, target := range targets {
+			if err := deleteAuthorizer(target.Path); err != nil {
+				respondPathAccessError(w, err)
+				return
+			}
+		}
+	}
+	if s.fs == nil {
+		ServiceUnavailable(w, "filesystem not initialized")
+		return
+	}
+
+	intent, err := s.fs.PrepareObservedDeleteIntents(r.Context(), targets, deleteAuthorizer)
+	if err != nil {
+		if errors.Is(err, errPathAccessDenied) || errors.Is(err, errPathOutsideHomeDir) {
+			respondPathAccessError(w, err)
+			return
+		}
+		if errors.Is(err, storage.ErrInvalidDeleteIntent) {
+			BadRequest(w, "invalid delete intent targets")
+			return
+		}
+		var identityChangedErr *storage.DeleteIdentityChangedError
+		if errors.As(err, &identityChangedErr) {
+			NewAPIError(ErrCodeDeleteTargetChanged, "delete target changed; refresh and confirm deletion again").WithDetails(map[string]any{
+				"path": identityChangedErr.Path,
+			}).Write(w, http.StatusConflict)
+			return
+		}
+		if errors.Is(err, storage.ErrDeleteIdentityUnavailable) {
+			ServiceUnavailable(w, "delete identity verification is unavailable")
+			return
+		}
+		if errors.Is(err, storage.ErrNotRegular) {
+			Conflict(w, "delete target is not a regular file or directory")
+			return
+		}
+		if errors.Is(err, storage.ErrNotDir) {
+			Conflict(w, "parent path is not a directory")
+			return
+		}
+		if isStorageNotFound(err) {
+			s.respondNotFound(w, "prepare delete intents", err)
+			return
+		}
+		s.respondInternalError(w, "prepare delete intents", err)
+		return
+	}
+
+	responseTargets := make([]preparedDeleteIntentTargetResponse, 0, len(intent.Targets))
+	for _, target := range intent.Targets {
+		root := target.Snapshot.Root
+		responseTargets = append(responseTargets, preparedDeleteIntentTargetResponse{
+			Path:                root.Path,
+			Name:                root.Name,
+			IsDir:               root.IsDir,
+			Size:                root.Size,
+			ModTime:             root.ModTime.UTC().Format(time.RFC3339Nano),
+			DeleteIdentityToken: root.DeleteIdentityToken,
+			DeleteTargetToken:   target.Token,
+		})
+	}
+	NewAPIResponse(map[string]any{
+		"deleteMode":              intent.Policy.Mode,
+		"deletePolicyToken":       intent.Policy.Token,
+		"trashRetentionDays":      intent.Policy.TrashRetentionDays,
+		"trashAutoCleanupEnabled": intent.Policy.TrashAutoCleanupEnabled,
+		"targets":                 responseTargets,
+	}).Write(w, http.StatusOK)
+}
+
+func normalizeDeleteIntentRequestTargets(requestTargets []prepareDeleteIntentTargetRequest) ([]storage.ObservedDeleteTarget, error) {
+	if len(requestTargets) == 0 || len(requestTargets) > storage.MaxDeleteIntentTargets {
+		return nil, storage.ErrInvalidDeleteIntent
+	}
+	targets := make([]storage.ObservedDeleteTarget, 0, len(requestTargets))
+	seen := make(map[string]struct{}, len(requestTargets))
+	for _, requestTarget := range requestTargets {
+		if requestTarget.Path == "" || !validDeletePolicyToken(requestTarget.ObservedIdentityToken) {
+			return nil, storage.ErrInvalidDeleteIntent
+		}
+		cleanPath, err := validatePath(requestTarget.Path)
+		if err != nil || isMutationRootPath(cleanPath) {
+			return nil, storage.ErrInvalidDeleteIntent
+		}
+		if _, ok := seen[cleanPath]; ok {
+			return nil, storage.ErrInvalidDeleteIntent
+		}
+		for _, existing := range targets {
+			if pathWithinBase(existing.Path, cleanPath) || pathWithinBase(cleanPath, existing.Path) {
+				return nil, storage.ErrInvalidDeleteIntent
+			}
+		}
+		seen[cleanPath] = struct{}{}
+		targets = append(targets, storage.ObservedDeleteTarget{
+			Path:                  cleanPath,
+			ObservedIdentityToken: requestTarget.ObservedIdentityToken,
+		})
+	}
+	return targets, nil
+}
+
 func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 	filePath, err := routePathAfterPrefix(r, "/api/v1/files")
 	if err != nil {
@@ -3184,21 +3343,49 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 		badRequestInvalidPath(w)
 		return
 	}
-	if err := s.authorizeUserWritePath(r.Context(), filePath); err != nil {
+	deleteAuthorizer, err := s.deletePathAuthorizerSnapshot(r.Context())
+	if err != nil {
 		respondPathAccessError(w, err)
 		return
 	}
+	if deleteAuthorizer != nil {
+		if err := deleteAuthorizer(filePath); err != nil {
+			respondPathAccessError(w, err)
+			return
+		}
+	}
 
+	expectedPolicy, expectedTargetToken, parseErr := parseExpectedDeleteRequest(r)
+	if parseErr != nil {
+		if errors.Is(parseErr, errMissingExpectedDeleteMode) {
+			NewAPIError(ErrCodeMissingExpectedDeleteMode, "expected_delete_mode is required").Write(w, http.StatusBadRequest)
+			return
+		}
+		if errors.Is(parseErr, errInvalidExpectedDeleteMode) {
+			NewAPIError(ErrCodeInvalidExpectedDeleteMode, "expected_delete_mode must be exactly one of trash or permanent").Write(w, http.StatusBadRequest)
+			return
+		}
+		if errors.Is(parseErr, errMissingExpectedDeletePolicyToken) {
+			NewAPIError(ErrCodeMissingExpectedDeletePolicyToken, "expected_delete_policy_token is required").Write(w, http.StatusBadRequest)
+			return
+		}
+		if errors.Is(parseErr, errInvalidExpectedDeletePolicyToken) {
+			NewAPIError(ErrCodeInvalidExpectedDeletePolicyToken, "expected_delete_policy_token must be one lowercase SHA-256 value").Write(w, http.StatusBadRequest)
+			return
+		}
+		if errors.Is(parseErr, errMissingExpectedDeleteTargetToken) {
+			NewAPIError(ErrCodeMissingExpectedDeleteTargetToken, "expected_delete_target_token is required").Write(w, http.StatusBadRequest)
+			return
+		}
+		NewAPIError(ErrCodeInvalidExpectedDeleteTargetToken, "expected_delete_target_token must be one lowercase SHA-256 value").Write(w, http.StatusBadRequest)
+		return
+	}
 	if s.fs == nil {
 		ServiceUnavailable(w, "filesystem not initialized")
 		return
 	}
-	if err := s.authorizeUserTreeWritePath(r.Context(), filePath); err != nil {
-		s.respondTreeMutationPreflightError(w, "delete file", err)
-		return
-	}
 
-	if err := s.fs.Delete(r.Context(), filePath); err != nil {
+	if err := s.fs.DeleteWithExpectedPolicyAndTarget(r.Context(), filePath, expectedPolicy, expectedTargetToken, deleteAuthorizer); err != nil {
 		deleteWarningDetails := map[string]string{}
 		hasWarning := false
 		message := ""
@@ -3225,11 +3412,56 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if hasWarning {
+			var residualErr *storage.DeleteStageResidualError
+			if errors.As(err, &residualErr) {
+				s.logger.Error().Err(err).Str("path", filePath).Msg("delete completed with staged cleanup residual")
+			}
 			s.LogActivityWithWarning(w, r, activity.ActionDelete, filePath, deleteWarningDetails)
 			NewAPIResponse(map[string]any{
 				"path":    filePath,
 				"warning": true,
 			}).WithMessage(message).Write(w, http.StatusOK)
+			return
+		}
+		var residualErr *storage.DeleteStageResidualError
+		if errors.As(err, &residualErr) {
+			s.respondInternalError(w, "delete file recovery required", err)
+			return
+		}
+		var policyChangedErr *storage.DeletePolicyChangedError
+		if errors.As(err, &policyChangedErr) {
+			NewAPIError(ErrCodeDeletePolicyChanged, "delete policy changed; refresh and confirm deletion again").WithDetails(map[string]any{
+				"expected_delete_mode":         policyChangedErr.Expected.Mode,
+				"expected_delete_policy_token": policyChangedErr.Expected.Token,
+				"actual_delete_mode":           policyChangedErr.Actual.Mode,
+				"actual_delete_policy_token":   policyChangedErr.Actual.Token,
+				"trash_retention_days":         policyChangedErr.Actual.TrashRetentionDays,
+				"trash_auto_cleanup_enabled":   policyChangedErr.Actual.TrashAutoCleanupEnabled,
+			}).Write(w, http.StatusConflict)
+			return
+		}
+		var targetChangedErr *storage.DeleteTargetChangedError
+		if errors.As(err, &targetChangedErr) {
+			expectedToken := targetChangedErr.ExpectedToken
+			if expectedToken == "" {
+				expectedToken = expectedTargetToken
+			}
+			details := map[string]any{
+				"path":                         targetChangedErr.Path,
+				"expected_delete_target_token": expectedToken,
+			}
+			if targetChangedErr.ActualToken != "" {
+				details["actual_delete_target_token"] = targetChangedErr.ActualToken
+			}
+			NewAPIError(ErrCodeDeleteTargetChanged, "delete target changed; refresh and confirm deletion again").WithDetails(details).Write(w, http.StatusConflict)
+			return
+		}
+		if errors.Is(err, errPathAccessDenied) || errors.Is(err, errPathOutsideHomeDir) {
+			s.respondTreeMutationPreflightError(w, "delete file", err)
+			return
+		}
+		if errors.Is(err, storage.ErrNotRegular) {
+			Conflict(w, "delete target is not a regular file or directory")
 			return
 		}
 		if errors.Is(err, storage.ErrDirNotEmpty) {
@@ -3255,6 +3487,100 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 	NewAPIResponse(map[string]any{
 		"path": filePath,
 	}).WithMessage("file deleted successfully").Write(w, http.StatusOK)
+}
+
+var (
+	errMissingExpectedDeleteMode        = errors.New("missing expected delete mode")
+	errInvalidExpectedDeleteMode        = errors.New("invalid expected delete mode")
+	errMissingExpectedDeletePolicyToken = errors.New("missing expected delete policy token")
+	errInvalidExpectedDeletePolicyToken = errors.New("invalid expected delete policy token")
+	errMissingExpectedDeleteTargetToken = errors.New("missing expected delete target token")
+	errInvalidExpectedDeleteTargetToken = errors.New("invalid expected delete target token")
+)
+
+func parseExpectedDeleteRequest(r *http.Request) (storage.DeletePolicyExpectation, string, error) {
+	modeValues, policyTokenValues, targetTokenValues, modeMalformed, policyTokenMalformed, targetTokenMalformed, queryMalformed := decodeExpectedDeleteQuery(r.URL.RawQuery)
+	if len(modeValues) == 0 && !modeMalformed && !queryMalformed {
+		return storage.DeletePolicyExpectation{}, "", errMissingExpectedDeleteMode
+	}
+	if len(modeValues) == 1 && modeValues[0] == "" && !modeMalformed && !queryMalformed {
+		return storage.DeletePolicyExpectation{}, "", errMissingExpectedDeleteMode
+	}
+	if modeMalformed || queryMalformed || len(modeValues) != 1 {
+		return storage.DeletePolicyExpectation{}, "", errInvalidExpectedDeleteMode
+	}
+
+	mode := storage.DeleteMode(modeValues[0])
+	if !mode.Valid() {
+		return storage.DeletePolicyExpectation{}, "", errInvalidExpectedDeleteMode
+	}
+	if len(policyTokenValues) == 0 && !policyTokenMalformed {
+		return storage.DeletePolicyExpectation{}, "", errMissingExpectedDeletePolicyToken
+	}
+	if len(policyTokenValues) == 1 && policyTokenValues[0] == "" && !policyTokenMalformed {
+		return storage.DeletePolicyExpectation{}, "", errMissingExpectedDeletePolicyToken
+	}
+	if policyTokenMalformed || len(policyTokenValues) != 1 || !validDeletePolicyToken(policyTokenValues[0]) {
+		return storage.DeletePolicyExpectation{}, "", errInvalidExpectedDeletePolicyToken
+	}
+	policy := storage.DeletePolicyExpectation{Mode: mode, Token: policyTokenValues[0]}
+	if len(targetTokenValues) == 0 && !targetTokenMalformed {
+		return storage.DeletePolicyExpectation{}, "", errMissingExpectedDeleteTargetToken
+	}
+	if len(targetTokenValues) == 1 && targetTokenValues[0] == "" && !targetTokenMalformed {
+		return storage.DeletePolicyExpectation{}, "", errMissingExpectedDeleteTargetToken
+	}
+	if targetTokenMalformed || len(targetTokenValues) != 1 || !validDeletePolicyToken(targetTokenValues[0]) {
+		return storage.DeletePolicyExpectation{}, "", errInvalidExpectedDeleteTargetToken
+	}
+	return policy, targetTokenValues[0], nil
+}
+
+func decodeExpectedDeleteQuery(rawQuery string) (modeValues, policyTokenValues, targetTokenValues []string, modeMalformed, policyTokenMalformed, targetTokenMalformed, queryMalformed bool) {
+	for _, field := range strings.Split(rawQuery, "&") {
+		rawKey, rawValue, _ := strings.Cut(field, "=")
+		key, err := url.QueryUnescape(rawKey)
+		if err != nil {
+			queryMalformed = true
+			continue
+		}
+		switch key {
+		case "expected_delete_mode":
+			value, err := url.QueryUnescape(rawValue)
+			if err != nil {
+				modeMalformed = true
+				continue
+			}
+			modeValues = append(modeValues, value)
+		case "expected_delete_policy_token":
+			value, err := url.QueryUnescape(rawValue)
+			if err != nil {
+				policyTokenMalformed = true
+				continue
+			}
+			policyTokenValues = append(policyTokenValues, value)
+		case "expected_delete_target_token":
+			value, err := url.QueryUnescape(rawValue)
+			if err != nil {
+				targetTokenMalformed = true
+				continue
+			}
+			targetTokenValues = append(targetTokenValues, value)
+		}
+	}
+	return modeValues, policyTokenValues, targetTokenValues, modeMalformed, policyTokenMalformed, targetTokenMalformed, queryMalformed
+}
+
+func validDeletePolicyToken(token string) bool {
+	if len(token) != sha256.Size*2 {
+		return false
+	}
+	for _, character := range token {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
@@ -3513,6 +3839,10 @@ func (s *Server) handleMoveFile(w http.ResponseWriter, r *http.Request) {
 			}
 			if errors.Is(err, storage.ErrAlreadyExists) {
 				Conflict(w, "resource already exists")
+				return
+			}
+			if errors.Is(err, storage.ErrNotRegular) {
+				Conflict(w, "resource type conflict")
 				return
 			}
 			if isStorageNotFound(err) {
@@ -5665,6 +5995,7 @@ func (s *Server) handleListTrash(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	deletePolicy := s.fs.CurrentDeletePolicy()
 	items, err := s.fs.ListTrash(r.Context())
 	if err != nil {
 		s.respondInternalError(w, "list trash", err)
@@ -5689,6 +6020,7 @@ func (s *Server) handleListTrash(w http.ResponseWriter, r *http.Request) {
 			"id":           item.ID,
 			"originalPath": item.OriginalPath,
 			"deletedAt":    item.DeletedAt.Format(time.RFC3339),
+			"expiresAt":    item.ExpiresAt.Format(time.RFC3339),
 			"name":         path.Base(item.OriginalPath),
 			"isDir":        item.IsDir,
 			"size":         item.Size,
@@ -5698,14 +6030,13 @@ func (s *Server) handleListTrash(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := map[string]any{
-		"items":     apiItems,
-		"count":     count,
-		"totalSize": totalSize,
-	}
-	if cfg := s.currentConfig(); cfg != nil {
-		response["retentionDays"] = cfg.Storage.Trash.RetentionDays
-		response["retentionEnabled"] = cfg.Storage.Trash.Enabled
-		response["retentionMaxSize"] = cfg.Storage.Trash.MaxSize
+		"items":                   apiItems,
+		"count":                   count,
+		"totalSize":               totalSize,
+		"retentionDays":           deletePolicy.TrashRetentionDays,
+		"retentionEnabled":        deletePolicy.Mode == storage.DeleteModeTrash,
+		"retentionMaxSize":        deletePolicy.MaxTrashSize,
+		"trashAutoCleanupEnabled": deletePolicy.TrashAutoCleanupEnabled,
 	}
 	NewAPIResponse(response).Write(w, http.StatusOK)
 }
@@ -5741,6 +6072,7 @@ func (s *Server) handleGetTrashItem(w http.ResponseWriter, r *http.Request) {
 		"id":           item.ID,
 		"originalPath": item.OriginalPath,
 		"deletedAt":    item.DeletedAt.Format(time.RFC3339),
+		"expiresAt":    item.ExpiresAt.Format(time.RFC3339),
 		"name":         path.Base(item.OriginalPath),
 		"isDir":        item.IsDir,
 		"size":         item.Size,
@@ -5872,6 +6204,10 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 				Conflict(w, "resource already exists")
 				return
 			}
+			if errors.Is(err, storage.ErrNotRegular) {
+				Conflict(w, "resource type conflict")
+				return
+			}
 			if isStorageNotFound(err) {
 				s.respondNotFound(w, "restore from trash", err)
 				return
@@ -5964,6 +6300,10 @@ func (s *Server) handleDeleteFromTrash(w http.ResponseWriter, r *http.Request) {
 			s.respondNotFound(w, "delete from trash", err)
 			return
 		}
+		if errors.Is(err, storage.ErrNotRegular) {
+			Conflict(w, "trash item contains a mounted filesystem")
+			return
+		}
 
 		s.respondInternalError(w, "delete from trash", err)
 		return
@@ -5997,6 +6337,25 @@ func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request) {
 
 		deletedCount := 0
 		cleanupWarning := false
+		writePartialResult := func() {
+			details := map[string]string{
+				"count":   strconv.Itoa(deletedCount),
+				"partial": "true",
+			}
+			response := map[string]any{
+				"deleted_count": deletedCount,
+				"partial":       true,
+			}
+			message := "trash emptied partially"
+			if cleanupWarning {
+				markTrashDeleteCleanupWarningHeaders(w)
+				details["cleanup_warning"] = "true"
+				response["warning"] = true
+				message = "trash emptied partially with cleanup warning"
+			}
+			s.LogActivityWithWarning(w, r, activity.ActionTrashEmpty, "", details)
+			NewAPIResponse(response).WithMessage(message).Write(w, http.StatusOK)
+		}
 		for _, item := range items {
 			if item == nil || s.authorizeUserWritePath(r.Context(), item.OriginalPath) != nil {
 				continue
@@ -6004,6 +6363,10 @@ func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request) {
 			if err := s.authorizeUserTrashItemTreeWritePath(r.Context(), item, ""); err != nil {
 				if errors.Is(err, errPathAccessDenied) || errors.Is(err, errPathOutsideHomeDir) {
 					continue
+				}
+				if deletedCount > 0 {
+					writePartialResult()
+					return
 				}
 				s.respondTreeMutationPreflightError(w, "empty trash", err)
 				return
@@ -6016,23 +6379,11 @@ func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				if deletedCount > 0 {
-					details := map[string]string{
-						"count":   strconv.Itoa(deletedCount),
-						"partial": "true",
-					}
-					response := map[string]any{
-						"deleted_count": deletedCount,
-						"partial":       true,
-					}
-					message := "trash emptied partially"
-					if cleanupWarning {
-						markTrashDeleteCleanupWarningHeaders(w)
-						details["cleanup_warning"] = "true"
-						response["warning"] = true
-						message = "trash emptied partially with cleanup warning"
-					}
-					s.LogActivityWithWarning(w, r, activity.ActionTrashEmpty, "", details)
-					NewAPIResponse(response).WithMessage(message).Write(w, http.StatusOK)
+					writePartialResult()
+					return
+				}
+				if errors.Is(err, storage.ErrNotRegular) {
+					Conflict(w, "trash item contains a mounted filesystem")
 					return
 				}
 				s.respondInternalError(w, "empty trash", err)
@@ -6092,6 +6443,10 @@ func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request) {
 				"deleted_count": count,
 				"partial":       true,
 			}).WithMessage("trash emptied partially").Write(w, http.StatusOK)
+			return
+		}
+		if errors.Is(err, storage.ErrNotRegular) {
+			Conflict(w, "trash item contains a mounted filesystem")
 			return
 		}
 		s.respondInternalError(w, "empty trash", err)
@@ -11178,29 +11533,27 @@ func (s *Server) applyRuntimeSettings(ctx context.Context, req UpdateSettingsReq
 		}
 	}
 
-	if req.Retention != nil {
-		if s.retentionMonitor != nil {
-			s.retentionMonitor.UpdateConfig(storage.RetentionMonitorConfig{
-				MaxVersions:   cfg.Storage.Retention.MaxVersions,
-				MaxVersionAge: cfg.Storage.Retention.MaxAge,
-				MinFreeSpace:  cfg.Storage.Retention.MinFreeSpace,
-				SweepInterval: cfg.Storage.Retention.GCInterval,
-			})
-		} else if s.fs != nil {
-			s.fs.UpdateRetentionSettings(
-				cfg.Storage.Retention.MaxVersions,
-				cfg.Storage.Retention.MaxAge,
-				cfg.Storage.Retention.MinFreeSpace,
-			)
+	if s.fs != nil && (req.Retention != nil || req.Trash != nil) {
+		monitorConfig := storage.RetentionMonitorConfig{
+			MaxVersions:   cfg.Storage.Retention.MaxVersions,
+			MaxVersionAge: cfg.Storage.Retention.MaxAge,
+			MinFreeSpace:  cfg.Storage.Retention.MinFreeSpace,
+			SweepInterval: cfg.Storage.Retention.GCInterval,
 		}
-	}
-
-	if req.Trash != nil && s.fs != nil {
-		s.fs.UpdateTrashSettings(
-			cfg.Storage.Trash.Enabled,
-			cfg.Storage.Trash.RetentionDays,
-			cfg.Storage.Trash.MaxSize,
-		)
+		runtimePolicy := storage.RuntimePolicySettings{
+			MaxVersions:        cfg.Storage.Retention.MaxVersions,
+			MaxVersionAge:      cfg.Storage.Retention.MaxAge,
+			MinFreeSpace:       cfg.Storage.Retention.MinFreeSpace,
+			SweepInterval:      cfg.Storage.Retention.GCInterval,
+			TrashEnabled:       cfg.Storage.Trash.Enabled,
+			TrashRetentionDays: cfg.Storage.Trash.RetentionDays,
+			MaxTrashSize:       cfg.Storage.Trash.MaxSize,
+		}
+		if s.retentionMonitor != nil {
+			s.retentionMonitor.UpdateConfigAndRuntimePolicy(monitorConfig, runtimePolicy)
+		} else {
+			s.fs.UpdateRuntimePolicySettings(runtimePolicy)
+		}
 	}
 
 	if req.Versioning != nil && s.fs != nil {

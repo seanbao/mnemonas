@@ -56,6 +56,53 @@ func OpenDirNoFollow(root *os.Root, name string) (*os.File, error) {
 	return root.Open(name)
 }
 
+// RenameLeafNoReplace is unsupported on platforms without atomic, descriptor-
+// relative, no-replace rename support.
+func RenameLeafNoReplace(root *os.Root, sourceName, targetName string) error {
+	return RenameLeafBetweenRootsNoReplace(root, sourceName, root, targetName)
+}
+
+// RenameLeafBetweenRootsNoReplace is unsupported on platforms without atomic,
+// descriptor-relative, no-replace rename support. It fails closed instead of
+// using a check-then-rename fallback.
+func RenameLeafBetweenRootsNoReplace(
+	sourceRoot *os.Root,
+	sourceName string,
+	targetRoot *os.Root,
+	targetName string,
+) error {
+	if _, _, err := splitRelativeParent(sourceName); err != nil {
+		return rootPathError("rename", sourceName, err)
+	}
+	if _, _, err := splitRelativeParent(targetName); err != nil {
+		return rootPathError("rename", targetName, err)
+	}
+	return rootPathError("rename", targetName, errors.ErrUnsupported)
+}
+
+// RenameLeafIntoDirNoReplace is unsupported without descriptor-relative,
+// no-replace rename support.
+func RenameLeafIntoDirNoReplace(sourceRoot *os.Root, sourceName string, targetDir *os.File, targetName string) error {
+	return rootPathError("rename", targetName, errors.ErrUnsupported)
+}
+
+// RenameLeafFromDirNoReplace is unsupported without descriptor-relative,
+// no-replace rename support.
+func RenameLeafFromDirNoReplace(sourceDir *os.File, sourceName string, targetRoot *os.Root, targetName string) error {
+	return rootPathError("rename", targetName, errors.ErrUnsupported)
+}
+
+// OpenDirEntryNoFollow is unsupported without descriptor-relative open support.
+func OpenDirEntryNoFollow(dir *os.File, name string) (*os.File, error) {
+	return nil, rootPathError("open", name, errors.ErrUnsupported)
+}
+
+// RemoveAllFromDirNoFollowChecked is unsupported without descriptor-relative
+// traversal and removal support.
+func RemoveAllFromDirNoFollowChecked(dir *os.File, name string, verify func(string, os.FileInfo) error) error {
+	return rootPathError("remove", name, errors.ErrUnsupported)
+}
+
 // RenameNoFollow renames sourceName to targetName relative to root without
 // following symlinks observed during the precheck and without intentionally
 // replacing an existing target. Platforms without openat support retain a

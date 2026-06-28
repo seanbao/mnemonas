@@ -16,6 +16,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"path"
 	"slices"
@@ -85,6 +86,7 @@ const (
 var webdavRandomRead = rand.Read
 var onWebDAVLockCleanupComplete = func(*Handler) {}
 var onWebDAVPropfindCacheMiss = func(*Handler, string, string) {}
+var beforeWebDAVDeleteStorage = func(*Handler, string) {}
 
 type webDAVScopeContextKey struct{}
 
@@ -796,7 +798,7 @@ func (h *Handler) handleGet(ctx context.Context, w http.ResponseWriter, r *http.
 
 	// Check If-Match (precondition) before cache validators.
 	if im := r.Header.Get("If-Match"); im != "" {
-		if !h.matchETag(im, etag) {
+		if !matchStrongETag(im, etag) {
 			http.Error(w, errPreconditionFailed.Error(), http.StatusPreconditionFailed)
 			return
 		}
@@ -811,7 +813,7 @@ func (h *Handler) handleGet(ctx context.Context, w http.ResponseWriter, r *http.
 
 	// Check If-None-Match (conditional GET)
 	if inm := r.Header.Get("If-None-Match"); inm != "" {
-		if h.matchETag(inm, etag) {
+		if matchWeakETag(inm, etag) {
 			w.Header().Set("ETag", etag)
 			w.Header().Set("Last-Modified", snapshotInfo.ModTime.UTC().Format(http.TimeFormat))
 			w.WriteHeader(http.StatusNotModified)
@@ -990,7 +992,7 @@ func (h *Handler) handlePut(ctx context.Context, w http.ResponseWriter, r *http.
 
 		// If-Match: only update if ETag matches (prevent overwrite conflicts)
 		if im := r.Header.Get("If-Match"); im != "" {
-			if !h.matchETag(im, etag) {
+			if !matchStrongETag(im, etag) {
 				http.Error(w, errPreconditionFailed.Error(), http.StatusPreconditionFailed)
 				return
 			}
@@ -1005,7 +1007,7 @@ func (h *Handler) handlePut(ctx context.Context, w http.ResponseWriter, r *http.
 
 		// If-None-Match: prevent update when any provided validator matches the current representation.
 		if inm := r.Header.Get("If-None-Match"); inm != "" {
-			if h.matchETag(inm, etag) {
+			if matchWeakETag(inm, etag) {
 				http.Error(w, errPreconditionFailed.Error(), http.StatusPreconditionFailed)
 				return
 			}
@@ -1057,31 +1059,52 @@ func (h *Handler) handleDelete(ctx context.Context, w http.ResponseWriter, r *ht
 		return
 	}
 
-	info, err := h.fs.Stat(ctx, filePath)
-	if err != nil {
-		h.handleError(w, err)
-		return
-	}
-	if info.IsDir {
-		if err := h.validateInfinityOnlyDepth(r.Header.Get("Depth")); err != nil {
-			writeKnownWebDAVError(w, errInvalidDepthHeader, http.StatusBadRequest)
-			return
-		}
-	}
-	if err := h.authorizeTreeAccess(ctx, filePath, accessWrite); err != nil {
-		h.handleError(w, err)
-		return
-	}
-
-	etag := fmt.Sprintf(`"%s"`, info.ContentHash)
-	if h.writeFailedMutationPrecondition(w, r, etag, info.ModTime) {
-		return
-	}
-
 	affectedPaths := []string{path.Dir(filePath), filePath}
 	h.invalidatePropCache(affectedPaths...)
 
-	if err := h.fs.Delete(ctx, filePath); err != nil {
+	scope := scopeFromContext(ctx)
+	var authorize storage.DeletePathAuthorizer
+	if scope.scoped {
+		authorize = func(targetPath string) error {
+			if !scope.canAccess(targetPath, accessWrite) {
+				return errWebDAVPathAccessDenied
+			}
+			return nil
+		}
+	}
+	beforeWebDAVDeleteStorage(h, filePath)
+	depth := r.Header.Get("Depth")
+	ifMatch := r.Header.Get("If-Match")
+	ifNoneMatch := r.Header.Get("If-None-Match")
+	ifUnmodifiedSince := r.Header.Get("If-Unmodified-Since")
+	needsTargetValidator := depth != "" || ifMatch != "" || ifNoneMatch != "" || ifUnmodifiedSince != ""
+	var err error
+	if needsTargetValidator {
+		validate := func(snapshot storage.DeleteTargetSnapshot) error {
+			info := snapshot.Root
+			if info.IsDir {
+				if err := h.validateInfinityOnlyDepth(depth); err != nil {
+					return err
+				}
+			}
+			etag := fmt.Sprintf(`"%s"`, info.ContentHash)
+			return h.mutationPreconditionError(r, etag, info.ModTime)
+		}
+		err = h.fs.DeleteWithTargetValidatorOptions(ctx, filePath, storage.DeleteTargetSnapshotOptions{
+			IncludeContentHash: ifMatch != "" || ifNoneMatch != "",
+		}, validate, authorize)
+	} else {
+		err = h.fs.DeleteWithPathAuthorizer(ctx, filePath, authorize)
+	}
+	if err != nil {
+		if errors.Is(err, errInvalidDepthHeader) {
+			writeKnownWebDAVError(w, errInvalidDepthHeader, http.StatusBadRequest)
+			return
+		}
+		if errors.Is(err, errPreconditionFailed) {
+			http.Error(w, errPreconditionFailed.Error(), http.StatusPreconditionFailed)
+			return
+		}
 		if !markDeleteWarningHeaders(w, err) {
 			h.handleError(w, err)
 			return
@@ -2250,25 +2273,30 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 }
 
 func (h *Handler) writeFailedMutationPrecondition(w http.ResponseWriter, r *http.Request, etag string, modTime time.Time) bool {
+	if err := h.mutationPreconditionError(r, etag, modTime); err != nil {
+		http.Error(w, err.Error(), http.StatusPreconditionFailed)
+		return true
+	}
+	return false
+}
+
+func (h *Handler) mutationPreconditionError(r *http.Request, etag string, modTime time.Time) error {
 	if im := r.Header.Get("If-Match"); im != "" {
-		if !h.matchETag(im, etag) {
-			http.Error(w, errPreconditionFailed.Error(), http.StatusPreconditionFailed)
-			return true
+		if !matchStrongETag(im, etag) {
+			return errPreconditionFailed
 		}
 	}
 	if ius := r.Header.Get("If-Unmodified-Since"); ius != "" {
 		if unmodifiedSince, err := http.ParseTime(ius); err == nil && isHTTPTimeAfter(modTime, unmodifiedSince) {
-			http.Error(w, errPreconditionFailed.Error(), http.StatusPreconditionFailed)
-			return true
+			return errPreconditionFailed
 		}
 	}
 	if inm := r.Header.Get("If-None-Match"); inm != "" {
-		if h.matchETag(inm, etag) {
-			http.Error(w, errPreconditionFailed.Error(), http.StatusPreconditionFailed)
-			return true
+		if matchWeakETag(inm, etag) {
+			return errPreconditionFailed
 		}
 	}
-	return false
+	return nil
 }
 
 func (h *Handler) allocateMoveBackupPath(ctx context.Context, dst string) (string, error) {
@@ -3866,6 +3894,11 @@ func defaultWebDAVPort(scheme string) string {
 }
 
 func (h *Handler) handleError(w http.ResponseWriter, err error) {
+	var residualErr *storage.DeleteStageResidualError
+	if errors.As(err, &residualErr) {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
 	if errors.Is(err, errWebDAVQuotaExceeded) {
 		http.Error(w, webDAVQuotaExceededMessage(err), http.StatusInsufficientStorage)
 		return
@@ -3878,7 +3911,7 @@ func (h *Handler) handleError(w http.ResponseWriter, err error) {
 		http.Error(w, "resource not found", http.StatusNotFound)
 		return
 	}
-	if errors.Is(err, storage.ErrIsDir) || errors.Is(err, storage.ErrNotDir) {
+	if errors.Is(err, storage.ErrIsDir) || errors.Is(err, storage.ErrNotDir) || errors.Is(err, storage.ErrNotRegular) {
 		http.Error(w, "resource type conflict", http.StatusConflict)
 		return
 	}
@@ -3998,24 +4031,89 @@ func (h *Handler) scopeForIdentity(identity *UserIdentity) (requestScope, error)
 	}, nil
 }
 
-// matchETag checks if the given ETag matches the condition value
-// Supports multiple ETags separated by comma, and weak ETag prefix "W/"
-func (h *Handler) matchETag(condition, etag string) bool {
+// matchStrongETag applies the strong comparison required by If-Match.
+func matchStrongETag(condition, current string) bool {
+	return matchETagCondition(condition, current, func(candidate, current string) bool {
+		return candidate == current && candidate[0] == '"'
+	})
+}
+
+// matchWeakETag applies the weak comparison required by If-None-Match.
+func matchWeakETag(condition, current string) bool {
+	return matchETagCondition(condition, current, func(candidate, current string) bool {
+		return strings.TrimPrefix(candidate, "W/") == strings.TrimPrefix(current, "W/")
+	})
+}
+
+func matchETagCondition(condition, current string, equal func(candidate, current string) bool) bool {
+	condition = textproto.TrimString(condition)
 	if condition == "*" {
 		return true
 	}
 
-	// Handle multiple ETags
-	for _, candidate := range strings.Split(condition, ",") {
-		candidate = strings.TrimSpace(candidate)
-		// Remove weak ETag prefix for comparison
-		candidate = strings.TrimPrefix(candidate, "W/")
-		etag = strings.TrimPrefix(etag, "W/")
-		if candidate == etag {
+	current, remain := scanEntityTag(current)
+	if current == "" || textproto.TrimString(remain) != "" {
+		return false
+	}
+	candidates, ok := parseEntityTagList(condition)
+	if !ok {
+		return false
+	}
+	for _, candidate := range candidates {
+		if equal(candidate, current) {
 			return true
 		}
 	}
 	return false
+}
+
+func parseEntityTagList(value string) ([]string, bool) {
+	tags := make([]string, 0, 1)
+	value = textproto.TrimString(value)
+	if value == "" {
+		return nil, false
+	}
+	for {
+		tag, remain := scanEntityTag(value)
+		if tag == "" {
+			return nil, false
+		}
+		tags = append(tags, tag)
+		remain = textproto.TrimString(remain)
+		if remain == "" {
+			return tags, true
+		}
+		if remain[0] != ',' {
+			return nil, false
+		}
+		value = textproto.TrimString(remain[1:])
+		if value == "" || value[0] == ',' {
+			return nil, false
+		}
+	}
+}
+
+// scanEntityTag consumes one RFC entity-tag and returns the remaining input.
+func scanEntityTag(value string) (tag, remain string) {
+	value = textproto.TrimString(value)
+	start := 0
+	if strings.HasPrefix(value, "W/") {
+		start = 2
+	}
+	if len(value[start:]) < 2 || value[start] != '"' {
+		return "", ""
+	}
+	for i := start + 1; i < len(value); i++ {
+		character := value[i]
+		switch {
+		case character == 0x21 || character >= 0x23 && character <= 0x7e || character >= 0x80:
+		case character == '"':
+			return value[:i+1], value[i+1:]
+		default:
+			return "", ""
+		}
+	}
+	return "", ""
 }
 
 // XML structure definitions

@@ -11,12 +11,30 @@ const API_BASE = '/api/v1'
 
 export const MAX_UPLOAD_FILE_SIZE_BYTES = 10 * 1024 * 1024 * 1024
 export const MAX_UPLOAD_FILE_SIZE_LABEL = '10 GB'
+export const MAX_DELETE_INTENT_TARGETS = 1000
 
-export interface FileListResponse {
+export type DeleteMode = 'trash' | 'permanent'
+
+interface FileListResponseBase {
   files: FileItem[]
   path: string
   capabilities?: FileItem['capabilities']
 }
+
+export type FileListResponse = FileListResponseBase & (
+  | {
+      deleteMode: DeleteMode
+      deletePolicyToken: string
+      trashRetentionDays: number
+      trashAutoCleanupEnabled: boolean
+    }
+  | {
+      deleteMode: 'unknown'
+      deletePolicyToken: null
+      trashRetentionDays: null
+      trashAutoCleanupEnabled: null
+    }
+)
 
 export interface ListFilesOptions {
   signal?: AbortSignal
@@ -24,6 +42,35 @@ export interface ListFilesOptions {
 
 export interface RequestOptions {
   signal?: AbortSignal
+}
+
+export interface DeleteFileOptions extends RequestOptions {
+  expectedDeleteMode: DeleteMode
+  expectedDeletePolicyToken: string
+  expectedDeleteTargetToken: string
+}
+
+export interface ObservedFileDeleteTarget {
+  path: string
+  observedIdentityToken: string
+}
+
+export interface FileDeleteTarget {
+  path: string
+  name: string
+  isDir: boolean
+  size: number
+  modTime: string
+  deleteIdentityToken: string
+  deleteTargetToken: string
+}
+
+export interface FileDeleteIntent {
+  deleteMode: DeleteMode
+  deletePolicyToken: string
+  trashRetentionDays: number
+  trashAutoCleanupEnabled: boolean
+  targets: FileDeleteTarget[]
 }
 
 export interface UploadFileOptions {
@@ -579,6 +626,7 @@ function isFileItemShape(value: unknown): value is FileItem {
     && typeof value.isDir === 'boolean'
     && isNonNegativeSafeInteger(value.size)
     && typeof value.modTime === 'string'
+    && (value.deleteIdentityToken === null || isDeletePolicyToken(value.deleteIdentityToken))
     && isStringOrUndefined(value.etag)
     && (value.capabilities === undefined || isFileCapabilitiesShape(value.capabilities))
 }
@@ -590,12 +638,88 @@ function isFileCapabilitiesShape(value: unknown): value is NonNullable<FileItem[
     && typeof value.write === 'boolean'
 }
 
-function isFileListResponseShape(value: unknown): value is FileListResponse {
+interface RawFileListResponse extends FileListResponseBase {
+  deleteMode?: unknown
+  deletePolicyToken?: unknown
+  trashRetentionDays?: unknown
+  trashAutoCleanupEnabled?: unknown
+}
+
+type NormalizedDeletePolicy =
+  | {
+      deleteMode: DeleteMode
+      deletePolicyToken: string
+      trashRetentionDays: number
+      trashAutoCleanupEnabled: boolean
+    }
+  | {
+      deleteMode: 'unknown'
+      deletePolicyToken: null
+      trashRetentionDays: null
+      trashAutoCleanupEnabled: null
+    }
+
+function isFileListResponseShape(value: unknown): value is RawFileListResponse {
   return isRecord(value)
     && isLogicalPathString(value.path)
     && Array.isArray(value.files)
     && value.files.every(isFileItemShape)
     && (value.capabilities === undefined || isFileCapabilitiesShape(value.capabilities))
+}
+
+function isDeletePolicyToken(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
+}
+
+function isFileDeleteTargetShape(value: unknown): value is FileDeleteTarget {
+  if (!isRecord(value)
+    || !isLogicalPathString(value.path)
+    || value.path === '/'
+    || typeof value.name !== 'string'
+    || value.name.length === 0
+    || typeof value.isDir !== 'boolean'
+    || !isNonNegativeSafeInteger(value.size)
+    || !isRfc3339Timestamp(value.modTime)
+    || !isDeletePolicyToken(value.deleteIdentityToken)
+    || !isDeletePolicyToken(value.deleteTargetToken)) {
+    return false
+  }
+
+  return value.path.slice(value.path.lastIndexOf('/') + 1) === value.name
+}
+
+function isFileDeleteIntentShape(value: unknown): value is FileDeleteIntent {
+  return isRecord(value)
+    && (value.deleteMode === 'trash' || value.deleteMode === 'permanent')
+    && isDeletePolicyToken(value.deletePolicyToken)
+    && isNonNegativeSafeInteger(value.trashRetentionDays)
+    && typeof value.trashAutoCleanupEnabled === 'boolean'
+    && Array.isArray(value.targets)
+    && value.targets.length > 0
+    && value.targets.every(isFileDeleteTargetShape)
+}
+
+function normalizeDeletePolicy(data: RawFileListResponse): NormalizedDeletePolicy {
+  if (
+    (data.deleteMode === 'trash' || data.deleteMode === 'permanent')
+    && isDeletePolicyToken(data.deletePolicyToken)
+    && isNonNegativeSafeInteger(data.trashRetentionDays)
+    && typeof data.trashAutoCleanupEnabled === 'boolean'
+  ) {
+    return {
+      deleteMode: data.deleteMode,
+      deletePolicyToken: data.deletePolicyToken,
+      trashRetentionDays: data.trashRetentionDays,
+      trashAutoCleanupEnabled: data.trashAutoCleanupEnabled,
+    }
+  }
+
+  return {
+    deleteMode: 'unknown',
+    deletePolicyToken: null,
+    trashRetentionDays: null,
+    trashAutoCleanupEnabled: null,
+  }
 }
 
 function isVersionInfoShape(value: unknown): value is VersionInfo {
@@ -747,6 +871,7 @@ function isTrashItemShape(value: unknown): value is {
   id: string
   originalPath: string
   deletedAt: string
+  expiresAt: string
   name: string
   isDir: boolean
   size: number
@@ -757,6 +882,7 @@ function isTrashItemShape(value: unknown): value is {
     && typeof value.id === 'string'
     && typeof value.originalPath === 'string'
     && typeof value.deletedAt === 'string'
+    && isRfc3339Timestamp(value.expiresAt)
     && typeof value.name === 'string'
     && typeof value.isDir === 'boolean'
     && isNonNegativeSafeInteger(value.size)
@@ -764,11 +890,46 @@ function isTrashItemShape(value: unknown): value is {
     && isBooleanOrUndefined(value.hadVersions)
 }
 
+const RFC3339_TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|([+-])(\d{2}):(\d{2}))$/
+
+function isRfc3339Timestamp(value: unknown): value is string {
+  if (typeof value !== 'string') {
+    return false
+  }
+
+  const match = RFC3339_TIMESTAMP_PATTERN.exec(value)
+  if (!match) {
+    return false
+  }
+
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const hour = Number(match[4])
+  const minute = Number(match[5])
+  const second = Number(match[6])
+  const offsetHour = match[8] === undefined ? 0 : Number(match[8])
+  const offsetMinute = match[9] === undefined ? 0 : Number(match[9])
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+
+  return month >= 1
+    && month <= 12
+    && day >= 1
+    && day <= daysInMonth[month - 1]!
+    && hour <= 23
+    && minute <= 59
+    && second <= 59
+    && offsetHour <= 23
+    && offsetMinute <= 59
+}
+
 function isTrashListResponseShape(value: unknown): value is {
   items: Array<{
     id: string
     originalPath: string
     deletedAt: string
+    expiresAt: string
     name: string
     isDir: boolean
     size: number
@@ -780,6 +941,7 @@ function isTrashListResponseShape(value: unknown): value is {
   retentionDays?: number
   retentionEnabled?: boolean
   retentionMaxSize?: number
+  trashAutoCleanupEnabled: boolean
 } {
   return isRecord(value)
     && Array.isArray(value.items)
@@ -790,6 +952,7 @@ function isTrashListResponseShape(value: unknown): value is {
     && isNonNegativeSafeIntegerOrUndefined(value.retentionDays)
     && isBooleanOrUndefined(value.retentionEnabled)
     && isNonNegativeSafeIntegerOrUndefined(value.retentionMaxSize)
+    && typeof value.trashAutoCleanupEnabled === 'boolean'
 }
 
 function isEmptyTrashResultShape(value: unknown): value is { deleted_count: number; partial?: boolean; warning?: boolean } {
@@ -1837,7 +2000,10 @@ export async function listFiles(path: string, options: ListFilesOptions = {}): P
   if (!isFileListResponseShape(data)) {
     throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
-  return data
+  return {
+    ...data,
+    ...normalizeDeletePolicy(data),
+  }
 }
 
 // Get file versions
@@ -1852,15 +2018,89 @@ export async function getVersions(path: string, options: { signal?: AbortSignal 
   return data.versions
 }
 
-// Delete a file (soft delete)
-export async function deleteFile(path: string, options: RequestInit = {}): Promise<ActionResult> {
+// Create an immutable delete confirmation snapshot for the requested targets.
+export async function createFileDeleteIntent(targets: ObservedFileDeleteTarget[], options: RequestOptions = {}): Promise<FileDeleteIntent> {
+  if (!Array.isArray(targets) || targets.length === 0) {
+    throw new Error('删除目标不能为空')
+  }
+  if (targets.length > MAX_DELETE_INTENT_TARGETS) {
+    throw new Error(`单次最多确认 ${MAX_DELETE_INTENT_TARGETS} 个删除目标`)
+  }
+
+  if (targets.some((target) => !isRecord(target)
+    || typeof target.path !== 'string'
+    || !isDeletePolicyToken(target.observedIdentityToken))) {
+    throw new Error('删除目标无效')
+  }
+
+  const normalizedTargets = targets.map((target) => ({
+    path: normalizePath(target.path),
+    observedIdentityToken: target.observedIdentityToken,
+  }))
+  const normalizedPaths = normalizedTargets.map((target) => target.path)
+  if (
+    normalizedPaths.some((path) => path === '/')
+    || new Set(normalizedPaths).size !== normalizedPaths.length
+  ) {
+    throw new Error('删除目标无效')
+  }
+
+  const response = await authFetch(`${API_BASE}/files-delete-intents`, {
+    ...options,
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ targets: normalizedTargets }),
+  })
+  const data = await handleWrappedResponse<unknown>(response, '获取删除确认信息失败')
+  if (!isFileDeleteIntentShape(data)) {
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
+  }
+
+  const targetsByPath = new Map(data.targets.map((target) => [target.path, target]))
+  if (
+    data.targets.length !== normalizedPaths.length
+    || targetsByPath.size !== normalizedPaths.length
+    || normalizedPaths.some((path) => !targetsByPath.has(path))
+    || normalizedTargets.some((target) => targetsByPath.get(target.path)?.deleteIdentityToken !== target.observedIdentityToken)
+  ) {
+    throw new Error(INVALID_API_RESPONSE_MESSAGE)
+  }
+
+  return {
+    ...data,
+    targets: normalizedPaths.map((path) => targetsByPath.get(path)!),
+  }
+}
+
+// Delete a file using the policy observed when the user confirmed the action.
+export async function deleteFile(path: string, options: DeleteFileOptions): Promise<ActionResult> {
+  if (options.expectedDeleteMode !== 'trash' && options.expectedDeleteMode !== 'permanent') {
+    throw new Error('删除方式无效')
+  }
+  if (!isDeletePolicyToken(options.expectedDeletePolicyToken)) {
+    throw new Error('删除策略令牌无效')
+  }
+  if (!isDeletePolicyToken(options.expectedDeleteTargetToken)) {
+    throw new Error('删除目标令牌无效')
+  }
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
-  const response = await authFetch(`${API_BASE}/files${encodedPath}`, {
-    ...options,
-    method: 'DELETE',
+  const query = new URLSearchParams({
+    expected_delete_mode: options.expectedDeleteMode,
+    expected_delete_policy_token: options.expectedDeletePolicyToken,
+    expected_delete_target_token: options.expectedDeleteTargetToken,
   })
-  return expectWrappedActionResponse(response, '删除文件失败', isPathActionShape)
+  const response = await authFetch(`${API_BASE}/files${encodedPath}?${query.toString()}`, {
+    method: 'DELETE',
+    signal: options.signal,
+  })
+  return expectWrappedActionResponse(
+    response,
+    '删除文件失败',
+    (value): value is { path: string } => isPathActionShape(value) && value.path === normalizedPath,
+  )
 }
 
 // Get storage stats (direct response, not wrapped)
@@ -2411,6 +2651,7 @@ export interface TrashItem {
   id: string
   originalPath: string
   deletedAt: string  // ISO 8601 format
+  expiresAt: string  // RFC 3339 timestamp persisted when the item entered trash
   name: string
   isDir: boolean
   size: number
@@ -2432,6 +2673,7 @@ export interface TrashListResponse {
   retentionDays?: number
   retentionEnabled?: boolean
   retentionMaxSize?: number
+  trashAutoCleanupEnabled: boolean
 }
 
 function trashItemUrl(id: string): string {
@@ -2450,6 +2692,7 @@ export async function listTrash(options: RequestOptions = {}): Promise<TrashList
       id: item.id,
       originalPath: item.originalPath,
       deletedAt: item.deletedAt,
+      expiresAt: item.expiresAt,
       name: item.name,
       isDir: item.isDir,
       size: item.size,
@@ -2464,6 +2707,7 @@ export async function listTrash(options: RequestOptions = {}): Promise<TrashList
     retentionDays: data.retentionDays,
     retentionEnabled: data.retentionEnabled,
     retentionMaxSize: data.retentionMaxSize,
+    trashAutoCleanupEnabled: data.trashAutoCleanupEnabled,
   }
 }
 
@@ -2487,7 +2731,13 @@ export async function deleteFromTrash(id: string, options: RequestOptions = {}):
     ...options,
     method: 'DELETE',
   })
-  return expectWrappedActionResponse(response, '永久删除失败', isDeleteTrashActionShape)
+  return expectWrappedActionResponse(
+    response,
+    '永久删除失败',
+    (value): value is { id: string; deleted: true } => (
+      isDeleteTrashActionShape(value) && value.id === id && value.deleted === true
+    ),
+  )
 }
 
 // Empty trash (delete all items permanently)

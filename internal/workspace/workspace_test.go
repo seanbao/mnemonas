@@ -1524,6 +1524,57 @@ func TestWorkspace_Walk_HidesSymlinkEntries(t *testing.T) {
 	}
 }
 
+func TestWorkspace_WalkStrict_RejectsSymlinkEntries(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	if err := w.Mkdir(ctx, "/walktest"); err != nil {
+		t.Fatalf("Mkdir(walktest) error: %v", err)
+	}
+	outsidePath := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outsidePath, []byte("outside"), 0o644); err != nil {
+		t.Fatalf("WriteFile(outside.txt) error: %v", err)
+	}
+	if err := os.Symlink(outsidePath, filepath.Join(w.Root(), "walktest", "linked.txt")); err != nil {
+		t.Fatalf("Symlink(linked.txt) error: %v", err)
+	}
+
+	var paths []string
+	err := w.WalkStrict(ctx, "/walktest", func(path string, info *FileInfo) error {
+		paths = append(paths, path)
+		return nil
+	})
+	if !errors.Is(err, ErrNotRegular) {
+		t.Fatalf("WalkStrict() error = %v, want ErrNotRegular", err)
+	}
+	if want := "/walktest|/walktest/linked.txt"; strings.Join(paths, "|") != want {
+		t.Fatalf("WalkStrict() paths = %v, want %s", paths, want)
+	}
+}
+
+func TestWorkspace_WalkStrict_RejectsRootSymlinkAfterCallback(t *testing.T) {
+	w := setupWorkspace(t)
+	outsidePath := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outsidePath, []byte("outside"), 0o644); err != nil {
+		t.Fatalf("WriteFile(outside.txt) error: %v", err)
+	}
+	if err := os.Symlink(outsidePath, filepath.Join(w.Root(), "linked.txt")); err != nil {
+		t.Fatalf("Symlink(linked.txt) error: %v", err)
+	}
+
+	var paths []string
+	err := w.WalkStrict(context.Background(), "/linked.txt", func(path string, _ *FileInfo) error {
+		paths = append(paths, path)
+		return nil
+	})
+	if !errors.Is(err, ErrNotRegular) {
+		t.Fatalf("WalkStrict(root symlink) error = %v, want ErrNotRegular", err)
+	}
+	if got, want := strings.Join(paths, "|"), "/linked.txt"; got != want {
+		t.Fatalf("WalkStrict(root symlink) paths = %q, want %q", got, want)
+	}
+}
+
 func TestWorkspace_WalkRejectsUnsafeEntryNames(t *testing.T) {
 	w := setupWorkspace(t)
 	ctx := context.Background()

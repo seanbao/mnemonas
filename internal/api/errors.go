@@ -18,15 +18,23 @@ type APIError struct {
 
 // Error codes
 const (
-	ErrCodeBadRequest      = "BAD_REQUEST"
-	ErrCodeNotFound        = "NOT_FOUND"
-	ErrCodeConflict        = "CONFLICT"
-	ErrCodePayloadTooLarge = "PAYLOAD_TOO_LARGE"
-	ErrCodeQuotaExceeded   = "QUOTA_EXCEEDED"
-	ErrCodeInternal        = "INTERNAL_ERROR"
-	ErrCodeServiceUnavail  = "SERVICE_UNAVAILABLE"
-	ErrCodeUnauthorized    = "UNAUTHORIZED"
-	ErrCodeForbidden       = "FORBIDDEN"
+	ErrCodeBadRequest                       = "BAD_REQUEST"
+	ErrCodeNotFound                         = "NOT_FOUND"
+	ErrCodeConflict                         = "CONFLICT"
+	ErrCodePayloadTooLarge                  = "PAYLOAD_TOO_LARGE"
+	ErrCodeQuotaExceeded                    = "QUOTA_EXCEEDED"
+	ErrCodeInternal                         = "INTERNAL_ERROR"
+	ErrCodeServiceUnavail                   = "SERVICE_UNAVAILABLE"
+	ErrCodeUnauthorized                     = "UNAUTHORIZED"
+	ErrCodeForbidden                        = "FORBIDDEN"
+	ErrCodeMissingExpectedDeleteMode        = "MISSING_EXPECTED_DELETE_MODE"
+	ErrCodeInvalidExpectedDeleteMode        = "INVALID_EXPECTED_DELETE_MODE"
+	ErrCodeMissingExpectedDeletePolicyToken = "MISSING_EXPECTED_DELETE_POLICY_TOKEN"
+	ErrCodeInvalidExpectedDeletePolicyToken = "INVALID_EXPECTED_DELETE_POLICY_TOKEN"
+	ErrCodeMissingExpectedDeleteTargetToken = "MISSING_EXPECTED_DELETE_TARGET_TOKEN"
+	ErrCodeInvalidExpectedDeleteTargetToken = "INVALID_EXPECTED_DELETE_TARGET_TOKEN"
+	ErrCodeDeletePolicyChanged              = "DELETE_POLICY_CHANGED"
+	ErrCodeDeleteTargetChanged              = "DELETE_TARGET_CHANGED"
 )
 
 // NewAPIError creates a new API error

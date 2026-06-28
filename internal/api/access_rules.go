@@ -51,6 +51,56 @@ func (s *Server) authorizeUserWritePath(ctx context.Context, targetPath string) 
 	return s.authorizeUserPathFor(ctx, targetPath, pathAccessWrite)
 }
 
+func (s *Server) deletePathAuthorizerSnapshot(ctx context.Context) (storage.DeletePathAuthorizer, error) {
+	if !s.authEnabled || auth.IsAdmin(ctx) {
+		return nil, nil
+	}
+
+	user := auth.GetUserFromContext(ctx)
+	if user == nil || user.Disabled {
+		return nil, errPathAccessDenied
+	}
+	userSnapshot := *user
+	userSnapshot.Groups = append([]string(nil), user.Groups...)
+
+	homeDir := ""
+	homeDirErr := error(nil)
+	if strings.TrimSpace(userSnapshot.HomeDir) == "" {
+		homeDirErr = errPathOutsideHomeDir
+	} else {
+		var err error
+		homeDir, err = validatePath(userSnapshot.HomeDir)
+		if err != nil {
+			homeDirErr = errPathOutsideHomeDir
+		}
+	}
+	cfg := s.currentConfig()
+	var rules []config.DirectoryAccessRuleConfig
+	if cfg != nil {
+		rules = cfg.Storage.DirectoryAccessRules
+	}
+
+	return func(targetPath string) error {
+		cleanTargetPath, err := validatePath(targetPath)
+		if err != nil {
+			return errPathOutsideHomeDir
+		}
+		if rule, ok := matchDirectoryAccessRuleIn(rules, cleanTargetPath); ok {
+			if directoryAccessRuleAllowsUser(rule, &userSnapshot, pathAccessWrite) {
+				return nil
+			}
+			return errPathAccessDenied
+		}
+		if homeDirErr != nil {
+			return homeDirErr
+		}
+		if !pathWithinBase(homeDir, cleanTargetPath) {
+			return errPathOutsideHomeDir
+		}
+		return nil
+	}, nil
+}
+
 func (s *Server) authorizeUserPath(ctx context.Context, targetPath string) error {
 	return s.authorizeUserReadPath(ctx, targetPath)
 }

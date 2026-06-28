@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import {
   listFiles,
   getVersions,
+  createFileDeleteIntent,
   deleteFile,
   getStorageStats,
   getHealth,
@@ -45,6 +46,11 @@ declare const global: typeof globalThis & { fetch: typeof fetch }
 // Mock fetch globally
 const mockFetch = vi.fn()
 global.fetch = mockFetch
+const deletePolicyToken = '1'.repeat(64)
+const updatedDeletePolicyToken = '2'.repeat(64)
+const deleteTargetToken = '3'.repeat(64)
+const photoDeleteIdentityToken = '5'.repeat(64)
+const documentsDeleteIdentityToken = '6'.repeat(64)
 
 type MockXHRResult = {
   type: 'load' | 'error' | 'timeout'
@@ -644,10 +650,15 @@ describe('API: files', () => {
               isDir: false,
               size: 100,
               modTime: '2024-01-01',
+              deleteIdentityToken: photoDeleteIdentityToken,
               capabilities: { read: true, concreteRead: true, write: false },
             },
           ],
           path: '/',
+          deleteMode: 'trash',
+          deletePolicyToken,
+          trashRetentionDays: 30,
+          trashAutoCleanupEnabled: true,
         },
         timestamp: '2024-01-01',
       }
@@ -662,7 +673,100 @@ describe('API: files', () => {
       expect(result.path).toBe('/')
       expect(result.capabilities).toEqual({ read: true, concreteRead: false, write: false })
       expect(result.files[0]?.capabilities).toEqual({ read: true, concreteRead: true, write: false })
+      expect(result).toMatchObject({
+        deleteMode: 'trash',
+        deletePolicyToken,
+        trashRetentionDays: 30,
+        trashAutoCleanupEnabled: true,
+      })
       expectFetchCall(1, '/api/v1/files/', { headers: {} })
+    })
+
+    it('normalizes a complete permanent-delete policy', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            files: [],
+            path: '/',
+            deleteMode: 'permanent',
+            deletePolicyToken: updatedDeletePolicyToken,
+            trashRetentionDays: 7,
+            trashAutoCleanupEnabled: false,
+          },
+        }),
+      })
+
+      await expect(listFiles('/')).resolves.toMatchObject({
+        deleteMode: 'permanent',
+        deletePolicyToken: updatedDeletePolicyToken,
+        trashRetentionDays: 7,
+        trashAutoCleanupEnabled: false,
+      })
+    })
+
+    it('keeps items readable when a delete identity is unavailable', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            files: [{
+              name: 'remote.txt',
+              path: '/remote.txt',
+              isDir: false,
+              size: 10,
+              modTime: '2024-01-01T00:00:00Z',
+              deleteIdentityToken: null,
+            }],
+            path: '/',
+            deleteMode: 'trash',
+            deletePolicyToken,
+            trashRetentionDays: 30,
+            trashAutoCleanupEnabled: true,
+          },
+        }),
+      })
+
+      await expect(listFiles('/')).resolves.toMatchObject({
+        files: [{ path: '/remote.txt', deleteIdentityToken: null }],
+      })
+    })
+
+    it.each([
+      ['missing policy', {}],
+      ['unknown delete mode', { deleteMode: 'archive', deletePolicyToken, trashRetentionDays: 30, trashAutoCleanupEnabled: true }],
+      ['missing policy token', { deleteMode: 'trash', trashRetentionDays: 30, trashAutoCleanupEnabled: true }],
+      ['blank policy token', { deleteMode: 'trash', deletePolicyToken: ' ', trashRetentionDays: 30, trashAutoCleanupEnabled: true }],
+      ['short policy token', { deleteMode: 'trash', deletePolicyToken: 'a'.repeat(63), trashRetentionDays: 30, trashAutoCleanupEnabled: true }],
+      ['long policy token', { deleteMode: 'trash', deletePolicyToken: 'a'.repeat(65), trashRetentionDays: 30, trashAutoCleanupEnabled: true }],
+      ['uppercase policy token', { deleteMode: 'trash', deletePolicyToken: 'A'.repeat(64), trashRetentionDays: 30, trashAutoCleanupEnabled: true }],
+      ['non-hex policy token', { deleteMode: 'trash', deletePolicyToken: 'g'.repeat(64), trashRetentionDays: 30, trashAutoCleanupEnabled: true }],
+      ['policy token with whitespace', { deleteMode: 'trash', deletePolicyToken: `${deletePolicyToken} `, trashRetentionDays: 30, trashAutoCleanupEnabled: true }],
+      ['invalid retention days', { deleteMode: 'trash', deletePolicyToken, trashRetentionDays: -1, trashAutoCleanupEnabled: true }],
+      ['missing cleanup state', { deleteMode: 'trash', deletePolicyToken, trashRetentionDays: 30 }],
+    ])('keeps the file list readable but normalizes %s to an unknown policy', async (_label, policy) => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            files: [],
+            path: '/',
+            ...policy,
+          },
+        }),
+      })
+
+      await expect(listFiles('/')).resolves.toMatchObject({
+        files: [],
+        path: '/',
+        deleteMode: 'unknown',
+        deletePolicyToken: null,
+        trashRetentionDays: null,
+        trashAutoCleanupEnabled: null,
+      })
     })
 
     it('handles path normalization', async () => {
@@ -767,12 +871,15 @@ describe('API: files', () => {
     })
 
     it.each([
-      ['negative file size', { name: 'test.txt', path: '/test.txt', isDir: false, size: -1, modTime: '2024-01-01' }],
-      ['fractional file size', { name: 'test.txt', path: '/test.txt', isDir: false, size: 1.5, modTime: '2024-01-01' }],
-      ['unsafe file size', { name: 'test.txt', path: '/test.txt', isDir: false, size: 9007199254740992, modTime: '2024-01-01' }],
-      ['unsafe file path', { name: 'test.txt', path: '/docs/./test.txt', isDir: false, size: 100, modTime: '2024-01-01' }],
-      ['relative file path', { name: 'test.txt', path: 'docs/test.txt', isDir: false, size: 100, modTime: '2024-01-01' }],
-      ['trailing-slash file path', { name: 'test.txt', path: '/docs/test.txt/', isDir: false, size: 100, modTime: '2024-01-01' }],
+      ['negative file size', { name: 'test.txt', path: '/test.txt', isDir: false, size: -1, modTime: '2024-01-01', deleteIdentityToken: photoDeleteIdentityToken }],
+      ['fractional file size', { name: 'test.txt', path: '/test.txt', isDir: false, size: 1.5, modTime: '2024-01-01', deleteIdentityToken: photoDeleteIdentityToken }],
+      ['unsafe file size', { name: 'test.txt', path: '/test.txt', isDir: false, size: 9007199254740992, modTime: '2024-01-01', deleteIdentityToken: photoDeleteIdentityToken }],
+      ['unsafe file path', { name: 'test.txt', path: '/docs/./test.txt', isDir: false, size: 100, modTime: '2024-01-01', deleteIdentityToken: photoDeleteIdentityToken }],
+      ['relative file path', { name: 'test.txt', path: 'docs/test.txt', isDir: false, size: 100, modTime: '2024-01-01', deleteIdentityToken: photoDeleteIdentityToken }],
+      ['trailing-slash file path', { name: 'test.txt', path: '/docs/test.txt/', isDir: false, size: 100, modTime: '2024-01-01', deleteIdentityToken: photoDeleteIdentityToken }],
+      ['missing delete identity', { name: 'test.txt', path: '/test.txt', isDir: false, size: 100, modTime: '2024-01-01' }],
+      ['uppercase delete identity', { name: 'test.txt', path: '/test.txt', isDir: false, size: 100, modTime: '2024-01-01', deleteIdentityToken: 'A'.repeat(64) }],
+      ['short delete identity', { name: 'test.txt', path: '/test.txt', isDir: false, size: 100, modTime: '2024-01-01', deleteIdentityToken: 'a'.repeat(63) }],
     ])('rejects file list payloads with %s', async (_label, file) => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -905,6 +1012,116 @@ describe('API: files', () => {
     })
   })
 
+  describe('createFileDeleteIntent', () => {
+    const buildIntentData = () => ({
+      deleteMode: 'trash',
+      deletePolicyToken,
+      trashRetentionDays: 30,
+      trashAutoCleanupEnabled: true,
+      targets: [
+        {
+          path: '/photo.jpg',
+          name: 'photo.jpg',
+          isDir: false,
+          size: 1024,
+          modTime: '2024-01-02T00:00:00Z',
+          deleteIdentityToken: photoDeleteIdentityToken,
+          deleteTargetToken,
+        },
+        {
+          path: '/documents',
+          name: 'documents',
+          isDir: true,
+          size: 0,
+          modTime: '2024-01-01T00:00:00Z',
+          deleteIdentityToken: documentsDeleteIdentityToken,
+          deleteTargetToken: '4'.repeat(64),
+        },
+      ],
+    })
+
+    it('creates a strict delete intent and preserves requested target order', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: buildIntentData(),
+        }),
+      })
+      const controller = new AbortController()
+
+      await expect(createFileDeleteIntent([
+        { path: '/documents', observedIdentityToken: documentsDeleteIdentityToken },
+        { path: '/photo.jpg', observedIdentityToken: photoDeleteIdentityToken },
+      ], { signal: controller.signal })).resolves.toMatchObject({
+        deleteMode: 'trash',
+        deletePolicyToken,
+        targets: [
+          { path: '/documents', deleteIdentityToken: documentsDeleteIdentityToken, deleteTargetToken: '4'.repeat(64) },
+          { path: '/photo.jpg', deleteIdentityToken: photoDeleteIdentityToken, deleteTargetToken },
+        ],
+      })
+      expectFetchCall(1, '/api/v1/files-delete-intents', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          targets: [
+            { path: '/documents', observedIdentityToken: documentsDeleteIdentityToken },
+            { path: '/photo.jpg', observedIdentityToken: photoDeleteIdentityToken },
+          ],
+        }),
+        signal: controller.signal,
+      })
+    })
+
+    it.each([
+      ['malformed policy token', { deletePolicyToken: 'A'.repeat(64) }],
+      ['fractional retention', { trashRetentionDays: 1.5 }],
+      ['malformed target token', { targets: [{ ...buildIntentData().targets[0], deleteTargetToken: 'short' }, buildIntentData().targets[1]] }],
+      ['malformed delete identity', { targets: [{ ...buildIntentData().targets[0], deleteIdentityToken: 'short' }, buildIntentData().targets[1]] }],
+      ['changed delete identity', { targets: [{ ...buildIntentData().targets[0], deleteIdentityToken: '7'.repeat(64) }, buildIntentData().targets[1]] }],
+      ['mismatched target name', { targets: [{ ...buildIntentData().targets[0], name: 'other.jpg' }, buildIntentData().targets[1]] }],
+      ['non-RFC3339 target time', { targets: [{ ...buildIntentData().targets[0], modTime: '2024-02-30T00:00:00Z' }, buildIntentData().targets[1]] }],
+      ['missing requested target', { targets: [buildIntentData().targets[0]] }],
+      ['duplicate target', { targets: [buildIntentData().targets[0], buildIntentData().targets[0]] }],
+      ['duplicate target with a complete unique set', { targets: [...buildIntentData().targets, buildIntentData().targets[0]] }],
+      ['unexpected target', { targets: [...buildIntentData().targets, { ...buildIntentData().targets[0], path: '/other.jpg', name: 'other.jpg' }] }],
+    ])('rejects %s in successful intent responses', async (_label, override) => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: { ...buildIntentData(), ...override },
+        }),
+      })
+
+      await expect(createFileDeleteIntent([
+        { path: '/photo.jpg', observedIdentityToken: photoDeleteIdentityToken },
+        { path: '/documents', observedIdentityToken: documentsDeleteIdentityToken },
+      ])).rejects.toThrow('服务器返回了无效的数据')
+    })
+
+    it.each([
+      ['non-array target list', null],
+      ['empty target list', []],
+      ['root target', [{ path: '/', observedIdentityToken: photoDeleteIdentityToken }]],
+      ['duplicate targets', [
+        { path: '/photo.jpg', observedIdentityToken: photoDeleteIdentityToken },
+        { path: '/photo.jpg', observedIdentityToken: photoDeleteIdentityToken },
+      ]],
+      ['missing identity', [{ path: '/photo.jpg' }]],
+      ['null identity', [{ path: '/photo.jpg', observedIdentityToken: null }]],
+      ['uppercase identity', [{ path: '/photo.jpg', observedIdentityToken: 'A'.repeat(64) }]],
+      ['more than 1000 targets', Array.from({ length: 1001 }, (_, index) => ({
+        path: `/file-${index}.txt`,
+        observedIdentityToken: photoDeleteIdentityToken,
+      }))],
+    ])('rejects %s without issuing a request', async (_label, targets) => {
+      await expect(createFileDeleteIntent(targets as Parameters<typeof createFileDeleteIntent>[0])).rejects.toThrow()
+      expect(mockFetch).not.toHaveBeenCalled()
+    })
+  })
+
   describe('deleteFile', () => {
     it('deletes a file', async () => {
       mockFetch.mockResolvedValueOnce({
@@ -918,8 +1135,12 @@ describe('API: files', () => {
         }),
       })
 
-      await expect(deleteFile('/test.txt')).resolves.toEqual({ warning: false, message: undefined })
-      expectFetchCall(1, '/api/v1/files/test.txt', {
+      await expect(deleteFile('/test.txt', {
+        expectedDeleteMode: 'trash',
+        expectedDeletePolicyToken: deletePolicyToken,
+        expectedDeleteTargetToken: deleteTargetToken,
+      })).resolves.toEqual({ warning: false, message: undefined })
+      expectFetchCall(1, `/api/v1/files/test.txt?expected_delete_mode=trash&expected_delete_policy_token=${deletePolicyToken}&expected_delete_target_token=${deleteTargetToken}`, {
         method: 'DELETE',
         headers: {},
       })
@@ -939,7 +1160,7 @@ describe('API: files', () => {
         }),
       })
 
-      await expect(deleteFile('/test.txt')).resolves.toEqual({
+      await expect(deleteFile('/test.txt', { expectedDeleteMode: 'trash', expectedDeletePolicyToken: deletePolicyToken, expectedDeleteTargetToken: deleteTargetToken })).resolves.toEqual({
         warning: true,
         message: 'file deleted with persistence warning',
       })
@@ -960,7 +1181,7 @@ describe('API: files', () => {
         }),
       })
 
-      await expect(deleteFile('/test.txt')).resolves.toEqual({
+      await expect(deleteFile('/test.txt', { expectedDeleteMode: 'permanent', expectedDeletePolicyToken: updatedDeletePolicyToken, expectedDeleteTargetToken: deleteTargetToken })).resolves.toEqual({
         warning: true,
         message: 'file deleted with persistence warning',
       })
@@ -979,11 +1200,16 @@ describe('API: files', () => {
         }),
       })
 
-      await expect(deleteFile('/test.txt', { signal: controller.signal })).resolves.toEqual({
+      await expect(deleteFile('/test.txt', {
+        expectedDeleteMode: 'permanent',
+        expectedDeletePolicyToken: updatedDeletePolicyToken,
+        expectedDeleteTargetToken: deleteTargetToken,
+        signal: controller.signal,
+      })).resolves.toEqual({
         warning: false,
         message: undefined,
       })
-      expectFetchCall(1, '/api/v1/files/test.txt', {
+      expectFetchCall(1, `/api/v1/files/test.txt?expected_delete_mode=permanent&expected_delete_policy_token=${updatedDeletePolicyToken}&expected_delete_target_token=${deleteTargetToken}`, {
         method: 'DELETE',
         headers: {},
         signal: controller.signal,
@@ -1002,7 +1228,26 @@ describe('API: files', () => {
         }),
       })
 
-      await expect(deleteFile('/test.txt')).rejects.toThrow('服务器返回了无效的数据')
+      await expect(deleteFile('/test.txt', { expectedDeleteMode: 'trash', expectedDeletePolicyToken: deletePolicyToken, expectedDeleteTargetToken: deleteTargetToken })).rejects.toThrow('服务器返回了无效的数据')
+    })
+
+    it('rejects successful delete responses for a different path', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            path: '/other.txt',
+          },
+          timestamp: '2024-01-01',
+        }),
+      })
+
+      await expect(deleteFile('/test.txt', {
+        expectedDeleteMode: 'trash',
+        expectedDeletePolicyToken: deletePolicyToken,
+        expectedDeleteTargetToken: deleteTargetToken,
+      })).rejects.toThrow('服务器返回了无效的数据')
     })
 
     it('throws ApiError on failure', async () => {
@@ -1013,7 +1258,69 @@ describe('API: files', () => {
         json: () => Promise.resolve({ error: { message: '只允许删除主目录内的文件' } }),
       })
 
-      await expect(deleteFile('/protected.txt')).rejects.toThrow('只允许删除主目录内的文件')
+      await expect(deleteFile('/protected.txt', { expectedDeleteMode: 'trash', expectedDeletePolicyToken: deletePolicyToken, expectedDeleteTargetToken: deleteTargetToken })).rejects.toThrow('只允许删除主目录内的文件')
+    })
+
+    it('preserves delete-policy drift conflict details', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 409,
+        statusText: 'Conflict',
+        json: () => Promise.resolve({
+          error: {
+            code: 'DELETE_POLICY_CHANGED',
+            message: '删除策略已更改',
+          },
+        }),
+      })
+
+      await expect(deleteFile('/test.txt', { expectedDeleteMode: 'trash', expectedDeletePolicyToken: deletePolicyToken, expectedDeleteTargetToken: deleteTargetToken })).rejects.toMatchObject({
+        status: 409,
+        code: 'DELETE_POLICY_CHANGED',
+        message: '删除策略已更改',
+      })
+    })
+
+    it('rejects invalid expected delete modes without issuing a request', async () => {
+      await expect(deleteFile('/test.txt', {
+        expectedDeleteMode: 'archive',
+        expectedDeletePolicyToken: deletePolicyToken,
+        expectedDeleteTargetToken: deleteTargetToken,
+      } as never)).rejects.toThrow('删除方式无效')
+
+      expect(mockFetch).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['blank', ' '],
+      ['short', 'a'.repeat(63)],
+      ['long', 'a'.repeat(65)],
+      ['uppercase', 'A'.repeat(64)],
+      ['non-hex', 'g'.repeat(64)],
+      ['surrounding whitespace', `${deletePolicyToken} `],
+    ])('rejects %s expected policy tokens without issuing a request', async (_label, invalidToken) => {
+      await expect(deleteFile('/test.txt', {
+        expectedDeleteMode: 'trash',
+        expectedDeletePolicyToken: invalidToken,
+        expectedDeleteTargetToken: deleteTargetToken,
+      })).rejects.toThrow('删除策略令牌无效')
+
+      expect(mockFetch).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['blank', ' '],
+      ['short', 'a'.repeat(63)],
+      ['uppercase', 'A'.repeat(64)],
+      ['non-hex', 'g'.repeat(64)],
+    ])('rejects %s expected target tokens without issuing a request', async (_label, invalidToken) => {
+      await expect(deleteFile('/test.txt', {
+        expectedDeleteMode: 'trash',
+        expectedDeletePolicyToken: deletePolicyToken,
+        expectedDeleteTargetToken: invalidToken,
+      })).rejects.toThrow('删除目标令牌无效')
+
+      expect(mockFetch).not.toHaveBeenCalled()
     })
   })
 
@@ -1962,6 +2269,7 @@ describe('API: files', () => {
                 id: 'item1',
                 originalPath: '/deleted.txt',
                 deletedAt: '2024-01-01T00:00:00Z',
+                expiresAt: '2024-01-31T00:00:00Z',
                 name: 'deleted.txt',
                 isDir: false,
                 size: 100,
@@ -1969,6 +2277,7 @@ describe('API: files', () => {
             ],
             count: 1,
             totalSize: 100,
+            trashAutoCleanupEnabled: true,
           },
           timestamp: '2024-01-01',
         }
@@ -1981,7 +2290,9 @@ describe('API: files', () => {
         const result = await listTrash()
         expect(result.items).toHaveLength(1)
         expect(result.items[0].originalPath).toBe('/deleted.txt')
+        expect(result.items[0].expiresAt).toBe('2024-01-31T00:00:00Z')
         expect(result.count).toBe(1)
+        expect(result.trashAutoCleanupEnabled).toBe(true)
       })
 
       it('forwards abort signal when listing trash items', async () => {
@@ -1994,6 +2305,7 @@ describe('API: files', () => {
               items: [],
               count: 0,
               totalSize: 0,
+              trashAutoCleanupEnabled: false,
             },
           }),
         })
@@ -2014,6 +2326,7 @@ describe('API: files', () => {
                 id: 'item1',
                 originalPath: '/deleted.txt',
                 deletedAt: '2024-01-01T00:00:00Z',
+                expiresAt: '2024-01-31T00:00:00Z',
                 name: 'deleted.txt',
                 isDir: false,
                 size: 100,
@@ -2022,11 +2335,13 @@ describe('API: files', () => {
                 id: 'item2',
                 originalPath: '/deleted-2.txt',
                 deletedAt: '2024-01-02T00:00:00Z',
+                expiresAt: '2024-02-01T00:00:00Z',
                 name: 'deleted-2.txt',
                 isDir: false,
                 size: 24,
               },
             ],
+            trashAutoCleanupEnabled: true,
           },
           timestamp: '2024-01-01',
         }
@@ -2052,12 +2367,14 @@ describe('API: files', () => {
                 id: 'item1',
                 originalPath: '/deleted.txt',
                 deletedAt: '2024-01-01T00:00:00Z',
+                expiresAt: '2024-01-31T00:00:00Z',
                 name: 'deleted.txt',
                 isDir: false,
                 size: '100',
               }],
               count: 1,
               totalSize: 100,
+              trashAutoCleanupEnabled: true,
             },
             timestamp: '2024-01-01',
           }),
@@ -2067,12 +2384,12 @@ describe('API: files', () => {
       })
 
       it.each([
-        ['negative item size', { items: [{ id: 'item1', originalPath: '/deleted.txt', deletedAt: '2024-01-01T00:00:00Z', name: 'deleted.txt', isDir: false, size: -1 }] }],
-        ['fractional item size', { items: [{ id: 'item1', originalPath: '/deleted.txt', deletedAt: '2024-01-01T00:00:00Z', name: 'deleted.txt', isDir: false, size: 1.5 }] }],
-        ['unsafe item size', { items: [{ id: 'item1', originalPath: '/deleted.txt', deletedAt: '2024-01-01T00:00:00Z', name: 'deleted.txt', isDir: false, size: 9007199254740992 }] }],
+        ['negative item size', { items: [{ id: 'item1', originalPath: '/deleted.txt', deletedAt: '2024-01-01T00:00:00Z', expiresAt: '2024-01-31T00:00:00Z', name: 'deleted.txt', isDir: false, size: -1 }] }],
+        ['fractional item size', { items: [{ id: 'item1', originalPath: '/deleted.txt', deletedAt: '2024-01-01T00:00:00Z', expiresAt: '2024-01-31T00:00:00Z', name: 'deleted.txt', isDir: false, size: 1.5 }] }],
+        ['unsafe item size', { items: [{ id: 'item1', originalPath: '/deleted.txt', deletedAt: '2024-01-01T00:00:00Z', expiresAt: '2024-01-31T00:00:00Z', name: 'deleted.txt', isDir: false, size: 9007199254740992 }] }],
         ['negative count', { items: [], count: -1 }],
         ['fractional count', { items: [], count: 1.5 }],
-        ['count smaller than returned items', { items: [{ id: 'item1', originalPath: '/deleted.txt', deletedAt: '2024-01-01T00:00:00Z', name: 'deleted.txt', isDir: false, size: 1 }], count: 0 }],
+        ['count smaller than returned items', { items: [{ id: 'item1', originalPath: '/deleted.txt', deletedAt: '2024-01-01T00:00:00Z', expiresAt: '2024-01-31T00:00:00Z', name: 'deleted.txt', isDir: false, size: 1 }], count: 0 }],
         ['unsafe total size', { items: [], totalSize: 9007199254740992 }],
         ['negative retention days', { items: [], retentionDays: -1 }],
         ['fractional retention max size', { items: [], retentionMaxSize: 1.5 }],
@@ -2081,8 +2398,50 @@ describe('API: files', () => {
           ok: true,
           json: () => Promise.resolve({
             success: true,
-            data,
+            data: {
+              trashAutoCleanupEnabled: true,
+              ...data,
+            },
             timestamp: '2024-01-01',
+          }),
+        })
+
+        await expect(listTrash()).rejects.toThrow('服务器返回了无效的数据')
+      })
+
+      it.each([
+        ['missing', undefined],
+        ['malformed', 'not-a-date'],
+        ['non-RFC3339', '2024-01-31'],
+      ])('rejects trash items with %s expiry timestamps', async (_label, expiresAt) => {
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({
+            success: true,
+            data: {
+              items: [{
+                id: 'item1',
+                originalPath: '/deleted.txt',
+                deletedAt: '2024-01-01T00:00:00Z',
+                expiresAt,
+                name: 'deleted.txt',
+                isDir: false,
+                size: 100,
+              }],
+              trashAutoCleanupEnabled: true,
+            },
+          }),
+        })
+
+        await expect(listTrash()).rejects.toThrow('服务器返回了无效的数据')
+      })
+
+      it('requires an explicit trash auto-cleanup state', async () => {
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({
+            success: true,
+            data: { items: [], retentionEnabled: true },
           }),
         })
 
@@ -2337,6 +2696,22 @@ describe('API: files', () => {
             data: {
               id: 'item1',
             },
+            timestamp: '2024-01-01',
+          }),
+        })
+
+        await expect(deleteFromTrash('item1')).rejects.toThrow('服务器返回了无效的数据')
+      })
+
+      it.each([
+        ['a different item', { id: 'item2', deleted: true }],
+        ['an item not reported as deleted', { id: 'item1', deleted: false }],
+      ])('rejects successful delete responses for %s', async (_label, data) => {
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({
+            success: true,
+            data,
             timestamp: '2024-01-01',
           }),
         })

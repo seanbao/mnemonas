@@ -682,6 +682,7 @@ func main() {
 		MaxVersions:             cfg.Storage.Retention.MaxVersions,
 		MaxVersionAge:           cfg.Storage.Retention.MaxAge,
 		MinFreeSpace:            cfg.Storage.Retention.MinFreeSpace,
+		RetentionSweepInterval:  cfg.Storage.Retention.GCInterval,
 		TrashEnabled:            &cfg.Storage.Trash.Enabled,
 		TrashRetentionDays:      cfg.Storage.Trash.RetentionDays,
 		MaxTrashSize:            cfg.Storage.Trash.MaxSize,

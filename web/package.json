@@ -51,7 +51,7 @@
     "pretest:e2e:ui": "node ./scripts/check-node.cjs && npm run check:test-focus",
     "test:e2e:ui": "node ./scripts/playwright.cjs test --ui",
     "pretest:e2e:update": "node ./scripts/check-node.cjs && npm run check:test-focus",
-    "test:e2e:update": "node ./scripts/playwright.cjs test --update-snapshots",
+    "test:e2e:update": "node ./scripts/playwright.cjs test --update-snapshots=all",
     "prepare": "node ./scripts/prepare-husky.cjs"
   },
   "dependencies": {

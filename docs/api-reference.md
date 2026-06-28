@@ -784,7 +784,8 @@ Content-Type: application/json
 | --- | --- | --- |
 | `GET` | `/api/v1/files/{path}` | 列出目录或获取文件元数据 |
 | `POST` | `/api/v1/files/{path}` | 上传或覆盖文件 |
-| `DELETE` | `/api/v1/files/{path}` | 启用回收站时移入回收站 |
+| `POST` | `/api/v1/files-delete-intents` | 获取待删除目标与当前删除策略的原子确认快照 |
+| `DELETE` | `/api/v1/files/{path}` | 按已确认的目标快照和当前删除策略移入回收站或永久删除 |
 | `POST` | `/api/v1/files-move` | 移动或重命名资源 |
 | `POST` | `/api/v1/files-copy` | 递归复制文件或目录 |
 | `GET` | `/api/v1/download/{path}` | 认证后的文件下载或 ZIP 归档下载 |
@@ -804,6 +805,54 @@ Content-Type: application/json
 - `write` 表示可在该路径或容器内执行变更。
 
 例如，根目录可能因允许在根下上传或创建而返回 `write: true`，同时因根目录本身不可下载或复制而返回 `concreteRead: false`。
+
+每个实际文件或目录条目还包含 `deleteIdentityToken`。Linux 与 macOS 上，该字段是 64 位小写十六进制 SHA-256 不透明值，绑定文件系统设备号、inode、ctime、类型与权限位、大小和纳秒级修改时间。即使同一路径被替换成类型、大小和修改时间相同的新对象，令牌也会变化。平台无法提供所需对象身份时，该字段为 `null`，对应条目不能创建删除意图。
+
+列表响应的 `data` 还会返回当前删除策略：
+
+- `deleteMode`：`trash` 表示移入回收站，`permanent` 表示直接永久删除。
+- `deletePolicyToken`：当前完整删除策略的 64 位小写十六进制 SHA-256 标识。该字段为不透明值，不用于推导设置内容。
+- `trashRetentionDays`：当前策略为新回收站项目设置的到期天数。`0` 表示项目创建后立即进入待清理状态。
+- `trashAutoCleanupEnabled`：保留清理周期是否已启用。该值为 `false` 时，到期项目不会由周期任务自动清理。
+
+客户端必须把这四个字段作为同一策略快照处理。策略缺失或无法识别时，不应发起删除请求。`deletePolicyToken` 会覆盖删除方式、回收站保留天数、后台清理周期和回收站容量上限等会改变删除后果的设置。
+
+删除确认应先调用 `POST /api/v1/files-delete-intents`。请求体只接受 `targets`，必须包含 1 至 1000 个互不重复、非根路径且互不嵌套的目标。每个目标必须同时提供 `path`，以及从同一条当前列表记录原样复制的 `observedIdentityToken`：
+
+```json
+{
+  "targets": [
+    {
+      "path": "/documents/report.pdf",
+      "observedIdentityToken": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    },
+    {
+      "path": "/photos/2026",
+      "observedIdentityToken": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+    }
+  ]
+}
+```
+
+`targets` 缺失、为 `null` 或为空，目标字段缺失，令牌为空、长度错误、包含大写或非十六进制字符，路径重复或嵌套，出现旧 `paths` 字段或任意未知字段时，返回 `400 Bad Request`。服务端会在同一文件系统读锁内按“写权限、挂载边界、文件类型、观察身份”的顺序检查根对象。观察身份不匹配时返回 `409 DELETE_TARGET_CHANGED`，`details` 只包含 `path`，且不会读取文件内容、遍历目录或修改数据。服务端当前无法生成对象身份时返回 `503 Service Unavailable`。
+
+响应同时返回 `deleteMode`、`deletePolicyToken`、`trashRetentionDays`、`trashAutoCleanupEnabled` 和按请求顺序排列的 `targets`。每个目标包含 `path`、`name`、`isDir`、`size`、UTC RFC 3339 纳秒格式的 `modTime`、`deleteIdentityToken` 与 `deleteTargetToken`；其中 `deleteIdentityToken` 与请求中对应的 `observedIdentityToken` 相同。`deleteTargetToken` 是 64 位小写十六进制不透明值，覆盖目标路径及其完整当前目录树的条目路径、对象身份、类型、大小、纳秒级修改时间和文件内容。目标不存在、父路径类型错误或任一目标树不具备完整写权限时，不会返回部分确认结果；目标树包含符号链接、FIFO、Unix socket、其他非普通文件或工作区根目录下的嵌套挂载点时返回 `409 Conflict`。嵌套挂载检查包括 bind mount，以及目标本身位于嵌套挂载目录内的情况。
+
+`DELETE /api/v1/files/{path}` 必须恰好提供一次 `expected_delete_mode`、一次 `expected_delete_policy_token` 和一次 `expected_delete_target_token` 查询参数。模式与两个令牌必须原样使用同一删除意图响应中的对应值；`expected_delete_mode` 的值严格为 `trash` 或 `permanent`，两个令牌均为 64 位小写十六进制值。
+
+`expected_delete_mode` 缺失或为空时返回 `400 MISSING_EXPECTED_DELETE_MODE`；重复、非法查询编码、大小写不符、包含首尾空白或值未知时返回 `400 INVALID_EXPECTED_DELETE_MODE`。`expected_delete_policy_token` 缺失或为空时返回 `400 MISSING_EXPECTED_DELETE_POLICY_TOKEN`；重复、长度错误、包含大写或非十六进制字符、包含首尾空白或非法查询编码时返回 `400 INVALID_EXPECTED_DELETE_POLICY_TOKEN`。`expected_delete_target_token` 缺失或为空时返回 `400 MISSING_EXPECTED_DELETE_TARGET_TOKEN`；重复、长度错误、包含大写或非十六进制字符、包含首尾空白或非法查询编码时返回 `400 INVALID_EXPECTED_DELETE_TARGET_TOKEN`。
+
+服务端会在同一存储写锁内先比较预期策略，再逐项复核当前目标树的写权限与目标令牌，最后执行删除。完整策略已经变化时返回 `409 DELETE_POLICY_CHANGED`，`details` 包含 `expected_delete_mode`、`expected_delete_policy_token`、`actual_delete_mode`、`actual_delete_policy_token`、`trash_retention_days` 和 `trash_auto_cleanup_enabled`。策略未变但目标路径、内容或目录树已经变化时返回 `409 DELETE_TARGET_CHANGED`。服务端能够生成当前目标令牌时，`details` 包含 `path`、`expected_delete_target_token` 和 `actual_delete_target_token`；已确认目标消失或父路径不再是目录时，`details` 包含 `path` 和 `expected_delete_target_token`，不返回无法生成的 `actual_delete_target_token`。挂载点和特殊文件冲突仍按各自的 `409 Conflict` 处理。在原子对象捕获开始前完成判定的策略与目标冲突不会提交工作区、索引、版本、分享、收藏、回收站或活动变更；调用方应刷新列表、重新取得删除意图并再次确认。
+
+策略、目标令牌或 WebDAV 条件通过后，服务端以禁止覆盖的原子重命名把当前对象捕获到源端同一父目录下的随机暂存路径，并从该路径继续处理。回收站副本在提交前会按路径、类型、大小、权限、对象身份和内容摘要建立并复核完整清单。最终物理清理会把已验证暂存对象移入权限不宽于 `0700` 的随机隔离目录，并通过服务端持有的目录句柄逐项删除。原逻辑路径在此期间出现的新对象不会被复制、覆盖或删除。
+
+逻辑提交前无法安全回滚时，REST 返回 `500 INTERNAL_ERROR`，不写入删除活动；内部暂存路径、回收站元数据或配对副本可能为恢复处理而保留，具体主机路径不会写入 API 响应。逻辑删除已经提交但隔离区物理清理未完成时，REST 返回带 `warning=true` 的 `200 OK`，`Warning` 响应头包含 `199 MnemoNAS "delete cleanup incomplete"`，删除活动包含 `cleanup_warning=true`，服务端错误日志记录残留路径。`trash` 模式已经提交目标项目、但后续容量回收未完成时，响应头改为 `199 MnemoNAS "trash delete cleanup incomplete"`，删除活动包含 `trash_cleanup_warning=true`。两类结果均可同时包含适用的持久化警告与 `persistence_warning=true`。只有内容已经移除、最终目录同步失败时，响应只包含持久化警告，不标记清理残留。WebDAV 对已提交的同类结果返回带对应 `Warning` 响应头的 `204 No Content`；未提交的恢复残留返回 `500 Internal Server Error`。
+
+删除意图、删除前复核、跨根复制前后、源暂存树进入隔离区前后和递归移除前都会重新读取主机挂载表。挂载表无法读取、包含非法路径，或目标跨越工作区根目录下的嵌套挂载边界时，流程停止。对象捕获前的冲突返回 `409 Conflict`；捕获后无法安全回滚时返回恢复残留；逻辑提交后返回清理警告。仅在目标边界仍可验证时清理已复制副本，否则保留内部副本以避免跨越新挂载。工作区根目录自身可以是挂载点；该限制只适用于其下的嵌套挂载。
+
+存储写锁只串行化通过 MnemoNAS 执行的操作。同 UID 进程直接修改文件系统、特权进程并发挂载、进程崩溃或断电不在该原子边界内；对象捕获和禁止覆盖回滚可能改变 ctime 或父目录时间戳。服务端不会移动或删除身份未知的替换物，也不会自动清理所有权无法确认的内部暂存或隔离残留。
+
+`trash` 模式下，文件或完整目录树会移入回收站。项目达到 `trashRetentionDays` 对应的持久化到期时间后，由启用的保留清理周期处理；回收站容量不足时，较早项目可能在到期前被永久清理。`permanent` 模式下，项目不会进入回收站且无法从回收站恢复；该模式下删除非空目录返回 `409 Conflict`。
 
 `GET /api/v1/download/{path}` 默认返回文件字节。支持的查询参数：
 
@@ -936,6 +985,12 @@ curl -X POST \
 | `DELETE` | `/api/v1/trash` | 清空回收站 |
 
 回收站可见性遵循当前用户配置的 `home_dir` 边界。
+
+列表中的每个项目包含持久化的 `expiresAt`。该 RFC 3339 时间在项目进入回收站时确定，之后修改 `retentionDays` 不会改写已有项目的到期时间。列表级 `retentionDays` 只表示新删除项目的当前策略；`trashAutoCleanupEnabled` 表示后台保留清理周期是否启用。容量上限仍可能使较早项目在 `expiresAt` 前被永久清理。
+
+启用保留清理周期时，同一次周期任务会清理过期文件版本和已到达 `expiresAt` 的回收站项目。周期停用时，项目可以通过永久删除或清空回收站端点显式清理。
+
+永久删除回收站项目会在暂存和递归清理前检查回收站根目录下的嵌套挂载。`DELETE /api/v1/trash/{id}` 遇到嵌套挂载或无法验证挂载表时返回 `409 Conflict`，且保留项目内容与元数据。清空回收站时，如果同一请求已删除前序项目，则现有部分成功响应契约仍然适用。
 
 `POST /api/v1/trash/{id}/restore` 默认恢复到原路径。
 
@@ -2361,6 +2416,8 @@ WebDAV 访问和方法语义：
 - 根目录示例配置保留旧全局 Basic Auth 作为兼容基线；该模式使用 `[webdav]` 中的服务凭据，或 `secrets.json` 中生成的凭据。
 - 为嵌套授权合成的祖先入口只是只读导航；写入仍需要匹配写授权。
 - 支持的核心方法包括 `OPTIONS`、`PROPFIND`、`GET`、`HEAD`、`PUT`、`DELETE`、`MKCOL`、`MOVE`、`COPY`、简化 `PROPPATCH`、简化 `LOCK` 和简化 `UNLOCK`。
+- HTTP 条件头遵循实体标签比较规则：`If-Match` 使用强比较，弱实体标签不能满足该条件；`If-None-Match` 使用弱比较。两者支持单独的 `*` 和严格的非空逗号分隔实体标签列表。条件 `DELETE` 会在同一存储写锁内完成目标树写权限复核后，再读取所需目标属性并求值条件；权限复核失败时不计算目标内容哈希，也不删除目标。
+- WebDAV `DELETE` 使用与 REST 相同的源端暂存、回收站副本清单和隔离清理。未提交且无法回滚的残留返回 `500 Internal Server Error`；逻辑删除已经提交但隔离区物理清理未完成时返回带 `delete cleanup incomplete` 的 `204 No Content`，`trash` 模式的后续容量回收未完成时改为 `trash delete cleanup incomplete`，两者均可同时携带适用的持久化警告。
 - 直接父目录不存在时，`MKCOL` 返回 `409 Conflict`；目标已存在时，返回带 `Allow` 的 `405 Method Not Allowed`。
 - 不支持的 WebDAV 方法返回 `405 Method Not Allowed`，并在 `Allow` 响应头列出当前范围可用方法。
   只读挂载和只读用户只列出 `OPTIONS`、`GET`、`HEAD` 和 `PROPFIND`。

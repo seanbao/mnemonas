@@ -25,6 +25,97 @@ function trashFixtureFileName(testInfo: TestInfo, prefix: string): string {
   return `${prefix}-${suffix}.txt`
 }
 
+async function deleteFileThroughCurrentPolicy(page: Page, fileUrl: string, action: string): Promise<void> {
+  await page.evaluate(async ({ fileUrl, action }) => {
+    const requireOk = async (response: Response, requestAction: string) => {
+      if (!response.ok) {
+        throw new Error(`${requestAction} failed: ${response.status} ${await response.text()}`)
+      }
+      return response
+    }
+
+    const fileApiPrefix = '/api/v1/files'
+    const encodedFilePath = new URL(fileUrl, window.location.origin).pathname.slice(fileApiPrefix.length)
+    const filePath = decodeURIComponent(encodedFilePath)
+    if (!filePath.startsWith('/') || filePath === '/') {
+      throw new Error(`prepare delete intent failed: invalid file URL ${fileUrl}`)
+    }
+
+    const parentPath = filePath.slice(0, filePath.lastIndexOf('/')) || '/'
+    const encodedParentPath = parentPath === '/'
+      ? '/'
+      : parentPath.split('/').map((segment) => encodeURIComponent(segment)).join('/')
+    const listResponse = await requireOk(
+      await fetch(`${fileApiPrefix}${encodedParentPath}`),
+      'list delete target parent',
+    )
+    const listBody = await listResponse.json() as {
+      success?: unknown
+      data?: {
+        files?: Array<{
+          path?: unknown
+          deleteIdentityToken?: unknown
+        }>
+      }
+    }
+    const matchingFiles = listBody.data?.files?.filter((file) => file.path === filePath)
+    if (listBody.success !== true || !Array.isArray(matchingFiles) || matchingFiles.length !== 1) {
+      throw new Error('prepare delete intent failed: target missing from parent listing')
+    }
+    const observedIdentityToken = matchingFiles[0]?.deleteIdentityToken
+    if (typeof observedIdentityToken !== 'string' || !/^[0-9a-f]{64}$/.test(observedIdentityToken)) {
+      throw new Error('prepare delete intent failed: invalid observed identity token')
+    }
+
+    const intentResponse = await requireOk(await fetch('/api/v1/files-delete-intents', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targets: [{ path: filePath, observedIdentityToken }] }),
+    }), 'prepare delete intent')
+    const intentBody = await intentResponse.json() as {
+      success?: unknown
+      data?: {
+        deleteMode?: unknown
+        deletePolicyToken?: unknown
+        targets?: Array<{
+          path?: unknown
+          deleteIdentityToken?: unknown
+          deleteTargetToken?: unknown
+        }>
+      }
+    }
+    const deleteMode = intentBody.data?.deleteMode
+    const deletePolicyToken = intentBody.data?.deletePolicyToken
+    const targets = intentBody.data?.targets
+    if (intentBody.success !== true) {
+      throw new Error('prepare delete intent failed: invalid response wrapper')
+    }
+    if (deleteMode !== 'trash' && deleteMode !== 'permanent') {
+      throw new Error(`prepare delete intent failed: invalid delete mode ${String(deleteMode)}`)
+    }
+    if (typeof deletePolicyToken !== 'string' || !/^[0-9a-f]{64}$/.test(deletePolicyToken)) {
+      throw new Error('prepare delete intent failed: invalid delete policy token')
+    }
+    if (!Array.isArray(targets) || targets.length !== 1 || targets[0]?.path !== filePath) {
+      throw new Error('prepare delete intent failed: invalid delete target')
+    }
+    if (targets[0].deleteIdentityToken !== observedIdentityToken) {
+      throw new Error('prepare delete intent failed: delete identity mismatch')
+    }
+    const deleteTargetToken = targets[0].deleteTargetToken
+    if (typeof deleteTargetToken !== 'string' || !/^[0-9a-f]{64}$/.test(deleteTargetToken)) {
+      throw new Error('prepare delete intent failed: invalid delete target token')
+    }
+
+    const query = new URLSearchParams({
+      expected_delete_mode: deleteMode,
+      expected_delete_policy_token: deletePolicyToken,
+      expected_delete_target_token: deleteTargetToken,
+    })
+    await requireOk(await fetch(`${fileUrl}?${query.toString()}`, { method: 'DELETE' }), action)
+  }, { fileUrl, action })
+}
+
 async function seedDeletedTextFile(page: Page, fileName: string, content = 'trash fixture'): Promise<void> {
   const fileUrl = `/api/v1/files/${encodeURIComponent(fileName)}`
 
@@ -39,8 +130,8 @@ async function seedDeletedTextFile(page: Page, fileName: string, content = 'tras
       method: 'POST',
       body: new File([content], fileName, { type: 'text/plain' }),
     }), 'create trash fixture')
-    await requireOk(await fetch(fileUrl, { method: 'DELETE' }), 'delete trash fixture')
   }, { fileUrl, fileName, content })
+  await deleteFileThroughCurrentPolicy(page, fileUrl, 'delete trash fixture')
 }
 
 async function isVisible(locator: Locator, timeout = 1000): Promise<boolean> {
@@ -82,7 +173,7 @@ test.describe('回收站页面', () => {
   test('应显示回收站页面', async ({ page }) => {
     await expect(page).not.toHaveURL(/\/login/)
     await expect(trashPageTitle(page)).toBeVisible({ timeout: 5000 })
-    await expect(page.getByText(/项\s*·.*天后自动清理/i)).toBeVisible()
+    await expect(page.getByText(/项\s*·.*天后到期/i)).toBeVisible()
   })
 
   test('应显示回收站标题', async ({ page }) => {
@@ -92,7 +183,7 @@ test.describe('回收站页面', () => {
 
   test('应显示回收站统计信息', async ({ page }) => {
     // Check item count, size, and automatic cleanup retention.
-    const statsText = page.getByText(/项\s*·.*天后自动清理/i)
+    const statsText = page.getByText(/项\s*·.*天后到期/i)
     await expect(statsText).toBeVisible({ timeout: 5000 })
   })
 
@@ -172,8 +263,8 @@ test.describe('回收站单项操作', () => {
         method: 'POST',
         body: new File(['restore workflow'], fileName, { type: 'text/plain' }),
       }), 'create restore fixture')
-      await requireOk(await fetch(fileUrl, { method: 'DELETE' }), 'delete restore fixture')
     }, { fileUrl, fileName })
+    await deleteFileThroughCurrentPolicy(page, fileUrl, 'delete restore fixture')
 
     await ensureAuthenticatedAt(page, '/trash')
     await expect(page.getByText(fileName, { exact: true }).filter({ visible: true })).toBeVisible({ timeout: 10_000 })
@@ -206,7 +297,7 @@ test.describe('回收站单项操作', () => {
 
     await page.goto('/files')
 
-    await page.evaluate(async ({ rootDirUrl, nestedDirUrl, nestedFileUrl, deleteDirUrl, nestedFileName }) => {
+    await page.evaluate(async ({ rootDirUrl, nestedDirUrl, nestedFileUrl, nestedFileName }) => {
       const requireOk = async (response: Response, action: string) => {
         if (!response.ok) {
           throw new Error(`${action} failed: ${response.status} ${await response.text()}`)
@@ -220,8 +311,8 @@ test.describe('回收站单项操作', () => {
       formData.append('file', new File(['nested content'], nestedFileName, { type: 'text/plain' }))
       await requireOk(await fetch(nestedFileUrl, { method: 'POST', body: formData }), 'upload nested file')
 
-      await requireOk(await fetch(deleteDirUrl, { method: 'DELETE' }), 'delete non-empty directory')
-    }, { rootDirUrl, nestedDirUrl, nestedFileUrl, deleteDirUrl, nestedFileName })
+    }, { rootDirUrl, nestedDirUrl, nestedFileUrl, nestedFileName })
+    await deleteFileThroughCurrentPolicy(page, deleteDirUrl, 'delete non-empty directory')
 
     await ensureAuthenticatedAt(page, '/trash')
 
@@ -266,7 +357,7 @@ test.describe('回收站页面响应式', () => {
 
     const title = trashPageTitle(page)
     await expect(title).toBeVisible({ timeout: 5000 })
-    await expect(page.getByText(/项\s*·.*天后自动清理/i)).toBeVisible()
+    await expect(page.getByText(/项\s*·.*天后到期/i)).toBeVisible()
     await waitForTrashContentState(page)
     await expectNoPageHorizontalOverflow(page)
   })
@@ -277,7 +368,7 @@ test.describe('回收站页面响应式', () => {
 
     const title = trashPageTitle(page)
     await expect(title).toBeVisible({ timeout: 5000 })
-    await expect(page.getByText(/项\s*·.*天后自动清理/i)).toBeVisible()
+    await expect(page.getByText(/项\s*·.*天后到期/i)).toBeVisible()
     await expectNoPageHorizontalOverflow(page)
   })
 })

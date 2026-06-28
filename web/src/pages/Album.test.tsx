@@ -58,6 +58,7 @@ describe('AlbumPage', () => {
   const mockAuthFetch = vi.mocked(authFetch)
   const mockRefreshAuthSession = vi.mocked(refreshAuthSession)
   const observeMock = vi.fn()
+  const deleteIdentityToken = '5'.repeat(64)
 
   class MockIntersectionObserver {
     private callback: IntersectionObserverCallback
@@ -85,16 +86,16 @@ describe('AlbumPage', () => {
   }
 
   const mockImageFiles = [
-    { name: 'photo1.jpg', path: '/photos/photo1.jpg', isDir: false, size: 1024000, modTime: '2024-01-01T00:00:00Z' },
-    { name: 'photo2.png', path: '/photos/photo2.png', isDir: false, size: 2048000, modTime: '2024-01-02T00:00:00Z' },
-    { name: 'photo3.gif', path: '/photos/photo3.gif', isDir: false, size: 512000, modTime: '2024-01-03T00:00:00Z' },
+    { name: 'photo1.jpg', path: '/photos/photo1.jpg', isDir: false, size: 1024000, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
+    { name: 'photo2.png', path: '/photos/photo2.png', isDir: false, size: 2048000, modTime: '2024-01-02T00:00:00Z', deleteIdentityToken },
+    { name: 'photo3.gif', path: '/photos/photo3.gif', isDir: false, size: 512000, modTime: '2024-01-03T00:00:00Z', deleteIdentityToken },
   ]
 
   const mockMixedFiles = [
-    { name: 'subfolder', path: '/subfolder', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
-    { name: 'photo1.jpg', path: '/photo1.jpg', isDir: false, size: 1024000, modTime: '2024-01-01T00:00:00Z' },
-    { name: 'document.pdf', path: '/document.pdf', isDir: false, size: 2048, modTime: '2024-01-01T00:00:00Z' },
-    { name: 'video.mp4', path: '/video.mp4', isDir: false, size: 10240, modTime: '2024-01-01T00:00:00Z' },
+    { name: 'subfolder', path: '/subfolder', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
+    { name: 'photo1.jpg', path: '/photo1.jpg', isDir: false, size: 1024000, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
+    { name: 'document.pdf', path: '/document.pdf', isDir: false, size: 2048, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
+    { name: 'video.mp4', path: '/video.mp4', isDir: false, size: 10240, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
   ]
 
   beforeEach(() => {
@@ -208,7 +209,7 @@ describe('AlbumPage', () => {
       })
       .mockResolvedValueOnce({
         files: [
-          { name: 'other-user.jpg', path: '/other-user.jpg', isDir: false, size: 4096, modTime: '2024-01-04T00:00:00Z' },
+          { name: 'other-user.jpg', path: '/other-user.jpg', isDir: false, size: 4096, modTime: '2024-01-04T00:00:00Z', deleteIdentityToken },
         ],
         path: '/',
       })
@@ -289,8 +290,8 @@ describe('AlbumPage', () => {
     it('shows empty state when only non-image files', async () => {
       mockListFiles.mockResolvedValue({
         files: [
-          { name: 'document.pdf', path: '/document.pdf', isDir: false, size: 2048, modTime: '2024-01-01T00:00:00Z' },
-          { name: 'video.mp4', path: '/video.mp4', isDir: false, size: 10240, modTime: '2024-01-01T00:00:00Z' },
+          { name: 'document.pdf', path: '/document.pdf', isDir: false, size: 2048, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
+          { name: 'video.mp4', path: '/video.mp4', isDir: false, size: 10240, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
         ],
         path: '/',
       })
@@ -322,7 +323,7 @@ describe('AlbumPage', () => {
         })
         .mockResolvedValueOnce({
           files: [
-            { name: 'nested.jpg', path: '/subfolder/nested.jpg', isDir: false, size: 1024, modTime: '2024-01-01T00:00:00Z' },
+            { name: 'nested.jpg', path: '/subfolder/nested.jpg', isDir: false, size: 1024, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
           ],
           path: '/subfolder',
         })
@@ -353,7 +354,7 @@ describe('AlbumPage', () => {
         const nextPath = nestedDirectories.get(path)
         return {
           files: nextPath
-            ? [{ name: nextPath.slice(1), path: nextPath, isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' }]
+            ? [{ name: nextPath.slice(1), path: nextPath, isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken }]
             : [],
           path,
         }
@@ -374,11 +375,11 @@ describe('AlbumPage', () => {
     it('supports multiple image formats', async () => {
       mockListFiles.mockResolvedValue({
         files: [
-          { name: 'photo.jpg', path: '/photo.jpg', isDir: false, size: 1024, modTime: '2024-01-01T00:00:00Z' },
-          { name: 'photo.jpeg', path: '/photo.jpeg', isDir: false, size: 1024, modTime: '2024-01-01T00:00:00Z' },
-          { name: 'photo.png', path: '/photo.png', isDir: false, size: 1024, modTime: '2024-01-01T00:00:00Z' },
-          { name: 'photo.gif', path: '/photo.gif', isDir: false, size: 1024, modTime: '2024-01-01T00:00:00Z' },
-          { name: 'photo.webp', path: '/photo.webp', isDir: false, size: 1024, modTime: '2024-01-01T00:00:00Z' },
+          { name: 'photo.jpg', path: '/photo.jpg', isDir: false, size: 1024, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
+          { name: 'photo.jpeg', path: '/photo.jpeg', isDir: false, size: 1024, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
+          { name: 'photo.png', path: '/photo.png', isDir: false, size: 1024, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
+          { name: 'photo.gif', path: '/photo.gif', isDir: false, size: 1024, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
+          { name: 'photo.webp', path: '/photo.webp', isDir: false, size: 1024, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
         ],
         path: '/',
       })
@@ -425,8 +426,8 @@ describe('AlbumPage', () => {
         if (path === '/') {
           return {
             files: [
-              { name: 'album', path: '/album', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
-              { name: 'cover.jpg', path: '/cover.jpg', isDir: false, size: 1024, modTime: '2024-01-01T00:00:00Z' },
+              { name: 'album', path: '/album', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
+              { name: 'cover.jpg', path: '/cover.jpg', isDir: false, size: 1024, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
             ],
             path,
           }
@@ -434,7 +435,7 @@ describe('AlbumPage', () => {
         if (path === '/album') {
           return {
             files: [
-              { name: '2024', path: '/album/2024', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
+              { name: '2024', path: '/album/2024', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
             ],
             path,
           }
@@ -524,9 +525,9 @@ describe('AlbumPage', () => {
     it('excludes non-image files from count', async () => {
       mockListFiles.mockResolvedValue({
         files: [
-          { name: 'photo.jpg', path: '/photo.jpg', isDir: false, size: 1024, modTime: '2024-01-01T00:00:00Z' },
-          { name: 'video.mp4', path: '/video.mp4', isDir: false, size: 10240, modTime: '2024-01-01T00:00:00Z' },
-          { name: 'document.pdf', path: '/document.pdf', isDir: false, size: 2048, modTime: '2024-01-01T00:00:00Z' },
+          { name: 'photo.jpg', path: '/photo.jpg', isDir: false, size: 1024, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
+          { name: 'video.mp4', path: '/video.mp4', isDir: false, size: 10240, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
+          { name: 'document.pdf', path: '/document.pdf', isDir: false, size: 2048, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
         ],
         path: '/',
       })
@@ -872,7 +873,7 @@ describe('AlbumPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockListFiles.mockResolvedValue({
         files: [
-          { name: 'orphan.jpg', path: '', isDir: false, size: 1024, modTime: '2024-01-01T00:00:00Z' },
+          { name: 'orphan.jpg', path: '', isDir: false, size: 1024, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
         ],
         path: '/',
       })

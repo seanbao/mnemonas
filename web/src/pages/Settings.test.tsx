@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor } from '@/test/utils'
 import { act, fireEvent, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { QueryClient } from '@tanstack/react-query'
 import { useSettingsDraftStore } from '@/stores/settingsDraft'
 import { SettingsPage } from './Settings'
 import * as HeroUI from '@heroui/react'
@@ -4992,37 +4993,42 @@ describe('SettingsPage', () => {
 
   describe('trash settings', () => {
     it('allows editing trash retention policy and saves it', async () => {
-    const user = userEvent.setup({ writeToClipboard: false })
-    render(<SettingsPage />)
+      const invalidateQueries = vi.spyOn(QueryClient.prototype, 'invalidateQueries')
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
 
-    await openTab(user, '版本保留')
+      await openTab(user, '版本保留')
 
-    await waitFor(() => {
-      expect(screen.getByText('版本策略')).toBeTruthy()
-    })
+      await waitFor(() => {
+        expect(screen.getByText('版本策略')).toBeTruthy()
+      })
 
-    const retentionInput = screen.getByLabelText('回收站保留天数')
-    await user.clear(retentionInput)
-    await user.type(retentionInput, '7')
+      const retentionInput = screen.getByLabelText('回收站保留天数')
+      await user.clear(retentionInput)
+      await user.type(retentionInput, '7')
 
-    const maxSizeInput = screen.getByLabelText('回收站最大容量')
-    await user.clear(maxSizeInput)
-    await user.type(maxSizeInput, '2GB')
+      const maxSizeInput = screen.getByLabelText('回收站最大容量')
+      await user.clear(maxSizeInput)
+      await user.type(maxSizeInput, '2GB')
 
-    await user.click(screen.getByText('保存设置'))
+      await user.click(screen.getByText('保存设置'))
 
-    await waitFor(() => {
-      expectUpdateSettingsCalledWith(expect.objectContaining({
-      trash: expect.objectContaining({
-        enabled: true,
-        retention_days: 7,
-        max_size: 2147483648,
-      }),
-      }))
-    })
+      await waitFor(() => {
+        expectUpdateSettingsCalledWith(expect.objectContaining({
+          trash: expect.objectContaining({
+            enabled: true,
+            retention_days: 7,
+            max_size: 2147483648,
+          }),
+        }))
+        expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: ['files'] })
+        expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: ['trash'] })
+      })
+      invalidateQueries.mockRestore()
     })
 
     it('allows editing version retention thresholds and saves them', async () => {
+      const invalidateQueries = vi.spyOn(QueryClient.prototype, 'invalidateQueries')
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
 
@@ -5046,7 +5052,33 @@ describe('SettingsPage', () => {
             gc_interval: '12h',
           }),
         }))
+        expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: ['files'] })
+        expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: ['trash'] })
       })
+      invalidateQueries.mockRestore()
+    })
+
+    it('does not invalidate file deletion queries after saving unrelated settings', async () => {
+      const invalidateQueries = vi.spyOn(QueryClient.prototype, 'invalidateQueries')
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      const portInput = await screen.findByLabelText('服务器端口')
+      await user.clear(portInput)
+      await user.type(portInput, '9000')
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expectUpdateSettingsCalledWith(expect.objectContaining({
+          server: expect.objectContaining({ port: 9000 }),
+        }))
+        expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+          title: '设置已保存',
+        }))
+      })
+      expect(invalidateQueries).not.toHaveBeenCalledWith({ queryKey: ['files'] })
+      expect(invalidateQueries).not.toHaveBeenCalledWith({ queryKey: ['trash'] })
+      invalidateQueries.mockRestore()
     })
   })
 

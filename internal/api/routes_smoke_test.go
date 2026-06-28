@@ -36,7 +36,7 @@ func TestServer_RouteContract_SmokeRequestsDoNot500(t *testing.T) {
 			}
 
 			body := routeSmokeRequestBody(contract, session)
-			req := httptest.NewRequest(method, routeSmokePath(routePattern), strings.NewReader(body))
+			req := httptest.NewRequest(method, routeSmokePath(method, routePattern), strings.NewReader(body))
 			if body != "" {
 				req.Header.Set("Content-Type", "application/json")
 			}
@@ -86,7 +86,7 @@ func TestServer_RouteContract_PublicRoutesDoNotRequireAuth(t *testing.T) {
 			}
 
 			body := routeSmokeRequestBody(contract, session)
-			req := httptest.NewRequest(method, routeSmokePath(routePattern), strings.NewReader(body))
+			req := httptest.NewRequest(method, routeSmokePath(method, routePattern), strings.NewReader(body))
 			if body != "" {
 				req.Header.Set("Content-Type", "application/json")
 			}
@@ -128,7 +128,7 @@ func TestServer_RouteContract_AdminOnlyRoutesRejectNonAdmin(t *testing.T) {
 			}
 
 			body := routeSmokeRequestBody(contract, adminSession)
-			req := httptest.NewRequest(method, routeSmokePath(routePattern), strings.NewReader(body))
+			req := httptest.NewRequest(method, routeSmokePath(method, routePattern), strings.NewReader(body))
 			if body != "" {
 				req.Header.Set("Content-Type", "application/json")
 			}
@@ -167,7 +167,7 @@ func TestServer_RouteContract_ProtectedRoutesRejectAnonymous(t *testing.T) {
 			}
 
 			body := routeSmokeRequestBody(contract, session)
-			req := httptest.NewRequest(method, routeSmokePath(routePattern), strings.NewReader(body))
+			req := httptest.NewRequest(method, routeSmokePath(method, routePattern), strings.NewReader(body))
 			if body != "" {
 				req.Header.Set("Content-Type", "application/json")
 			}
@@ -205,7 +205,7 @@ func TestServer_RouteContract_ProtectedRoutesRejectInvalidAuthorizationHeader(t 
 			}
 
 			body := routeSmokeRequestBody(contract, session)
-			req := httptest.NewRequest(method, routeSmokePath(routePattern), strings.NewReader(body))
+			req := httptest.NewRequest(method, routeSmokePath(method, routePattern), strings.NewReader(body))
 			if body != "" {
 				req.Header.Set("Content-Type", "application/json")
 			}
@@ -251,7 +251,7 @@ func TestServer_RouteContract_WriteRoutesRejectGuest(t *testing.T) {
 			}
 
 			body := routeSmokeRequestBody(contract, adminSession)
-			req := httptest.NewRequest(method, routeSmokePath(routePattern), strings.NewReader(body))
+			req := httptest.NewRequest(method, routeSmokePath(method, routePattern), strings.NewReader(body))
 			if body != "" {
 				req.Header.Set("Content-Type", "application/json")
 			}
@@ -383,12 +383,15 @@ func loginRouteSmokeUser(t *testing.T, server *Server, username, password string
 	}
 }
 
-func routeSmokePath(routePattern string) string {
+func routeSmokePath(method, routePattern string) string {
 	path := strings.ReplaceAll(routePattern, "{id}", "smoke-id")
 	path = strings.ReplaceAll(path, "{hash}", "smoke-hash")
 	path = strings.ReplaceAll(path, "*", "smoke.txt")
 	if path == "/api/v1/favorites/check" {
 		return path + "?path=/smoke.txt"
+	}
+	if method == http.MethodDelete && routePattern == "/api/v1/files/*" {
+		return path + "?expected_delete_mode=trash&expected_delete_policy_token=" + strings.Repeat("0", 64) + "&expected_delete_target_token=" + strings.Repeat("0", 64)
 	}
 	return path
 }
@@ -479,7 +482,7 @@ func routeSmokeRequiresWriteRole(contract string) bool {
 		return true
 	case (method == http.MethodPost || method == http.MethodDelete) && routePattern == "/api/v1/files/*":
 		return true
-	case method == http.MethodPost && (routePattern == "/api/v1/files-copy" || routePattern == "/api/v1/files-move"):
+	case method == http.MethodPost && (routePattern == "/api/v1/files-copy" || routePattern == "/api/v1/files-delete-intents" || routePattern == "/api/v1/files-move"):
 		return true
 	case method == http.MethodPost && routePattern == "/api/v1/directories/*":
 		return true
@@ -514,6 +517,8 @@ func routeSmokeRequestBody(contract string, session routeSmokeSession) string {
 		return `{}`
 	case "POST /api/v1/files-copy", "POST /api/v1/files-move":
 		return `{"from":"/missing.txt","to":"/target.txt"}`
+	case "POST /api/v1/files-delete-intents":
+		return `{"targets":[{"path":"/missing.txt","observedIdentityToken":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}`
 	case "POST /api/v1/favorites/":
 		return `{"path":"/smoke.txt"}`
 	case "POST /api/v1/favorites/check-batch":

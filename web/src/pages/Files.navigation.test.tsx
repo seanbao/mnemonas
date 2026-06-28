@@ -91,7 +91,9 @@ vi.mock('@/hooks', () => ({
 }))
 
 vi.mock('@/api/files', () => ({
+  MAX_DELETE_INTENT_TARGETS: 1000,
   listFiles: vi.fn(),
+  createFileDeleteIntent: vi.fn(),
   deleteFile: vi.fn(),
   createDirectory: vi.fn(),
   uploadFile: vi.fn(),
@@ -202,17 +204,25 @@ describe('FilesPage navigation integration', () => {
       if (path === '/documents') {
         return {
           path: '/documents',
+          deleteMode: 'trash',
+          deletePolicyToken: '1'.repeat(64),
+          trashRetentionDays: 30,
+          trashAutoCleanupEnabled: true,
           files: [
-            { name: 'notes.txt', path: '/documents/notes.txt', isDir: false, size: 512, modTime: '2024-01-03T00:00:00Z' },
+            { name: 'notes.txt', path: '/documents/notes.txt', isDir: false, size: 512, modTime: '2024-01-03T00:00:00Z', deleteIdentityToken: '5'.repeat(64) },
           ],
         }
       }
 
       return {
         path: '/',
+        deleteMode: 'trash',
+        deletePolicyToken: '1'.repeat(64),
+        trashRetentionDays: 30,
+        trashAutoCleanupEnabled: true,
         files: [
-          { name: 'documents', path: '/documents', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
-          { name: 'photo.jpg', path: '/photo.jpg', isDir: false, size: 1024, modTime: '2024-01-02T00:00:00Z' },
+          { name: 'documents', path: '/documents', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken: '5'.repeat(64) },
+          { name: 'photo.jpg', path: '/photo.jpg', isDir: false, size: 1024, modTime: '2024-01-02T00:00:00Z', deleteIdentityToken: '5'.repeat(64) },
         ],
       }
     })

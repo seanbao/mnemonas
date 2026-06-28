@@ -711,6 +711,27 @@ run_playwright_backend_binds_password_change_to_authenticated_user_test() {
 	assert_file_contains "$backend_script" 'json_password_change_payload "$user_id" "$password" "$changed_password"'
 }
 
+run_playwright_backend_confirms_delete_policy_test() {
+	local backend_script="$REPO_ROOT/web/scripts/start-e2e-backend.sh"
+
+	assert_file_contains "$backend_script" 'curl -sf "$NASD_BASE_URL/api/v1/files/"'
+	assert_file_contains "$backend_script" 'observed_identity_token=$(extract_file_delete_identity_token "$file_list_response" '\''/e2e-trash-fixture.txt'\'')'
+	assert_file_contains "$backend_script" '[[ ! "$observed_identity_token" =~ ^[0-9a-f]{64}$ ]]'
+	assert_file_contains "$backend_script" 'curl -sf -X POST "$NASD_BASE_URL/api/v1/files-delete-intents"'
+	assert_file_contains "$backend_script" ''\''{"targets":[{"path":%s,"observedIdentityToken":%s}]}'\'''
+	assert_file_contains "$backend_script" '-d "$delete_intent_payload"'
+	assert_file_contains "$backend_script" 'delete_mode=$(extract_json_field "$delete_intent_response" '\''deleteMode'\'')'
+	assert_file_contains "$backend_script" 'delete_policy_token=$(extract_json_field "$delete_intent_response" '\''deletePolicyToken'\'')'
+	assert_file_contains "$backend_script" 'echoed_identity_token=$(extract_json_field "$delete_intent_response" '\''deleteIdentityToken'\'')'
+	assert_file_contains "$backend_script" 'delete_target_token=$(extract_json_field "$delete_intent_response" '\''deleteTargetToken'\'')'
+	assert_file_contains "$backend_script" '[[ ! "$delete_policy_token" =~ ^[0-9a-f]{64}$ ]]'
+	assert_file_contains "$backend_script" '[[ "$echoed_identity_token" != "$observed_identity_token" ]]'
+	assert_file_contains "$backend_script" '[[ ! "$delete_target_token" =~ ^[0-9a-f]{64}$ ]]'
+	assert_file_contains "$backend_script" '--data-urlencode "expected_delete_mode=$delete_mode"'
+	assert_file_contains "$backend_script" '--data-urlencode "expected_delete_policy_token=$delete_policy_token"'
+	assert_file_contains "$backend_script" '--data-urlencode "expected_delete_target_token=$delete_target_token"'
+}
+
 run_playwright_defaults_use_low_collision_ports_test() {
 	assert_file_contains "$REPO_ROOT/web/playwright.config.ts" "http://127.0.0.1:18180"
 	assert_file_contains "$REPO_ROOT/web/playwright.config.ts" "http://127.0.0.1:14173"
@@ -1516,6 +1537,7 @@ run_playwright_defaults_use_low_collision_ports_test
 run_playwright_backend_uses_long_access_ttl_test
 run_playwright_backend_uses_private_auth_state_directories_test
 run_playwright_backend_binds_password_change_to_authenticated_user_test
+run_playwright_backend_confirms_delete_policy_test
 run_testing_strategy_uses_json_safe_login_payload_test
 run_testing_strategy_uses_portable_toml_snippet_test
 run_configuration_complete_example_keeps_optional_arrays_commented_test
