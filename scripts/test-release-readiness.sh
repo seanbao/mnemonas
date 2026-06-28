@@ -31,6 +31,7 @@ write_checklists() {
 # CHANGELOG
 
 - `scripts/release-readiness.sh` 会要求 `CHANGELOG.md` 和 `CHANGELOG.en.md` 的发布清单包含文档检查、依赖安全检查、Docker 构建烟测、所选发布 tag 校验和发布脚本回归命令，避免关键本地门禁从最终发布核验中遗漏
+- `scripts/release-readiness.sh` 会要求发布清单和双语 release notes 保留 `mnemonas-doctor --public-domain`、`scripts/public-go-live-smoke.sh`、`scripts/backup-restore-drill-smoke.sh`、`scripts/release-go-live-check.sh` 和 `cloud-firewall-checklist` 入口，避免公网部署环境复核、发布后上线总核验和恢复演练入口从最终发布流程中遗漏
 
 - [ ] 变更感知完整验证通过：`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
 - [ ] 文档检查通过：`make docs-check`
@@ -56,6 +57,7 @@ EOF
 # CHANGELOG
 
 - `scripts/release-readiness.sh` requires the `CHANGELOG.md` and `CHANGELOG.en.md` release checklists to include documentation, dependency-security, Docker build/smoke, selected release tag validation, and release script regression commands, preventing key local gates from being omitted from final release verification.
+- `scripts/release-readiness.sh` requires the release checklist and bilingual release notes to retain the `mnemonas-doctor --public-domain`, `scripts/public-go-live-smoke.sh`, `scripts/backup-restore-drill-smoke.sh`, `scripts/release-go-live-check.sh`, and `cloud-firewall-checklist` entry points, preventing public-deployment environment review, post-publication go-live verification, and the restore-drill entry point from being omitted during final release preparation.
 
 - [ ] Run full change-aware validation: `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
 - [ ] Run documentation checks: `make docs-check`
@@ -1130,6 +1132,15 @@ if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes 
 fi
 assert_file_contains "$output_dir/missing-checklist-summary-scope.err" "CHANGELOG.en.md is missing required text"
 assert_file_contains "$output_dir/missing-checklist-summary-scope.err" "release checklists to include documentation, dependency-security, Docker build/smoke, selected release tag validation, and release script regression commands"
+git checkout -q -- CHANGELOG.en.md
+
+perl -0pi.bak -e 's/, `scripts\/release-go-live-check\.sh`//' CHANGELOG.en.md
+rm -f CHANGELOG.en.md.bak
+if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes >"$output_dir/missing-go-live-summary-scope.out" 2>"$output_dir/missing-go-live-summary-scope.err"; then
+	fail "release readiness accepted stale go-live release checklist summary wording"
+fi
+assert_file_contains "$output_dir/missing-go-live-summary-scope.err" "CHANGELOG.en.md is missing required text"
+assert_file_contains "$output_dir/missing-go-live-summary-scope.err" "release checklist and bilingual release notes to retain the \`mnemonas-doctor --public-domain\`, \`scripts/public-go-live-smoke.sh\`, \`scripts/backup-restore-drill-smoke.sh\`, \`scripts/release-go-live-check.sh\`, and \`cloud-firewall-checklist\` entry points"
 git checkout -q -- CHANGELOG.en.md
 
 sed -i.bak 's/, not as the only long-term copy of important data//' CHANGELOG.en.md

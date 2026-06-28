@@ -750,6 +750,8 @@ if [[ "$CHECK_CHECKLIST" -eq 1 ]]; then
 	require_file_contains "CHANGELOG.en.md" "$artifact_verify_cmd"
 	require_file_contains "CHANGELOG.md" "发布清单包含文档检查、依赖安全检查、Docker 构建烟测、所选发布 tag 校验和发布脚本回归命令"
 	require_file_contains "CHANGELOG.en.md" "release checklists to include documentation, dependency-security, Docker build/smoke, selected release tag validation, and release script regression commands"
+	require_file_contains "CHANGELOG.md" "发布清单和双语 release notes 保留 \`mnemonas-doctor --public-domain\`、\`scripts/public-go-live-smoke.sh\`、\`scripts/backup-restore-drill-smoke.sh\`、\`scripts/release-go-live-check.sh\` 和 \`cloud-firewall-checklist\` 入口"
+	require_file_contains "CHANGELOG.en.md" "release checklist and bilingual release notes to retain the \`mnemonas-doctor --public-domain\`, \`scripts/public-go-live-smoke.sh\`, \`scripts/backup-restore-drill-smoke.sh\`, \`scripts/release-go-live-check.sh\`, and \`cloud-firewall-checklist\` entry points"
 	require_file_contains "CHANGELOG.md" "L1 私有文件云盘"
 	require_file_contains "CHANGELOG.md" "不应作为重要数据的唯一长期副本"
 	require_file_contains "CHANGELOG.md" "外部备份"
