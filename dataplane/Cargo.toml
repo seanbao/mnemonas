@@ -10,7 +10,7 @@ tokio = { version = "1.45", features = ["full"] }
 tokio-stream = "0.1"
 
 # gRPC - use matching versions
-tonic = "0.13"
+tonic = "0.14"
 prost = "0.13"
 
 # Hashing (BLAKE3 - 10x faster than SHA256)
