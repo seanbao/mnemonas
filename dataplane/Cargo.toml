@@ -20,7 +20,7 @@ blake3 = "1.7"
 zstd = "0.13"
 
 # CDC (Content-Defined Chunking)
-fastcdc = "3.1"
+fastcdc = "4.0"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
