@@ -418,17 +418,7 @@ extract_validation_target() {
 }
 
 is_validation_evidence_path() {
-	case "$1" in
-		docs/hardening-progress.md|\
-		docs/hardening-progress.en.md|\
-		docs/hardening-review-summary.md|\
-		docs/hardening-review-summary.en.md)
-			return 0
-			;;
-		*)
-			return 1
-			;;
-	esac
+	return 1
 }
 
 is_release_documentation_path() {
@@ -462,10 +452,8 @@ check_validation_evidence() {
 	local target=""
 	local target_full=""
 	local evidence_files=(
-		"docs/hardening-progress.md"
-		"docs/hardening-progress.en.md"
-		"docs/hardening-review-summary.md"
-		"docs/hardening-review-summary.en.md"
+		"docs/release-notes.md"
+		"docs/release-notes.en.md"
 	)
 
 	for path in "${evidence_files[@]}"; do
@@ -494,9 +482,6 @@ check_validation_evidence() {
 	target_short="$(git rev-parse --short=12 "$target_full")"
 	head_full="$(git rev-parse HEAD)"
 	VALIDATION_TARGET_SHORT="$target_short"
-
-	require_file_line_contains_pair "docs/hardening-progress.md" "make release-readiness" "$target_short" "release-readiness validation record"
-	require_file_line_contains_pair "docs/hardening-progress.en.md" "make release-readiness" "$target_short" "release-readiness validation record"
 
 	if ! git merge-base --is-ancestor "$target_full" HEAD; then
 		fail "validation evidence target is not an ancestor of HEAD: $target_short"
@@ -750,6 +735,8 @@ if [[ "$CHECK_CHECKLIST" -eq 1 ]]; then
 	require_file_contains "CHANGELOG.en.md" "$artifact_verify_cmd"
 	require_file_contains "CHANGELOG.md" "发布清单包含文档检查、依赖安全检查、Docker 构建烟测、所选发布 tag 校验和发布脚本回归命令"
 	require_file_contains "CHANGELOG.en.md" "release checklists to include documentation, dependency-security, Docker build/smoke, selected release tag validation, and release script regression commands"
+	require_file_contains "CHANGELOG.md" "发布清单和双语 release notes 保留 \`mnemonas-doctor --public-domain\`、\`scripts/public-go-live-smoke.sh\`、\`scripts/backup-restore-drill-smoke.sh\`、\`scripts/release-go-live-check.sh\` 和 \`cloud-firewall-checklist\` 入口"
+	require_file_contains "CHANGELOG.en.md" "release checklist and bilingual release notes to retain the \`mnemonas-doctor --public-domain\`, \`scripts/public-go-live-smoke.sh\`, \`scripts/backup-restore-drill-smoke.sh\`, \`scripts/release-go-live-check.sh\`, and \`cloud-firewall-checklist\` entry points"
 	require_file_contains "CHANGELOG.md" "L1 私有文件云盘"
 	require_file_contains "CHANGELOG.md" "不应作为重要数据的唯一长期副本"
 	require_file_contains "CHANGELOG.md" "外部备份"

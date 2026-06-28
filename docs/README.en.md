@@ -38,8 +38,6 @@ This directory contains MnemoNAS usage guides, deployment notes, and reference m
 | [Roadmap](roadmap.en.md) | Priorities and capability boundaries from private file cloud to home and small-team NAS |
 | [Development guide](development.en.md) | Local development setup |
 | [Testing strategy](testing-strategy.en.md) | Unit, integration, E2E, and torture test strategy |
-| [Hardening progress ledger](hardening-progress.en.md) | Completed hardening areas, validation evidence, and closeout items |
-| [Hardening review summary](hardening-review-summary.en.md) | Current hardening worktree review groups, residual risks, and pre-release checks |
 | [Release notes draft](release-notes.en.md) | Draft notes, validation evidence, and post-publish verification entry point for the next public release |
 | [API reference](api-reference.en.md) | REST API endpoints and request/response formats |
 | [Extension points](extension-points.en.md) | Future interface draft for S3, plugins, and runners |

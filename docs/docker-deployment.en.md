@@ -294,6 +294,7 @@ After a public release, prefer the unified go-live entry point. It chains the re
   --backup-job-id external-disk
 ```
 
+When the unified go-live check should retain temporary downloaded published artifacts for troubleshooting, omit `--artifact-dir` and pass `--keep-published-artifacts`; explicit `--artifact-dir` directories are already retained, so the two options cannot be combined.
 When the backup restore drill cannot be run, pass `--skip-backup-restore-drill` explicitly. That result is not complete restore evidence.
 
 The examples below default to the source-built local image and can be switched to a verified release image with `MNEMONAS_IMAGE`.
