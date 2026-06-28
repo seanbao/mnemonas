@@ -147,9 +147,18 @@ async function openDeleteDialogFromFileMenu(
       await expect(deleteMenuItem).toBeVisible({ timeout: 5_000 })
     }
 
-    await deleteMenuItem.click()
+    let clickError: unknown
+    try {
+      await deleteMenuItem.click({ timeout: 5_000 })
+    } catch (error) {
+      clickError = error
+    }
     if (await deleteDialogHeading.isVisible({ timeout: 2_000 }).catch(() => false)) {
       return
+    }
+
+    if (clickError && attempt === 1) {
+      throw clickError
     }
 
     await page.keyboard.press('Escape').catch(() => {})
