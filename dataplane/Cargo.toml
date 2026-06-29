@@ -11,7 +11,7 @@ tokio-stream = "0.1"
 
 # gRPC - use matching versions
 tonic = "0.13"
-prost = "0.13"
+prost = "0.14"
 
 # Hashing (BLAKE3 - 10x faster than SHA256)
 blake3 = "1.7"
