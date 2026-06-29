@@ -1986,11 +1986,11 @@ func (s *Server) setupRoutes() {
 			r.Get("/", s.handleListTrash)
 			r.Get("/{id}", s.handleGetTrashItem)
 			if s.authEnabled {
-				r.With(requireWriteAccess).Delete("/", s.handleEmptyTrash)
+				r.With(requireWriteAccess).Post("/empty", s.handleEmptyTrash)
 				r.With(requireWriteAccess).Post("/{id}/restore", s.handleRestoreFromTrash)
 				r.With(requireWriteAccess).Delete("/{id}", s.handleDeleteFromTrash)
 			} else {
-				r.Delete("/", s.handleEmptyTrash)
+				r.Post("/empty", s.handleEmptyTrash)
 				r.Post("/{id}/restore", s.handleRestoreFromTrash)
 				r.Delete("/{id}", s.handleDeleteFromTrash)
 			}
@@ -6318,148 +6318,197 @@ func (s *Server) handleDeleteFromTrash(w http.ResponseWriter, r *http.Request) {
 	}).WithMessage("item permanently deleted").Write(w, http.StatusOK)
 }
 
+type emptyTrashSelectionRequest struct {
+	IDs []string `json:"ids"`
+}
+
+type emptyTrashSelectionResponse struct {
+	Deleted        []string `json:"deleted"`
+	Remaining      []string `json:"remaining"`
+	Skipped        []string `json:"skipped"`
+	DeletedCount   int      `json:"deleted_count"`
+	RemainingCount int      `json:"remaining_count"`
+	SkippedCount   int      `json:"skipped_count"`
+	Partial        bool     `json:"partial"`
+	Warning        bool     `json:"warning"`
+}
+
+func normalizeTrashSelectionIDs(ids []string) ([]string, error) {
+	if len(ids) == 0 || len(ids) > storage.MaxTrashSelectionIDs {
+		return nil, storage.ErrInvalidTrashSelection
+	}
+	seen := make(map[string]struct{}, len(ids))
+	normalized := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if len(id) == 0 || len(id) > storage.MaxTrashSelectionIDLength {
+			return nil, storage.ErrInvalidTrashSelection
+		}
+		for index := 0; index < len(id); index++ {
+			character := id[index]
+			if (character < 'a' || character > 'z') &&
+				(character < 'A' || character > 'Z') &&
+				(character < '0' || character > '9') &&
+				character != '-' && character != '_' {
+				return nil, storage.ErrInvalidTrashSelection
+			}
+		}
+		if _, exists := seen[id]; exists {
+			return nil, storage.ErrInvalidTrashSelection
+		}
+		seen[id] = struct{}{}
+		normalized = append(normalized, id)
+	}
+	return normalized, nil
+}
+
+func completeTrashSelectionPartition(requested []string, result storage.TrashSelectionResult) bool {
+	positions := make(map[string]int, len(requested))
+	for index, id := range requested {
+		positions[id] = index
+	}
+	seen := make(map[string]struct{}, len(requested))
+	checkPartition := func(ids []string) bool {
+		previousPosition := -1
+		for _, id := range ids {
+			position, exists := positions[id]
+			if !exists || position <= previousPosition {
+				return false
+			}
+			if _, duplicate := seen[id]; duplicate {
+				return false
+			}
+			seen[id] = struct{}{}
+			previousPosition = position
+		}
+		return true
+	}
+	return checkPartition(result.DeletedIDs) &&
+		checkPartition(result.RemainingIDs) &&
+		checkPartition(result.SkippedIDs) &&
+		len(seen) == len(requested)
+}
+
+func invalidTrashSelection(w http.ResponseWriter) {
+	NewAPIError(ErrCodeInvalidTrashSelection, "invalid trash selection").Write(w, http.StatusBadRequest)
+}
+
 func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request) {
 	if s.fs == nil {
 		ServiceUnavailable(w, "filesystem not initialized")
 		return
 	}
-	_, scoped, err := s.currentUserHomeDir(r.Context())
+
+	var request emptyTrashSelectionRequest
+	if err := decodeJSONBody(r, &request); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeLimitedJSONBodyError(w, err, DefaultJSONRequestBodyLimit)
+			return
+		}
+		invalidTrashSelection(w)
+		return
+	}
+	ids, err := normalizeTrashSelectionIDs(request.IDs)
+	if err != nil {
+		invalidTrashSelection(w)
+		return
+	}
+	authorize, err := s.deletePathAuthorizerSnapshot(r.Context())
 	if err != nil {
 		respondPathAccessError(w, err)
 		return
 	}
-	if scoped {
-		items, err := s.fs.ListTrash(r.Context())
-		if err != nil {
-			s.respondInternalError(w, "empty trash", err)
+
+	result, executionErr := s.fs.EmptyTrashSelection(r.Context(), ids, authorize)
+	if executionErr != nil {
+		if errors.Is(executionErr, storage.ErrInvalidTrashSelection) {
+			invalidTrashSelection(w)
 			return
 		}
+		noDeletion := len(result.DeletedIDs) == 0
+		var rootAuthorizationErr *storage.TrashRootAuthorizationError
+		if noDeletion && errors.As(executionErr, &rootAuthorizationErr) {
+			s.respondNotFound(w, "empty trash selection", storage.ErrNotFound)
+			return
+		}
+		if noDeletion && errors.Is(executionErr, errPathOutsideHomeDir) {
+			s.respondNotFound(w, "empty trash selection", storage.ErrNotFound)
+			return
+		}
+		if noDeletion && errors.Is(executionErr, errPathAccessDenied) {
+			forbiddenPathAccessDenied(w)
+			return
+		}
+		if noDeletion && (errors.Is(executionErr, storage.ErrNotRegular) || errors.Is(executionErr, storage.ErrNotDir)) {
+			Conflict(w, "trash item contains a mounted filesystem or invalid resource type")
+			return
+		}
+		if noDeletion && isStorageNotFound(executionErr) {
+			s.respondNotFound(w, "empty trash selection", executionErr)
+			return
+		}
+		if noDeletion {
+			s.respondInternalError(w, "empty trash selection", executionErr)
+			return
+		}
+	}
 
-		deletedCount := 0
-		cleanupWarning := false
-		writePartialResult := func() {
-			details := map[string]string{
-				"count":   strconv.Itoa(deletedCount),
-				"partial": "true",
-			}
-			response := map[string]any{
-				"deleted_count": deletedCount,
-				"partial":       true,
-			}
-			message := "trash emptied partially"
-			if cleanupWarning {
-				markTrashDeleteCleanupWarningHeaders(w)
-				details["cleanup_warning"] = "true"
-				response["warning"] = true
-				message = "trash emptied partially with cleanup warning"
-			}
-			s.LogActivityWithWarning(w, r, activity.ActionTrashEmpty, "", details)
-			NewAPIResponse(response).WithMessage(message).Write(w, http.StatusOK)
+	if !completeTrashSelectionPartition(ids, result) {
+		partitionErr := errors.New("storage returned an incomplete trash selection partition")
+		if executionErr != nil {
+			partitionErr = errors.Join(partitionErr, executionErr)
 		}
-		for _, item := range items {
-			if item == nil || s.authorizeUserWritePath(r.Context(), item.OriginalPath) != nil {
-				continue
-			}
-			if err := s.authorizeUserTrashItemTreeWritePath(r.Context(), item, ""); err != nil {
-				if errors.Is(err, errPathAccessDenied) || errors.Is(err, errPathOutsideHomeDir) {
-					continue
-				}
-				if deletedCount > 0 {
-					writePartialResult()
-					return
-				}
-				s.respondTreeMutationPreflightError(w, "empty trash", err)
-				return
-			}
-			if err := s.fs.DeleteFromTrash(r.Context(), item.ID); err != nil {
-				var warningErr *storage.TrashDeleteWarningError
-				if errors.As(err, &warningErr) {
-					deletedCount++
-					cleanupWarning = true
-					continue
-				}
-				if deletedCount > 0 {
-					writePartialResult()
-					return
-				}
-				if errors.Is(err, storage.ErrNotRegular) {
-					Conflict(w, "trash item contains a mounted filesystem")
-					return
-				}
-				s.respondInternalError(w, "empty trash", err)
-				return
-			}
-			deletedCount++
-		}
-
-		details := map[string]string{"count": strconv.Itoa(deletedCount)}
-		response := map[string]any{
-			"deleted_count": deletedCount,
-			"partial":       false,
-		}
-		message := "trash emptied successfully"
-		if cleanupWarning {
-			markTrashDeleteCleanupWarningHeaders(w)
-			details["cleanup_warning"] = "true"
-			response["warning"] = true
-			message = "trash emptied with cleanup warning"
-		}
-		s.LogActivityWithWarning(w, r, activity.ActionTrashEmpty, "", details)
-		NewAPIResponse(response).WithMessage(message).Write(w, http.StatusOK)
+		s.respondInternalError(w, "empty trash selection", partitionErr)
 		return
 	}
 
-	count, err := s.fs.EmptyTrash(r.Context())
-	if err != nil {
-		var warningErr *storage.TrashDeleteWarningError
-		if errors.As(err, &warningErr) {
-			markTrashDeleteCleanupWarningHeaders(w)
-			details := map[string]string{
-				"count":           strconv.Itoa(count),
-				"cleanup_warning": "true",
-			}
-			response := map[string]any{
-				"deleted_count": count,
-				"warning":       true,
-			}
-			message := "trash emptied with cleanup warning"
-			if warningErr.Partial() {
-				details["partial"] = "true"
-				response["partial"] = true
-				message = "trash emptied partially with cleanup warning"
-			} else {
-				response["partial"] = false
-			}
-			s.LogActivityWithWarning(w, r, activity.ActionTrashEmpty, "", details)
-			NewAPIResponse(response).WithMessage(message).Write(w, http.StatusOK)
-			return
-		}
-		if count > 0 {
-			s.LogActivityWithWarning(w, r, activity.ActionTrashEmpty, "", map[string]string{
-				"count":   strconv.Itoa(count),
-				"partial": "true",
-			})
-			NewAPIResponse(map[string]any{
-				"deleted_count": count,
-				"partial":       true,
-			}).WithMessage("trash emptied partially").Write(w, http.StatusOK)
-			return
-		}
-		if errors.Is(err, storage.ErrNotRegular) {
-			Conflict(w, "trash item contains a mounted filesystem")
-			return
-		}
-		s.respondInternalError(w, "empty trash", err)
-		return
+	var cleanupWarningErr *storage.TrashDeleteWarningError
+	cleanupWarning := errors.As(executionErr, &cleanupWarningErr)
+	partial := len(result.RemainingIDs) > 0 || len(result.SkippedIDs) > 0
+	if executionErr != nil && partial {
+		s.logger.Error().
+			Err(executionErr).
+			Int("requested_count", len(ids)).
+			Int("deleted_count", len(result.DeletedIDs)).
+			Int("remaining_count", len(result.RemainingIDs)).
+			Int("skipped_count", len(result.SkippedIDs)).
+			Msg("empty trash selection completed partially")
+	}
+	if cleanupWarning {
+		markTrashDeleteCleanupWarningHeaders(w)
 	}
 
-	// Log activity
-	s.LogActivityWithWarning(w, r, activity.ActionTrashEmpty, "", map[string]string{"count": strconv.Itoa(count)})
+	response := emptyTrashSelectionResponse{
+		Deleted:        append([]string{}, result.DeletedIDs...),
+		Remaining:      append([]string{}, result.RemainingIDs...),
+		Skipped:        append([]string{}, result.SkippedIDs...),
+		DeletedCount:   len(result.DeletedIDs),
+		RemainingCount: len(result.RemainingIDs),
+		SkippedCount:   len(result.SkippedIDs),
+		Partial:        partial,
+		Warning:        cleanupWarning,
+	}
+	details := map[string]string{
+		"requested_count": strconv.Itoa(len(ids)),
+		"count":           strconv.Itoa(response.DeletedCount),
+		"remaining":       strconv.Itoa(response.RemainingCount),
+		"skipped":         strconv.Itoa(response.SkippedCount),
+		"partial":         strconv.FormatBool(response.Partial),
+		"cleanup_warning": strconv.FormatBool(response.Warning),
+	}
+	s.LogActivityWithWarning(w, r, activity.ActionTrashEmpty, "", details)
 
-	NewAPIResponse(map[string]any{
-		"deleted_count": count,
-		"partial":       false,
-	}).WithMessage("trash emptied successfully").Write(w, http.StatusOK)
+	message := "trash selection emptied successfully"
+	if partial {
+		message = "trash selection emptied partially"
+	}
+	if cleanupWarning {
+		message = "trash selection emptied with cleanup warning"
+		if partial {
+			message = "trash selection emptied partially with cleanup warning"
+		}
+	}
+	NewAPIResponse(response).WithMessage(message).Write(w, http.StatusOK)
 }
 
 // === Thumbnail Handler ===

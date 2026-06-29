@@ -12,6 +12,7 @@ const API_BASE = '/api/v1'
 export const MAX_UPLOAD_FILE_SIZE_BYTES = 10 * 1024 * 1024 * 1024
 export const MAX_UPLOAD_FILE_SIZE_LABEL = '10 GB'
 export const MAX_DELETE_INTENT_TARGETS = 1000
+export const MAX_EMPTY_TRASH_IDS = 1000
 
 export type DeleteMode = 'trash' | 'permanent'
 
@@ -955,11 +956,84 @@ function isTrashListResponseShape(value: unknown): value is {
     && typeof value.trashAutoCleanupEnabled === 'boolean'
 }
 
-function isEmptyTrashResultShape(value: unknown): value is { deleted_count: number; partial?: boolean; warning?: boolean } {
-  return isRecord(value)
-    && isNonNegativeSafeInteger(value.deleted_count)
-    && isBooleanOrUndefined(value.partial)
-    && isBooleanOrUndefined(value.warning)
+type RawEmptyTrashResult = {
+  deleted: string[]
+  remaining: string[]
+  skipped: string[]
+  deleted_count: number
+  remaining_count: number
+  skipped_count: number
+  partial: boolean
+  warning: boolean
+}
+
+function isValidTrashSelection(ids: unknown): ids is string[] {
+  return Array.isArray(ids)
+    && ids.length > 0
+    && ids.length <= MAX_EMPTY_TRASH_IDS
+    && ids.every((id) => typeof id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(id))
+    && new Set(ids).size === ids.length
+}
+
+function isOrderedTrashIdGroup(ids: unknown, requestIndexes: Map<string, number>, seen: Set<string>): ids is string[] {
+  if (!Array.isArray(ids)) {
+    return false
+  }
+
+  let previousIndex = -1
+  for (const id of ids) {
+    if (typeof id !== 'string') {
+      return false
+    }
+    const requestIndex = requestIndexes.get(id)
+    if (requestIndex === undefined || requestIndex <= previousIndex || seen.has(id)) {
+      return false
+    }
+    previousIndex = requestIndex
+    seen.add(id)
+  }
+  return true
+}
+
+function isEmptyTrashResultShape(value: unknown, requestedIds: string[]): value is RawEmptyTrashResult {
+  const expectedKeys = new Set([
+    'deleted',
+    'remaining',
+    'skipped',
+    'deleted_count',
+    'remaining_count',
+    'skipped_count',
+    'partial',
+    'warning',
+  ])
+  if (
+    !isRecord(value)
+    || Object.keys(value).length !== expectedKeys.size
+    || Object.keys(value).some((key) => !expectedKeys.has(key))
+    || typeof value.partial !== 'boolean'
+    || typeof value.warning !== 'boolean'
+    || !isNonNegativeSafeInteger(value.deleted_count)
+    || !isNonNegativeSafeInteger(value.remaining_count)
+    || !isNonNegativeSafeInteger(value.skipped_count)
+  ) {
+    return false
+  }
+
+  const requestIndexes = new Map(requestedIds.map((id, index) => [id, index]))
+  const seen = new Set<string>()
+  if (
+    !isOrderedTrashIdGroup(value.deleted, requestIndexes, seen)
+    || !isOrderedTrashIdGroup(value.remaining, requestIndexes, seen)
+    || !isOrderedTrashIdGroup(value.skipped, requestIndexes, seen)
+    || seen.size !== requestedIds.length
+    || value.deleted_count !== value.deleted.length
+    || value.remaining_count !== value.remaining.length
+    || value.skipped_count !== value.skipped.length
+  ) {
+    return false
+  }
+
+  return value.partial === (value.remaining.length > 0 || value.skipped.length > 0)
 }
 
 function isHealthShape(value: unknown): value is HealthStatus & { uptime_secs?: number } {
@@ -2660,9 +2734,12 @@ export interface TrashItem {
 }
 
 export interface EmptyTrashResult {
-  deletedCount: number
+  deleted: string[]
+  remaining: string[]
+  skipped: string[]
   partial: boolean
-  warning?: boolean
+  warning: boolean
+  auditWarning: boolean
   message?: string
 }
 
@@ -2740,11 +2817,17 @@ export async function deleteFromTrash(id: string, options: RequestOptions = {}):
   )
 }
 
-// Empty trash (delete all items permanently)
-export async function emptyTrash(options: RequestOptions = {}): Promise<EmptyTrashResult> {
-  const response = await authFetch(`${API_BASE}/trash/`, {
+// Permanently delete the exact trash items confirmed by the caller.
+export async function emptyTrash(ids: string[], options: RequestOptions = {}): Promise<EmptyTrashResult> {
+  if (!isValidTrashSelection(ids)) {
+    throw new Error('回收站选择无效')
+  }
+
+  const response = await authFetch(`${API_BASE}/trash/empty`, {
     ...options,
-    method: 'DELETE',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids }),
   })
   const body = await handleResponse<ApiResponseWrapper<unknown>>(response, '清空回收站失败')
   if (
@@ -2757,15 +2840,16 @@ export async function emptyTrash(options: RequestOptions = {}): Promise<EmptyTra
   }
 
   const data = body.data
-  if (!isEmptyTrashResultShape(data)) {
+  if (!isEmptyTrashResultShape(data, ids)) {
     throw new Error(INVALID_API_RESPONSE_MESSAGE)
   }
   return {
-    deletedCount: data.deleted_count,
-    partial: !!data.partial,
-    warning: response.headers?.get?.('Warning') != null
-      || body.warning === true
-      || (isRecord(data) && data.warning === true),
+    deleted: [...data.deleted],
+    remaining: [...data.remaining],
+    skipped: [...data.skipped],
+    partial: data.partial,
+    warning: data.warning,
+    auditWarning: response.headers?.get?.('X-Mnemonas-Audit-Status')?.trim().toLowerCase() === 'failed',
     message: getNonBlankJsonString(body.message),
   }
 }

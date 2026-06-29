@@ -29,7 +29,9 @@ import {
   deleteFromTrash,
   emptyTrash,
   ApiError,
+  MAX_EMPTY_TRASH_IDS,
   type ActionResult,
+  type EmptyTrashResult,
   type TrashItem,
   type TrashListResponse
 } from '@/api/files'
@@ -135,6 +137,71 @@ const TRASH_RESTORE_ACTIVITY_LIMIT = 100
 type TrashBatchIntent = {
   items: TrashItem[]
   trashAutoCleanupEnabled: boolean | undefined
+}
+
+type TrashEmptyIntent = {
+  items: Array<Pick<TrashItem, 'id' | 'name' | 'size'>>
+}
+
+async function emptyConfirmedTrashItems(ids: string[], signal: AbortSignal): Promise<EmptyTrashResult> {
+  const aggregate: EmptyTrashResult = {
+    deleted: [],
+    remaining: [],
+    skipped: [],
+    partial: false,
+    warning: false,
+    auditWarning: false,
+  }
+  const messages: string[] = []
+
+  for (let offset = 0; offset < ids.length; offset += MAX_EMPTY_TRASH_IDS) {
+    const chunkEnd = Math.min(offset + MAX_EMPTY_TRASH_IDS, ids.length)
+    const result = await emptyTrash(ids.slice(offset, chunkEnd), { signal })
+    aggregate.deleted.push(...result.deleted)
+    aggregate.remaining.push(...result.remaining)
+    aggregate.skipped.push(...result.skipped)
+    aggregate.partial = aggregate.partial || result.partial
+    aggregate.warning = aggregate.warning || result.warning
+    aggregate.auditWarning = aggregate.auditWarning || result.auditWarning
+    if (result.message && !messages.includes(result.message)) {
+      messages.push(result.message)
+    }
+    if (result.remaining.length > 0) {
+      aggregate.remaining.push(...ids.slice(chunkEnd))
+      aggregate.partial = true
+      break
+    }
+  }
+
+  aggregate.partial = aggregate.partial || aggregate.remaining.length > 0 || aggregate.skipped.length > 0
+  aggregate.message = messages.length > 0 ? messages.join('；') : undefined
+  return aggregate
+}
+
+function getEmptyTrashSuccessToast(result: EmptyTrashResult, refreshFailed = false) {
+  const descriptions: string[] = []
+  if (result.remaining.length > 0) {
+    descriptions.push(`仍有 ${result.remaining.length} 项保留在回收站`)
+  }
+  if (result.skipped.length > 0) {
+    descriptions.push(`已跳过 ${result.skipped.length} 项`)
+  }
+  if (result.warning) {
+    descriptions.push('删除过程报告了清理警告')
+  }
+  if (result.auditWarning) {
+    descriptions.push('操作记录未保存')
+  }
+  if (refreshFailed) {
+    descriptions.push('删除结果已返回，但列表刷新失败')
+  }
+
+  const hasWarning = result.partial || result.warning || result.auditWarning || refreshFailed
+  return {
+    title: `已永久删除已确认的 ${result.deleted.length} 项`,
+    ...(descriptions.length > 0 ? { description: `${descriptions.join('；')}。` } : {}),
+    color: hasWarning ? 'warning' as const : 'success' as const,
+  }
 }
 
 class MissingTrashItemSynchronizationError extends Error {
@@ -738,6 +805,7 @@ export function TrashPage() {
   const [actionItem, setActionItem] = useState<TrashItem | null>(null)
   const [batchRestoreIntent, setBatchRestoreIntent] = useState<TrashBatchIntent | null>(null)
   const [batchDeleteIntent, setBatchDeleteIntent] = useState<TrashBatchIntent | null>(null)
+  const [emptyTrashIntent, setEmptyTrashIntent] = useState<TrashEmptyIntent | null>(null)
   const actionItemRef = useRef(actionItem)
   const restoreAbortControllerRef = useRef<AbortController | null>(null)
   const deleteAbortControllerRef = useRef<AbortController | null>(null)
@@ -1020,20 +1088,24 @@ export function TrashPage() {
   })
 
   const emptyMutation = useMutation({
-    mutationFn: ({ signal }: { signal: AbortSignal }) => emptyTrash({ signal }),
-    onSuccess: (result, variables) => {
+    mutationFn: ({ ids, signal }: { ids: string[]; signal: AbortSignal }) => emptyConfirmedTrashItems(ids, signal),
+    onSuccess: async (result, variables) => {
       if (variables.signal.aborted) {
         return
       }
-      void refetch()
-      if (result.partial) {
-        addToast({ title: `回收站已部分清空，删除 ${result.deletedCount} 项`, color: 'warning' })
-      } else if (result.warning) {
-        addToast({ title: `已清空回收站，删除 ${result.deletedCount} 项，但存在警告`, color: 'warning' })
-      } else {
-        addToast({ title: `已清空回收站，删除 ${result.deletedCount} 项`, color: 'success' })
+      let refreshFailed = false
+      try {
+        const refreshResult = await refetch()
+        refreshFailed = refreshResult.error != null
+      } catch {
+        refreshFailed = true
       }
+      if (variables.signal.aborted) {
+        return
+      }
+      addToast(getEmptyTrashSuccessToast(result, refreshFailed))
       onEmptyClose()
+      setEmptyTrashIntent(null)
     },
     onError: (error, variables) => {
       if (variables.signal.aborted || isAbortError(error)) {
@@ -1063,7 +1135,18 @@ export function TrashPage() {
       return
     }
     onEmptyClose()
+    setEmptyTrashIntent(null)
   }, [emptyMutation.isPending, onEmptyClose])
+
+  const handleEmptyTrashClick = useCallback(() => {
+    if (!canWrite || items.length === 0) {
+      return
+    }
+    setEmptyTrashIntent({
+      items: items.map(({ id, name, size }) => ({ id, name, size })),
+    })
+    onEmptyOpen()
+  }, [canWrite, items, onEmptyOpen])
 
   const handleSelectAll = useCallback(() => {
     if (!canWrite) return
@@ -1246,11 +1329,13 @@ export function TrashPage() {
 
   const handleConfirmEmpty = useCallback(() => {
     if (!canWrite) return
+    const ids = emptyTrashIntent?.items.map((item) => item.id) ?? []
+    if (ids.length === 0) return
     emptyAbortControllerRef.current?.abort()
     const controller = new AbortController()
     emptyAbortControllerRef.current = controller
-    emptyMutation.mutate({ signal: controller.signal })
-  }, [canWrite, emptyMutation])
+    emptyMutation.mutate({ ids, signal: controller.signal })
+  }, [canWrite, emptyMutation, emptyTrashIntent])
 
   const handleClearPathFilter = useCallback(() => {
     setSearchParams({})
@@ -1319,6 +1404,8 @@ export function TrashPage() {
 
   const totalSize = data?.totalSize ?? items.reduce((sum, item) => sum + item.size, 0)
   const itemCount = data?.count ?? items.length
+  const emptyIntentItemCount = emptyTrashIntent?.items.length ?? 0
+  const emptyIntentTotalSize = emptyTrashIntent?.items.reduce((sum, item) => sum + item.size, 0) ?? 0
   const visibleItemCount = visibleItems.length
   const retentionLabel = getTrashPolicyLabel(retentionEnabled, retentionDays, trashAutoCleanupEnabled)
   const pageSubtitle = pathFilter
@@ -1338,13 +1425,13 @@ export function TrashPage() {
         subtitle={pageSubtitle}
         icon={Trash2}
         actions={
-          canWrite && itemCount > 0 ? (
+          canWrite && items.length > 0 ? (
             <Button
               color="danger"
               variant="flat"
               className="rounded-lg"
               startContent={<Trash2 size={16} />}
-              onPress={onEmptyOpen}
+              onPress={handleEmptyTrashClick}
             >
               清空回收站
             </Button>
@@ -1668,16 +1755,16 @@ export function TrashPage() {
             </div>
             <div>
               <h3 id="trash-empty-dialog-title" className="text-lg font-semibold text-foreground">清空回收站</h3>
-              <p className="text-xs text-default-500 font-normal">删除所有文件</p>
+              <p className="text-xs text-default-500 font-normal">删除已确认项目</p>
             </div>
           </ModalHeader>
           <ModalBody id="trash-empty-dialog-description" className="px-6 py-4">
             <p className="text-foreground">确定要清空回收站吗？</p>
             <p className="text-sm text-default-600 mt-2">
-              将永久删除 {itemCount} 项，共 {formatBytes(totalSize)}。
+              将永久删除 {emptyIntentItemCount} 项，共 {formatBytes(emptyIntentTotalSize)}。
             </p>
             <p className="text-xs text-danger mt-2 bg-danger/10 p-2 rounded-lg">
-              警告：此操作无法撤销，所有文件将被彻底删除。
+              警告：此操作无法撤销，以上已确认项目将被彻底删除。打开对话框后新增的项目不在此次操作范围内。
             </p>
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">

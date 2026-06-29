@@ -6364,7 +6364,7 @@ func TestFileSystem_RestoreFromTrash_AlreadyExists(t *testing.T) {
 	}
 }
 
-func TestFileSystem_EmptyTrash(t *testing.T) {
+func TestFileSystem_EmptyTrashSelection_DeletesSelectedItems(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 
@@ -6373,13 +6373,18 @@ func TestFileSystem_EmptyTrash(t *testing.T) {
 	fs.Delete(ctx, "/empty1.txt")
 	fs.Delete(ctx, "/empty2.txt")
 
-	deleted, err := fs.EmptyTrash(ctx)
+	selected, err := fs.ListTrash(ctx)
 	if err != nil {
-		t.Fatalf("EmptyTrash() error: %v", err)
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	ids := []string{selected[0].ID, selected[1].ID}
+	result, err := fs.EmptyTrashSelection(ctx, ids, nil)
+	if err != nil {
+		t.Fatalf("EmptyTrashSelection() error: %v", err)
 	}
 
-	if deleted != 2 {
-		t.Errorf("EmptyTrash() deleted %d, want 2", deleted)
+	if len(result.DeletedIDs) != 2 {
+		t.Errorf("EmptyTrashSelection() deleted %d, want 2", len(result.DeletedIDs))
 	}
 
 	items, _ := fs.ListTrash(ctx)
@@ -6388,17 +6393,17 @@ func TestFileSystem_EmptyTrash(t *testing.T) {
 	}
 }
 
-func TestFileSystem_EmptyTrash_ReturnsContextCanceledBeforeListing(t *testing.T) {
+func TestFileSystem_EmptyTrashSelection_ReturnsContextCanceledBeforeListing(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	deleted, err := fs.EmptyTrash(ctx)
+	result, err := fs.EmptyTrashSelection(ctx, []string{"missing"}, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
-	if deleted != 0 {
-		t.Fatalf("expected zero deleted items on canceled context, got %d", deleted)
+	if len(result.DeletedIDs) != 0 {
+		t.Fatalf("expected zero deleted items on canceled context, got %d", len(result.DeletedIDs))
 	}
 }
 
@@ -6713,7 +6718,7 @@ func TestFileSystem_DeleteFromTrash_KeepsDirectoryChildVersionMetadataReferenced
 	}
 }
 
-func TestFileSystem_EmptyTrash_AttemptsVersionObjectCleanup(t *testing.T) {
+func TestFileSystem_EmptyTrashSelection_AttemptsVersionObjectCleanup(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 
@@ -6738,6 +6743,10 @@ func TestFileSystem_EmptyTrash_AttemptsVersionObjectCleanup(t *testing.T) {
 	if err := fs.Delete(ctx, "/empty-trash-objects.md"); err != nil {
 		t.Fatalf("Delete() error: %v", err)
 	}
+	selected, err := fs.ListTrash(ctx)
+	if err != nil || len(selected) != 1 {
+		t.Fatalf("ListTrash() = %+v, %v; want one item", selected, err)
+	}
 
 	called := make(map[string]int)
 	fs.deleteVersionObject = func(ctx context.Context, hash string) error {
@@ -6745,9 +6754,9 @@ func TestFileSystem_EmptyTrash_AttemptsVersionObjectCleanup(t *testing.T) {
 		return errors.New("delete object failed")
 	}
 
-	deleted, err := fs.EmptyTrash(ctx)
+	result, err := fs.EmptyTrashSelection(ctx, []string{selected[0].ID}, nil)
 	if err == nil {
-		t.Fatal("expected EmptyTrash() to fail when version object cleanup fails")
+		t.Fatal("expected EmptyTrashSelection() to fail when version object cleanup fails")
 	}
 	var emptyWarningErr *TrashDeleteWarningError
 	if !errors.As(err, &emptyWarningErr) {
@@ -6756,8 +6765,8 @@ func TestFileSystem_EmptyTrash_AttemptsVersionObjectCleanup(t *testing.T) {
 	if !strings.Contains(err.Error(), "failed to delete version objects for trash item") {
 		t.Fatalf("expected trash version object cleanup error, got %v", err)
 	}
-	if deleted != 1 {
-		t.Fatalf("expected visible deletion to be counted before object cleanup failure, got %d", deleted)
+	if len(result.DeletedIDs) != 1 {
+		t.Fatalf("expected visible deletion to be counted before object cleanup failure, got %d", len(result.DeletedIDs))
 	}
 
 	for _, version := range versions {
@@ -6872,7 +6881,7 @@ func TestFileSystem_CleanupExpiredTrash_AttemptsVersionObjectCleanup(t *testing.
 	}
 }
 
-func TestFileSystem_EmptyTrash_ContinuesAfterVisibleDeleteWarning(t *testing.T) {
+func TestFileSystem_EmptyTrashSelection_ContinuesAfterVisibleDeleteWarning(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 
@@ -6899,6 +6908,11 @@ func TestFileSystem_EmptyTrash_ContinuesAfterVisibleDeleteWarning(t *testing.T) 
 	if len(versions) == 0 {
 		t.Fatal("expected historical versions for warning scenario")
 	}
+	selected, err := fs.ListTrash(ctx)
+	if err != nil || len(selected) != 2 {
+		t.Fatalf("ListTrash() = %+v, %v; want two items", selected, err)
+	}
+	ids := []string{selected[0].ID, selected[1].ID}
 
 	called := 0
 	fs.deleteVersionObject = func(ctx context.Context, hash string) error {
@@ -6906,16 +6920,16 @@ func TestFileSystem_EmptyTrash_ContinuesAfterVisibleDeleteWarning(t *testing.T) 
 		return errors.New("delete object failed")
 	}
 
-	deleted, err := fs.EmptyTrash(ctx)
+	result, err := fs.EmptyTrashSelection(ctx, ids, nil)
 	if err == nil {
-		t.Fatal("expected EmptyTrash() to return warning when visible delete cleanup fails")
+		t.Fatal("expected EmptyTrashSelection() to return warning when visible delete cleanup fails")
 	}
 	var warningErr *TrashDeleteWarningError
 	if !errors.As(err, &warningErr) {
 		t.Fatalf("expected trash delete warning error, got %v", err)
 	}
-	if deleted != 2 {
-		t.Fatalf("expected warning cleanup to continue deleting remaining items, got %d deletions", deleted)
+	if len(result.DeletedIDs) != 2 {
+		t.Fatalf("expected warning cleanup to continue deleting remaining items, got %d deletions", len(result.DeletedIDs))
 	}
 	if called != len(versions) {
 		t.Fatalf("expected deleteVersionObject to be attempted %d times, got %d", len(versions), called)
@@ -6929,7 +6943,7 @@ func TestFileSystem_EmptyTrash_ContinuesAfterVisibleDeleteWarning(t *testing.T) 
 	}
 }
 
-func TestFileSystem_EmptyTrash_PreservesPartialWarningWhenHardFailureFollows(t *testing.T) {
+func TestFileSystem_EmptyTrashSelection_PreservesPartialWarningWhenHardFailureFollows(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 
@@ -6948,6 +6962,11 @@ func TestFileSystem_EmptyTrash_PreservesPartialWarningWhenHardFailureFollows(t *
 	if err := fs.Delete(ctx, "/empty-trash-mixed-versioned.md"); err != nil {
 		t.Fatalf("Delete(versioned) error: %v", err)
 	}
+	selected, err := fs.ListTrash(ctx)
+	if err != nil || len(selected) != 2 {
+		t.Fatalf("ListTrash() = %+v, %v; want two items", selected, err)
+	}
+	ids := []string{selected[0].ID, selected[1].ID}
 
 	originalSyncManagedStorageDir := syncManagedStorageDir
 	syncFailures := 0
@@ -6971,9 +6990,9 @@ func TestFileSystem_EmptyTrash_PreservesPartialWarningWhenHardFailureFollows(t *
 		return os.RemoveAll(path)
 	}
 
-	deleted, err := fs.EmptyTrash(ctx)
+	result, err := fs.EmptyTrashSelection(ctx, ids, nil)
 	if err == nil {
-		t.Fatal("expected EmptyTrash() to report mixed partial warning")
+		t.Fatal("expected EmptyTrashSelection() to report mixed partial warning")
 	}
 	var warningErr *TrashDeleteWarningError
 	if !errors.As(err, &warningErr) {
@@ -6982,8 +7001,8 @@ func TestFileSystem_EmptyTrash_PreservesPartialWarningWhenHardFailureFollows(t *
 	if !warningErr.Partial() {
 		t.Fatalf("expected trash delete warning error to mark partial failure, got %v", err)
 	}
-	if deleted != 1 {
-		t.Fatalf("expected deleted count 1 when hard failure follows warning, got %d", deleted)
+	if len(result.DeletedIDs) != 1 {
+		t.Fatalf("expected deleted count 1 when hard failure follows warning, got %d", len(result.DeletedIDs))
 	}
 
 	items, listErr := fs.ListTrash(ctx)
@@ -7266,7 +7285,7 @@ func TestFileSystem_DeleteFromTrash_AnchorsContentRemovalAfterTrashRootSwap(t *t
 	}
 }
 
-func TestFileSystem_EmptyTrash_KeepsMetadataWhenContentDeleteFails(t *testing.T) {
+func TestFileSystem_EmptyTrashSelection_KeepsMetadataWhenContentDeleteFails(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 
@@ -7282,17 +7301,22 @@ func TestFileSystem_EmptyTrash_KeepsMetadataWhenContentDeleteFails(t *testing.T)
 	if err := fs.Delete(ctx, "/empty-fail-2.txt"); err != nil {
 		t.Fatalf("Delete() error: %v", err)
 	}
+	selected, err := fs.ListTrash(ctx)
+	if err != nil || len(selected) != 2 {
+		t.Fatalf("ListTrash() = %+v, %v; want two items", selected, err)
+	}
+	ids := []string{selected[0].ID, selected[1].ID}
 
 	fs.removeTrashPath = func(path string) error {
 		return errors.New("trash delete failed")
 	}
 
-	deleted, err := fs.EmptyTrash(ctx)
+	result, err := fs.EmptyTrashSelection(ctx, ids, nil)
 	if err == nil {
-		t.Fatal("Expected EmptyTrash() to fail when trash content deletion fails")
+		t.Fatal("Expected EmptyTrashSelection() to fail when trash content deletion fails")
 	}
-	if deleted != 0 {
-		t.Fatalf("Expected no metadata deletion on failure, got %d", deleted)
+	if len(result.DeletedIDs) != 0 {
+		t.Fatalf("Expected no metadata deletion on failure, got %d", len(result.DeletedIDs))
 	}
 
 	items, listErr := fs.ListTrash(ctx)
@@ -7304,7 +7328,7 @@ func TestFileSystem_EmptyTrash_KeepsMetadataWhenContentDeleteFails(t *testing.T)
 	}
 }
 
-func TestFileSystem_EmptyTrash_RollsBackContentWhenMetadataDeleteFails(t *testing.T) {
+func TestFileSystem_EmptyTrashSelection_RollsBackContentWhenMetadataDeleteFails(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 
@@ -7338,12 +7362,13 @@ func TestFileSystem_EmptyTrash_RollsBackContentWhenMetadataDeleteFails(t *testin
 		return fs.versions.RemoveFromTrash(ctx, id)
 	}
 
-	deleted, err := fs.EmptyTrash(ctx)
+	ids := []string{items[0].ID, items[1].ID}
+	result, err := fs.EmptyTrashSelection(ctx, ids, nil)
 	if err == nil {
-		t.Fatal("Expected EmptyTrash() to fail when trash metadata deletion fails")
+		t.Fatal("Expected EmptyTrashSelection() to fail when trash metadata deletion fails")
 	}
-	if deleted != 1 {
-		t.Fatalf("Expected one trash item to be deleted before failure, got %d", deleted)
+	if len(result.DeletedIDs) != 1 {
+		t.Fatalf("Expected one trash item to be deleted before failure, got %d", len(result.DeletedIDs))
 	}
 
 	remaining, listErr := fs.ListTrash(ctx)
@@ -7413,7 +7438,7 @@ func TestFileSystem_CleanupExpiredTrash_KeepsMetadataWhenContentDeleteFails(t *t
 	}
 }
 
-func TestFileSystem_EmptyTrash_CountsDeletedItemWhenDirectorySyncFailsAfterContentDelete(t *testing.T) {
+func TestFileSystem_EmptyTrashSelection_CountsDeletedItemWhenDirectorySyncFailsAfterContentDelete(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 
@@ -7422,6 +7447,10 @@ func TestFileSystem_EmptyTrash_CountsDeletedItemWhenDirectorySyncFailsAfterConte
 	}
 	if err := fs.Delete(ctx, "/empty-sync-fail.txt"); err != nil {
 		t.Fatalf("Delete() error: %v", err)
+	}
+	selected, err := fs.ListTrash(ctx)
+	if err != nil || len(selected) != 1 {
+		t.Fatalf("ListTrash() = %+v, %v; want one item", selected, err)
 	}
 	if err := os.MkdirAll(filepath.Join(fs.trashRoot, ".deleting"), 0700); err != nil {
 		t.Fatalf("MkdirAll(.deleting) error: %v", err)
@@ -7440,15 +7469,15 @@ func TestFileSystem_EmptyTrash_CountsDeletedItemWhenDirectorySyncFailsAfterConte
 		syncManagedStorageDir = originalSyncManagedStorageDir
 	})
 
-	deleted, err := fs.EmptyTrash(ctx)
+	result, err := fs.EmptyTrashSelection(ctx, []string{selected[0].ID}, nil)
 	if err == nil {
-		t.Fatal("Expected EmptyTrash() to fail when trash delete directory sync fails")
+		t.Fatal("Expected EmptyTrashSelection() to fail when trash delete directory sync fails")
 	}
 	if !strings.Contains(err.Error(), "failed to sync deleted trash content") {
 		t.Fatalf("expected deleted trash sync failure in error, got %v", err)
 	}
-	if deleted != 1 {
-		t.Fatalf("Expected visible deletion to be counted before sync failure, got %d", deleted)
+	if len(result.DeletedIDs) != 1 {
+		t.Fatalf("Expected visible deletion to be counted before sync failure, got %d", len(result.DeletedIDs))
 	}
 
 	remaining, listErr := fs.ListTrash(ctx)

@@ -35,6 +35,7 @@ const (
 	ErrCodeInvalidExpectedDeleteTargetToken = "INVALID_EXPECTED_DELETE_TARGET_TOKEN"
 	ErrCodeDeletePolicyChanged              = "DELETE_POLICY_CHANGED"
 	ErrCodeDeleteTargetChanged              = "DELETE_TARGET_CHANGED"
+	ErrCodeInvalidTrashSelection            = "INVALID_TRASH_SELECTION"
 )
 
 // NewAPIError creates a new API error

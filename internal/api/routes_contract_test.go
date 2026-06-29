@@ -100,7 +100,7 @@ func expectedRESTRouteContracts() []string {
 		"GET /api/v1/stats",
 		"GET /api/v1/thumbnails/*",
 		"GET /api/v1/trash/",
-		"DELETE /api/v1/trash/",
+		"POST /api/v1/trash/empty",
 		"GET /api/v1/trash/{id}",
 		"DELETE /api/v1/trash/{id}",
 		"POST /api/v1/trash/{id}/restore",

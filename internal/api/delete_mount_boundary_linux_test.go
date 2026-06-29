@@ -5,14 +5,12 @@ package api
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -24,7 +22,7 @@ import (
 
 const apiBindMountDeleteHelperEnv = "MNEMONAS_API_BIND_MOUNT_DELETE_HELPER"
 
-func TestServer_DeleteMountBoundaryReturnsConflictAndPreservesPartialTrashResult(t *testing.T) {
+func TestServer_DeleteMountBoundaryReturnsConflictBeforeEmptyTrashMutation(t *testing.T) {
 	if os.Getenv(apiBindMountDeleteHelperEnv) == "1" {
 		runAPIBindMountDeleteHelper(t)
 		return
@@ -40,7 +38,7 @@ func TestServer_DeleteMountBoundaryReturnsConflictAndPreservesPartialTrashResult
 		"--mount",
 		"--propagation", "private",
 		os.Args[0],
-		"-test.run=^TestServer_DeleteMountBoundaryReturnsConflictAndPreservesPartialTrashResult$",
+		"-test.run=^TestServer_DeleteMountBoundaryReturnsConflictBeforeEmptyTrashMutation$",
 		"-test.count=1",
 	)
 	command.Env = append(os.Environ(), apiBindMountDeleteHelperEnv+"=1")
@@ -57,11 +55,11 @@ func TestServer_DeleteMountBoundaryReturnsConflictAndPreservesPartialTrashResult
 
 func runAPIBindMountDeleteHelper(t *testing.T) {
 	t.Run("file delete", testServerRejectsFileDeleteInsideBindMount)
-	t.Run("admin partial empty", func(t *testing.T) {
+	t.Run("admin exact empty", func(t *testing.T) {
 		server, fs, tmpDir := setupTestServer(t)
 		testServerEmptyTrashMountedItem(t, server, fs, tmpDir, "", "")
 	})
-	t.Run("scoped partial empty", func(t *testing.T) {
+	t.Run("scoped exact empty", func(t *testing.T) {
 		server, fs, tmpDir, username, password := setupAuthServer(t)
 		setUserHomeDirForTest(t, server, username, "/tester")
 		setDirectoryAccessRulesForTest(t, server, []config.DirectoryAccessRuleConfig{{
@@ -160,13 +158,20 @@ func testServerEmptyTrashMountedItem(t *testing.T, server *Server, fs *storage.F
 		t.Fatalf("ListTrash() = %+v, %v; want two items", items, err)
 	}
 	var mountedItem *storage.TrashItem
+	var ordinaryItem *storage.TrashItem
 	for _, item := range items {
 		if item.OriginalPath == mountedRoot {
 			mountedItem = item
 		}
+		if item.OriginalPath == ordinaryPath {
+			ordinaryItem = item
+		}
 	}
 	if mountedItem == nil {
 		t.Fatalf("mounted trash item not found in %+v", items)
+	}
+	if ordinaryItem == nil {
+		t.Fatalf("ordinary trash item not found in %+v", items)
 	}
 
 	sourceRoot := t.TempDir()
@@ -191,38 +196,26 @@ func testServerEmptyTrashMountedItem(t *testing.T, server *Server, fs *storage.F
 	}
 	assertAPIBindSource(t, sourceFile)
 
-	request := httptest.NewRequest(http.MethodDelete, "/api/v1/trash/", nil)
+	request := newEmptyTrashSelectionRequest(t, []string{ordinaryItem.ID, mountedItem.ID})
 	if token != "" {
 		request.Header.Set("Authorization", "Bearer "+token)
 	}
 	response := httptest.NewRecorder()
 	server.Router().ServeHTTP(response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("partial empty trash status = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
-	}
-	var payload struct {
-		Data struct {
-			DeletedCount int  `json:"deleted_count"`
-			Partial      bool `json:"partial"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("decode partial empty response: %v", err)
-	}
-	if payload.Data.DeletedCount != 1 || !payload.Data.Partial {
-		t.Fatalf("partial empty response = %+v; want deleted_count=1 partial=true", payload.Data)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("preflight empty trash status = %d, want %d; body=%s", response.Code, http.StatusConflict, response.Body.String())
 	}
 	remaining, err := fs.ListTrash(ctx)
-	if err != nil || len(remaining) != 1 || remaining[0].ID != mountedItem.ID {
-		t.Fatalf("remaining trash items = %+v, %v; want mounted item %s", remaining, err, mountedItem.ID)
+	if err != nil || len(remaining) != 2 {
+		t.Fatalf("remaining trash items = %+v, %v; want both selected items", remaining, err)
 	}
 	assertAPIBindSource(t, sourceFile)
 	entries, total := server.activity.List(10, 0, activity.ActionTrashEmpty, "")
-	if total != 1 || len(entries) != 1 || entries[0].Details["count"] != strconv.Itoa(1) || entries[0].Details["partial"] != "true" {
-		t.Fatalf("partial trash activity total=%d entries=%+v", total, entries)
+	if total != 0 || len(entries) != 0 {
+		t.Fatalf("preflight trash activity total=%d entries=%+v, want none", total, entries)
 	}
 
-	secondRequest := httptest.NewRequest(http.MethodDelete, "/api/v1/trash/", nil)
+	secondRequest := newEmptyTrashSelectionRequest(t, []string{mountedItem.ID})
 	if token != "" {
 		secondRequest.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -231,8 +224,8 @@ func testServerEmptyTrashMountedItem(t *testing.T, server *Server, fs *storage.F
 	if secondResponse.Code != http.StatusConflict {
 		t.Fatalf("zero-delete mounted trash status = %d, want %d; body=%s", secondResponse.Code, http.StatusConflict, secondResponse.Body.String())
 	}
-	if _, total := server.activity.List(10, 0, activity.ActionTrashEmpty, ""); total != 1 {
-		t.Fatalf("trash empty activities after zero-delete conflict = %d, want 1", total)
+	if _, total := server.activity.List(10, 0, activity.ActionTrashEmpty, ""); total != 0 {
+		t.Fatalf("trash empty activities after zero-delete conflict = %d, want 0", total)
 	}
 
 	itemRequest := httptest.NewRequest(http.MethodDelete, "/api/v1/trash/"+mountedItem.ID, nil)

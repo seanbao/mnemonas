@@ -63,6 +63,13 @@ func TestServerEmptyTrashReturnsAccessDeniedForInvalidUserContext(t *testing.T) 
 	if err := fs.Delete(t.Context(), "/deleted.txt"); err != nil {
 		t.Fatalf("Delete(/deleted.txt) error: %v", err)
 	}
+	items, err := fs.ListTrash(t.Context())
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("trash item count = %d, want 1", len(items))
+	}
 
 	tests := []struct {
 		name string
@@ -83,7 +90,8 @@ func TestServerEmptyTrashReturnsAccessDeniedForInvalidUserContext(t *testing.T) 
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodDelete, "/api/v1/trash/", nil)
+			body := `{"ids":["` + items[0].ID + `"]}`
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/trash/empty", strings.NewReader(body))
 			if tt.user != nil {
 				req = req.WithContext(contextWithAPIUser(tt.user))
 			}

@@ -45,12 +45,19 @@ var (
 	ErrDeletePolicyChanged       = errors.New("delete policy changed")
 	ErrDeleteTargetChanged       = errors.New("delete target changed")
 	ErrInvalidDeleteIntent       = errors.New("invalid delete intent")
+	ErrInvalidTrashSelection     = errors.New("invalid trash selection")
 	ErrDeleteIdentityUnavailable = errors.New("delete identity verification unavailable")
 	errStoragePathSymlink        = errors.New("storage path contains symlink")
 )
 
 // MaxDeleteIntentTargets bounds one atomic delete-intent snapshot request.
 const MaxDeleteIntentTargets = 1000
+
+// MaxTrashSelectionIDs bounds one exact trash deletion request.
+const MaxTrashSelectionIDs = 1000
+
+// MaxTrashSelectionIDLength bounds one immutable trash identifier in bytes.
+const MaxTrashSelectionIDLength = 128
 
 // DeleteMode identifies how a live path is deleted.
 type DeleteMode string
@@ -267,6 +274,34 @@ type TrashItem struct {
 	IsDir        bool      `json:"is_dir"`
 	HadVersions  bool      `json:"had_versions"`
 	RestoreData  []byte    `json:"-"`
+}
+
+// TrashSelectionResult partitions every requested trash ID by its outcome.
+type TrashSelectionResult struct {
+	DeletedIDs   []string
+	RemainingIDs []string
+	SkippedIDs   []string
+}
+
+// TrashRootAuthorizationError reports that authorization failed for a trash
+// item's root restore path rather than one of its descendants.
+type TrashRootAuthorizationError struct {
+	Path string
+	err  error
+}
+
+func (e *TrashRootAuthorizationError) Error() string {
+	if e == nil || e.err == nil {
+		return "trash root authorization failed"
+	}
+	return e.err.Error()
+}
+
+func (e *TrashRootAuthorizationError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
 }
 
 // DiskStats describes capacity for the filesystem hosting the workspace.
@@ -2179,8 +2214,14 @@ func (fs *FileSystem) WalkTrashItemRestorePaths(ctx context.Context, id string, 
 		}
 		return err
 	}
+	return fs.walkTrashItemRestorePathsLocked(ctx, item, fn)
+}
 
-	contentRel := filepath.Join(id, "content")
+func (fs *FileSystem) walkTrashItemRestorePathsLocked(ctx context.Context, item *versionstore.TrashItem, fn func(restoredPath string, isDir bool, size int64) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	contentRel := filepath.Join(item.ID, "content")
 	info, err := fs.trashRootHandle.Lstat(contentRel)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -2611,48 +2652,130 @@ func (fs *FileSystem) DeleteFromTrash(ctx context.Context, id string) error {
 	return err
 }
 
-// EmptyTrash permanently deletes all items from trash
-func (fs *FileSystem) EmptyTrash(ctx context.Context) (int, error) {
+// EmptyTrashSelection permanently deletes exactly the requested trash items.
+func (fs *FileSystem) EmptyTrashSelection(ctx context.Context, ids []string, authorize DeletePathAuthorizer) (TrashSelectionResult, error) {
 	release := fs.beginMutation()
 	defer release()
-	if err := ctx.Err(); err != nil {
-		return 0, err
+
+	var result TrashSelectionResult
+	if len(ids) == 0 || len(ids) > MaxTrashSelectionIDs {
+		return result, ErrInvalidTrashSelection
+	}
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if !validTrashSelectionID(id) {
+			return result, ErrInvalidTrashSelection
+		}
+		if _, exists := seen[id]; exists {
+			return result, ErrInvalidTrashSelection
+		}
+		seen[id] = struct{}{}
 	}
 
-	// Get all trash items
 	items, err := fs.versions.ListTrash(ctx)
 	if err != nil {
-		return 0, err
+		return result, err
+	}
+	itemsByID := make(map[string]*versionstore.TrashItem, len(items))
+	for i := range items {
+		itemsByID[items[i].ID] = &items[i]
 	}
 
-	deleted := 0
-	var warningErr error
-	for _, item := range items {
-		if err := ctx.Err(); err != nil {
-			if warningErr != nil {
-				return deleted, wrapTrashDeletePartialWarning(errors.Join(warningErr, err))
+	partitionUndeleted := func() TrashSelectionResult {
+		partition := TrashSelectionResult{}
+		for _, id := range ids {
+			if _, exists := itemsByID[id]; exists {
+				partition.RemainingIDs = append(partition.RemainingIDs, id)
+			} else {
+				partition.SkippedIDs = append(partition.SkippedIDs, id)
 			}
-			return deleted, err
 		}
-		visibleDeleted, err := fs.permanentlyDeleteTrashItem(ctx, &item)
+		return partition
+	}
+
+	for _, id := range ids {
+		item, exists := itemsByID[id]
+		if !exists {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return partitionUndeleted(), err
+		}
+		rootCallback := true
+		if err := fs.walkTrashItemRestorePathsLocked(ctx, item, func(restoredPath string, _ bool, _ int64) error {
+			if authorize == nil {
+				return nil
+			}
+			err := authorize(restoredPath)
+			if rootCallback {
+				rootCallback = false
+				if err != nil {
+					return &TrashRootAuthorizationError{Path: restoredPath, err: err}
+				}
+			}
+			return err
+		}); err != nil {
+			return partitionUndeleted(), err
+		}
+	}
+
+	var warningErr error
+	var hardFailure error
+	for _, id := range ids {
+		item, exists := itemsByID[id]
+		if !exists {
+			result.SkippedIDs = append(result.SkippedIDs, id)
+			continue
+		}
+		if hardFailure != nil {
+			result.RemainingIDs = append(result.RemainingIDs, id)
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			hardFailure = err
+			result.RemainingIDs = append(result.RemainingIDs, id)
+			continue
+		}
+		visibleDeleted, err := fs.permanentlyDeleteTrashItem(ctx, item)
 		if err != nil {
 			if visibleDeleted {
-				deleted++
+				result.DeletedIDs = append(result.DeletedIDs, id)
 				warningErr = errors.Join(warningErr, err)
 				continue
 			}
-			if warningErr != nil {
-				return deleted, wrapTrashDeletePartialWarning(errors.Join(warningErr, err))
-			}
-			return deleted, err
+			hardFailure = err
+			result.RemainingIDs = append(result.RemainingIDs, id)
+			continue
 		}
-		deleted++
+		result.DeletedIDs = append(result.DeletedIDs, id)
 	}
 
-	if warningErr != nil {
-		return deleted, wrapTrashDeleteWarning(warningErr)
+	if hardFailure != nil {
+		if warningErr != nil {
+			return result, wrapTrashDeletePartialWarning(errors.Join(warningErr, hardFailure))
+		}
+		return result, hardFailure
 	}
-	return deleted, nil
+	if warningErr != nil {
+		return result, wrapTrashDeleteWarning(warningErr)
+	}
+	return result, nil
+}
+
+func validTrashSelectionID(id string) bool {
+	if len(id) == 0 || len(id) > MaxTrashSelectionIDLength {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		character := id[i]
+		if (character < 'a' || character > 'z') &&
+			(character < 'A' || character > 'Z') &&
+			(character < '0' || character > '9') &&
+			character != '_' && character != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 // CleanupExpiredTrash removes expired trash items

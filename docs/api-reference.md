@@ -982,15 +982,47 @@ curl -X POST \
 | `GET` | `/api/v1/trash/{id}` | 获取回收站项目详情 |
 | `POST` | `/api/v1/trash/{id}/restore` | 恢复回收站项目 |
 | `DELETE` | `/api/v1/trash/{id}` | 永久删除单个项目 |
-| `DELETE` | `/api/v1/trash` | 清空回收站 |
+| `POST` | `/api/v1/trash/empty` | 永久删除已确认的回收站项目 |
 
 回收站可见性遵循当前用户配置的 `home_dir` 边界。
 
-列表中的每个项目包含持久化的 `expiresAt`。该 RFC 3339 时间在项目进入回收站时确定，之后修改 `retentionDays` 不会改写已有项目的到期时间。列表级 `retentionDays` 只表示新删除项目的当前策略；`trashAutoCleanupEnabled` 表示后台保留清理周期是否启用。容量上限仍可能使较早项目在 `expiresAt` 前被永久清理。
+列表中的每个项目包含生命周期内保持不变的随机 `id`，以及持久化的 `expiresAt`。该 RFC 3339 时间在项目进入回收站时确定，之后修改 `retentionDays` 不会改写已有项目的到期时间。列表级 `retentionDays` 只表示新删除项目的当前策略；`trashAutoCleanupEnabled` 表示后台保留清理周期是否启用。容量上限仍可能使较早项目在 `expiresAt` 前被永久清理。
 
-启用保留清理周期时，同一次周期任务会清理过期文件版本和已到达 `expiresAt` 的回收站项目。周期停用时，项目可以通过永久删除或清空回收站端点显式清理。
+启用保留清理周期时，同一次周期任务会清理过期文件版本和已到达 `expiresAt` 的回收站项目。周期停用时，项目可以通过永久删除端点显式清理。
 
-永久删除回收站项目会在暂存和递归清理前检查回收站根目录下的嵌套挂载。`DELETE /api/v1/trash/{id}` 遇到嵌套挂载或无法验证挂载表时返回 `409 Conflict`，且保留项目内容与元数据。清空回收站时，如果同一请求已删除前序项目，则现有部分成功响应契约仍然适用。
+永久删除回收站项目会在暂存和递归清理前检查回收站根目录下的嵌套挂载。`DELETE /api/v1/trash/{id}` 遇到嵌套挂载或无法验证挂载表时返回 `409 Conflict`，且保留项目内容与元数据。
+
+`POST /api/v1/trash/empty` 只永久删除请求中明确确认的项目。请求体是仅包含 `ids` 的 JSON 对象：
+
+```json
+{
+  "ids": ["7d29d7827f68f1a3", "4fdd157f624d892b"]
+}
+```
+
+`ids` 必须包含 1 至 1000 个互不重复的字符串。每个 ID 的 UTF-8 长度必须为 1 至 128 字节，且只能包含 ASCII 字母、数字、`-` 和 `_`。请求体超过 JSON 大小限制时返回 `413 Payload Too Large` 和 `PAYLOAD_TOO_LARGE`。未知字段、尾随 JSON、空数组、重复 ID 或格式不合要求的 ID 返回 `400 Bad Request`，错误代码为 `INVALID_TRASH_SELECTION`，且不会删除项目。
+
+服务端在同一存储写锁内载入当前回收站，并在任何删除发生前，对所有仍存在的已选项目按其恢复逻辑路径完成访问规则预检。任一预检失败都会终止请求，不删除任何已选项目。顶层路径对当前账户不可见时返回 `404 Not Found`；顶层可写但后代被访问规则拒绝时返回 `403 Forbidden`。预检通过后，服务端按请求顺序处理已选 ID；请求发出后新增的项目和所有未选择项目均保持不变，已经不存在的已选 ID 归入 `skipped`。
+
+响应中的 `deleted`、`remaining` 和 `skipped` 按原请求顺序构成输入 ID 的完整、互不重叠分区，三个对应的 `*_count` 字段分别等于数组长度。执行阶段出现硬失败时，尚未处理且仍存在的项目归入 `remaining`；响应仍描述已经完成的删除。仅当 `remaining` 或 `skipped` 非空时，`partial` 才为 `true`。`warning` 始终为布尔值，只表示已提交删除后的物理清理未完全结束，不用于表示选择缺失或执行失败。
+
+```json
+{
+  "success": true,
+  "data": {
+    "deleted": ["7d29d7827f68f1a3"],
+    "remaining": ["4fdd157f624d892b"],
+    "skipped": [],
+    "deleted_count": 1,
+    "remaining_count": 1,
+    "skipped_count": 0,
+    "partial": true,
+    "warning": false
+  },
+  "message": "trash selection emptied partially",
+  "timestamp": "2024-01-15T10:00:00Z"
+}
+```
 
 `POST /api/v1/trash/{id}/restore` 默认恢复到原路径。
 

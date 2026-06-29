@@ -16496,52 +16496,247 @@ func TestServer_DeleteFromTrash_LogsOriginalPath(t *testing.T) {
 	}
 }
 
-func TestServer_Trash_Empty(t *testing.T) {
-	server, fs, _ := setupTestServer(t)
-	ctx := context.Background()
+type emptyTrashSelectionTestPayload struct {
+	Success bool `json:"success"`
+	Data    struct {
+		Deleted        []string `json:"deleted"`
+		Remaining      []string `json:"remaining"`
+		Skipped        []string `json:"skipped"`
+		DeletedCount   int      `json:"deleted_count"`
+		RemainingCount int      `json:"remaining_count"`
+		SkippedCount   int      `json:"skipped_count"`
+		Partial        bool     `json:"partial"`
+		Warning        bool     `json:"warning"`
+	} `json:"data"`
+	Message string `json:"message"`
+}
 
-	// Create and delete multiple files
-	fs.Mkdir(ctx, "/trash-empty-test")
-	fs.WriteFile(ctx, "/trash-empty-test/file1.txt", bytes.NewReader([]byte("1")))
-	fs.WriteFile(ctx, "/trash-empty-test/file2.txt", bytes.NewReader([]byte("2")))
-	fs.Delete(ctx, "/trash-empty-test/file1.txt")
-	fs.Delete(ctx, "/trash-empty-test/file2.txt")
+func createTrashSelectionItems(t *testing.T, fs *storage.FileSystem, paths ...string) map[string]string {
+	t.Helper()
+	for _, filePath := range paths {
+		if err := fs.WriteFile(t.Context(), filePath, strings.NewReader("content:"+filePath)); err != nil {
+			t.Fatalf("WriteFile(%s) error: %v", filePath, err)
+		}
+		if err := fs.Delete(t.Context(), filePath); err != nil {
+			t.Fatalf("Delete(%s) error: %v", filePath, err)
+		}
+	}
+	items, err := fs.ListTrash(t.Context())
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	ids := make(map[string]string, len(items))
+	for _, item := range items {
+		ids[item.OriginalPath] = item.ID
+	}
+	for _, filePath := range paths {
+		if ids[filePath] == "" {
+			t.Fatalf("missing trash ID for %s: %+v", filePath, items)
+		}
+	}
+	return ids
+}
 
-	req := httptest.NewRequest("DELETE", "/api/v1/trash/", nil)
-	w := httptest.NewRecorder()
+func newEmptyTrashSelectionRequest(t *testing.T, ids []string) *http.Request {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"ids": ids})
+	if err != nil {
+		t.Fatalf("Marshal(empty trash selection) error: %v", err)
+	}
+	return httptest.NewRequest(http.MethodPost, "/api/v1/trash/empty", bytes.NewReader(body))
+}
 
-	server.Router().ServeHTTP(w, req)
+func decodeEmptyTrashSelectionPayload(t *testing.T, w *httptest.ResponseRecorder) emptyTrashSelectionTestPayload {
+	t.Helper()
+	var payload emptyTrashSelectionTestPayload
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode empty trash selection response: %v; body=%s", err, w.Body.String())
+	}
+	return payload
+}
 
-	if w.Code != http.StatusOK {
-		t.Errorf("EmptyTrash status = %d, want %d", w.Code, http.StatusOK)
+func TestServer_Trash_EmptySelectionRejectsInvalidRequests(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	tooManyIDs := make([]string, 1001)
+	for index := range tooManyIDs {
+		tooManyIDs[index] = fmt.Sprintf("id-%d", index)
+	}
+	tooManyBody, err := json.Marshal(map[string]any{"ids": tooManyIDs})
+	if err != nil {
+		t.Fatalf("Marshal(too many IDs) error: %v", err)
 	}
 
-	body := w.Body.String()
-	if !strings.Contains(body, "deleted_count") {
-		t.Error("Response should contain 'deleted_count'")
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "empty body", body: ""},
+		{name: "missing ids", body: `{}`},
+		{name: "null ids", body: `{"ids":null}`},
+		{name: "empty ids", body: `{"ids":[]}`},
+		{name: "duplicate id", body: `{"ids":["same","same"]}`},
+		{name: "empty id", body: `{"ids":[""]}`},
+		{name: "slash", body: `{"ids":["bad/id"]}`},
+		{name: "space", body: `{"ids":["bad id"]}`},
+		{name: "non ascii", body: `{"ids":["回收站"]}`},
+		{name: "too long", body: `{"ids":["` + strings.Repeat("a", 129) + `"]}`},
+		{name: "too many", body: string(tooManyBody)},
+		{name: "unknown field", body: `{"ids":["valid"],"extra":true}`},
+		{name: "trailing json", body: `{"ids":["valid"]}{}`},
+		{name: "wrong type", body: `{"ids":"valid"}`},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/trash/empty", strings.NewReader(testCase.body))
+			w := httptest.NewRecorder()
+			server.Router().ServeHTTP(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusBadRequest, w.Body.String())
+			}
+			var apiErr APIError
+			if err := json.Unmarshal(w.Body.Bytes(), &apiErr); err != nil {
+				t.Fatalf("decode invalid selection error: %v", err)
+			}
+			if apiErr.Code != ErrCodeInvalidTrashSelection {
+				t.Fatalf("error code = %q, want %q", apiErr.Code, ErrCodeInvalidTrashSelection)
+			}
+		})
 	}
 }
 
-func TestServer_Trash_EmptyPartialSuccessReturnsDeletedCount(t *testing.T) {
+func TestServer_Trash_EmptySelectionPrioritizesFilesystemReadiness(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	server.fs = nil
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/trash/empty", strings.NewReader(`{"ids":`))
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusServiceUnavailable, w.Body.String())
+	}
+	var apiErr APIError
+	if err := json.Unmarshal(w.Body.Bytes(), &apiErr); err != nil {
+		t.Fatalf("decode service unavailable error: %v", err)
+	}
+	if apiErr.Code != ErrCodeServiceUnavail {
+		t.Fatalf("error code = %q, want %q", apiErr.Code, ErrCodeServiceUnavail)
+	}
+}
+
+func TestServer_Trash_EmptySelectionRejectsOversizedRequestBody(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/trash/empty",
+		io.LimitReader(repeatingReader{}, DefaultJSONRequestBodyLimit+1),
+	)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusRequestEntityTooLarge, w.Body.String())
+	}
+	var apiErr APIError
+	if err := json.Unmarshal(w.Body.Bytes(), &apiErr); err != nil {
+		t.Fatalf("decode payload-too-large error: %v", err)
+	}
+	if apiErr.Code != ErrCodePayloadTooLarge {
+		t.Fatalf("error code = %q, want %q", apiErr.Code, ErrCodePayloadTooLarge)
+	}
+}
+
+func TestServer_Trash_LegacyEmptyDeleteRouteIsUnavailable(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
-	ctx := context.Background()
+	ids := createTrashSelectionItems(t, fs, "/legacy-empty-guard.txt")
+	for _, requestPath := range []string{"/api/v1/trash/", "/api/v1/trash"} {
+		t.Run(requestPath, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodDelete, requestPath, nil)
+			w := httptest.NewRecorder()
+			server.Router().ServeHTTP(w, req)
+			if w.Code != http.StatusNotFound && w.Code != http.StatusMethodNotAllowed {
+				t.Fatalf("legacy empty-trash status = %d, want 404 or 405; body=%s", w.Code, w.Body.String())
+			}
+			items, err := fs.ListTrash(t.Context())
+			if err != nil {
+				t.Fatalf("ListTrash() error: %v", err)
+			}
+			if len(items) != 1 || items[0].ID != ids["/legacy-empty-guard.txt"] {
+				t.Fatalf("legacy route changed trash contents: %+v", items)
+			}
+		})
+	}
+	entries, total := server.activity.List(10, 0, activity.ActionTrashEmpty, "")
+	if total != 0 || len(entries) != 0 {
+		t.Fatalf("legacy route activity total=%d entries=%d, want zero", total, len(entries))
+	}
+}
 
-	if err := fs.Mkdir(ctx, "/trash-empty-partial"); err != nil {
-		t.Fatalf("Mkdir() error: %v", err)
+func TestServer_Trash_EmptySelectionReturnsOrderedCompletePartition(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ids := createTrashSelectionItems(t, fs, "/selected-a.txt", "/unselected.txt", "/selected-b.txt")
+	requestIDs := []string{ids["/selected-b.txt"], "missing-id", ids["/selected-a.txt"]}
+	req := newEmptyTrashSelectionRequest(t, requestIDs)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
 	}
-	if err := fs.WriteFile(ctx, "/trash-empty-partial/file1.txt", bytes.NewReader([]byte("1"))); err != nil {
-		t.Fatalf("WriteFile(file1) error: %v", err)
+	payload := decodeEmptyTrashSelectionPayload(t, w)
+	if !payload.Success {
+		t.Fatalf("expected success response: %s", w.Body.String())
 	}
-	if err := fs.WriteFile(ctx, "/trash-empty-partial/file2.txt", bytes.NewReader([]byte("2"))); err != nil {
-		t.Fatalf("WriteFile(file2) error: %v", err)
+	if want := []string{ids["/selected-b.txt"], ids["/selected-a.txt"]}; !reflect.DeepEqual(payload.Data.Deleted, want) {
+		t.Fatalf("deleted = %v, want %v", payload.Data.Deleted, want)
 	}
-	if err := fs.Delete(ctx, "/trash-empty-partial/file1.txt"); err != nil {
-		t.Fatalf("Delete(file1) error: %v", err)
+	if len(payload.Data.Remaining) != 0 {
+		t.Fatalf("remaining = %v, want empty", payload.Data.Remaining)
 	}
-	if err := fs.Delete(ctx, "/trash-empty-partial/file2.txt"); err != nil {
-		t.Fatalf("Delete(file2) error: %v", err)
+	if want := []string{"missing-id"}; !reflect.DeepEqual(payload.Data.Skipped, want) {
+		t.Fatalf("skipped = %v, want %v", payload.Data.Skipped, want)
+	}
+	if !payload.Data.Partial || payload.Data.Warning {
+		t.Fatalf("partial/warning = %t/%t, want true/false", payload.Data.Partial, payload.Data.Warning)
+	}
+	if payload.Data.DeletedCount != len(payload.Data.Deleted) || payload.Data.RemainingCount != len(payload.Data.Remaining) || payload.Data.SkippedCount != len(payload.Data.Skipped) {
+		t.Fatalf("response counts do not match arrays: %+v", payload.Data)
 	}
 
+	var envelope struct {
+		Data map[string]json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode response fields: %v", err)
+	}
+	wantKeys := []string{"deleted", "deleted_count", "partial", "remaining", "remaining_count", "skipped", "skipped_count", "warning"}
+	gotKeys := make([]string, 0, len(envelope.Data))
+	for key := range envelope.Data {
+		gotKeys = append(gotKeys, key)
+	}
+	slices.Sort(gotKeys)
+	if !reflect.DeepEqual(gotKeys, wantKeys) {
+		t.Fatalf("response data keys = %v, want %v", gotKeys, wantKeys)
+	}
+
+	items, err := fs.ListTrash(t.Context())
+	if err != nil {
+		t.Fatalf("ListTrash() after selection error: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != ids["/unselected.txt"] {
+		t.Fatalf("remaining trash items = %+v, want only unselected ID %q", items, ids["/unselected.txt"])
+	}
+	entries, total := server.activity.List(10, 0, activity.ActionTrashEmpty, "")
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("trash-empty activity total=%d entries=%d, want 1", total, len(entries))
+	}
+	if details := entries[0].Details; details["requested_count"] != "3" || details["count"] != "2" || details["remaining"] != "0" || details["skipped"] != "1" || details["partial"] != "true" || details["cleanup_warning"] != "false" {
+		t.Fatalf("trash-empty activity details = %+v", details)
+	}
+}
+
+func TestServer_Trash_EmptySelectionReturnsPartialPartitionOnExecutionFailure(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ids := createTrashSelectionItems(t, fs, "/partial-a.txt", "/partial-b.txt")
 	deleteCalls := 0
 	setStorageHook(t, fs, "removeTrashPath", func(path string) error {
 		deleteCalls++
@@ -16550,219 +16745,178 @@ func TestServer_Trash_EmptyPartialSuccessReturnsDeletedCount(t *testing.T) {
 		}
 		return os.RemoveAll(path)
 	})
+	var logOutput bytes.Buffer
+	server.logger = zerolog.New(&logOutput)
 
-	req := httptest.NewRequest("DELETE", "/api/v1/trash/", nil)
+	requestIDs := []string{ids["/partial-a.txt"], ids["/partial-b.txt"]}
+	req := newEmptyTrashSelectionRequest(t, requestIDs)
 	w := httptest.NewRecorder()
-
 	server.Router().ServeHTTP(w, req)
-
 	if w.Code != http.StatusOK {
-		t.Fatalf("EmptyTrash partial status = %d, want %d", w.Code, http.StatusOK)
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
 	}
-
-	var payload struct {
-		Success bool `json:"success"`
-		Data    struct {
-			DeletedCount int  `json:"deleted_count"`
-			Partial      bool `json:"partial"`
-		} `json:"data"`
-		Message string `json:"message"`
+	payload := decodeEmptyTrashSelectionPayload(t, w)
+	if want := []string{requestIDs[0]}; !reflect.DeepEqual(payload.Data.Deleted, want) {
+		t.Fatalf("deleted = %v, want %v", payload.Data.Deleted, want)
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("failed to parse response JSON: %v", err)
+	if want := []string{requestIDs[1]}; !reflect.DeepEqual(payload.Data.Remaining, want) {
+		t.Fatalf("remaining = %v, want %v", payload.Data.Remaining, want)
 	}
-	if !payload.Success {
-		t.Fatal("expected success response for partial trash empty")
+	if len(payload.Data.Skipped) != 0 || !payload.Data.Partial || payload.Data.Warning {
+		t.Fatalf("unexpected partial response: %+v", payload.Data)
 	}
-	if payload.Data.DeletedCount != 1 {
-		t.Fatalf("expected deleted_count 1, got %d", payload.Data.DeletedCount)
+	if payload.Data.DeletedCount != len(payload.Data.Deleted) || payload.Data.RemainingCount != len(payload.Data.Remaining) || payload.Data.SkippedCount != len(payload.Data.Skipped) {
+		t.Fatalf("response counts do not match arrays: %+v", payload.Data)
 	}
-	if !payload.Data.Partial {
-		t.Fatal("expected partial=true in response")
+	if !strings.Contains(logOutput.String(), "trash delete failed") {
+		t.Fatalf("execution failure was not logged: %s", logOutput.String())
 	}
-	if payload.Message != "trash emptied partially" {
-		t.Fatalf("expected partial message, got %q", payload.Message)
+	entries, total := server.activity.List(10, 0, activity.ActionTrashEmpty, "")
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("trash-empty activity total=%d entries=%d, want 1", total, len(entries))
 	}
-
-	items, err := fs.ListTrash(ctx)
-	if err != nil {
-		t.Fatalf("ListTrash() after partial empty error: %v", err)
-	}
-	if len(items) != 1 {
-		t.Fatalf("expected one trash item to remain after partial empty, got %d", len(items))
+	if details := entries[0].Details; details["requested_count"] != "2" || details["count"] != "1" || details["remaining"] != "1" || details["skipped"] != "0" || details["partial"] != "true" || details["cleanup_warning"] != "false" {
+		t.Fatalf("trash-empty activity details = %+v", details)
 	}
 }
 
-func TestServer_Trash_EmptyReturnsWarningWhenCleanupFailsAfterVisibleDelete(t *testing.T) {
+func TestServer_Trash_EmptySelectionReturnsErrorWhenExecutionDeletesNothing(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
-	ctx := context.Background()
-	historicalContent := uniqueVersionTestContent(t, "trash-empty-v1")
-	currentContent := uniqueVersionTestContent(t, "trash-empty-v2")
+	ids := createTrashSelectionItems(t, fs, "/failed-a.txt", "/failed-b.txt")
+	setStorageHook(t, fs, "removeTrashPath", func(string) error {
+		return errors.New("trash delete failed before mutation")
+	})
 
-	if err := fs.WriteFile(ctx, "/trash-empty-warning-versioned.txt", bytes.NewReader(historicalContent)); err != nil {
-		t.Fatalf("WriteFile(versioned v1) error: %v", err)
-	}
-	if err := fs.WriteFile(ctx, "/trash-empty-warning-versioned.txt", bytes.NewReader(currentContent)); err != nil {
-		t.Fatalf("WriteFile(versioned v2) error: %v", err)
-	}
-	if err := fs.WriteFile(ctx, "/trash-empty-warning-plain.txt", bytes.NewReader([]byte("plain"))); err != nil {
-		t.Fatalf("WriteFile(plain) error: %v", err)
-	}
-	if err := fs.Delete(ctx, "/trash-empty-warning-versioned.txt"); err != nil {
-		t.Fatalf("Delete(versioned) error: %v", err)
-	}
-	if err := fs.Delete(ctx, "/trash-empty-warning-plain.txt"); err != nil {
-		t.Fatalf("Delete(plain) error: %v", err)
-	}
+	requestIDs := []string{ids["/failed-a.txt"], ids["/failed-b.txt"]}
+	req := newEmptyTrashSelectionRequest(t, requestIDs)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
 
-	setStorageHook(t, fs, "deleteVersionObject", func(ctx context.Context, hash string) error {
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusInternalServerError, w.Body.String())
+	}
+	items, err := fs.ListTrash(t.Context())
+	if err != nil {
+		t.Fatalf("ListTrash() after failed selection error: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("failed selection deleted trash items: %+v", items)
+	}
+	entries, total := server.activity.List(10, 0, activity.ActionTrashEmpty, "")
+	if total != 0 || len(entries) != 0 {
+		t.Fatalf("failed selection activity total=%d entries=%d, want zero", total, len(entries))
+	}
+}
+
+func TestServer_Trash_EmptySelectionReturnsCleanupWarning(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	historicalContent := uniqueVersionTestContent(t, "trash-selection-warning-v1")
+	currentContent := uniqueVersionTestContent(t, "trash-selection-warning-v2")
+	if err := fs.WriteFile(t.Context(), "/selection-warning.txt", bytes.NewReader(historicalContent)); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(t.Context(), "/selection-warning.txt", bytes.NewReader(currentContent)); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+	if err := fs.Delete(t.Context(), "/selection-warning.txt"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+	items, err := fs.ListTrash(t.Context())
+	if err != nil || len(items) != 1 {
+		t.Fatalf("ListTrash() = %+v, %v; want one item", items, err)
+	}
+	setStorageHook(t, fs, "deleteVersionObject", func(context.Context, string) error {
 		return errors.New("delete object failed")
 	})
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/trash/", nil)
+	req := newEmptyTrashSelectionRequest(t, []string{items[0].ID})
 	w := httptest.NewRecorder()
-
 	server.Router().ServeHTTP(w, req)
-
 	if w.Code != http.StatusOK {
-		t.Fatalf("EmptyTrash warning status = %d, want %d, body: %s", w.Code, http.StatusOK, w.Body.String())
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
 	}
-	warningValues := w.Header().Values("Warning")
-	if len(warningValues) == 0 || warningValues[0] != trashDeleteCleanupWarningHeader {
-		t.Fatalf("warning headers = %v, want first value %q", warningValues, trashDeleteCleanupWarningHeader)
+	if got := w.Header().Get("Warning"); got != trashDeleteCleanupWarningHeader {
+		t.Fatalf("Warning = %q, want %q", got, trashDeleteCleanupWarningHeader)
 	}
-
-	var payload struct {
-		Success bool `json:"success"`
-		Data    struct {
-			DeletedCount int  `json:"deleted_count"`
-			Partial      bool `json:"partial"`
-			Warning      bool `json:"warning"`
-		} `json:"data"`
-		Message string `json:"message"`
+	payload := decodeEmptyTrashSelectionPayload(t, w)
+	if want := []string{items[0].ID}; !reflect.DeepEqual(payload.Data.Deleted, want) {
+		t.Fatalf("deleted = %v, want %v", payload.Data.Deleted, want)
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("failed to parse response JSON: %v", err)
+	if len(payload.Data.Remaining) != 0 || len(payload.Data.Skipped) != 0 || payload.Data.Partial || !payload.Data.Warning {
+		t.Fatalf("unexpected warning response: %+v", payload.Data)
 	}
-	if !payload.Success {
-		t.Fatal("expected success response for warning trash empty")
+	if payload.Data.DeletedCount != len(payload.Data.Deleted) || payload.Data.RemainingCount != len(payload.Data.Remaining) || payload.Data.SkippedCount != len(payload.Data.Skipped) {
+		t.Fatalf("response counts do not match arrays: %+v", payload.Data)
 	}
-	if payload.Data.DeletedCount != 2 {
-		t.Fatalf("expected deleted_count 2, got %d", payload.Data.DeletedCount)
+	entries, total := server.activity.List(10, 0, activity.ActionTrashEmpty, "")
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("trash-empty activity total=%d entries=%d, want 1", total, len(entries))
 	}
-	if payload.Data.Partial {
-		t.Fatal("expected partial=false when all trash items were removed")
-	}
-	if !payload.Data.Warning {
-		t.Fatal("expected warning=true when cleanup warning occurs")
-	}
-	if payload.Message != "trash emptied with cleanup warning" {
-		t.Fatalf("unexpected message %q", payload.Message)
-	}
-
-	items, err := fs.ListTrash(ctx)
-	if err != nil {
-		t.Fatalf("ListTrash() after warning empty error: %v", err)
-	}
-	if len(items) != 0 {
-		t.Fatalf("expected all trash items removed despite cleanup warning, got %d", len(items))
+	if details := entries[0].Details; details["requested_count"] != "1" || details["count"] != "1" || details["remaining"] != "0" || details["skipped"] != "0" || details["partial"] != "false" || details["cleanup_warning"] != "true" {
+		t.Fatalf("trash-empty activity details = %+v", details)
 	}
 }
 
-func TestServer_Trash_EmptyPartialSuccessPreservesCleanupWarning(t *testing.T) {
+func TestServer_Trash_EmptySelectionPreservesCleanupWarningOnPartialFailure(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
-	ctx := context.Background()
-
-	if err := fs.WriteFile(ctx, "/trash-empty-mixed-a.txt", bytes.NewReader([]byte("a-v1"))); err != nil {
-		t.Fatalf("WriteFile(mixed a v1) error: %v", err)
+	paths := []string{"/selection-mixed-a.txt", "/selection-mixed-b.txt"}
+	for _, filePath := range paths {
+		if err := fs.WriteFile(t.Context(), filePath, strings.NewReader(filePath+":v1")); err != nil {
+			t.Fatalf("WriteFile(%s v1) error: %v", filePath, err)
+		}
+		if err := fs.WriteFile(t.Context(), filePath, strings.NewReader(filePath+":v2")); err != nil {
+			t.Fatalf("WriteFile(%s v2) error: %v", filePath, err)
+		}
+		if err := fs.Delete(t.Context(), filePath); err != nil {
+			t.Fatalf("Delete(%s) error: %v", filePath, err)
+		}
 	}
-	if err := fs.WriteFile(ctx, "/trash-empty-mixed-a.txt", bytes.NewReader([]byte("a-v2"))); err != nil {
-		t.Fatalf("WriteFile(mixed a v2) error: %v", err)
+	items, err := fs.ListTrash(t.Context())
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "/trash-empty-mixed-b.md", bytes.NewReader([]byte("b-v1"))); err != nil {
-		t.Fatalf("WriteFile(mixed b v1) error: %v", err)
+	ids := make(map[string]string, len(items))
+	for _, item := range items {
+		ids[item.OriginalPath] = item.ID
 	}
-	if err := fs.WriteFile(ctx, "/trash-empty-mixed-b.md", bytes.NewReader([]byte("b-v2"))); err != nil {
-		t.Fatalf("WriteFile(mixed b v2) error: %v", err)
-	}
-	if err := fs.Delete(ctx, "/trash-empty-mixed-a.txt"); err != nil {
-		t.Fatalf("Delete(mixed a) error: %v", err)
-	}
-	if err := fs.Delete(ctx, "/trash-empty-mixed-b.md"); err != nil {
-		t.Fatalf("Delete(mixed b) error: %v", err)
-	}
-
 	cleanupWarningTriggered := false
-	hardFailureInjected := false
 	setStorageHook(t, fs, "removeTrashPath", func(path string) error {
-		if cleanupWarningTriggered && !hardFailureInjected {
-			hardFailureInjected = true
-			return errors.New("trash delete failed")
+		if cleanupWarningTriggered {
+			return storage.ErrNotRegular
 		}
 		return os.RemoveAll(path)
 	})
-	setStorageHook(t, fs, "deleteVersionObject", func(ctx context.Context, hash string) error {
+	setStorageHook(t, fs, "deleteVersionObject", func(context.Context, string) error {
 		cleanupWarningTriggered = true
 		return errors.New("delete object failed")
 	})
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/trash/", nil)
+	requestIDs := []string{ids[paths[0]], ids[paths[1]]}
+	req := newEmptyTrashSelectionRequest(t, requestIDs)
 	w := httptest.NewRecorder()
-
 	server.Router().ServeHTTP(w, req)
-
 	if w.Code != http.StatusOK {
-		t.Fatalf("EmptyTrash mixed warning status = %d, want %d, body: %s", w.Code, http.StatusOK, w.Body.String())
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
 	}
 	if got := w.Header().Get("Warning"); got != trashDeleteCleanupWarningHeader {
-		t.Fatalf("warning header = %q, want %q", got, trashDeleteCleanupWarningHeader)
+		t.Fatalf("Warning = %q, want %q", got, trashDeleteCleanupWarningHeader)
 	}
-
-	var payload struct {
-		Success bool `json:"success"`
-		Data    struct {
-			DeletedCount int  `json:"deleted_count"`
-			Partial      bool `json:"partial"`
-			Warning      bool `json:"warning"`
-		} `json:"data"`
-		Message string `json:"message"`
+	payload := decodeEmptyTrashSelectionPayload(t, w)
+	if want := []string{requestIDs[0]}; !reflect.DeepEqual(payload.Data.Deleted, want) {
+		t.Fatalf("deleted = %v, want %v", payload.Data.Deleted, want)
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("failed to parse response JSON: %v", err)
+	if want := []string{requestIDs[1]}; !reflect.DeepEqual(payload.Data.Remaining, want) {
+		t.Fatalf("remaining = %v, want %v", payload.Data.Remaining, want)
 	}
-	if !payload.Success {
-		t.Fatal("expected success response for mixed partial warning trash empty")
+	if !payload.Data.Partial || !payload.Data.Warning || payload.Data.DeletedCount != 1 || payload.Data.RemainingCount != 1 || payload.Data.SkippedCount != 0 {
+		t.Fatalf("unexpected mixed warning response: %+v", payload.Data)
 	}
-	if payload.Data.DeletedCount != 1 {
-		t.Fatalf("expected deleted_count 1, got %d", payload.Data.DeletedCount)
-	}
-	if !payload.Data.Partial {
-		t.Fatal("expected partial=true when a later trash item fails")
-	}
-	if !payload.Data.Warning {
-		t.Fatal("expected warning=true when cleanup warning occurred before hard failure")
-	}
-	if payload.Message != "trash emptied partially with cleanup warning" {
-		t.Fatalf("unexpected message %q", payload.Message)
-	}
-
 	entries, total := server.activity.List(10, 0, activity.ActionTrashEmpty, "")
 	if total != 1 || len(entries) != 1 {
-		t.Fatalf("expected one trash empty activity entry, got total=%d len=%d", total, len(entries))
+		t.Fatalf("trash-empty activity total=%d entries=%d, want 1", total, len(entries))
 	}
-	if entries[0].Details["cleanup_warning"] != "true" {
-		t.Fatalf("expected activity cleanup_warning=true, got %+v", entries[0].Details)
-	}
-	if entries[0].Details["partial"] != "true" {
-		t.Fatalf("expected activity partial=true, got %+v", entries[0].Details)
-	}
-
-	items, err := fs.ListTrash(ctx)
-	if err != nil {
-		t.Fatalf("ListTrash() after mixed warning empty error: %v", err)
-	}
-	if len(items) != 1 {
-		t.Fatalf("expected one trash item to remain after mixed warning empty, got %d", len(items))
+	if details := entries[0].Details; details["requested_count"] != "2" || details["count"] != "1" || details["remaining"] != "1" || details["skipped"] != "0" || details["partial"] != "true" || details["cleanup_warning"] != "true" {
+		t.Fatalf("trash-empty activity details = %+v", details)
 	}
 }
 
@@ -18619,65 +18773,124 @@ func TestServer_ListTrash_HidesNestedSharedAncestorTrashForNonAdmin(t *testing.T
 	}
 }
 
-func TestServer_EmptyTrash_FiltersResultsByHomeDirForNonAdmin(t *testing.T) {
+func TestServer_EmptyTrashSelectionHidesRootACLDenialBeforeDeleting(t *testing.T) {
 	server, fs, _, username, password := setupAuthServer(t)
-
+	setUserHomeDirForTest(t, server, username, "/tester")
+	setDirectoryAccessRulesForTest(t, server, []config.DirectoryAccessRuleConfig{
+		{Path: "/team", WriteUsers: []string{"other"}},
+	})
 	ctx := context.Background()
-	if err := fs.Mkdir(ctx, "/tester"); err != nil {
-		t.Fatalf("Mkdir(/tester) error: %v", err)
+	for _, dir := range []string{"/tester", "/team"} {
+		if err := fs.Mkdir(ctx, dir); err != nil {
+			t.Fatalf("Mkdir(%s) error: %v", dir, err)
+		}
 	}
-	if err := fs.Mkdir(ctx, "/other"); err != nil {
-		t.Fatalf("Mkdir(/other) error: %v", err)
-	}
-	if err := fs.WriteFile(ctx, "/tester/deleted.txt", bytes.NewReader([]byte("deleted"))); err != nil {
-		t.Fatalf("WriteFile(/tester/deleted.txt) error: %v", err)
-	}
-	if err := fs.WriteFile(ctx, "/other/secret.txt", bytes.NewReader([]byte("secret"))); err != nil {
-		t.Fatalf("WriteFile(/other/secret.txt) error: %v", err)
-	}
-	if err := fs.Delete(ctx, "/tester/deleted.txt"); err != nil {
-		t.Fatalf("Delete(/tester/deleted.txt) error: %v", err)
-	}
-	if err := fs.Delete(ctx, "/other/secret.txt"); err != nil {
-		t.Fatalf("Delete(/other/secret.txt) error: %v", err)
-	}
-
+	ids := createTrashSelectionItems(t, fs, "/tester/allowed.txt", "/team/denied.txt")
 	token := loginAndGetAccessToken(t, server, username, password)
-
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/trash/", nil)
+	req := newEmptyTrashSelectionRequest(t, []string{ids["/tester/allowed.txt"], ids["/team/denied.txt"]})
 	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
 	server.Router().ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("empty trash status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("root ACL denial status = %d, want %d; body=%s", w.Code, http.StatusNotFound, w.Body.String())
 	}
-
-	var payload struct {
-		Data struct {
-			DeletedCount int  `json:"deleted_count"`
-			Partial      bool `json:"partial"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("failed to parse response JSON: %v", err)
-	}
-	if payload.Data.DeletedCount != 1 {
-		t.Fatalf("deleted_count = %d, want 1; body=%s", payload.Data.DeletedCount, w.Body.String())
-	}
-	if payload.Data.Partial {
-		t.Fatalf("partial = true, want false; body=%s", w.Body.String())
-	}
-
 	items, err := fs.ListTrash(ctx)
 	if err != nil {
 		t.Fatalf("ListTrash() error: %v", err)
 	}
-	if len(items) != 1 {
-		t.Fatalf("expected one outside-home trash item to remain, got %d", len(items))
+	if len(items) != 2 {
+		t.Fatalf("root ACL preflight deleted selected items: %+v", items)
 	}
-	if items[0].OriginalPath != "/other/secret.txt" {
-		t.Fatalf("remaining trash item = %q, want %q", items[0].OriginalPath, "/other/secret.txt")
+	entries, total := server.activity.List(10, 0, activity.ActionTrashEmpty, "")
+	if total != 0 || len(entries) != 0 {
+		t.Fatalf("root ACL preflight activity total=%d entries=%d, want zero", total, len(entries))
+	}
+}
+
+func TestServer_EmptyTrashSelectionPreflightsAllDescendantACLsBeforeDeleting(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+	setUserHomeDirForTest(t, server, username, "/tester")
+	setDirectoryAccessRulesForTest(t, server, []config.DirectoryAccessRuleConfig{
+		{Path: "/team", WriteUsers: []string{username}},
+		{Path: "/team/private", WriteUsers: []string{"other"}},
+	})
+	ctx := context.Background()
+	for _, dir := range []string{"/tester", "/team", "/team/public", "/team/private"} {
+		if err := fs.Mkdir(ctx, dir); err != nil {
+			t.Fatalf("Mkdir(%s) error: %v", dir, err)
+		}
+	}
+	for filePath, content := range map[string]string{
+		"/tester/allowed.txt":  "allowed selection",
+		"/team/public/readme":  "allowed descendant",
+		"/team/private/secret": "denied descendant",
+	} {
+		if err := fs.WriteFile(ctx, filePath, strings.NewReader(content)); err != nil {
+			t.Fatalf("WriteFile(%s) error: %v", filePath, err)
+		}
+	}
+	for _, targetPath := range []string{"/tester/allowed.txt", "/team"} {
+		if err := fs.Delete(ctx, targetPath); err != nil {
+			t.Fatalf("Delete(%s) error: %v", targetPath, err)
+		}
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	ids := make(map[string]string, len(items))
+	for _, item := range items {
+		ids[item.OriginalPath] = item.ID
+	}
+	token := loginAndGetAccessToken(t, server, username, password)
+	req := newEmptyTrashSelectionRequest(t, []string{ids["/tester/allowed.txt"], ids["/team"]})
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("empty trash selection status = %d, want %d; body=%s", w.Code, http.StatusForbidden, w.Body.String())
+	}
+	items, err = fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("ACL preflight deleted selected items: %+v", items)
+	}
+	entries, total := server.activity.List(10, 0, activity.ActionTrashEmpty, "")
+	if total != 0 || len(entries) != 0 {
+		t.Fatalf("ACL preflight activity total=%d entries=%d, want zero", total, len(entries))
+	}
+}
+
+func TestServer_EmptyTrashSelectionHidesTopLevelItemsOutsideHome(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+	setUserHomeDirForTest(t, server, username, "/tester")
+	ctx := context.Background()
+	for _, dir := range []string{"/tester", "/other"} {
+		if err := fs.Mkdir(ctx, dir); err != nil {
+			t.Fatalf("Mkdir(%s) error: %v", dir, err)
+		}
+	}
+	ids := createTrashSelectionItems(t, fs, "/tester/allowed.txt", "/other/secret.txt")
+	token := loginAndGetAccessToken(t, server, username, password)
+	req := newEmptyTrashSelectionRequest(t, []string{ids["/tester/allowed.txt"], ids["/other/secret.txt"]})
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("outside-home selection status = %d, want %d; body=%s", w.Code, http.StatusNotFound, w.Body.String())
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("outside-home preflight deleted selected items: %+v", items)
+	}
+	entries, total := server.activity.List(10, 0, activity.ActionTrashEmpty, "")
+	if total != 0 || len(entries) != 0 {
+		t.Fatalf("outside-home preflight activity total=%d entries=%d, want zero", total, len(entries))
 	}
 }
 
@@ -18770,7 +18983,7 @@ func TestServer_DeleteFromTrashDirectoryRejectsDeniedDescendantAccessRule(t *tes
 	}
 }
 
-func TestServer_EmptyTrashSkipsDirectoryWithDeniedDescendantAccessRule(t *testing.T) {
+func TestServer_EmptyTrashSelectionRejectsDirectoryWithDeniedDescendantAccessRule(t *testing.T) {
 	server, fs, _, username, password := setupAuthServer(t)
 	setUserHomeDirForTest(t, server, username, "/tester")
 	setDirectoryAccessRulesForTest(t, server, []config.DirectoryAccessRuleConfig{
@@ -18796,37 +19009,34 @@ func TestServer_EmptyTrashSkipsDirectoryWithDeniedDescendantAccessRule(t *testin
 	if err := fs.Delete(ctx, "/team"); err != nil {
 		t.Fatalf("Delete(/team) error: %v", err)
 	}
-
-	token := loginAndGetAccessToken(t, server, username, password)
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/trash/", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	rec := httptest.NewRecorder()
-	server.Router().ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("empty trash status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
-	}
-	var payload struct {
-		Data struct {
-			DeletedCount int  `json:"deleted_count"`
-			Partial      bool `json:"partial"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("failed to parse response JSON: %v", err)
-	}
-	if payload.Data.DeletedCount != 1 {
-		t.Fatalf("deleted_count = %d, want 1; body=%s", payload.Data.DeletedCount, rec.Body.String())
-	}
-	if payload.Data.Partial {
-		t.Fatalf("partial = true, want false; body=%s", rec.Body.String())
-	}
 	items, err := fs.ListTrash(ctx)
 	if err != nil {
 		t.Fatalf("ListTrash() error: %v", err)
 	}
-	if len(items) != 1 || items[0].OriginalPath != "/team" {
-		t.Fatalf("expected denied directory trash item to remain, got %+v", items)
+	ids := make(map[string]string, len(items))
+	for _, item := range items {
+		ids[item.OriginalPath] = item.ID
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+	req := newEmptyTrashSelectionRequest(t, []string{ids["/tester/deleted.txt"], ids["/team"]})
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("empty trash selection status = %d, want %d; body=%s", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+	items, err = fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("descendant ACL preflight deleted selected items: %+v", items)
+	}
+	entries, total := server.activity.List(10, 0, activity.ActionTrashEmpty, "")
+	if total != 0 || len(entries) != 0 {
+		t.Fatalf("descendant ACL preflight activity total=%d entries=%d, want zero", total, len(entries))
 	}
 }
 
@@ -26361,7 +26571,7 @@ func TestServer_GuestRole_IsReadOnlyForMutatingRoutes(t *testing.T) {
 		{name: "move file", method: http.MethodPost, url: "/api/v1/files-move", body: `{"from":"/docs/a.txt","to":"/docs/moved.txt"}`, contentType: "application/json"},
 		{name: "create share", method: http.MethodPost, url: "/api/v1/shares", body: `{"path":"/docs/a.txt","type":"file"}`, contentType: "application/json"},
 		{name: "add favorite", method: http.MethodPost, url: "/api/v1/favorites", body: `{"path":"/docs/a.txt"}`, contentType: "application/json"},
-		{name: "empty trash", method: http.MethodDelete, url: "/api/v1/trash/"},
+		{name: "empty trash", method: http.MethodPost, url: "/api/v1/trash/empty", body: `{"ids":["missing"]}`, contentType: "application/json"},
 	}
 
 	for _, tt := range tests {

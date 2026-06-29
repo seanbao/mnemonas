@@ -134,6 +134,37 @@ async function seedDeletedTextFile(page: Page, fileName: string, content = 'tras
   await deleteFileThroughCurrentPolicy(page, fileUrl, 'delete trash fixture')
 }
 
+async function readTrashItemId(page: Page, fileName: string): Promise<string> {
+  return page.evaluate(async (expectedFileName) => {
+    const response = await fetch('/api/v1/trash/')
+    if (!response.ok) {
+      throw new Error(`list trash failed: ${response.status} ${await response.text()}`)
+    }
+    const body = await response.json() as {
+      success?: unknown
+      data?: {
+        items?: Array<{
+          id?: unknown
+          name?: unknown
+          originalPath?: unknown
+        }>
+      }
+    }
+    const expectedPath = `/${expectedFileName}`
+    const matches = body.data?.items?.filter((item) => (
+      item.name === expectedFileName && item.originalPath === expectedPath
+    ))
+    if (body.success !== true || !Array.isArray(matches) || matches.length !== 1) {
+      throw new Error(`trash item lookup failed for ${expectedFileName}`)
+    }
+    const id = matches[0]?.id
+    if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) {
+      throw new Error(`trash item lookup returned an invalid id for ${expectedFileName}`)
+    }
+    return id
+  }, fileName)
+}
+
 async function isVisible(locator: Locator, timeout = 1000): Promise<boolean> {
   return locator.isVisible({ timeout }).catch(() => false)
 }
@@ -337,6 +368,47 @@ test.describe('回收站确认对话框', () => {
     // Check the destructive-action confirmation dialog.
     await expect(page.getByText('确定要清空回收站吗？')).toBeVisible({ timeout: 5000 })
     await expect(page.getByText(/此操作无法撤销/i)).toBeVisible({ timeout: 5000 })
+  })
+
+  test('清空回收站只删除打开对话框时确认的项目', async ({ page }, testInfo) => {
+    testInfo.setTimeout(60_000)
+    await ensureAuthenticatedAt(page, '/trash')
+
+    const confirmedFileName = trashFixtureFileName(testInfo, 'e2e-empty-confirmed')
+    const laterFileName = trashFixtureFileName(testInfo, 'e2e-empty-later')
+    await seedDeletedTextFile(page, confirmedFileName)
+    await ensureAuthenticatedAt(page, '/trash')
+    await expect(page.getByText(confirmedFileName, { exact: true }).filter({ visible: true })).toBeVisible({ timeout: 10_000 })
+    const confirmedId = await readTrashItemId(page, confirmedFileName)
+
+    await page.getByRole('button', { name: '清空回收站' }).click()
+    await expect(page.getByText('确定要清空回收站吗？')).toBeVisible({ timeout: 5000 })
+
+    await seedDeletedTextFile(page, laterFileName, 'created after empty-trash confirmation opened')
+    const laterId = await readTrashItemId(page, laterFileName)
+
+    const emptyRequestPromise = page.waitForRequest((request) => {
+      const { pathname } = new URL(request.url())
+      return request.method() === 'POST' && pathname === '/api/v1/trash/empty'
+    })
+    const emptyResponsePromise = page.waitForResponse((response) => {
+      const { pathname } = new URL(response.url())
+      return response.request().method() === 'POST' && pathname === '/api/v1/trash/empty'
+    })
+
+    await page.getByRole('button', { name: '确认清空回收站' }).click()
+
+    const emptyRequest = await emptyRequestPromise
+    const payload = emptyRequest.postDataJSON() as { ids?: unknown }
+    expect(Array.isArray(payload.ids)).toBe(true)
+    expect(payload.ids).toContain(confirmedId)
+    expect(payload.ids).not.toContain(laterId)
+
+    const emptyResponse = await emptyResponsePromise
+    expect(emptyResponse.ok()).toBe(true)
+    await expect(page.getByText(/已永久删除已确认的 \d+ 项/)).toBeVisible({ timeout: 10_000 })
+    await expect(page.getByText(laterFileName, { exact: true }).filter({ visible: true })).toBeVisible({ timeout: 10_000 })
+    await expect(page.getByText(confirmedFileName, { exact: true }).filter({ visible: true })).toHaveCount(0)
   })
 })
 

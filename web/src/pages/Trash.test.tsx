@@ -212,6 +212,25 @@ function trashTestItem(id: string, name: string, options: {
   }
 }
 
+function emptyTrashDeletedResult(ids: string[], options: {
+  remaining?: string[]
+  skipped?: string[]
+  warning?: boolean
+  message?: string
+} = {}): Awaited<ReturnType<typeof emptyTrash>> {
+  const remaining = options.remaining ?? []
+  const skipped = options.skipped ?? []
+  return {
+    deleted: [...ids],
+    remaining,
+    skipped,
+    partial: remaining.length > 0 || skipped.length > 0,
+    warning: options.warning ?? false,
+    auditWarning: false,
+    message: options.message,
+  }
+}
+
 async function selectTrashItem(user: ReturnType<typeof userEvent.setup>, name: string) {
   await user.click(screen.getByRole('checkbox', { name: `选择 ${name}` }))
 }
@@ -1671,11 +1690,11 @@ describe('TrashPage', () => {
       })
     })
 
-    it('opens confirmation modal on empty trash click', async () => {
+    it('opens confirmation modal with a frozen count and total size', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
-      
+
       render(<TrashPage />)
-      
+
       await waitFor(() => {
         expect(screen.getByText('清空回收站')).toBeTruthy()
       })
@@ -1684,6 +1703,7 @@ describe('TrashPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('确定要清空回收站吗？')).toBeTruthy()
+        expect(screen.getByText('将永久删除 2 项，共 1 KB。')).toBeTruthy()
       })
 
       const dialog = getModalContent('trash-empty-dialog-title')
@@ -1692,10 +1712,17 @@ describe('TrashPage', () => {
       expect(within(dialog).getByRole('button', { name: '取消' })).toHaveFocus()
     })
 
-    it('closes the empty trash modal when cancellation is allowed', async () => {
+    it('clears the frozen intent on cancel and captures a new snapshot when reopened', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false, gcTime: 0, staleTime: 0 } },
+      })
 
-      render(<TrashPage />)
+      render(
+        <QueryClientProvider client={queryClient}>
+          <TrashPage />
+        </QueryClientProvider>,
+      )
 
       await waitFor(() => {
         expect(screen.getByText('清空回收站')).toBeTruthy()
@@ -1712,94 +1739,343 @@ describe('TrashPage', () => {
       await waitFor(() => {
         expect(screen.queryByText('确定要清空回收站吗？')).toBeNull()
       })
+
+      act(() => {
+        queryClient.setQueryData(['trash', 'u1'], {
+          items: [
+            trashTestItem('item1', 'deleted-file.txt'),
+            trashTestItem('item2', 'deleted-folder', { isDir: true, size: 0 }),
+            trashTestItem('item3', 'new-after-cancel.txt', { size: 2048 }),
+          ],
+          count: 3,
+          totalSize: 3072,
+          retentionEnabled: true,
+          retentionDays: 30,
+          trashAutoCleanupEnabled: true,
+        })
+      })
+
+      await user.click(screen.getByText('清空回收站'))
+      expect(await screen.findByText('将永久删除 3 项，共 3 KB。')).toBeTruthy()
     })
 
-    it('empties trash on confirm', async () => {
+    it('freezes item ids and excludes cache additions from confirmation and request', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
-      mockEmptyTrash.mockResolvedValue({ deletedCount: 2, partial: false })
-      
-      render(<TrashPage />)
-      
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false, gcTime: 0, staleTime: 0 } },
+      })
+      mockEmptyTrash.mockResolvedValue(emptyTrashDeletedResult(['item1', 'item2']))
+      mockListTrash.mockImplementationOnce(async () => ({
+        items: [
+          trashTestItem('item1', 'deleted-file.txt'),
+          trashTestItem('item2', 'deleted-folder', { isDir: true, size: 0 }),
+        ],
+        count: 2,
+        totalSize: 1024,
+        retentionEnabled: true,
+        retentionDays: 30,
+        trashAutoCleanupEnabled: true,
+      })).mockResolvedValue({
+        items: [trashTestItem('item3', 'new-after-open.txt', { size: 4096 })],
+        count: 1,
+        totalSize: 4096,
+        retentionEnabled: true,
+        retentionDays: 30,
+        trashAutoCleanupEnabled: true,
+      })
+
+      render(
+        <QueryClientProvider client={queryClient}>
+          <TrashPage />
+        </QueryClientProvider>,
+      )
+
       await waitFor(() => {
         expect(screen.getByText('清空回收站')).toBeTruthy()
       })
 
       await user.click(screen.getByText('清空回收站'))
+      expect(await screen.findByText('将永久删除 2 项，共 1 KB。')).toBeTruthy()
+
+      act(() => {
+        queryClient.setQueryData(['trash', 'u1'], {
+          items: [
+            trashTestItem('item1', 'deleted-file.txt'),
+            trashTestItem('item2', 'deleted-folder', { isDir: true, size: 0 }),
+            trashTestItem('item3', 'new-after-open.txt', { size: 4096 }),
+          ],
+          count: 3,
+          totalSize: 5120,
+          retentionEnabled: true,
+          retentionDays: 30,
+          trashAutoCleanupEnabled: true,
+        })
+      })
+
+      expect(screen.getByText('将永久删除 2 项，共 1 KB。')).toBeTruthy()
+      expect(screen.queryByText('将永久删除 3 项，共 5 KB。')).toBeNull()
 
       await clickEmptyTrashConfirm(user)
 
       await waitFor(() => {
-        expect(mockEmptyTrash).toHaveBeenCalled()
+        expect(mockEmptyTrash).toHaveBeenCalledTimes(1)
       })
+      expect(mockEmptyTrash.mock.calls[0]?.[0]).toEqual(['item1', 'item2'])
+      expect(mockEmptyTrash.mock.calls[0]?.[0]).not.toContain('item3')
+      expect(mockEmptyTrash.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal)
 
       await waitFor(() => {
-        expect(mockAddToast).toHaveBeenCalledWith({ title: '已清空回收站，删除 2 项', color: 'success' })
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '已永久删除已确认的 2 项', color: 'success' })
       })
+      expect(screen.getByText('new-after-open.txt')).toBeTruthy()
+      expect(mockListTrash).toHaveBeenCalledTimes(2)
+
+      await user.click(screen.getByText('清空回收站'))
+      expect(await screen.findByText('将永久删除 1 项，共 4 KB。')).toBeTruthy()
     })
 
-    it.each(['pending', 'failed'] as const)(
-      'keeps cached items visible when a non-partial empty result has a %s refetch',
-      async (refetchState) => {
-        const user = userEvent.setup({ writeToClipboard: false })
-        mockEmptyTrash.mockResolvedValue({ deletedCount: 1, partial: false })
+    it('keeps cached items visible while requests and the final refetch are pending', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const pendingEmpty = createDeferred<Awaited<ReturnType<typeof emptyTrash>>>()
+      mockEmptyTrash.mockImplementationOnce(() => pendingEmpty.promise)
 
-        render(<TrashPage />)
-        await waitFor(() => {
-          expect(screen.getByText('deleted-file.txt')).toBeTruthy()
-          expect(screen.getByText('deleted-folder')).toBeTruthy()
-        })
-        if (refetchState === 'pending') {
-          mockListTrash.mockImplementation(() => pendingTrashRefetch())
-        } else {
-          mockListTrash.mockRejectedValue(new Error('refetch failed'))
-        }
-
-        await user.click(screen.getByText('清空回收站'))
-        await clickEmptyTrashConfirm(user)
-
-        await waitFor(() => {
-          expect(mockAddToast).toHaveBeenCalledWith({ title: '已清空回收站，删除 1 项', color: 'success' })
-        })
+      render(<TrashPage />)
+      await waitFor(() => {
+        expect(screen.getByText('清空回收站')).toBeTruthy()
         expect(screen.getByText('deleted-file.txt')).toBeTruthy()
         expect(screen.getByText('deleted-folder')).toBeTruthy()
-        expect(screen.queryByText('回收站是空的')).toBeNull()
-      },
-    )
-
-    it('keeps cached items visible while a partial empty-trash refetch is pending', async () => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      mockEmptyTrash.mockResolvedValue({ deletedCount: 1, partial: true })
-
-      render(<TrashPage />)
-
-      await waitFor(() => {
-        expect(screen.getByText('清空回收站')).toBeTruthy()
-        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
       })
-      mockListTrash.mockImplementation(() => pendingTrashRefetch())
-
       await user.click(screen.getByText('清空回收站'))
-
       await clickEmptyTrashConfirm(user)
-
       await waitFor(() => {
-        expect(mockEmptyTrash).toHaveBeenCalled()
-      })
-
-      await waitFor(() => {
-        expect(mockAddToast).toHaveBeenCalledWith({ title: '回收站已部分清空，删除 1 项', color: 'warning' })
+        expect(mockEmptyTrash).toHaveBeenCalledTimes(1)
       })
       expect(screen.getByText('deleted-file.txt')).toBeTruthy()
       expect(screen.getByText('deleted-folder')).toBeTruthy()
+
+      const dialog = getModalContent('trash-empty-dialog-title')
+      expect(dialog).toHaveAttribute('aria-busy', 'true')
+      await user.click(within(dialog).getByRole('button', { name: '取消' }))
+      expect(screen.getByText('确定要清空回收站吗？')).toBeTruthy()
+
+      mockListTrash.mockImplementation(() => pendingTrashRefetch())
+      await act(async () => {
+        pendingEmpty.resolve(emptyTrashDeletedResult(['item1', 'item2']))
+      })
+
+      await waitFor(() => expect(mockListTrash).toHaveBeenCalledTimes(2))
+      expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      expect(screen.getByText('deleted-folder')).toBeTruthy()
+      expect(screen.queryByText('回收站是空的')).toBeNull()
     })
 
-    it('keeps cached items visible when a partial empty-trash refetch fails', async () => {
+    it('chunks more than 1000 frozen ids without an intermediate refetch', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
-      mockEmptyTrash.mockResolvedValue({ deletedCount: 1, partial: true })
+      const frozenItems = Array.from({ length: 1001 }, (_, index) => (
+        trashTestItem(`item-${index + 1}`, `item-${index + 1}.txt`, { size: 1 })
+      ))
+      mockListTrash.mockResolvedValueOnce({
+        items: frozenItems,
+        count: frozenItems.length,
+        totalSize: frozenItems.length,
+        retentionEnabled: true,
+        retentionDays: 30,
+        trashAutoCleanupEnabled: true,
+      }).mockResolvedValue({
+        items: [],
+        count: 0,
+        totalSize: 0,
+        retentionEnabled: true,
+        retentionDays: 30,
+        trashAutoCleanupEnabled: true,
+      })
+      mockEmptyTrash
+        .mockImplementationOnce(async (ids) => ({
+          deleted: ids.slice(0, 999),
+          remaining: [],
+          skipped: [ids[999]!],
+          partial: true,
+          warning: false,
+          auditWarning: true,
+        }))
+        .mockImplementationOnce(async (ids) => {
+          expect(mockListTrash).toHaveBeenCalledTimes(1)
+          return emptyTrashDeletedResult(ids)
+        })
+
+      render(<TrashPage />)
+      await waitFor(() => {
+        expect(screen.getByText('清空回收站')).toBeTruthy()
+      })
+      await user.click(screen.getByText('清空回收站'))
+      await clickEmptyTrashConfirm(user)
+
+      await waitFor(() => {
+        expect(mockEmptyTrash).toHaveBeenCalledTimes(2)
+      })
+      expect(mockEmptyTrash.mock.calls[0]?.[0]).toEqual(frozenItems.slice(0, 1000).map((item) => item.id))
+      expect(mockEmptyTrash.mock.calls[1]?.[0]).toEqual([frozenItems[1000]!.id])
+      expect(mockEmptyTrash.mock.calls[0]?.[1]?.signal).toBe(mockEmptyTrash.mock.calls[1]?.[1]?.signal)
+      await waitFor(() => expect(mockListTrash).toHaveBeenCalledTimes(2))
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '已永久删除已确认的 1000 项',
+        description: '已跳过 1 项；操作记录未保存。',
+        color: 'warning',
+      })
+    }, 20_000)
+
+    it('stops after a remaining result and classifies unsent frozen ids as remaining', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const frozenItems = Array.from({ length: 1001 }, (_, index) => (
+        trashTestItem(`item-${index + 1}`, `item-${index + 1}.txt`, { size: 1 })
+      ))
+      const firstChunkIds = frozenItems.slice(0, 1000).map((item) => item.id)
+      mockListTrash.mockResolvedValueOnce({
+        items: frozenItems,
+        count: frozenItems.length,
+        totalSize: frozenItems.length,
+        retentionEnabled: true,
+        retentionDays: 30,
+        trashAutoCleanupEnabled: true,
+      }).mockResolvedValue({
+        items: frozenItems.slice(999),
+        count: 2,
+        totalSize: 2,
+        retentionEnabled: true,
+        retentionDays: 30,
+        trashAutoCleanupEnabled: true,
+      })
+      mockEmptyTrash.mockResolvedValueOnce({
+        deleted: firstChunkIds.slice(0, 999),
+        remaining: [firstChunkIds[999]!],
+        skipped: [],
+        partial: true,
+        warning: false,
+        auditWarning: false,
+      })
+
+      render(<TrashPage />)
+      await waitFor(() => expect(screen.getByText('清空回收站')).toBeTruthy())
+      await user.click(screen.getByText('清空回收站'))
+      await clickEmptyTrashConfirm(user)
+
+      await waitFor(() => expect(mockEmptyTrash).toHaveBeenCalledTimes(1))
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '已永久删除已确认的 999 项',
+          description: '仍有 2 项保留在回收站。',
+          color: 'warning',
+        })
+      })
+      expect(mockEmptyTrash.mock.calls[0]?.[0]).toEqual(firstChunkIds)
+    }, 20_000)
+
+    it('aggregates partial and warning results into one warning toast', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockEmptyTrash.mockResolvedValue({
+        deleted: ['item1'],
+        remaining: ['item2'],
+        skipped: [],
+        partial: true,
+        warning: true,
+        auditWarning: false,
+        message: 'cleanup warning',
+      })
+
+      render(<TrashPage />)
+      await waitFor(() => {
+        expect(screen.getByText('清空回收站')).toBeTruthy()
+      })
+      await user.click(screen.getByText('清空回收站'))
+      await clickEmptyTrashConfirm(user)
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '已永久删除已确认的 1 项',
+          description: '仍有 1 项保留在回收站；删除过程报告了清理警告。',
+          color: 'warning',
+        })
+      })
+    })
+
+    it('shows audit persistence warnings separately from cleanup warnings', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockEmptyTrash.mockResolvedValue({
+        deleted: ['item1', 'item2'],
+        remaining: [],
+        skipped: [],
+        partial: false,
+        warning: false,
+        auditWarning: true,
+      })
+
+      render(<TrashPage />)
+      await waitFor(() => expect(screen.getByText('清空回收站')).toBeTruthy())
+      await user.click(screen.getByText('清空回收站'))
+      await clickEmptyTrashConfirm(user)
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '已永久删除已确认的 2 项',
+          description: '操作记录未保存。',
+          color: 'warning',
+        })
+      })
+    })
+
+    it('retains the frozen intent after failure and retries the same ids', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false, gcTime: 0, staleTime: 0 } },
+      })
+      mockEmptyTrash
+        .mockRejectedValueOnce(new ApiError('temporary failure', 500, 'Internal Server Error'))
+        .mockResolvedValueOnce(emptyTrashDeletedResult(['item1', 'item2']))
+
+      render(
+        <QueryClientProvider client={queryClient}>
+          <TrashPage />
+        </QueryClientProvider>,
+      )
+      await waitFor(() => expect(screen.getByText('清空回收站')).toBeTruthy())
+      await user.click(screen.getByText('清空回收站'))
+
+      act(() => {
+        queryClient.setQueryData(['trash', 'u1'], {
+          items: [
+            trashTestItem('item1', 'deleted-file.txt'),
+            trashTestItem('item2', 'deleted-folder', { isDir: true, size: 0 }),
+            trashTestItem('item3', 'new-during-retry.txt'),
+          ],
+          count: 3,
+          totalSize: 2048,
+          retentionEnabled: true,
+          retentionDays: 30,
+          trashAutoCleanupEnabled: true,
+        })
+      })
+
+      await clickEmptyTrashConfirm(user)
+      await waitFor(() => expect(mockEmptyTrash).toHaveBeenCalledTimes(1))
+      expect(screen.getByText('确定要清空回收站吗？')).toBeTruthy()
+      expect(screen.getByText('将永久删除 2 项，共 1 KB。')).toBeTruthy()
+
+      await clickEmptyTrashConfirm(user)
+      await waitFor(() => expect(mockEmptyTrash).toHaveBeenCalledTimes(2))
+      expect(mockEmptyTrash.mock.calls[0]?.[0]).toEqual(['item1', 'item2'])
+      expect(mockEmptyTrash.mock.calls[1]?.[0]).toEqual(['item1', 'item2'])
+      expect(mockEmptyTrash.mock.calls[1]?.[0]).not.toContain('item3')
+      await waitFor(() => expect(screen.queryByText('确定要清空回收站吗？')).toBeNull())
+    })
+
+    it('keeps old cache and reports a final refetch failure', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockEmptyTrash.mockResolvedValue(emptyTrashDeletedResult(['item1', 'item2']))
 
       render(<TrashPage />)
       await waitFor(() => {
         expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+        expect(screen.getByText('deleted-folder')).toBeTruthy()
       })
       mockListTrash.mockRejectedValue(new Error('refetch failed'))
 
@@ -1807,120 +2083,15 @@ describe('TrashPage', () => {
       await clickEmptyTrashConfirm(user)
 
       await waitFor(() => {
-        expect(mockAddToast).toHaveBeenCalledWith({ title: '回收站已部分清空，删除 1 项', color: 'warning' })
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '已永久删除已确认的 2 项',
+          description: '删除结果已返回，但列表刷新失败。',
+          color: 'warning',
+        })
       })
       expect(screen.getByText('deleted-file.txt')).toBeTruthy()
       expect(screen.getByText('deleted-folder')).toBeTruthy()
-    })
-
-    it('shows warning toast when empty trash succeeds with cleanup warnings', async () => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      mockEmptyTrash.mockResolvedValue({
-        deletedCount: 2,
-        partial: false,
-        warning: true,
-        message: 'trash emptied with cleanup warning',
-      })
-
-      render(<TrashPage />)
-
-      await waitFor(() => {
-        expect(screen.getByText('清空回收站')).toBeTruthy()
-      })
-
-      await user.click(screen.getByText('清空回收站'))
-
-      await clickEmptyTrashConfirm(user)
-
-      await waitFor(() => {
-        expect(mockEmptyTrash).toHaveBeenCalled()
-      })
-
-      await waitFor(() => {
-        expect(mockAddToast).toHaveBeenCalledWith({ title: '已清空回收站，删除 2 项，但存在警告', color: 'warning' })
-      })
-    })
-
-    it('shows unavailable toast when empty trash is unavailable', async () => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      mockEmptyTrash.mockRejectedValue(new ApiError(
-        'filesystem not initialized',
-        503,
-        'Service Unavailable',
-        'SERVICE_UNAVAILABLE'
-      ))
-
-      render(<TrashPage />)
-
-      await waitFor(() => {
-        expect(screen.getByText('清空回收站')).toBeTruthy()
-      })
-
-      await user.click(screen.getByText('清空回收站'))
-
-      await clickEmptyTrashConfirm(user)
-
-      await waitFor(() => {
-        expect(mockAddToast).toHaveBeenCalledWith({
-          title: '清空回收站暂不可用',
-          description: '文件系统当前不可用，请稍后重试',
-          color: 'warning',
-        })
-      })
-    })
-
-    it('keeps the empty trash modal open when a pending request later fails', async () => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      const pendingEmpty = createDeferred<{ deletedCount: number; partial: boolean }>()
-      mockEmptyTrash.mockImplementationOnce(() => pendingEmpty.promise)
-
-      render(<TrashPage />)
-
-      await waitFor(() => {
-        expect(screen.getByText('清空回收站')).toBeTruthy()
-      })
-
-      await user.click(screen.getByText('清空回收站'))
-
-      await waitFor(() => {
-        expect(screen.getByText('确定要清空回收站吗？')).toBeTruthy()
-      })
-
-      await clickEmptyTrashConfirm(user)
-
-      await waitFor(() => {
-        expect(mockEmptyTrash).toHaveBeenCalled()
-      })
-
-      const dialog = getModalContent('trash-empty-dialog-title')
-      await waitFor(() => {
-        expect(dialog).toHaveAttribute('aria-busy', 'true')
-      })
-      await user.keyboard('{Escape}')
-      expect(screen.getByText('确定要清空回收站吗？')).toBeTruthy()
-
-      await user.click(screen.getByRole('button', { name: '取消' }))
-
-      expect(screen.getByText('确定要清空回收站吗？')).toBeTruthy()
-
-      await act(async () => {
-        pendingEmpty.reject(new ApiError(
-          'filesystem not initialized',
-          503,
-          'Service Unavailable',
-          'SERVICE_UNAVAILABLE'
-        ))
-      })
-
-      await waitFor(() => {
-        expect(mockAddToast).toHaveBeenCalledWith({
-          title: '清空回收站暂不可用',
-          description: '文件系统当前不可用，请稍后重试',
-          color: 'warning',
-        })
-      })
-
-      expect(screen.getByText('确定要清空回收站吗？')).toBeTruthy()
+      expect(screen.queryByText('回收站是空的')).toBeNull()
     })
   })
 
@@ -1987,7 +2158,7 @@ describe('TrashPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       const pendingEmpty = createDeferred<Awaited<ReturnType<typeof emptyTrash>>>()
       let signal: AbortSignal | undefined
-      mockEmptyTrash.mockImplementationOnce((options) => {
+      mockEmptyTrash.mockImplementationOnce((_ids, options) => {
         signal = options?.signal
         return pendingEmpty.promise
       })

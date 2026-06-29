@@ -985,15 +985,47 @@ Example response:
 | `GET` | `/api/v1/trash/{id}` | Get trash item detail |
 | `POST` | `/api/v1/trash/{id}/restore` | Restore trash item |
 | `DELETE` | `/api/v1/trash/{id}` | Permanently delete one item |
-| `DELETE` | `/api/v1/trash` | Empty trash |
+| `POST` | `/api/v1/trash/empty` | Permanently delete confirmed Trash items |
 
 Trash visibility follows the current user's configured `home_dir` boundary.
 
-Every listed item includes its persisted `expiresAt` value. This RFC 3339 timestamp is assigned when the item enters Trash; changing `retentionDays` later does not rewrite existing item expiry. The list-level `retentionDays` describes only the current policy for new deletions, while `trashAutoCleanupEnabled` reports whether the background retention sweep is enabled. The size limit may still permanently remove older items before `expiresAt`.
+Every listed item includes a random `id` that remains immutable for the item's lifetime and its persisted `expiresAt` value. This RFC 3339 timestamp is assigned when the item enters Trash; changing `retentionDays` later does not rewrite existing item expiry. The list-level `retentionDays` describes only the current policy for new deletions, while `trashAutoCleanupEnabled` reports whether the background retention sweep is enabled. The size limit may still permanently remove older items before `expiresAt`.
 
-When the retention sweep is enabled, the same periodic task removes expired file versions and Trash items whose `expiresAt` has been reached. When it is disabled, items can still be removed explicitly through permanent-delete or empty-Trash endpoints.
+When the retention sweep is enabled, the same periodic task removes expired file versions and Trash items whose `expiresAt` has been reached. When it is disabled, items can still be removed explicitly through permanent-delete endpoints.
 
-Permanent Trash deletion checks for nested mounts below the Trash root before staging and recursive removal. `DELETE /api/v1/trash/{id}` returns `409 Conflict` and preserves the item content and metadata when a nested mount exists or the mount table cannot be verified. If an empty-Trash request already deleted earlier items, the existing partial-success response contract still applies.
+Permanent Trash deletion checks for nested mounts below the Trash root before staging and recursive removal. `DELETE /api/v1/trash/{id}` returns `409 Conflict` and preserves the item content and metadata when a nested mount exists or the mount table cannot be verified.
+
+`POST /api/v1/trash/empty` permanently deletes only the items explicitly confirmed in the request. The body is a JSON object containing only `ids`:
+
+```json
+{
+  "ids": ["7d29d7827f68f1a3", "4fdd157f624d892b"]
+}
+```
+
+`ids` must contain between 1 and 1000 unique strings. Each ID must be between 1 and 128 bytes in UTF-8 and may contain only ASCII letters, digits, `-`, and `_`. A body above the JSON size limit returns `413 Payload Too Large` with code `PAYLOAD_TOO_LARGE`. Unknown fields, trailing JSON, an empty array, duplicate IDs, or an invalid ID format return `400 Bad Request` with code `INVALID_TRASH_SELECTION` and do not delete any item.
+
+Under one storage write lock, the server loads the current Trash contents and preflights access rules for the restored logical paths of every selected item that still exists before deleting anything. Any preflight failure terminates the request without deleting a selected item. A top-level path that is not visible to the current account returns `404 Not Found`; a writable top level with a descendant denied by an access rule returns `403 Forbidden`. After preflight succeeds, selected IDs are processed in request order. Items added after the request and all unselected items remain unchanged; selected IDs that no longer exist are classified as `skipped`.
+
+The `deleted`, `remaining`, and `skipped` response arrays form a complete, non-overlapping partition of the input IDs, with each array retaining original request order. The corresponding `*_count` fields equal the three array lengths. If a hard failure occurs during execution, unprocessed items that still exist are classified as `remaining`, and the response still reports completed deletions. `partial` is `true` if and only if `remaining` or `skipped` is non-empty. `warning` is always a boolean and reports only incomplete physical cleanup after a committed deletion; it does not represent a missing selection or an execution failure.
+
+```json
+{
+  "success": true,
+  "data": {
+    "deleted": ["7d29d7827f68f1a3"],
+    "remaining": ["4fdd157f624d892b"],
+    "skipped": [],
+    "deleted_count": 1,
+    "remaining_count": 1,
+    "skipped_count": 0,
+    "partial": true,
+    "warning": false
+  },
+  "message": "trash selection emptied partially",
+  "timestamp": "2024-01-15T10:00:00Z"
+}
+```
 
 `POST /api/v1/trash/{id}/restore` restores the item to its original path by default.
 

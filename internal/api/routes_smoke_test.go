@@ -486,7 +486,7 @@ func routeSmokeRequiresWriteRole(contract string) bool {
 		return true
 	case method == http.MethodPost && routePattern == "/api/v1/directories/*":
 		return true
-	case method == http.MethodDelete && routePattern == "/api/v1/trash/":
+	case method == http.MethodPost && routePattern == "/api/v1/trash/empty":
 		return true
 	case (method == http.MethodPost || method == http.MethodDelete) && routePattern == "/api/v1/trash/{id}":
 		return true
@@ -519,6 +519,8 @@ func routeSmokeRequestBody(contract string, session routeSmokeSession) string {
 		return `{"from":"/missing.txt","to":"/target.txt"}`
 	case "POST /api/v1/files-delete-intents":
 		return `{"targets":[{"path":"/missing.txt","observedIdentityToken":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}`
+	case "POST /api/v1/trash/empty":
+		return `{"ids":["smoke-id"]}`
 	case "POST /api/v1/favorites/":
 		return `{"path":"/smoke.txt"}`
 	case "POST /api/v1/favorites/check-batch":

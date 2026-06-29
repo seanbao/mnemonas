@@ -2622,14 +2622,23 @@ describe('API: files', () => {
             ok: true,
             json: () => Promise.resolve({
               success: true,
-              data: { deleted_count: 1, partial: false },
+              data: {
+                deleted: ['item1'],
+                remaining: [],
+                skipped: [],
+                deleted_count: 1,
+                remaining_count: 0,
+                skipped_count: 0,
+                partial: false,
+                warning: false,
+              },
               timestamp: '2024-01-01',
             }),
           })
 
         await restoreFromTrash('item1', undefined, { signal })
         await deleteFromTrash('item1', { signal })
-        await emptyTrash({ signal })
+        await emptyTrash(['item1'], { signal })
 
         expectFetchCall(1, '/api/v1/trash/item1/restore', {
           method: 'POST',
@@ -2639,8 +2648,10 @@ describe('API: files', () => {
           method: 'DELETE',
           signal,
         })
-        expectFetchCall(3, '/api/v1/trash/', {
-          method: 'DELETE',
+        expectFetchCall(3, '/api/v1/trash/empty', {
+          method: 'POST',
+          body: JSON.stringify({ ids: ['item1'] }),
+          headers: { 'Content-Type': 'application/json' },
           signal,
         })
       })
@@ -2732,36 +2743,53 @@ describe('API: files', () => {
     })
 
     describe('emptyTrash', () => {
-      it('empties trash and returns count', async () => {
-        const mockResponse = {
-          success: true,
-          data: { deleted_count: 5, partial: false },
-          timestamp: '2024-01-01',
-        }
-
-        mockFetch.mockResolvedValueOnce({
-          ok: true,
-          json: () => Promise.resolve(mockResponse),
-        })
-
-        const result = await emptyTrash()
-        expect(result).toEqual({ deletedCount: 5, partial: false, warning: false, message: undefined })
+      it.each([
+        ['an empty selection', []],
+        ['a duplicated id', ['item-a', 'item-a']],
+        ['an invalid id', ['item/a']],
+        ['more than 1000 ids', Array.from({ length: 1001 }, (_, index) => `item-${index}`)],
+      ])('rejects %s before sending a request', async (_label, ids) => {
+        await expect(emptyTrash(ids)).rejects.toThrow('回收站选择无效')
+        expect(mockFetch).not.toHaveBeenCalled()
       })
 
-      it('returns partial result when backend reports partial empty', async () => {
-        const mockResponse = {
-          success: true,
-          data: { deleted_count: 2, partial: true },
-          timestamp: '2024-01-01',
-        }
-
+      it('posts exact ids and returns the ordered result partition', async () => {
         mockFetch.mockResolvedValueOnce({
           ok: true,
-          json: () => Promise.resolve(mockResponse),
+          headers: { get: () => null },
+          json: () => Promise.resolve({
+            success: true,
+            data: {
+              deleted: ['item-a', 'item-c'],
+              remaining: ['item-b'],
+              skipped: [],
+              deleted_count: 2,
+              remaining_count: 1,
+              skipped_count: 0,
+              partial: true,
+              warning: false,
+            },
+            timestamp: '2024-01-01',
+          }),
         })
 
-        const result = await emptyTrash()
-        expect(result).toEqual({ deletedCount: 2, partial: true, warning: false, message: undefined })
+        const signal = new AbortController().signal
+        await expect(emptyTrash(['item-a', 'item-b', 'item-c'], { signal })).resolves.toEqual({
+          deleted: ['item-a', 'item-c'],
+          remaining: ['item-b'],
+          skipped: [],
+          partial: true,
+          warning: false,
+          auditWarning: false,
+          message: undefined,
+        })
+
+        expectFetchCall(1, '/api/v1/trash/empty', {
+          method: 'POST',
+          body: JSON.stringify({ ids: ['item-a', 'item-b', 'item-c'] }),
+          headers: { 'Content-Type': 'application/json' },
+          signal,
+        })
       })
 
       it('returns warning details for successful empty trash responses with cleanup warnings', async () => {
@@ -2770,40 +2798,67 @@ describe('API: files', () => {
           headers: { get: (name: string) => name === 'Warning' ? '199 MnemoNAS "trash delete cleanup incomplete"' : null },
           json: () => Promise.resolve({
             success: true,
-            data: { deleted_count: 3, partial: false, warning: true },
+            data: {
+              deleted: ['item-a'],
+              remaining: [],
+              skipped: [],
+              deleted_count: 1,
+              remaining_count: 0,
+              skipped_count: 0,
+              partial: false,
+              warning: true,
+            },
             message: 'trash emptied with cleanup warning',
             timestamp: '2024-01-01',
           }),
         })
 
-        const result = await emptyTrash()
-      expect(result).toEqual({
-        deletedCount: 3,
-        partial: false,
-        warning: true,
-        message: 'trash emptied with cleanup warning',
+        await expect(emptyTrash(['item-a'])).resolves.toEqual({
+          deleted: ['item-a'],
+          remaining: [],
+          skipped: [],
+          partial: false,
+          warning: true,
+          auditWarning: false,
+          message: 'trash emptied with cleanup warning',
+        })
       })
-    })
 
-      it('returns warning details for successful empty trash responses with body warning flags', async () => {
+      it('separates audit persistence warnings from cleanup warnings', async () => {
         mockFetch.mockResolvedValueOnce({
           ok: true,
-          headers: { get: () => null },
+          headers: {
+            get: (name: string) => {
+              if (name === 'X-Mnemonas-Audit-Status') return 'failed'
+              if (name === 'Warning') return '199 MnemoNAS "activity audit unavailable"'
+              return null
+            },
+          },
           json: () => Promise.resolve({
             success: true,
             warning: true,
-            data: { deleted_count: 3, partial: false },
-            message: 'trash emptied with cleanup warning',
+            data: {
+              deleted: ['item-a'],
+              remaining: [],
+              skipped: [],
+              deleted_count: 1,
+              remaining_count: 0,
+              skipped_count: 0,
+              partial: false,
+              warning: false,
+            },
             timestamp: '2024-01-01',
           }),
         })
 
-        const result = await emptyTrash()
-        expect(result).toEqual({
-          deletedCount: 3,
+        await expect(emptyTrash(['item-a'])).resolves.toEqual({
+          deleted: ['item-a'],
+          remaining: [],
+          skipped: [],
           partial: false,
-          warning: true,
-          message: 'trash emptied with cleanup warning',
+          warning: false,
+          auditWarning: true,
+          message: undefined,
         })
       })
 
@@ -2812,16 +2867,27 @@ describe('API: files', () => {
           ok: true,
           json: () => Promise.resolve({
             success: true,
-            data: { deleted_count: 3, partial: false },
+            data: {
+              deleted: ['item-a'],
+              remaining: [],
+              skipped: [],
+              deleted_count: 1,
+              remaining_count: 0,
+              skipped_count: 0,
+              partial: false,
+              warning: false,
+            },
             message: '   ',
           }),
         })
 
-        const result = await emptyTrash()
-        expect(result).toEqual({
-          deletedCount: 3,
+        await expect(emptyTrash(['item-a'])).resolves.toEqual({
+          deleted: ['item-a'],
+          remaining: [],
+          skipped: [],
           partial: false,
           warning: false,
+          auditWarning: false,
           message: undefined,
         })
       })
@@ -2835,37 +2901,33 @@ describe('API: files', () => {
           }),
         })
 
-        await expect(emptyTrash()).rejects.toThrow('服务器返回了无效的数据')
-      })
-
-      it('rejects malformed successful empty trash responses', async () => {
-        mockFetch.mockResolvedValueOnce({
-          ok: true,
-          json: () => Promise.resolve({
-            success: true,
-            data: { deleted_count: '2', partial: true },
-            timestamp: '2024-01-01',
-          }),
-        })
-
-        await expect(emptyTrash()).rejects.toThrow('服务器返回了无效的数据')
+        await expect(emptyTrash(['item-a'])).rejects.toThrow('服务器返回了无效的数据')
       })
 
       it.each([
-        ['negative deleted count', -1],
-        ['fractional deleted count', 1.5],
-        ['unsafe deleted count', 9007199254740992],
-      ])('rejects empty trash responses with %s', async (_label, deletedCount) => {
+        ['a non-array partition', { deleted: 'item-a', remaining: [], skipped: [], deleted_count: 1, remaining_count: 0, skipped_count: 0, partial: false, warning: false }],
+        ['an unknown id', { deleted: ['item-a'], remaining: [], skipped: ['item-x'], deleted_count: 1, remaining_count: 0, skipped_count: 1, partial: true, warning: false }],
+        ['a duplicated id', { deleted: ['item-a'], remaining: ['item-a'], skipped: ['item-b'], deleted_count: 1, remaining_count: 1, skipped_count: 1, partial: true, warning: false }],
+        ['an incomplete partition', { deleted: ['item-a'], remaining: [], skipped: [], deleted_count: 1, remaining_count: 0, skipped_count: 0, partial: false, warning: false }],
+        ['out-of-order deleted ids', { deleted: ['item-b', 'item-a'], remaining: [], skipped: [], deleted_count: 2, remaining_count: 0, skipped_count: 0, partial: false, warning: false }],
+        ['an inconsistent partial flag', { deleted: ['item-a'], remaining: ['item-b'], skipped: [], deleted_count: 1, remaining_count: 1, skipped_count: 0, partial: false, warning: false }],
+        ['a missing warning flag', { deleted: ['item-a', 'item-b'], remaining: [], skipped: [], deleted_count: 2, remaining_count: 0, skipped_count: 0, partial: false }],
+        ['a non-boolean warning flag', { deleted: ['item-a', 'item-b'], remaining: [], skipped: [], deleted_count: 2, remaining_count: 0, skipped_count: 0, partial: false, warning: 'false' }],
+        ['a mismatched deleted count', { deleted: ['item-a', 'item-b'], remaining: [], skipped: [], deleted_count: 1, remaining_count: 0, skipped_count: 0, partial: false, warning: false }],
+        ['a mismatched remaining count', { deleted: ['item-a'], remaining: ['item-b'], skipped: [], deleted_count: 1, remaining_count: 0, skipped_count: 0, partial: true, warning: false }],
+        ['a mismatched skipped count', { deleted: ['item-a'], remaining: [], skipped: ['item-b'], deleted_count: 1, remaining_count: 0, skipped_count: 0, partial: true, warning: false }],
+        ['an unexpected field', { deleted: ['item-a', 'item-b'], remaining: [], skipped: [], deleted_count: 2, remaining_count: 0, skipped_count: 0, partial: false, warning: false, extra: true }],
+      ])('rejects empty trash responses with %s', async (_label, data) => {
         mockFetch.mockResolvedValueOnce({
           ok: true,
           json: () => Promise.resolve({
             success: true,
-            data: { deleted_count: deletedCount, partial: false },
+            data,
             timestamp: '2024-01-01',
           }),
         })
 
-        await expect(emptyTrash()).rejects.toThrow('服务器返回了无效的数据')
+        await expect(emptyTrash(['item-a', 'item-b'])).rejects.toThrow('服务器返回了无效的数据')
       })
     })
   })
