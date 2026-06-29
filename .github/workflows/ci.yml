@@ -165,7 +165,7 @@ jobs:
           "$(go env GOPATH)/bin/govulncheck" "${packages[@]}"
 
       - name: Upload coverage
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v7
         with:
           files: coverage.out
           flags: go
@@ -274,7 +274,7 @@ jobs:
         run: npm run test:coverage
 
       - name: Upload coverage
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v7
         with:
           files: web/coverage/coverage-final.json
           flags: frontend
