@@ -15,7 +15,7 @@ require (
 	golang.org/x/crypto v0.52.0
 	golang.org/x/image v0.43.0
 	golang.org/x/sys v0.45.0
-	google.golang.org/grpc v1.81.0
+	google.golang.org/grpc v1.81.1
 	google.golang.org/protobuf v1.36.11
 	modernc.org/sqlite v1.50.0
 )
