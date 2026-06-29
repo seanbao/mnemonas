@@ -363,7 +363,7 @@ func deleteSnapshotEntryMap(snapshot DeleteTargetSnapshot) map[string]FileInfo {
 }
 
 func sameDeleteSnapshotMetadata(actual *workspace.FileInfo, expected FileInfo) bool {
-	return actual != nil && actual.IsDir == expected.IsDir && actual.Size == expected.Size && actual.ModTime.Equal(expected.ModTime)
+	return actual != nil && actual.IsDir == expected.IsDir && actual.Mode == expected.Mode && actual.Size == expected.Size && actual.ModTime.Equal(expected.ModTime)
 }
 
 func (fs *FileSystem) hashStableStagedFile(ctx context.Context, target *stagedDeleteTarget, stagePath, logicalPath string, expected FileInfo, forceHash bool) (string, error) {
@@ -472,6 +472,7 @@ func (fs *FileSystem) snapshotStagedDeleteLockedWithHashes(ctx context.Context, 
 			Path:                logicalPath,
 			Name:                expected.Name,
 			IsDir:               info.IsDir,
+			Mode:                info.Mode,
 			Size:                info.Size,
 			ModTime:             info.ModTime,
 			DeleteIdentityToken: expected.DeleteIdentityToken,
@@ -520,7 +521,9 @@ func (fs *FileSystem) snapshotStagedDeleteLockedWithHashes(ctx context.Context, 
 			if forceHash && !deleteSnapshotIncludesContentHashes(target.expected) {
 				comparison = projectDeleteTargetSnapshot(snapshot, DeleteTargetSnapshotOptions{IncludeDescendants: true})
 			}
-			if deleteTargetToken(comparison) != deleteTargetToken(target.expected) {
+			actualToken, actualErr := deleteTreeTokenV3(comparison)
+			expectedToken, expectedErr := deleteTreeTokenV3(target.expected)
+			if actualErr != nil || expectedErr != nil || actualToken == "" || expectedToken == "" || actualToken != expectedToken {
 				return DeleteTargetSnapshot{}, &DeleteTargetChangedError{Path: target.logicalName}
 			}
 			return snapshot, nil

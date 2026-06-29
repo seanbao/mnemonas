@@ -7,7 +7,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -48,6 +47,7 @@ var (
 	ErrInvalidTrashSelection     = errors.New("invalid trash selection")
 	ErrDeleteIdentityUnavailable = errors.New("delete identity verification unavailable")
 	errStoragePathSymlink        = errors.New("storage path contains symlink")
+	errEmptyDeleteTargetToken    = errors.New("delete target token is empty")
 )
 
 // MaxDeleteIntentTargets bounds one atomic delete-intent snapshot request.
@@ -246,14 +246,15 @@ const defaultMaxWriteSize int64 = 10 * 1024 * 1024 * 1024 // 10GB
 
 // FileInfo represents file metadata
 type FileInfo struct {
-	Path                string    `json:"path"`
-	Name                string    `json:"name"`
-	IsDir               bool      `json:"is_dir"`
-	Size                int64     `json:"size"`
-	ModTime             time.Time `json:"mod_time"`
-	DeleteIdentityToken string    `json:"delete_identity_token,omitempty"`
-	ContentHash         string    `json:"content_hash,omitempty"`
-	Versioned           bool      `json:"versioned"` // Whether this file has version management
+	Path                string      `json:"path"`
+	Name                string      `json:"name"`
+	IsDir               bool        `json:"is_dir"`
+	Mode                os.FileMode `json:"-"`
+	Size                int64       `json:"size"`
+	ModTime             time.Time   `json:"mod_time"`
+	DeleteIdentityToken string      `json:"delete_identity_token,omitempty"`
+	ContentHash         string      `json:"content_hash,omitempty"`
+	Versioned           bool        `json:"versioned"` // Whether this file has version management
 }
 
 // VersionRef represents a version reference
@@ -796,6 +797,7 @@ func (fs *FileSystem) Stat(ctx context.Context, name string) (*FileInfo, error) 
 			Path:    "/",
 			Name:    "/",
 			IsDir:   true,
+			Mode:    os.ModeDir,
 			ModTime: time.Now(),
 		}, nil
 	}
@@ -815,6 +817,7 @@ func (fs *FileSystem) Stat(ctx context.Context, name string) (*FileInfo, error) 
 		Path:                info.Path,
 		Name:                info.Name,
 		IsDir:               info.IsDir,
+		Mode:                info.Mode,
 		Size:                info.Size,
 		ModTime:             info.ModTime,
 		DeleteIdentityToken: info.DeleteIdentityToken,
@@ -862,6 +865,7 @@ func (fs *FileSystem) ReadDir(ctx context.Context, name string) ([]*FileInfo, er
 			Path:                childPath,
 			Name:                childName,
 			IsDir:               e.IsDir,
+			Mode:                e.Mode,
 			Size:                e.Size,
 			ModTime:             e.ModTime,
 			DeleteIdentityToken: e.DeleteIdentityToken,
@@ -968,6 +972,7 @@ func (fs *FileSystem) snapshotFileInfo(ctx context.Context, name string, file *o
 		Path:    name,
 		Name:    path.Base(name),
 		IsDir:   false,
+		Mode:    stat.Mode(),
 		Size:    stat.Size(),
 		ModTime: stat.ModTime(),
 	}
@@ -1204,9 +1209,16 @@ func (fs *FileSystem) prepareDeleteIntents(ctx context.Context, targets []Observ
 		if err != nil {
 			return DeleteIntentSnapshot{}, err
 		}
+		token, err := deleteTreeTokenV3(snapshot)
+		if err != nil {
+			return DeleteIntentSnapshot{}, err
+		}
+		if token == "" {
+			return DeleteIntentSnapshot{}, errEmptyDeleteTargetToken
+		}
 		result.Targets = append(result.Targets, PreparedDeleteTarget{
 			Snapshot: snapshot,
-			Token:    deleteTargetToken(snapshot),
+			Token:    token,
 		})
 	}
 	return result, nil
@@ -1245,7 +1257,13 @@ func (fs *FileSystem) DeleteWithExpectedPolicyAndTarget(ctx context.Context, nam
 		}
 		return err
 	}
-	actualTargetToken := deleteTargetToken(snapshot)
+	actualTargetToken, err := deleteTreeTokenV3(snapshot)
+	if err != nil {
+		return err
+	}
+	if actualTargetToken == "" {
+		return errEmptyDeleteTargetToken
+	}
 	if expectedTargetToken != actualTargetToken {
 		return &DeleteTargetChangedError{
 			Path:          name,
@@ -1329,6 +1347,7 @@ func (fs *FileSystem) deleteTargetSnapshotWithObservedIdentityLocked(ctx context
 			Path:                filePath,
 			Name:                info.Name,
 			IsDir:               info.IsDir,
+			Mode:                info.Mode,
 			Size:                info.Size,
 			ModTime:             info.ModTime,
 			DeleteIdentityToken: info.DeleteIdentityToken,
@@ -1379,39 +1398,6 @@ func (fs *FileSystem) deleteTargetFileHash(ctx context.Context, name string) (st
 		return fs.hashDeleteTargetFile(ctx, name)
 	}
 	return fs.hashWorkspaceFile(ctx, name)
-}
-
-func deleteTargetToken(snapshot DeleteTargetSnapshot) string {
-	hasher := sha256.New()
-	writeDeleteTargetTokenString(hasher, "mnemonas-delete-target-v2")
-	writeDeleteTargetTokenString(hasher, snapshot.Root.Path)
-	entries := append([]FileInfo(nil), snapshot.Entries...)
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
-	writeDeleteTargetTokenUint64(hasher, uint64(len(entries)))
-	for _, entry := range entries {
-		writeDeleteTargetTokenString(hasher, entry.Path)
-		if entry.IsDir {
-			_, _ = hasher.Write([]byte{1})
-		} else {
-			_, _ = hasher.Write([]byte{0})
-		}
-		writeDeleteTargetTokenUint64(hasher, uint64(entry.Size))
-		writeDeleteTargetTokenUint64(hasher, uint64(entry.ModTime.UnixNano()))
-		writeDeleteTargetTokenString(hasher, entry.DeleteIdentityToken)
-		writeDeleteTargetTokenString(hasher, entry.ContentHash)
-	}
-	return hex.EncodeToString(hasher.Sum(nil))
-}
-
-func writeDeleteTargetTokenString(w io.Writer, value string) {
-	writeDeleteTargetTokenUint64(w, uint64(len(value)))
-	_, _ = io.WriteString(w, value)
-}
-
-func writeDeleteTargetTokenUint64(w io.Writer, value uint64) {
-	var encoded [8]byte
-	binary.BigEndian.PutUint64(encoded[:], value)
-	_, _ = w.Write(encoded[:])
 }
 
 func normalizeDeleteIntentPaths(names []string) ([]string, error) {

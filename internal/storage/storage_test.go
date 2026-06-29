@@ -617,6 +617,9 @@ func TestFileSystem_OpenFileSnapshot_PreservesSnapshotAcrossPathReplacement(t *t
 	if info.Size != int64(len(originalContent)) {
 		t.Fatalf("snapshot size = %d, want %d", info.Size, len(originalContent))
 	}
+	if !info.Mode.IsRegular() {
+		t.Fatalf("snapshot mode = %v, want regular file mode", info.Mode)
+	}
 
 	if err := fs.WriteFile(ctx, "/snapshot.txt", bytes.NewReader(replacementContent)); err != nil {
 		t.Fatalf("WriteFile(snapshot replacement) error: %v", err)
@@ -1383,6 +1386,9 @@ func TestFileSystem_Stat(t *testing.T) {
 	if info.Size != 7 {
 		t.Errorf("Size = %d, want 7", info.Size)
 	}
+	if !info.Mode.IsRegular() {
+		t.Errorf("Mode = %v, want regular file mode", info.Mode)
+	}
 }
 
 func TestFileSystem_Stat_NotFound(t *testing.T) {
@@ -1406,6 +1412,9 @@ func TestFileSystem_Stat_Root(t *testing.T) {
 
 	if !info.IsDir {
 		t.Error("Root should be a directory")
+	}
+	if !info.Mode.IsDir() {
+		t.Errorf("Root mode = %v, want directory mode", info.Mode)
 	}
 }
 
@@ -1679,6 +1688,14 @@ func TestFileSystem_ReadDir(t *testing.T) {
 
 	if len(entries) != 3 {
 		t.Errorf("ReadDir() returned %d entries, want 3", len(entries))
+	}
+	for _, entry := range entries {
+		if entry.Mode.IsDir() != entry.IsDir {
+			t.Errorf("ReadDir() entry %q mode = %v, is_dir = %t", entry.Name, entry.Mode, entry.IsDir)
+		}
+		if !entry.IsDir && !entry.Mode.IsRegular() {
+			t.Errorf("ReadDir() entry %q mode = %v, want regular file mode", entry.Name, entry.Mode)
+		}
 	}
 }
 
@@ -2516,25 +2533,33 @@ func TestFileSystem_DeleteTargetSnapshotsAuthorizeBeforeHashAndStopAtDenial(t *t
 	}
 }
 
-func TestDeleteTargetTokenIsDeterministicAndLengthPrefixed(t *testing.T) {
+func TestDeleteTreeTokenV3IsDeterministicAndLengthPrefixed(t *testing.T) {
 	modTime := time.Unix(100, 200)
 	entries := []FileInfo{
-		{Path: "/root", Name: "root", IsDir: true, Size: 10, ModTime: modTime},
-		{Path: "/root/a", Name: "a", Size: 1, ModTime: modTime, ContentHash: "bc"},
-		{Path: "/root/ab", Name: "ab", Size: 1, ModTime: modTime, ContentHash: "c"},
+		{Path: "/root", Name: "root", IsDir: true, Mode: os.ModeDir | 0o750, Size: 10, ModTime: modTime},
+		{Path: "/root/a", Name: "a", Mode: 0o640, Size: 1, ModTime: modTime, ContentHash: "bc"},
+		{Path: "/root/ab", Name: "ab", Mode: 0o640, Size: 1, ModTime: modTime, ContentHash: "c"},
+	}
+	token := func(snapshot DeleteTargetSnapshot) string {
+		t.Helper()
+		value, err := deleteTreeTokenV3(snapshot)
+		if err != nil {
+			t.Fatalf("deleteTreeTokenV3() error: %v", err)
+		}
+		return value
 	}
 	snapshot := DeleteTargetSnapshot{Root: entries[0], Entries: entries}
 	shuffled := DeleteTargetSnapshot{Root: entries[0], Entries: []FileInfo{entries[2], entries[0], entries[1]}}
-	if got, want := deleteTargetToken(shuffled), deleteTargetToken(snapshot); got != want {
+	if got, want := token(shuffled), token(snapshot); got != want {
 		t.Fatalf("token changed with entry order: got %q want %q", got, want)
 	}
 
 	ambiguousWithoutLengths := DeleteTargetSnapshot{Root: entries[0], Entries: []FileInfo{
 		entries[0],
-		{Path: "/root/a", Name: "a", Size: 1, ModTime: modTime, ContentHash: "b"},
-		{Path: "/root/ab", Name: "ab", Size: 1, ModTime: modTime, ContentHash: "cc"},
+		{Path: "/root/a", Name: "a", Mode: 0o640, Size: 1, ModTime: modTime, ContentHash: "b"},
+		{Path: "/root/ab", Name: "ab", Mode: 0o640, Size: 1, ModTime: modTime, ContentHash: "cc"},
 	}}
-	if deleteTargetToken(snapshot) == deleteTargetToken(ambiguousWithoutLengths) {
+	if token(snapshot) == token(ambiguousWithoutLengths) {
 		t.Fatal("length-prefixed token encoding did not distinguish different entry fields")
 	}
 }
