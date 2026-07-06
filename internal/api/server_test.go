@@ -2871,6 +2871,20 @@ func TestServer_PrepareDeleteIntentsReturnsPolicyAndTargetsInRequestOrder(t *tes
 	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
 		t.Fatalf("decode prepare delete intents response: %v", err)
 	}
+	var contract struct {
+		Data struct {
+			Targets []map[string]json.RawMessage `json:"targets"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &contract); err != nil {
+		t.Fatalf("decode prepare delete intents response contract: %v", err)
+	}
+	wantTargetKeys := []string{"deleteIdentityToken", "deleteTargetToken", "isDir", "modTime", "name", "path", "size"}
+	for i, target := range contract.Data.Targets {
+		if gotKeys := sortedMapKeys(target); !reflect.DeepEqual(gotKeys, wantTargetKeys) {
+			t.Fatalf("target[%d] response keys = %v, want %v", i, gotKeys, wantTargetKeys)
+		}
+	}
 	policy := fs.CurrentDeletePolicy()
 	if response.Data.DeleteMode != policy.Mode || response.Data.DeletePolicyToken != policy.Token || response.Data.TrashRetentionDays != policy.TrashRetentionDays || response.Data.TrashAutoCleanupEnabled != policy.TrashAutoCleanupEnabled {
 		t.Fatalf("intent policy response = %+v, want %+v", response.Data, policy)

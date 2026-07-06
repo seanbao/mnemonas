@@ -35,12 +35,16 @@ func deleteTreeTokenV3(snapshot DeleteTargetSnapshot) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return deleteTreeTargetTokenV3(snapshot.Root.Path, rootDigest, uint64(nodeCount)), nil
+}
+
+func deleteTreeTargetTokenV3(rootPath string, rootDigest [sha256.Size]byte, nodeCount uint64) string {
 	targetHasher := sha256.New()
 	writeDeleteTreeMerkleStringV3(targetHasher, deleteTreeTargetDomainV3)
-	writeDeleteTreeMerkleStringV3(targetHasher, snapshot.Root.Path)
+	writeDeleteTreeMerkleStringV3(targetHasher, rootPath)
 	writeDeleteTreeMerkleBytesV3(targetHasher, rootDigest[:])
-	writeDeleteTreeMerkleUint64V3(targetHasher, uint64(nodeCount))
-	return hex.EncodeToString(targetHasher.Sum(nil)), nil
+	writeDeleteTreeMerkleUint64V3(targetHasher, nodeCount)
+	return hex.EncodeToString(targetHasher.Sum(nil))
 }
 
 func buildDeleteTreeMerkleV3(snapshot DeleteTargetSnapshot) (*deleteTreeMerkleNodeV3, int, error) {
@@ -144,17 +148,7 @@ func (node *deleteTreeMerkleNodeV3) digest() ([sha256.Size]byte, error) {
 	if node == nil {
 		return [sha256.Size]byte{}, fmt.Errorf("invalid delete tree snapshot: Merkle node is nil")
 	}
-	hasher := sha256.New()
-	if node.info.IsDir {
-		writeDeleteTreeMerkleStringV3(hasher, deleteTreeDirDomainV3)
-	} else {
-		writeDeleteTreeMerkleStringV3(hasher, deleteTreeFileDomainV3)
-	}
-	writeDeleteTreeMerkleUint64V3(hasher, uint64(node.info.Mode))
-	writeDeleteTreeMerkleUint64V3(hasher, uint64(node.info.Size))
-	writeDeleteTreeMerkleUint64V3(hasher, uint64(node.info.ModTime.UnixNano()))
-	writeDeleteTreeMerkleStringV3(hasher, node.info.DeleteIdentityToken)
-	writeDeleteTreeMerkleStringV3(hasher, node.info.ContentHash)
+	hasher := newDeleteTreeMerkleNodeHasherV3(node.info)
 
 	if node.info.IsDir {
 		sort.Slice(node.children, func(i, j int) bool {
@@ -165,15 +159,38 @@ func (node *deleteTreeMerkleNodeV3) digest() ([sha256.Size]byte, error) {
 			if err != nil {
 				return [sha256.Size]byte{}, err
 			}
-			writeDeleteTreeMerkleStringV3(hasher, child.info.Name)
-			writeDeleteTreeMerkleBytesV3(hasher, childDigest[:])
+			writeDeleteTreeMerkleChildV3(hasher, child.info.Name, childDigest)
 		}
 		writeDeleteTreeMerkleUint64V3(hasher, uint64(len(node.children)))
 	}
 
+	return finishDeleteTreeMerkleDigestV3(hasher), nil
+}
+
+func newDeleteTreeMerkleNodeHasherV3(info FileInfo) hash.Hash {
+	hasher := sha256.New()
+	if info.IsDir {
+		writeDeleteTreeMerkleStringV3(hasher, deleteTreeDirDomainV3)
+	} else {
+		writeDeleteTreeMerkleStringV3(hasher, deleteTreeFileDomainV3)
+	}
+	writeDeleteTreeMerkleUint64V3(hasher, uint64(info.Mode))
+	writeDeleteTreeMerkleUint64V3(hasher, uint64(info.Size))
+	writeDeleteTreeMerkleUint64V3(hasher, uint64(info.ModTime.UnixNano()))
+	writeDeleteTreeMerkleStringV3(hasher, info.DeleteIdentityToken)
+	writeDeleteTreeMerkleStringV3(hasher, info.ContentHash)
+	return hasher
+}
+
+func writeDeleteTreeMerkleChildV3(hasher hash.Hash, name string, digest [sha256.Size]byte) {
+	writeDeleteTreeMerkleStringV3(hasher, name)
+	writeDeleteTreeMerkleBytesV3(hasher, digest[:])
+}
+
+func finishDeleteTreeMerkleDigestV3(hasher hash.Hash) [sha256.Size]byte {
 	var digest [sha256.Size]byte
 	copy(digest[:], hasher.Sum(nil))
-	return digest, nil
+	return digest
 }
 
 func writeDeleteTreeMerkleStringV3(hasher hash.Hash, value string) {

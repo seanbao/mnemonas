@@ -2393,7 +2393,7 @@ func TestFileSystem_DeleteWithTargetValidatorAuthorizesBeforeHashing(t *testing.
 	}
 }
 
-func TestFileSystem_PrepareDeleteIntentsPreservesOrderAndSnapshotsCompleteTrees(t *testing.T) {
+func TestFileSystem_PrepareDeleteIntentsPreservesOrderAndReturnsRootMetadata(t *testing.T) {
 	fs := setupStandaloneFileSystem(t)
 	ctx := context.Background()
 	for _, dir := range []string{"/empty", "/tree", "/tree/nested"} {
@@ -2422,28 +2422,136 @@ func TestFileSystem_PrepareDeleteIntentsPreservesOrderAndSnapshotsCompleteTrees(
 	wantOrder := []string{"/file.bin", "/tree", "/empty"}
 	for i, wantPath := range wantOrder {
 		target := intent.Targets[i]
-		if target.Snapshot.Root.Path != wantPath {
-			t.Fatalf("target[%d] path = %q, want %q", i, target.Snapshot.Root.Path, wantPath)
+		if target.Path != wantPath {
+			t.Fatalf("target[%d] path = %q, want %q", i, target.Path, wantPath)
 		}
 		if len(target.Token) != sha256.Size*2 || target.Token != strings.ToLower(target.Token) {
 			t.Fatalf("target[%d] token = %q, want lowercase SHA-256", i, target.Token)
 		}
 	}
-	if intent.Targets[0].Snapshot.Root.ContentHash == "" || len(intent.Targets[0].Snapshot.Entries) != 1 {
-		t.Fatalf("file snapshot = %+v, want one hashed file", intent.Targets[0].Snapshot)
+	if intent.Targets[0].Name != "file.bin" || intent.Targets[0].IsDir || intent.Targets[0].Size != int64(len("file")) {
+		t.Fatalf("file target metadata = %+v", intent.Targets[0])
 	}
-	if got := len(intent.Targets[1].Snapshot.Entries); got != 3 {
-		t.Fatalf("tree snapshot entries = %d, want root, nested directory, and child file", got)
+	if intent.Targets[1].Name != "tree" || !intent.Targets[1].IsDir {
+		t.Fatalf("tree target metadata = %+v", intent.Targets[1])
 	}
-	if got := intent.Targets[1].Snapshot.Entries[2].ContentHash; got == "" {
-		t.Fatal("tree child content hash is empty")
-	}
-	if got := len(intent.Targets[2].Snapshot.Entries); got != 1 || !intent.Targets[2].Snapshot.Root.IsDir {
-		t.Fatalf("empty directory snapshot = %+v, want one directory entry", intent.Targets[2].Snapshot)
+	if intent.Targets[2].Name != "empty" || !intent.Targets[2].IsDir {
+		t.Fatalf("empty directory target metadata = %+v", intent.Targets[2])
 	}
 	wantAuthorized := []string{"/file.bin", "/tree", "/tree/nested", "/tree/nested/child.bin", "/empty"}
 	if !slices.Equal(authorized, wantAuthorized) {
 		t.Fatalf("authorized paths = %v, want %v", authorized, wantAuthorized)
+	}
+}
+
+func TestFileSystem_PrepareDeleteIntentsUsesOneStreamingWalkPerTarget(t *testing.T) {
+	tests := []struct {
+		name    string
+		targets []string
+	}{
+		{name: "single target", targets: []string{"/tree"}},
+		{name: "multiple targets", targets: []string{"/file.bin", "/tree", "/empty"}},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			fs := setupStandaloneFileSystem(t)
+			ctx := context.Background()
+			for _, dir := range []string{"/empty", "/tree", "/tree/nested"} {
+				if err := fs.Mkdir(ctx, dir); err != nil {
+					t.Fatalf("Mkdir(%s) error: %v", dir, err)
+				}
+			}
+			for targetPath, content := range map[string]string{
+				"/file.bin":              "file",
+				"/tree/child.bin":        "child",
+				"/tree/nested/value.bin": "nested",
+			} {
+				if err := fs.WriteFile(ctx, targetPath, strings.NewReader(content)); err != nil {
+					t.Fatalf("WriteFile(%s) error: %v", targetPath, err)
+				}
+			}
+
+			oracles := make(map[string]DeleteTargetSnapshot, len(testCase.targets))
+			oracleTokens := make(map[string]string, len(testCase.targets))
+			for _, targetPath := range testCase.targets {
+				fs.mu.RLock()
+				snapshot, err := fs.deleteTargetSnapshotLocked(ctx, targetPath, DeleteTargetSnapshotOptions{
+					IncludeDescendants: true,
+					IncludeContentHash: true,
+				}, nil)
+				fs.mu.RUnlock()
+				if err != nil {
+					t.Fatalf("deleteTargetSnapshotLocked(%s) error: %v", targetPath, err)
+				}
+				token, err := deleteTreeTokenV3(snapshot)
+				if err != nil {
+					t.Fatalf("deleteTreeTokenV3(%s) error: %v", targetPath, err)
+				}
+				oracles[targetPath] = snapshot
+				oracleTokens[targetPath] = token
+			}
+
+			originalWalk := walkStorageDeleteTree
+			walkCalls := make(map[string]int, len(testCase.targets))
+			callbackCalls := make(map[string]int, len(testCase.targets))
+			walkStorageDeleteTree = func(ctx context.Context, ws *workspace.Workspace, root string, fn workspace.WalkFunc) error {
+				walkCalls[root]++
+				return originalWalk(ctx, ws, root, func(entryPath string, info *workspace.FileInfo) error {
+					callbackCalls[root]++
+					return fn(entryPath, info)
+				})
+			}
+			t.Cleanup(func() { walkStorageDeleteTree = originalWalk })
+
+			hashCalls := make(map[string]int)
+			fs.hashDeleteTargetFile = func(ctx context.Context, targetPath string) (string, error) {
+				hashCalls[targetPath]++
+				return fs.hashWorkspaceFile(ctx, targetPath)
+			}
+
+			intent, err := fs.PrepareDeleteIntents(ctx, testCase.targets, nil)
+			if err != nil {
+				t.Fatalf("PrepareDeleteIntents() error: %v", err)
+			}
+			if len(intent.Targets) != len(testCase.targets) {
+				t.Fatalf("prepared target count = %d, want %d", len(intent.Targets), len(testCase.targets))
+			}
+
+			expectedHashCalls := 0
+			for i, targetPath := range testCase.targets {
+				oracle := oracles[targetPath]
+				prepared := intent.Targets[i]
+				if prepared.Path != oracle.Root.Path || prepared.Name != oracle.Root.Name || prepared.IsDir != oracle.Root.IsDir || prepared.Size != oracle.Root.Size || !prepared.ModTime.Equal(oracle.Root.ModTime) || prepared.DeleteIdentityToken != oracle.Root.DeleteIdentityToken {
+					t.Fatalf("prepared target[%d] = %+v, want root %+v", i, prepared, oracle.Root)
+				}
+				if prepared.Token != oracleTokens[targetPath] {
+					t.Fatalf("prepared token for %s = %q, want full-snapshot oracle %q", targetPath, prepared.Token, oracleTokens[targetPath])
+				}
+				if walkCalls[targetPath] != 1 {
+					t.Fatalf("walk calls for %s = %d, want 1", targetPath, walkCalls[targetPath])
+				}
+				if callbackCalls[targetPath] != len(oracle.Entries) {
+					t.Fatalf("entry callbacks for %s = %d, want %d", targetPath, callbackCalls[targetPath], len(oracle.Entries))
+				}
+				for _, entry := range oracle.Entries {
+					if entry.IsDir {
+						continue
+					}
+					expectedHashCalls++
+					if hashCalls[entry.Path] != 1 {
+						t.Fatalf("live hash calls for %s = %d, want 1", entry.Path, hashCalls[entry.Path])
+					}
+				}
+			}
+			actualHashCalls := 0
+			for _, count := range hashCalls {
+				actualHashCalls += count
+			}
+			if actualHashCalls != expectedHashCalls {
+				t.Fatalf("total live hash calls = %d, want %d", actualHashCalls, expectedHashCalls)
+			}
+		})
 	}
 }
 

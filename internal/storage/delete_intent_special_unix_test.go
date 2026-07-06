@@ -108,12 +108,17 @@ func TestFileSystem_PrepareDeleteIntentsHashesRegularFileWithSafeOpen(t *testing
 	if err := fs.WriteFile(ctx, "/regular-target.bin", strings.NewReader("regular content")); err != nil {
 		t.Fatalf("WriteFile() error: %v", err)
 	}
+	hashCalls := 0
+	fs.hashDeleteTargetFile = func(ctx context.Context, targetPath string) (string, error) {
+		hashCalls++
+		return fs.hashWorkspaceFile(ctx, targetPath)
+	}
 
 	intent, err := fs.PrepareDeleteIntents(ctx, []string{"/regular-target.bin"}, nil)
 	if err != nil {
 		t.Fatalf("PrepareDeleteIntents() error: %v", err)
 	}
-	if len(intent.Targets) != 1 || intent.Targets[0].Snapshot.Root.ContentHash == "" || len(intent.Targets[0].Token) != 64 {
+	if len(intent.Targets) != 1 || len(intent.Targets[0].Token) != 64 || hashCalls != 1 {
 		t.Fatalf("regular target intent = %+v", intent.Targets)
 	}
 }

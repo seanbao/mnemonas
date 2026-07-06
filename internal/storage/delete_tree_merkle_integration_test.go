@@ -27,7 +27,13 @@ func TestDeleteTreeTokenV3_PrepareAndCommitUseSameToken(t *testing.T) {
 	if len(intent.Targets) != 1 {
 		t.Fatalf("prepared targets = %d, want 1", len(intent.Targets))
 	}
-	wantToken, err := deleteTreeTokenV3(intent.Targets[0].Snapshot)
+	fs.mu.RLock()
+	oracle, err := fs.deleteTargetSnapshotLocked(ctx, targetPath, DeleteTargetSnapshotOptions{IncludeDescendants: true, IncludeContentHash: true}, nil)
+	fs.mu.RUnlock()
+	if err != nil {
+		t.Fatalf("deleteTargetSnapshotLocked() error: %v", err)
+	}
+	wantToken, err := deleteTreeTokenV3(oracle)
 	if err != nil {
 		t.Fatalf("deleteTreeTokenV3() error: %v", err)
 	}
@@ -35,7 +41,7 @@ func TestDeleteTreeTokenV3_PrepareAndCommitUseSameToken(t *testing.T) {
 		t.Fatalf("prepared token = %q, want v3 token %q", intent.Targets[0].Token, wantToken)
 	}
 
-	if intent.Targets[0].Snapshot.Root.DeleteIdentityToken == "" {
+	if intent.Targets[0].DeleteIdentityToken == "" {
 		t.Skip("platform deletion identity is unavailable; v3 token preparation remains covered")
 	}
 	if err := fs.DeleteWithExpectedPolicyAndTarget(
@@ -88,18 +94,12 @@ func TestDeleteTreeTokenV3_ModeDriftChangesTokenAndRejectsCommit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PrepareDeleteIntents(before) error: %v", err)
 	}
-	if got := before.Targets[0].Snapshot.Root.Mode.Perm(); got != 0o600 {
-		t.Fatalf("prepared mode = %#o, want %#o", got, os.FileMode(0o600))
-	}
 	if err := os.Chmod(hostPath, 0o640); err != nil {
 		t.Skipf("chmod update is unavailable: %v", err)
 	}
 	after, err := fs.PrepareDeleteIntents(ctx, []string{targetPath}, nil)
 	if err != nil {
 		t.Fatalf("PrepareDeleteIntents(after) error: %v", err)
-	}
-	if got := after.Targets[0].Snapshot.Root.Mode.Perm(); got != 0o640 {
-		t.Fatalf("updated prepared mode = %#o, want %#o", got, os.FileMode(0o640))
 	}
 	if before.Targets[0].Token == "" || after.Targets[0].Token == "" || before.Targets[0].Token == after.Targets[0].Token {
 		t.Fatalf("mode drift tokens = %q and %q, want distinct non-empty tokens", before.Targets[0].Token, after.Targets[0].Token)
@@ -131,10 +131,9 @@ func TestFileSystem_StagedDeleteRejectsModeDrift(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PrepareDeleteIntents() error: %v", err)
 	}
-	if intent.Targets[0].Snapshot.Root.DeleteIdentityToken == "" {
+	if intent.Targets[0].DeleteIdentityToken == "" {
 		t.Skip("platform deletion identity is unavailable")
 	}
-
 	release := fs.beginMutation()
 	released := false
 	defer func() {
@@ -142,7 +141,11 @@ func TestFileSystem_StagedDeleteRejectsModeDrift(t *testing.T) {
 			release()
 		}
 	}()
-	target, err := fs.stageDeleteTargetLocked(ctx, targetPath, intent.Targets[0].Snapshot, nil)
+	snapshot, err := fs.deleteTargetSnapshotLocked(ctx, targetPath, DeleteTargetSnapshotOptions{IncludeDescendants: true, IncludeContentHash: true}, nil)
+	if err != nil {
+		t.Fatalf("deleteTargetSnapshotLocked() error: %v", err)
+	}
+	target, err := fs.stageDeleteTargetLocked(ctx, targetPath, snapshot, nil)
 	if err != nil {
 		t.Fatalf("stageDeleteTargetLocked() error: %v", err)
 	}

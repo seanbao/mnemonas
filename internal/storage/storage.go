@@ -125,10 +125,16 @@ type DeleteTargetSnapshotOptions struct {
 // methods because the filesystem mutation lock is held.
 type DeleteTargetValidator func(DeleteTargetSnapshot) error
 
-// PreparedDeleteTarget is one target returned from an atomic delete-intent snapshot.
+// PreparedDeleteTarget contains root response metadata and the opaque token
+// produced for one target during atomic delete-intent preparation.
 type PreparedDeleteTarget struct {
-	Snapshot DeleteTargetSnapshot
-	Token    string
+	Path                string
+	Name                string
+	IsDir               bool
+	Size                int64
+	ModTime             time.Time
+	DeleteIdentityToken string
+	Token               string
 }
 
 // ObservedDeleteTarget binds a requested path to the object identity returned
@@ -1205,11 +1211,26 @@ func (fs *FileSystem) prepareDeleteIntents(ctx context.Context, targets []Observ
 	}
 	options := DeleteTargetSnapshotOptions{IncludeDescendants: true, IncludeContentHash: true}
 	for _, target := range targets {
-		snapshot, err := fs.deleteTargetSnapshotWithObservedIdentityLocked(ctx, target.Path, options, target.ObservedIdentityToken, authorize)
+		stream, err := newDeleteTreeMerkleStreamV3(target.Path)
 		if err != nil {
 			return DeleteIntentSnapshot{}, err
 		}
-		token, err := deleteTreeTokenV3(snapshot)
+		var root FileInfo
+		rootSeen := false
+		err = fs.walkDeleteTargetEntriesWithObservedIdentityLocked(ctx, target.Path, options, target.ObservedIdentityToken, authorize, func(entry FileInfo) error {
+			if entry.Path == target.Path {
+				root = entry
+				rootSeen = true
+			}
+			return stream.add(entry)
+		})
+		if err != nil {
+			return DeleteIntentSnapshot{}, err
+		}
+		if !rootSeen {
+			return DeleteIntentSnapshot{}, ErrNotFound
+		}
+		token, err := stream.finish()
 		if err != nil {
 			return DeleteIntentSnapshot{}, err
 		}
@@ -1217,8 +1238,13 @@ func (fs *FileSystem) prepareDeleteIntents(ctx context.Context, targets []Observ
 			return DeleteIntentSnapshot{}, errEmptyDeleteTargetToken
 		}
 		result.Targets = append(result.Targets, PreparedDeleteTarget{
-			Snapshot: snapshot,
-			Token:    token,
+			Path:                root.Path,
+			Name:                root.Name,
+			IsDir:               root.IsDir,
+			Size:                root.Size,
+			ModTime:             root.ModTime,
+			DeleteIdentityToken: root.DeleteIdentityToken,
+			Token:               token,
 		})
 	}
 	return result, nil
@@ -1318,9 +1344,27 @@ func (fs *FileSystem) deleteTargetSnapshotLocked(ctx context.Context, name strin
 }
 
 func (fs *FileSystem) deleteTargetSnapshotWithObservedIdentityLocked(ctx context.Context, name string, options DeleteTargetSnapshotOptions, observedIdentityToken string, authorize DeletePathAuthorizer) (DeleteTargetSnapshot, error) {
-	mountBoundary := fs.captureDeleteMountBoundary(fs.workspace.Root())
 	entries := make([]FileInfo, 0, 1)
-	appendEntry := func(filePath string, info *workspace.FileInfo) error {
+	err := fs.walkDeleteTargetEntriesWithObservedIdentityLocked(ctx, name, options, observedIdentityToken, authorize, func(entry FileInfo) error {
+		entries = append(entries, entry)
+		return nil
+	})
+	if err != nil {
+		return DeleteTargetSnapshot{}, err
+	}
+
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
+	for _, entry := range entries {
+		if entry.Path == name {
+			return DeleteTargetSnapshot{Root: entry, Entries: entries}, nil
+		}
+	}
+	return DeleteTargetSnapshot{}, ErrNotFound
+}
+
+func (fs *FileSystem) walkDeleteTargetEntriesWithObservedIdentityLocked(ctx context.Context, name string, options DeleteTargetSnapshotOptions, observedIdentityToken string, authorize DeletePathAuthorizer, visit func(FileInfo) error) error {
+	mountBoundary := fs.captureDeleteMountBoundary(fs.workspace.Root())
+	visitWorkspaceEntry := func(filePath string, info *workspace.FileInfo) error {
 		if info == nil {
 			return ErrNotFound
 		}
@@ -1364,33 +1408,25 @@ func (fs *FileSystem) deleteTargetSnapshotWithObservedIdentityLocked(ctx context
 				entry.ContentHash = contentHash
 			}
 		}
-		entries = append(entries, entry)
-		return nil
+		return visit(entry)
 	}
 
 	if options.IncludeDescendants {
-		if err := walkStorageDeleteTree(ctx, fs.workspace, name, appendEntry); err != nil {
-			return DeleteTargetSnapshot{}, mapWorkspaceReadablePathError(err)
+		if err := walkStorageDeleteTree(ctx, fs.workspace, name, visitWorkspaceEntry); err != nil {
+			return mapWorkspaceReadablePathError(err)
 		}
 	} else {
 		err := walkStorageDeleteTree(ctx, fs.workspace, name, func(filePath string, info *workspace.FileInfo) error {
-			if err := appendEntry(filePath, info); err != nil {
+			if err := visitWorkspaceEntry(filePath, info); err != nil {
 				return err
 			}
 			return errDeleteSnapshotRootComplete
 		})
 		if err != nil && !errors.Is(err, errDeleteSnapshotRootComplete) {
-			return DeleteTargetSnapshot{}, mapWorkspaceReadablePathError(err)
+			return mapWorkspaceReadablePathError(err)
 		}
 	}
-
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
-	for _, entry := range entries {
-		if entry.Path == name {
-			return DeleteTargetSnapshot{Root: entry, Entries: entries}, nil
-		}
-	}
-	return DeleteTargetSnapshot{}, ErrNotFound
+	return nil
 }
 
 func (fs *FileSystem) deleteTargetFileHash(ctx context.Context, name string) (string, error) {

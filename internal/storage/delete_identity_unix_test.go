@@ -12,7 +12,7 @@ import (
 	"testing"
 )
 
-func TestFileSystemDeleteIdentityPropagatesToReadsAndSnapshots(t *testing.T) {
+func TestFileSystemDeleteIdentityPropagatesToReadsAndPreparedTargets(t *testing.T) {
 	fs := setupStandaloneFileSystem(t)
 	ctx := context.Background()
 	if err := fs.WriteFile(ctx, "/item.bin", bytes.NewReader([]byte("item"))); err != nil {
@@ -37,8 +37,8 @@ func TestFileSystemDeleteIdentityPropagatesToReadsAndSnapshots(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PrepareDeleteIntents() error: %v", err)
 	}
-	if len(intent.Targets) != 1 || intent.Targets[0].Snapshot.Root.DeleteIdentityToken != statInfo.DeleteIdentityToken {
-		t.Fatalf("delete snapshot identity = %+v, want %q", intent.Targets, statInfo.DeleteIdentityToken)
+	if len(intent.Targets) != 1 || intent.Targets[0].DeleteIdentityToken != statInfo.DeleteIdentityToken {
+		t.Fatalf("prepared target identity = %+v, want %q", intent.Targets, statInfo.DeleteIdentityToken)
 	}
 }
 
@@ -120,7 +120,7 @@ func TestFileSystemPrepareObservedDeleteIntentsAcceptsCurrentIdentity(t *testing
 	if err != nil {
 		t.Fatalf("PrepareObservedDeleteIntents() error: %v", err)
 	}
-	if len(intent.Targets) != 1 || intent.Targets[0].Snapshot.Root.DeleteIdentityToken != info.DeleteIdentityToken || !validDeleteIdentityToken(intent.Targets[0].Token) {
+	if len(intent.Targets) != 1 || intent.Targets[0].DeleteIdentityToken != info.DeleteIdentityToken || !validDeleteIdentityToken(intent.Targets[0].Token) {
 		t.Fatalf("observed intent = %+v", intent)
 	}
 }

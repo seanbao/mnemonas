@@ -3276,14 +3276,13 @@ func (s *Server) handlePrepareDeleteIntents(w http.ResponseWriter, r *http.Reque
 
 	responseTargets := make([]preparedDeleteIntentTargetResponse, 0, len(intent.Targets))
 	for _, target := range intent.Targets {
-		root := target.Snapshot.Root
 		responseTargets = append(responseTargets, preparedDeleteIntentTargetResponse{
-			Path:                root.Path,
-			Name:                root.Name,
-			IsDir:               root.IsDir,
-			Size:                root.Size,
-			ModTime:             root.ModTime.UTC().Format(time.RFC3339Nano),
-			DeleteIdentityToken: root.DeleteIdentityToken,
+			Path:                target.Path,
+			Name:                target.Name,
+			IsDir:               target.IsDir,
+			Size:                target.Size,
+			ModTime:             target.ModTime.UTC().Format(time.RFC3339Nano),
+			DeleteIdentityToken: target.DeleteIdentityToken,
 			DeleteTargetToken:   target.Token,
 		})
 	}
