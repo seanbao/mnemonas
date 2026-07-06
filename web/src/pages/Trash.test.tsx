@@ -1712,6 +1712,75 @@ describe('TrashPage', () => {
       expect(within(dialog).getByRole('button', { name: '取消' })).toHaveFocus()
     })
 
+    it('moves focus to the stable trash region when a completed empty removes its trigger', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockEmptyTrash.mockResolvedValueOnce(emptyTrashDeletedResult(['item1', 'item2']))
+      mockListTrash.mockResolvedValueOnce({
+        items: [
+          trashTestItem('item1', 'deleted-file.txt'),
+          trashTestItem('item2', 'deleted-folder', { isDir: true, size: 0 }),
+        ],
+        count: 2,
+        totalSize: 1024,
+        retentionEnabled: true,
+        retentionDays: 30,
+        trashAutoCleanupEnabled: true,
+      }).mockResolvedValueOnce({
+        items: [],
+        count: 0,
+        totalSize: 0,
+        retentionEnabled: true,
+        retentionDays: 30,
+        trashAutoCleanupEnabled: true,
+      })
+
+      render(<TrashPage />)
+      await user.click(await screen.findByRole('button', { name: '清空回收站' }))
+      await clickEmptyTrashConfirm(user)
+
+      const focusFallback = screen.getByRole('region', { name: '回收站内容' })
+      await waitFor(() => {
+        expect(screen.queryByRole('button', { name: '清空回收站' })).toBeNull()
+        expect(screen.queryByText('确定要清空回收站吗？')).toBeNull()
+        expect(focusFallback).toHaveFocus()
+      })
+    })
+
+    it('returns focus to the empty trigger when concurrent additions keep it mounted', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const addedAfterOpen = trashTestItem('item3', 'new-after-open.txt')
+      mockEmptyTrash.mockResolvedValueOnce(emptyTrashDeletedResult(['item1', 'item2']))
+      mockListTrash.mockResolvedValueOnce({
+        items: [
+          trashTestItem('item1', 'deleted-file.txt'),
+          trashTestItem('item2', 'deleted-folder', { isDir: true, size: 0 }),
+        ],
+        count: 2,
+        totalSize: 1024,
+        retentionEnabled: true,
+        retentionDays: 30,
+        trashAutoCleanupEnabled: true,
+      }).mockResolvedValueOnce({
+        items: [addedAfterOpen],
+        count: 1,
+        totalSize: addedAfterOpen.size,
+        retentionEnabled: true,
+        retentionDays: 30,
+        trashAutoCleanupEnabled: true,
+      })
+
+      render(<TrashPage />)
+      const trigger = await screen.findByRole('button', { name: '清空回收站' })
+      await user.click(trigger)
+      await clickEmptyTrashConfirm(user)
+
+      await waitFor(() => {
+        expect(screen.queryByText('确定要清空回收站吗？')).toBeNull()
+        expect(trigger).toHaveFocus()
+      })
+      expect(screen.getByText(addedAfterOpen.name)).toBeTruthy()
+    })
+
     it('clears the frozen intent on cancel and captures a new snapshot when reopened', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       const queryClient = new QueryClient({
@@ -1924,39 +1993,363 @@ describe('TrashPage', () => {
       })
     }, 20_000)
 
-    it('stops after a remaining result and classifies unsent frozen ids as remaining', async () => {
+    it('preserves committed chunks and retries only the frozen remainder after a later request fails', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false, gcTime: 0, staleTime: 0 } },
+      })
       const frozenItems = Array.from({ length: 1001 }, (_, index) => (
         trashTestItem(`item-${index + 1}`, `item-${index + 1}.txt`, { size: 1 })
       ))
       const firstChunkIds = frozenItems.slice(0, 1000).map((item) => item.id)
-      mockListTrash.mockResolvedValueOnce({
-        items: frozenItems,
-        count: frozenItems.length,
-        totalSize: frozenItems.length,
-        retentionEnabled: true,
-        retentionDays: 30,
-        trashAutoCleanupEnabled: true,
-      }).mockResolvedValue({
-        items: frozenItems.slice(999),
-        count: 2,
-        totalSize: 2,
-        retentionEnabled: true,
-        retentionDays: 30,
-        trashAutoCleanupEnabled: true,
-      })
-      mockEmptyTrash.mockResolvedValueOnce({
-        deleted: firstChunkIds.slice(0, 999),
-        remaining: [firstChunkIds[999]!],
-        skipped: [],
-        partial: true,
-        warning: false,
-        auditWarning: false,
-      })
+      const remainingItem = frozenItems[1000]!
+      const addedAfterOpen = trashTestItem('new-after-open', 'new-after-open.txt', { size: 4096 })
+      mockListTrash
+        .mockResolvedValueOnce({
+          items: frozenItems,
+          count: frozenItems.length,
+          totalSize: frozenItems.length,
+          retentionEnabled: true,
+          retentionDays: 30,
+          trashAutoCleanupEnabled: true,
+        })
+        .mockResolvedValueOnce({
+          items: [remainingItem, addedAfterOpen],
+          count: 2,
+          totalSize: remainingItem.size + addedAfterOpen.size,
+          retentionEnabled: true,
+          retentionDays: 30,
+          trashAutoCleanupEnabled: true,
+        })
+        .mockResolvedValue({
+          items: [addedAfterOpen],
+          count: 1,
+          totalSize: addedAfterOpen.size,
+          retentionEnabled: true,
+          retentionDays: 30,
+          trashAutoCleanupEnabled: true,
+        })
+      mockEmptyTrash
+        .mockImplementationOnce(async (ids) => emptyTrashDeletedResult(ids))
+        .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+        .mockImplementationOnce(async (ids) => emptyTrashDeletedResult(ids))
 
-      render(<TrashPage />)
+      render(
+        <QueryClientProvider client={queryClient}>
+          <TrashPage />
+        </QueryClientProvider>,
+      )
       await waitFor(() => expect(screen.getByText('清空回收站')).toBeTruthy())
       await user.click(screen.getByText('清空回收站'))
+      expect(await screen.findByText('将永久删除 1001 项，共 1001 B。')).toBeTruthy()
+
+      act(() => {
+        queryClient.setQueryData(['trash', 'u1'], {
+          items: [...frozenItems, addedAfterOpen],
+          count: frozenItems.length + 1,
+          totalSize: frozenItems.length + addedAfterOpen.size,
+          retentionEnabled: true,
+          retentionDays: 30,
+          trashAutoCleanupEnabled: true,
+        })
+      })
+
+      await clickEmptyTrashConfirm(user)
+
+      await waitFor(() => expect(mockEmptyTrash).toHaveBeenCalledTimes(2))
+      expect(mockEmptyTrash.mock.calls[0]?.[0]).toEqual(firstChunkIds)
+      expect(mockEmptyTrash.mock.calls[1]?.[0]).toEqual([remainingItem.id])
+      await waitFor(() => expect(mockListTrash).toHaveBeenCalledTimes(2))
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '已永久删除已确认的 1000 项',
+        color: 'warning',
+      }))
+      expect(screen.queryByText('item-1.txt')).toBeNull()
+      expect(screen.getByText(remainingItem.name)).toBeTruthy()
+      expect(screen.getByText(addedAfterOpen.name)).toBeTruthy()
+      expect(screen.getByText('将永久删除 1 项，共 1 B。')).toBeTruthy()
+
+      await clickEmptyTrashConfirm(user)
+
+      await waitFor(() => expect(mockEmptyTrash).toHaveBeenCalledTimes(3))
+      expect(mockEmptyTrash.mock.calls[2]?.[0]).toEqual([remainingItem.id])
+      expect(mockEmptyTrash.mock.calls[2]?.[0]).not.toContain(addedAfterOpen.id)
+    }, 20_000)
+
+    it('requires a successful reconciliation before retrying unknown and unattempted frozen items', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false, gcTime: 0, staleTime: 0 } },
+      })
+      const frozenItems = Array.from({ length: 2001 }, (_, index) => (
+        trashTestItem(`item-${index + 1}`, `item-${index + 1}.txt`, { size: 1 })
+      ))
+      const firstChunkIds = frozenItems.slice(0, 1000).map((item) => item.id)
+      const failedChunkIds = frozenItems.slice(1000, 2000).map((item) => item.id)
+      const unknownItem = frozenItems[1000]!
+      const unattemptedItem = frozenItems[2000]!
+      const addedAfterOpen = trashTestItem('new-after-open', 'new-after-open.txt', { size: 4096 })
+      mockListTrash
+        .mockResolvedValueOnce({
+          items: frozenItems,
+          count: frozenItems.length,
+          totalSize: frozenItems.length,
+          retentionEnabled: true,
+          retentionDays: 30,
+          trashAutoCleanupEnabled: true,
+        })
+        .mockRejectedValueOnce(new TypeError('Failed to refresh'))
+        .mockRejectedValueOnce(new TypeError('Still offline'))
+        .mockResolvedValueOnce({
+          items: [unknownItem, unattemptedItem, addedAfterOpen],
+          count: 3,
+          totalSize: unknownItem.size + unattemptedItem.size + addedAfterOpen.size,
+          retentionEnabled: true,
+          retentionDays: 30,
+          trashAutoCleanupEnabled: true,
+        })
+        .mockResolvedValue({
+          items: [addedAfterOpen],
+          count: 1,
+          totalSize: addedAfterOpen.size,
+          retentionEnabled: true,
+          retentionDays: 30,
+          trashAutoCleanupEnabled: true,
+        })
+      mockEmptyTrash
+        .mockResolvedValueOnce({
+          deleted: firstChunkIds.slice(0, 999),
+          remaining: [],
+          skipped: [firstChunkIds[999]!],
+          partial: true,
+          warning: false,
+          auditWarning: false,
+        })
+        .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+        .mockImplementationOnce(async (ids) => emptyTrashDeletedResult(ids))
+
+      render(
+        <QueryClientProvider client={queryClient}>
+          <TrashPage />
+        </QueryClientProvider>,
+      )
+      await waitFor(() => expect(screen.getByText('清空回收站')).toBeTruthy())
+      await user.click(screen.getByText('清空回收站'))
+
+      act(() => {
+        queryClient.setQueryData(['trash', 'u1'], {
+          items: [...frozenItems, addedAfterOpen],
+          count: frozenItems.length + 1,
+          totalSize: frozenItems.length + addedAfterOpen.size,
+          retentionEnabled: true,
+          retentionDays: 30,
+          trashAutoCleanupEnabled: true,
+        })
+      })
+
+      await clickEmptyTrashConfirm(user)
+
+      await waitFor(() => expect(mockEmptyTrash).toHaveBeenCalledTimes(2))
+      expect(mockEmptyTrash.mock.calls[0]?.[0]).toEqual(firstChunkIds)
+      expect(mockEmptyTrash.mock.calls[1]?.[0]).toEqual(failedChunkIds)
+      await waitFor(() => expect(mockListTrash).toHaveBeenCalledTimes(2))
+      expect(screen.queryByText(frozenItems[0]!.name)).toBeNull()
+      expect(screen.queryByText(frozenItems[999]!.name)).toBeNull()
+      expect(screen.getByText(unknownItem.name)).toBeTruthy()
+      expect(screen.getByText(unattemptedItem.name)).toBeTruthy()
+      expect(screen.getByText(addedAfterOpen.name)).toBeTruthy()
+      expect(screen.getByText('1001 项仍需通过最新回收站列表确认状态。')).toBeTruthy()
+      expect(screen.queryByRole('button', { name: '确认清空回收站' })).toBeNull()
+      expect(screen.getByRole('button', { name: '重新核对清空范围' })).toBeEnabled()
+
+      await user.click(screen.getByRole('button', { name: '重新核对清空范围' }))
+
+      await waitFor(() => expect(mockListTrash).toHaveBeenCalledTimes(3))
+      expect(mockEmptyTrash).toHaveBeenCalledTimes(2)
+      expect(screen.queryByRole('button', { name: '确认清空回收站' })).toBeNull()
+      expect(screen.getByRole('button', { name: '重新核对清空范围' })).toBeEnabled()
+
+      await user.click(screen.getByRole('button', { name: '重新核对清空范围' }))
+
+      await waitFor(() => expect(mockListTrash).toHaveBeenCalledTimes(4))
+      expect(mockEmptyTrash).toHaveBeenCalledTimes(2)
+      expect(await screen.findByText('将永久删除 2 项，共 2 B。')).toBeTruthy()
+      expect(screen.queryByRole('button', { name: '重新核对清空范围' })).toBeNull()
+      expect(getEmptyTrashConfirmButton()).toBeEnabled()
+
+      await clickEmptyTrashConfirm(user)
+
+      await waitFor(() => expect(mockEmptyTrash).toHaveBeenCalledTimes(3))
+      expect(mockEmptyTrash.mock.calls[2]?.[0]).toEqual([unknownItem.id, unattemptedItem.id])
+      expect(mockEmptyTrash.mock.calls[2]?.[0]).not.toContain(addedAfterOpen.id)
+    }, 30_000)
+
+    it('closes without another delete when reconciliation finds the frozen range absent', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const addedAfterOpen = trashTestItem('item3', 'new-after-open.txt')
+      mockEmptyTrash.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      mockListTrash
+        .mockResolvedValueOnce({
+          items: [
+            trashTestItem('item1', 'deleted-file.txt'),
+            trashTestItem('item2', 'deleted-folder', { isDir: true, size: 0 }),
+          ],
+          count: 2,
+          totalSize: 1024,
+          retentionEnabled: true,
+          retentionDays: 30,
+          trashAutoCleanupEnabled: true,
+        })
+        .mockRejectedValueOnce(new TypeError('Failed to refresh'))
+        .mockResolvedValueOnce({
+          items: [addedAfterOpen],
+          count: 1,
+          totalSize: addedAfterOpen.size,
+          retentionEnabled: true,
+          retentionDays: 30,
+          trashAutoCleanupEnabled: true,
+        })
+
+      render(<TrashPage />)
+      await user.click(await screen.findByRole('button', { name: '清空回收站' }))
+      await clickEmptyTrashConfirm(user)
+      await user.click(await screen.findByRole('button', { name: '重新核对清空范围' }))
+
+      await waitFor(() => {
+        expect(screen.queryByText('上次清空请求的最终结果尚未核对。')).toBeNull()
+        expect(screen.getByText(addedAfterOpen.name)).toBeTruthy()
+      })
+      expect(mockEmptyTrash).toHaveBeenCalledTimes(1)
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '清空范围已核对',
+        description: '本次确认范围内的项目均已不在回收站。',
+        color: 'success',
+      })
+    })
+
+    it('keeps reconciliation busy, non-dismissible, and single-flight until refresh completes', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const pendingReconciliation = createDeferred<Awaited<ReturnType<typeof listTrash>>>()
+      mockEmptyTrash.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      mockListTrash
+        .mockResolvedValueOnce({
+          items: [
+            trashTestItem('item1', 'deleted-file.txt'),
+            trashTestItem('item2', 'deleted-folder', { isDir: true, size: 0 }),
+          ],
+          count: 2,
+          totalSize: 1024,
+          retentionEnabled: true,
+          retentionDays: 30,
+          trashAutoCleanupEnabled: true,
+        })
+        .mockRejectedValueOnce(new TypeError('Failed to refresh'))
+        .mockImplementationOnce(() => pendingReconciliation.promise)
+
+      render(<TrashPage />)
+      await user.click(await screen.findByRole('button', { name: '清空回收站' }))
+      await clickEmptyTrashConfirm(user)
+      const reconcileButton = await screen.findByRole('button', { name: '重新核对清空范围' })
+      await user.click(reconcileButton)
+
+      const dialog = getModalContent('trash-empty-dialog-title')
+      await waitFor(() => {
+        expect(mockListTrash).toHaveBeenCalledTimes(3)
+        expect(dialog).toHaveAttribute('aria-busy', 'true')
+        expect(reconcileButton).toBeDisabled()
+        expect(within(dialog).getByRole('button', { name: '关闭' })).toBeDisabled()
+      })
+      await user.click(reconcileButton)
+      await user.keyboard('{Escape}')
+      expect(mockListTrash).toHaveBeenCalledTimes(3)
+      expect(screen.getByText('上次清空请求的最终结果尚未核对。')).toBeTruthy()
+
+      await act(async () => {
+        pendingReconciliation.resolve({
+          items: [trashTestItem('item1', 'deleted-file.txt')],
+          count: 1,
+          totalSize: 1024,
+          retentionEnabled: true,
+          retentionDays: 30,
+          trashAutoCleanupEnabled: true,
+        })
+        await pendingReconciliation.promise
+      })
+
+      await waitFor(() => {
+        expect(dialog).toHaveAttribute('aria-busy', 'false')
+        expect(screen.queryByRole('button', { name: '重新核对清空范围' })).toBeNull()
+        expect(screen.getByRole('button', { name: '确认清空回收站' })).toBeEnabled()
+      })
+      expect(mockEmptyTrash).toHaveBeenCalledTimes(1)
+    })
+
+    it('stops after a remaining result and classifies unsent frozen ids as remaining', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false, gcTime: 0, staleTime: 0 } },
+      })
+      const frozenItems = Array.from({ length: 1001 }, (_, index) => (
+        trashTestItem(`item-${index + 1}`, `item-${index + 1}.txt`, { size: 1 })
+      ))
+      const firstChunkIds = frozenItems.slice(0, 1000).map((item) => item.id)
+      const remainingItems = frozenItems.slice(999)
+      const addedAfterOpen = trashTestItem('new-after-open', 'new-after-open.txt', { size: 4096 })
+      mockListTrash
+        .mockResolvedValueOnce({
+          items: frozenItems,
+          count: frozenItems.length,
+          totalSize: frozenItems.length,
+          retentionEnabled: true,
+          retentionDays: 30,
+          trashAutoCleanupEnabled: true,
+        })
+        .mockResolvedValueOnce({
+          items: [...remainingItems, addedAfterOpen],
+          count: 3,
+          totalSize: 2 + addedAfterOpen.size,
+          retentionEnabled: true,
+          retentionDays: 30,
+          trashAutoCleanupEnabled: true,
+        })
+        .mockResolvedValue({
+          items: [addedAfterOpen],
+          count: 1,
+          totalSize: addedAfterOpen.size,
+          retentionEnabled: true,
+          retentionDays: 30,
+          trashAutoCleanupEnabled: true,
+        })
+      mockEmptyTrash
+        .mockResolvedValueOnce({
+          deleted: firstChunkIds.slice(0, 999),
+          remaining: [firstChunkIds[999]!],
+          skipped: [],
+          partial: true,
+          warning: false,
+          auditWarning: false,
+        })
+        .mockImplementationOnce(async (ids) => emptyTrashDeletedResult(ids))
+
+      render(
+        <QueryClientProvider client={queryClient}>
+          <TrashPage />
+        </QueryClientProvider>,
+      )
+      await waitFor(() => expect(screen.getByText('清空回收站')).toBeTruthy())
+      await user.click(screen.getByText('清空回收站'))
+
+      act(() => {
+        queryClient.setQueryData(['trash', 'u1'], {
+          items: [...frozenItems, addedAfterOpen],
+          count: frozenItems.length + 1,
+          totalSize: frozenItems.length + addedAfterOpen.size,
+          retentionEnabled: true,
+          retentionDays: 30,
+          trashAutoCleanupEnabled: true,
+        })
+      })
+
       await clickEmptyTrashConfirm(user)
 
       await waitFor(() => expect(mockEmptyTrash).toHaveBeenCalledTimes(1))
@@ -1968,6 +2361,16 @@ describe('TrashPage', () => {
         })
       })
       expect(mockEmptyTrash.mock.calls[0]?.[0]).toEqual(firstChunkIds)
+      expect(screen.getByText('将永久删除 2 项，共 2 B。')).toBeTruthy()
+      expect(screen.getByText(remainingItems[0]!.name)).toBeTruthy()
+      expect(screen.getByText(remainingItems[1]!.name)).toBeTruthy()
+      expect(screen.getByText(addedAfterOpen.name)).toBeTruthy()
+
+      await clickEmptyTrashConfirm(user)
+
+      await waitFor(() => expect(mockEmptyTrash).toHaveBeenCalledTimes(2))
+      expect(mockEmptyTrash.mock.calls[1]?.[0]).toEqual(remainingItems.map((item) => item.id))
+      expect(mockEmptyTrash.mock.calls[1]?.[0]).not.toContain(addedAfterOpen.id)
     }, 20_000)
 
     it('aggregates partial and warning results into one warning toast', async () => {
@@ -2057,6 +2460,11 @@ describe('TrashPage', () => {
 
       await clickEmptyTrashConfirm(user)
       await waitFor(() => expect(mockEmptyTrash).toHaveBeenCalledTimes(1))
+      const failureToast = mockAddToast.mock.calls
+        .map(([toast]) => toast as { description?: string })
+        .find((toast) => toast.description?.includes('清空请求未完成'))
+      expect(failureToast?.description).toContain('清空请求未完成')
+      expect(failureToast?.description).not.toContain('后续批次未完成')
       expect(screen.getByText('确定要清空回收站吗？')).toBeTruthy()
       expect(screen.getByText('将永久删除 2 项，共 1 KB。')).toBeTruthy()
 
@@ -2068,30 +2476,58 @@ describe('TrashPage', () => {
       await waitFor(() => expect(screen.queryByText('确定要清空回收站吗？')).toBeNull())
     })
 
-    it('keeps old cache and reports a final refetch failure', async () => {
+    it('removes confirmed cached items and preserves concurrent additions when the final refetch fails', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
-      mockEmptyTrash.mockResolvedValue(emptyTrashDeletedResult(['item1', 'item2']))
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false, gcTime: 0, staleTime: 60_000 } },
+      })
+      const addedAfterOpen = trashTestItem('item3', 'new-after-open.txt', { size: 4096 })
+      mockEmptyTrash.mockResolvedValue(emptyTrashDeletedResult(['item1'], { skipped: ['item2'] }))
 
-      render(<TrashPage />)
+      render(
+        <QueryClientProvider client={queryClient}>
+          <TrashPage />
+        </QueryClientProvider>,
+      )
       await waitFor(() => {
         expect(screen.getByText('deleted-file.txt')).toBeTruthy()
         expect(screen.getByText('deleted-folder')).toBeTruthy()
       })
-      mockListTrash.mockRejectedValue(new Error('refetch failed'))
 
       await user.click(screen.getByText('清空回收站'))
+
+      act(() => {
+        queryClient.setQueryData(['trash', 'u1'], {
+          items: [
+            trashTestItem('item1', 'deleted-file.txt'),
+            trashTestItem('item2', 'deleted-folder', { isDir: true, size: 0 }),
+            addedAfterOpen,
+          ],
+          count: 3,
+          totalSize: 5120,
+          retentionEnabled: true,
+          retentionDays: 30,
+          trashAutoCleanupEnabled: true,
+        })
+      })
+      mockListTrash.mockRejectedValue(new Error('refetch failed'))
+
       await clickEmptyTrashConfirm(user)
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
-          title: '已永久删除已确认的 2 项',
-          description: '删除结果已返回，但列表刷新失败。',
+          title: '已永久删除已确认的 1 项',
+          description: '已跳过 1 项；删除结果已返回，但列表刷新失败。',
           color: 'warning',
         })
       })
-      expect(screen.getByText('deleted-file.txt')).toBeTruthy()
-      expect(screen.getByText('deleted-folder')).toBeTruthy()
+      expect(mockEmptyTrash.mock.calls[0]?.[0]).toEqual(['item1', 'item2'])
+      expect(mockEmptyTrash.mock.calls[0]?.[0]).not.toContain(addedAfterOpen.id)
+      expect(screen.queryByText('deleted-file.txt')).toBeNull()
+      expect(screen.queryByText('deleted-folder')).toBeNull()
+      expect(screen.getByText(addedAfterOpen.name)).toBeTruthy()
       expect(screen.queryByText('回收站是空的')).toBeNull()
+      expect(queryClient.getQueryState(['trash', 'u1'])?.isInvalidated).toBe(true)
     })
   })
 
@@ -2156,14 +2592,24 @@ describe('TrashPage', () => {
 
     it('aborts a pending empty trash request when the page unmounts', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
-      const pendingEmpty = createDeferred<Awaited<ReturnType<typeof emptyTrash>>>()
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false, gcTime: 60_000, staleTime: 60_000 } },
+      })
       let signal: AbortSignal | undefined
       mockEmptyTrash.mockImplementationOnce((_ids, options) => {
         signal = options?.signal
-        return pendingEmpty.promise
+        return new Promise<Awaited<ReturnType<typeof emptyTrash>>>((_resolve, reject) => {
+          signal?.addEventListener('abort', () => {
+            reject(new DOMException('Aborted', 'AbortError'))
+          }, { once: true })
+        })
       })
 
-      const { unmount } = render(<TrashPage />)
+      const { unmount } = render(
+        <QueryClientProvider client={queryClient}>
+          <TrashPage />
+        </QueryClientProvider>,
+      )
 
       await waitFor(() => {
         expect(screen.getByText('清空回收站')).toBeTruthy()
@@ -2183,6 +2629,112 @@ describe('TrashPage', () => {
       unmount()
 
       expect(signal.aborted).toBe(true)
+      await waitFor(() => {
+        expect(queryClient.getQueryState(['trash', 'u1'])?.isInvalidated).toBe(true)
+      })
+      expect(mockAddToast).not.toHaveBeenCalled()
+    })
+
+    it('preserves committed empty chunks in cache when a later chunk aborts on unmount', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false, gcTime: 60_000, staleTime: 60_000 } },
+      })
+      const frozenItems = Array.from({ length: 1001 }, (_, index) => (
+        trashTestItem(`item-${index + 1}`, `item-${index + 1}.txt`, { size: 1 })
+      ))
+      let secondSignal: AbortSignal | undefined
+      mockListTrash.mockResolvedValueOnce({
+        items: frozenItems,
+        count: frozenItems.length,
+        totalSize: frozenItems.length,
+        retentionEnabled: true,
+        retentionDays: 30,
+        trashAutoCleanupEnabled: true,
+      })
+      mockEmptyTrash
+        .mockImplementationOnce(async (ids) => emptyTrashDeletedResult(ids))
+        .mockImplementationOnce((_ids, options) => {
+          secondSignal = options?.signal
+          return new Promise<Awaited<ReturnType<typeof emptyTrash>>>((_resolve, reject) => {
+            secondSignal?.addEventListener('abort', () => {
+              reject(new DOMException('Aborted', 'AbortError'))
+            }, { once: true })
+          })
+        })
+
+      const { unmount } = render(
+        <QueryClientProvider client={queryClient}>
+          <TrashPage />
+        </QueryClientProvider>,
+      )
+      await user.click(await screen.findByRole('button', { name: '清空回收站' }))
+      await clickEmptyTrashConfirm(user)
+      await waitFor(() => {
+        expect(mockEmptyTrash).toHaveBeenCalledTimes(2)
+        expectAbortSignal(secondSignal)
+      })
+
+      unmount()
+      expect(secondSignal?.aborted).toBe(true)
+
+      await waitFor(() => {
+        const cached = queryClient.getQueryData<{ items: ReturnType<typeof trashTestItem>[] }>(['trash', 'u1'])
+        expect(cached?.items.map((item) => item.id)).toEqual([frozenItems[1000]!.id])
+        expect(queryClient.getQueryState(['trash', 'u1'])?.isInvalidated).toBe(true)
+      })
+      expect(mockAddToast).not.toHaveBeenCalled()
+    }, 20_000)
+
+    it('preserves a completed empty result when unmount aborts its final refetch', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false, gcTime: 60_000, staleTime: 60_000 } },
+      })
+      let refetchSignal: AbortSignal | undefined
+      mockEmptyTrash.mockResolvedValueOnce(emptyTrashDeletedResult(['item1', 'item2']))
+      mockListTrash
+        .mockResolvedValueOnce({
+          items: [
+            trashTestItem('item1', 'deleted-file.txt'),
+            trashTestItem('item2', 'deleted-folder', { isDir: true, size: 0 }),
+          ],
+          count: 2,
+          totalSize: 1024,
+          retentionEnabled: true,
+          retentionDays: 30,
+          trashAutoCleanupEnabled: true,
+        })
+        .mockImplementationOnce((options) => {
+          refetchSignal = options?.signal
+          return new Promise<Awaited<ReturnType<typeof listTrash>>>((_resolve, reject) => {
+            refetchSignal?.addEventListener('abort', () => {
+              reject(new DOMException('Aborted', 'AbortError'))
+            }, { once: true })
+          })
+        })
+
+      const { unmount } = render(
+        <QueryClientProvider client={queryClient}>
+          <TrashPage />
+        </QueryClientProvider>,
+      )
+      await user.click(await screen.findByRole('button', { name: '清空回收站' }))
+      await clickEmptyTrashConfirm(user)
+      await waitFor(() => {
+        expect(mockListTrash).toHaveBeenCalledTimes(2)
+        expectAbortSignal(refetchSignal)
+      })
+
+      unmount()
+      expect(refetchSignal?.aborted).toBe(true)
+
+      await waitFor(() => {
+        const cached = queryClient.getQueryData<{ items: ReturnType<typeof trashTestItem>[] }>(['trash', 'u1'])
+        expect(cached?.items).toEqual([])
+        expect(queryClient.getQueryState(['trash', 'u1'])?.isInvalidated).toBe(true)
+      })
+      expect(mockAddToast).not.toHaveBeenCalled()
     })
 
     it('aborts pending batch restore requests when the page unmounts', async () => {

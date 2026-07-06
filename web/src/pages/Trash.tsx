@@ -141,6 +141,31 @@ type TrashBatchIntent = {
 
 type TrashEmptyIntent = {
   items: Array<Pick<TrashItem, 'id' | 'name' | 'size'>>
+  reconciliationRequired?: boolean
+}
+
+class EmptyTrashChunkExecutionError extends Error {
+  readonly executionError: unknown
+  readonly completedResult: EmptyTrashResult
+  readonly uncertainIds: string[]
+  readonly unattemptedIds: string[]
+  readonly aborted: boolean
+
+  constructor(
+    executionError: unknown,
+    completedResult: EmptyTrashResult,
+    uncertainIds: string[],
+    unattemptedIds: string[],
+    aborted = false,
+  ) {
+    super(executionError instanceof Error ? executionError.message : 'empty trash chunk failed')
+    this.name = 'EmptyTrashChunkExecutionError'
+    this.executionError = executionError
+    this.completedResult = completedResult
+    this.uncertainIds = uncertainIds
+    this.unattemptedIds = unattemptedIds
+    this.aborted = aborted
+  }
 }
 
 async function emptyConfirmedTrashItems(ids: string[], signal: AbortSignal): Promise<EmptyTrashResult> {
@@ -156,7 +181,30 @@ async function emptyConfirmedTrashItems(ids: string[], signal: AbortSignal): Pro
 
   for (let offset = 0; offset < ids.length; offset += MAX_EMPTY_TRASH_IDS) {
     const chunkEnd = Math.min(offset + MAX_EMPTY_TRASH_IDS, ids.length)
-    const result = await emptyTrash(ids.slice(offset, chunkEnd), { signal })
+    const chunkIds = ids.slice(offset, chunkEnd)
+    let result: EmptyTrashResult
+    try {
+      result = await emptyTrash(chunkIds, { signal })
+    } catch (error) {
+      if (signal.aborted || isAbortError(error)) {
+        if (aggregate.deleted.length > 0 || aggregate.skipped.length > 0) {
+          throw new EmptyTrashChunkExecutionError(
+            error,
+            aggregate,
+            chunkIds,
+            ids.slice(chunkEnd),
+            true,
+          )
+        }
+        throw error
+      }
+      throw new EmptyTrashChunkExecutionError(
+        error,
+        aggregate,
+        chunkIds,
+        ids.slice(chunkEnd),
+      )
+    }
     aggregate.deleted.push(...result.deleted)
     aggregate.remaining.push(...result.remaining)
     aggregate.skipped.push(...result.skipped)
@@ -178,13 +226,22 @@ async function emptyConfirmedTrashItems(ids: string[], signal: AbortSignal): Pro
   return aggregate
 }
 
-function getEmptyTrashSuccessToast(result: EmptyTrashResult, refreshFailed = false) {
+function getEmptyTrashSuccessToast(
+  result: EmptyTrashResult,
+  refreshFailed = false,
+  reconciledAbsentCount = 0,
+) {
   const descriptions: string[] = []
   if (result.remaining.length > 0) {
-    descriptions.push(`仍有 ${result.remaining.length} 项保留在回收站`)
+    descriptions.push(refreshFailed
+      ? `${result.remaining.length} 项状态待核对`
+      : `仍有 ${result.remaining.length} 项保留在回收站`)
   }
   if (result.skipped.length > 0) {
     descriptions.push(`已跳过 ${result.skipped.length} 项`)
+  }
+  if (reconciledAbsentCount > 0) {
+    descriptions.push(`核对后另有 ${reconciledAbsentCount} 项已不在回收站`)
   }
   if (result.warning) {
     descriptions.push('删除过程报告了清理警告')
@@ -196,11 +253,69 @@ function getEmptyTrashSuccessToast(result: EmptyTrashResult, refreshFailed = fal
     descriptions.push('删除结果已返回，但列表刷新失败')
   }
 
-  const hasWarning = result.partial || result.warning || result.auditWarning || refreshFailed
+  const hasWarning = result.partial || result.warning || result.auditWarning || refreshFailed || reconciledAbsentCount > 0
   return {
     title: `已永久删除已确认的 ${result.deleted.length} 项`,
     ...(descriptions.length > 0 ? { description: `${descriptions.join('；')}。` } : {}),
     color: hasWarning ? 'warning' as const : 'success' as const,
+  }
+}
+
+function getEmptyTrashInterruptedToast(
+  error: EmptyTrashChunkExecutionError,
+  remainingCount: number,
+  reconciledAbsentCount: number,
+  refreshFailed: boolean,
+) {
+  const errorPresentation = getTrashActionErrorPresentation(error.executionError, {
+    unavailable: '清空回收站暂不可用',
+    failure: '清空失败',
+  })
+  const hasCompletedChunk = error.completedResult.deleted.length > 0
+    || error.completedResult.skipped.length > 0
+    || error.completedResult.remaining.length > 0
+  const descriptions = [
+    `${hasCompletedChunk ? '后续批次' : '清空请求'}未完成：${errorPresentation.description}`,
+  ]
+  if (error.completedResult.skipped.length > 0) {
+    descriptions.push(`已跳过 ${error.completedResult.skipped.length} 项`)
+  }
+  if (reconciledAbsentCount > 0) {
+    descriptions.push(`核对后另有 ${reconciledAbsentCount} 项已不在回收站`)
+  }
+  if (remainingCount > 0) {
+    if (refreshFailed) {
+      if (error.uncertainIds.length > 0) {
+        descriptions.push(`${error.uncertainIds.length} 项请求结果未知`)
+      }
+      if (error.unattemptedIds.length > 0) {
+        descriptions.push(`${error.unattemptedIds.length} 项尚未处理`)
+      }
+      descriptions.push('请先重新核对')
+    } else {
+      descriptions.push(`已核对 ${remainingCount} 项仍在回收站，可重试`)
+    }
+  }
+  if (error.completedResult.warning) {
+    descriptions.push('删除过程报告了清理警告')
+  }
+  if (error.completedResult.auditWarning) {
+    descriptions.push('操作记录未保存')
+  }
+  if (refreshFailed) {
+    descriptions.push('列表刷新失败')
+  }
+
+  const completedCount = error.completedResult.deleted.length
+  const title = completedCount > 0
+    ? `已永久删除已确认的 ${completedCount} 项`
+    : reconciledAbsentCount > 0 && remainingCount === 0
+      ? `已核对 ${reconciledAbsentCount} 项不再位于回收站`
+      : errorPresentation.title
+  return {
+    title,
+    description: `${descriptions.join('；')}。`,
+    color: 'warning' as const,
   }
 }
 
@@ -806,12 +921,14 @@ export function TrashPage() {
   const [batchRestoreIntent, setBatchRestoreIntent] = useState<TrashBatchIntent | null>(null)
   const [batchDeleteIntent, setBatchDeleteIntent] = useState<TrashBatchIntent | null>(null)
   const [emptyTrashIntent, setEmptyTrashIntent] = useState<TrashEmptyIntent | null>(null)
+  const [isEmptyTrashReconciling, setIsEmptyTrashReconciling] = useState(false)
   const actionItemRef = useRef(actionItem)
   const restoreAbortControllerRef = useRef<AbortController | null>(null)
   const deleteAbortControllerRef = useRef<AbortController | null>(null)
   const emptyAbortControllerRef = useRef<AbortController | null>(null)
   const batchRestoreAbortControllerRef = useRef<AbortController | null>(null)
   const batchDeleteAbortControllerRef = useRef<AbortController | null>(null)
+  const emptyReconciliationSessionRef = useRef(0)
   const deleteFocusFallbackRef = useRef<HTMLDivElement>(null)
 
   useLayoutEffect(() => {
@@ -830,6 +947,7 @@ export function TrashPage() {
       batchRestoreAbortControllerRef.current = null
       batchDeleteAbortControllerRef.current?.abort()
       batchDeleteAbortControllerRef.current = null
+      emptyReconciliationSessionRef.current += 1
     }
   }, [])
 
@@ -842,6 +960,11 @@ export function TrashPage() {
     captureReturnFocus: captureDeleteReturnFocus,
     setFallbackReturnFocus: setDeleteFallbackReturnFocus,
   } = useDestructiveDialogFocus(isDeleteOpen)
+  const {
+    initialFocusRef: emptyCancelButtonRef,
+    captureReturnFocus: captureEmptyReturnFocus,
+    setFallbackReturnFocus: setEmptyFallbackReturnFocus,
+  } = useDestructiveDialogFocus(isEmptyOpen)
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: trashQueryKey,
@@ -932,6 +1055,11 @@ export function TrashPage() {
       }
     })
   }, [queryClient, trashQueryKey])
+
+  const markEmptyTrashCacheForReconciliation = useCallback((completedIds: string[]) => {
+    removeTrashItemsFromCache(completedIds)
+    queryClient.invalidateQueries({ queryKey: trashQueryKey, refetchType: 'none' })
+  }, [queryClient, removeTrashItemsFromCache, trashQueryKey])
 
   const handleRefreshTrash = useCallback(async () => {
   const result = await refetch()
@@ -1088,27 +1216,120 @@ export function TrashPage() {
   })
 
   const emptyMutation = useMutation({
-    mutationFn: ({ ids, signal }: { ids: string[]; signal: AbortSignal }) => emptyConfirmedTrashItems(ids, signal),
+    mutationFn: ({ items, signal }: { items: TrashEmptyIntent['items']; signal: AbortSignal }) => (
+      emptyConfirmedTrashItems(items.map((item) => item.id), signal)
+    ),
     onSuccess: async (result, variables) => {
+      const completedIds = [...result.deleted, ...result.skipped]
       if (variables.signal.aborted) {
+        markEmptyTrashCacheForReconciliation(completedIds)
         return
       }
+      let refreshedData: TrashListResponse | undefined
       let refreshFailed = false
       try {
         const refreshResult = await refetch()
-        refreshFailed = refreshResult.error != null
+        refreshedData = refreshResult.data
+        refreshFailed = refreshResult.error != null || !refreshedData
       } catch {
         refreshFailed = true
       }
       if (variables.signal.aborted) {
+        markEmptyTrashCacheForReconciliation(completedIds)
         return
       }
-      addToast(getEmptyTrashSuccessToast(result, refreshFailed))
-      onEmptyClose()
-      setEmptyTrashIntent(null)
+
+      const remainingIds = new Set(result.remaining)
+      const currentIds = !refreshFailed && refreshedData
+        ? new Set(refreshedData.items.map((item) => item.id))
+        : null
+      const remainingItems = variables.items.filter((item) => (
+        remainingIds.has(item.id) && (currentIds === null || currentIds.has(item.id))
+      ))
+      const reconciledAbsentCount = currentIds === null
+        ? 0
+        : result.remaining.length - remainingItems.length
+      if (refreshFailed) {
+        markEmptyTrashCacheForReconciliation(completedIds)
+      }
+      removeSelectedIds(completedIds)
+      const reconciledResult = currentIds === null
+        ? result
+        : { ...result, remaining: remainingItems.map((item) => item.id) }
+      addToast(getEmptyTrashSuccessToast(reconciledResult, refreshFailed, reconciledAbsentCount))
+      if (remainingItems.length > 0) {
+        setEmptyTrashIntent({
+          items: remainingItems,
+          reconciliationRequired: refreshFailed,
+        })
+      } else {
+        onEmptyClose()
+        setEmptyTrashIntent(null)
+      }
     },
-    onError: (error, variables) => {
+    onError: async (error, variables) => {
+      if (error instanceof EmptyTrashChunkExecutionError && error.aborted) {
+        const completedIds = [
+          ...error.completedResult.deleted,
+          ...error.completedResult.skipped,
+        ]
+        markEmptyTrashCacheForReconciliation(completedIds)
+        return
+      }
       if (variables.signal.aborted || isAbortError(error)) {
+        markEmptyTrashCacheForReconciliation([])
+        return
+      }
+      if (error instanceof EmptyTrashChunkExecutionError) {
+        const completedIds = [
+          ...error.completedResult.deleted,
+          ...error.completedResult.skipped,
+        ]
+        const completedIdSet = new Set(completedIds)
+        let currentIds: Set<string> | null = null
+        let refreshFailed = false
+        try {
+          const refreshResult = await refetch()
+          if (refreshResult.error || !refreshResult.data) {
+            refreshFailed = true
+          } else {
+            currentIds = new Set(refreshResult.data.items.map((item) => item.id))
+          }
+        } catch {
+          refreshFailed = true
+        }
+        if (variables.signal.aborted) {
+          markEmptyTrashCacheForReconciliation(completedIds)
+          return
+        }
+
+        const remainingItems = variables.items.filter((item) => (
+          currentIds === null ? !completedIdSet.has(item.id) : currentIds.has(item.id)
+        ))
+        const reconciledAbsentCount = currentIds === null
+          ? 0
+          : variables.items.reduce((count, item) => (
+              !completedIdSet.has(item.id) && !currentIds.has(item.id) ? count + 1 : count
+            ), 0)
+        if (refreshFailed) {
+          markEmptyTrashCacheForReconciliation(completedIds)
+        }
+        removeSelectedIds(completedIds)
+        addToast(getEmptyTrashInterruptedToast(
+          error,
+          remainingItems.length,
+          reconciledAbsentCount,
+          refreshFailed,
+        ))
+        if (remainingItems.length > 0) {
+          setEmptyTrashIntent({
+            items: remainingItems,
+            reconciliationRequired: refreshFailed,
+          })
+        } else {
+          onEmptyClose()
+          setEmptyTrashIntent(null)
+        }
         return
       }
       addToast(getTrashActionErrorPresentation(error, {
@@ -1131,22 +1352,32 @@ export function TrashPage() {
   }, [deleteMutation.isPending, onDeleteClose])
 
   const handleCloseEmptyModal = useCallback(() => {
-    if (emptyMutation.isPending) {
+    if (emptyMutation.isPending || isEmptyTrashReconciling) {
       return
     }
+    emptyReconciliationSessionRef.current += 1
+    setIsEmptyTrashReconciling(false)
     onEmptyClose()
     setEmptyTrashIntent(null)
-  }, [emptyMutation.isPending, onEmptyClose])
+  }, [emptyMutation.isPending, isEmptyTrashReconciling, onEmptyClose])
 
   const handleEmptyTrashClick = useCallback(() => {
     if (!canWrite || items.length === 0) {
       return
     }
+    const focusFallback = deleteFocusFallbackRef.current
+    if (focusFallback) {
+      focusFallback.tabIndex = -1
+    }
+    captureEmptyReturnFocus()
+    setEmptyFallbackReturnFocus(focusFallback)
+    emptyReconciliationSessionRef.current += 1
+    setIsEmptyTrashReconciling(false)
     setEmptyTrashIntent({
       items: items.map(({ id, name, size }) => ({ id, name, size })),
     })
     onEmptyOpen()
-  }, [canWrite, items, onEmptyOpen])
+  }, [canWrite, captureEmptyReturnFocus, items, onEmptyOpen, setEmptyFallbackReturnFocus])
 
   const handleSelectAll = useCallback(() => {
     if (!canWrite) return
@@ -1329,13 +1560,66 @@ export function TrashPage() {
 
   const handleConfirmEmpty = useCallback(() => {
     if (!canWrite) return
-    const ids = emptyTrashIntent?.items.map((item) => item.id) ?? []
-    if (ids.length === 0) return
+    if (!emptyTrashIntent || emptyTrashIntent.reconciliationRequired || emptyTrashIntent.items.length === 0) return
     emptyAbortControllerRef.current?.abort()
     const controller = new AbortController()
     emptyAbortControllerRef.current = controller
-    emptyMutation.mutate({ ids, signal: controller.signal })
+    emptyMutation.mutate({ items: emptyTrashIntent.items, signal: controller.signal })
   }, [canWrite, emptyMutation, emptyTrashIntent])
+
+  const handleReconcileEmptyTrash = useCallback(async () => {
+    if (!emptyTrashIntent?.reconciliationRequired || isEmptyTrashReconciling) {
+      return
+    }
+    const session = emptyReconciliationSessionRef.current + 1
+    emptyReconciliationSessionRef.current = session
+    setIsEmptyTrashReconciling(true)
+    try {
+      const refreshResult = await refetch()
+      if (emptyReconciliationSessionRef.current !== session) {
+        return
+      }
+      if (refreshResult.error || !refreshResult.data) {
+        const presentation = getTrashActionErrorPresentation(refreshResult.error, {
+          unavailable: '清空结果仍无法核对',
+          failure: '清空结果仍无法核对',
+        })
+        addToast(presentation)
+        return
+      }
+      const currentIds = new Set(refreshResult.data.items.map((item) => item.id))
+      const remainingItems = emptyTrashIntent.items.filter((item) => currentIds.has(item.id))
+      if (remainingItems.length === 0) {
+        addToast({
+          title: '清空范围已核对',
+          description: '本次确认范围内的项目均已不在回收站。',
+          color: 'success',
+        })
+        onEmptyClose()
+        setEmptyTrashIntent(null)
+        return
+      }
+      setEmptyTrashIntent({ items: remainingItems })
+      addToast({
+        title: '清空范围已核对',
+        description: `${remainingItems.length} 项仍在回收站，可继续处理。`,
+        color: 'success',
+      })
+    } catch (error) {
+      if (emptyReconciliationSessionRef.current !== session) {
+        return
+      }
+      const presentation = getTrashActionErrorPresentation(error, {
+        unavailable: '清空结果仍无法核对',
+        failure: '清空结果仍无法核对',
+      })
+      addToast(presentation)
+    } finally {
+      if (emptyReconciliationSessionRef.current === session) {
+        setIsEmptyTrashReconciling(false)
+      }
+    }
+  }, [emptyTrashIntent, isEmptyTrashReconciling, onEmptyClose, refetch])
 
   const handleClearPathFilter = useCallback(() => {
     setSearchParams({})
@@ -1406,6 +1690,7 @@ export function TrashPage() {
   const itemCount = data?.count ?? items.length
   const emptyIntentItemCount = emptyTrashIntent?.items.length ?? 0
   const emptyIntentTotalSize = emptyTrashIntent?.items.reduce((sum, item) => sum + item.size, 0) ?? 0
+  const emptyReconciliationRequired = emptyTrashIntent?.reconciliationRequired === true
   const visibleItemCount = visibleItems.length
   const retentionLabel = getTrashPolicyLabel(retentionEnabled, retentionDays, trashAutoCleanupEnabled)
   const pageSubtitle = pathFilter
@@ -1734,8 +2019,8 @@ export function TrashPage() {
       <Modal 
         isOpen={isEmptyOpen} 
         onClose={handleCloseEmptyModal}
-        isDismissable={!emptyMutation.isPending}
-        isKeyboardDismissDisabled={emptyMutation.isPending}
+        isDismissable={!emptyMutation.isPending && !isEmptyTrashReconciling}
+        isKeyboardDismissDisabled={emptyMutation.isPending || isEmptyTrashReconciling}
         placement="center"
         size="md"
         classNames={{
@@ -1747,7 +2032,7 @@ export function TrashPage() {
         <ModalContent
           aria-labelledby="trash-empty-dialog-title"
           aria-describedby="trash-empty-dialog-description"
-          aria-busy={emptyMutation.isPending}
+          aria-busy={emptyMutation.isPending || isEmptyTrashReconciling}
         >
           <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
             <div className="w-10 h-10 rounded-lg bg-danger/10 text-danger flex items-center justify-center">
@@ -1759,32 +2044,40 @@ export function TrashPage() {
             </div>
           </ModalHeader>
           <ModalBody id="trash-empty-dialog-description" className="px-6 py-4">
-            <p className="text-foreground">确定要清空回收站吗？</p>
+            <p className="text-foreground">
+              {emptyReconciliationRequired ? '上次清空请求的最终结果尚未核对。' : '确定要清空回收站吗？'}
+            </p>
             <p className="text-sm text-default-600 mt-2">
-              将永久删除 {emptyIntentItemCount} 项，共 {formatBytes(emptyIntentTotalSize)}。
+              {emptyReconciliationRequired
+                ? `${emptyIntentItemCount} 项仍需通过最新回收站列表确认状态。`
+                : `将永久删除 ${emptyIntentItemCount} 项，共 ${formatBytes(emptyIntentTotalSize)}。`}
             </p>
             <p className="text-xs text-danger mt-2 bg-danger/10 p-2 rounded-lg">
-              警告：此操作无法撤销，以上已确认项目将被彻底删除。打开对话框后新增的项目不在此次操作范围内。
+              {emptyReconciliationRequired
+                ? '核对完成前不会再次发送删除请求。打开对话框后新增的项目仍不在此次操作范围内。'
+                : '警告：此操作无法撤销，以上已确认项目将被彻底删除。打开对话框后新增的项目不在此次操作范围内。'}
             </p>
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
             <Button
+              ref={emptyCancelButtonRef}
               autoFocus
               variant="flat"
               onPress={handleCloseEmptyModal}
-              isDisabled={emptyMutation.isPending}
+              isDisabled={emptyMutation.isPending || isEmptyTrashReconciling}
               className="text-default-600 rounded-lg"
             >
-              取消
+              {emptyReconciliationRequired ? '关闭' : '取消'}
             </Button>
             <Button
-              color="danger"
-              onPress={handleConfirmEmpty}
-              isLoading={emptyMutation.isPending}
-              aria-label="确认清空回收站"
+              color={emptyReconciliationRequired ? 'primary' : 'danger'}
+              onPress={emptyReconciliationRequired ? handleReconcileEmptyTrash : handleConfirmEmpty}
+              isLoading={emptyReconciliationRequired ? isEmptyTrashReconciling : emptyMutation.isPending}
+              isDisabled={!emptyTrashIntent || emptyIntentItemCount === 0}
+              aria-label={emptyReconciliationRequired ? '重新核对清空范围' : '确认清空回收站'}
               className="rounded-lg"
             >
-              清空回收站
+              {emptyReconciliationRequired ? '重新核对' : '清空回收站'}
             </Button>
           </ModalFooter>
         </ModalContent>
