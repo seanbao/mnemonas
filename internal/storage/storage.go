@@ -103,8 +103,11 @@ func (e *DeletePolicyChangedError) Unwrap() error {
 	return ErrDeletePolicyChanged
 }
 
-// DeletePathAuthorizer validates one path in a deletion tree. Implementations
-// must not call FileSystem methods because the filesystem mutation lock is held.
+// DeletePathAuthorizer validates one path in a deletion tree. Delete-intent
+// retries may invoke it more than once without holding the filesystem lock, so
+// implementations must be idempotent and side-effect free. Implementations
+// must not call FileSystem methods because deletion and fallback scans invoke
+// the authorizer while holding the filesystem lock.
 type DeletePathAuthorizer func(path string) error
 
 // DeleteTargetSnapshot describes the live root selected for deletion while the
@@ -145,7 +148,7 @@ type ObservedDeleteTarget struct {
 }
 
 // DeleteIntentSnapshot contains one policy snapshot and the requested targets
-// captured under the same filesystem read lock.
+// captured from one validated filesystem mutation epoch.
 type DeleteIntentSnapshot struct {
 	Policy  DeletePolicy
 	Targets []PreparedDeleteTarget
@@ -481,11 +484,12 @@ type FileSystem struct {
 	hookMu                    sync.RWMutex
 	gcMu                      sync.RWMutex
 	mu                        sync.RWMutex
+	mutationEpoch             uint64 // guarded by mu
 }
 
 // UpdateTrashSettings applies trash settings to the running filesystem.
 func (fs *FileSystem) UpdateTrashSettings(enabled bool, retentionDays int, maxSize int64) {
-	fs.mu.Lock()
+	fs.lockMutation()
 	defer fs.mu.Unlock()
 
 	if fs.config == nil {
@@ -501,7 +505,7 @@ func (fs *FileSystem) UpdateTrashSettings(enabled bool, retentionDays int, maxSi
 
 // UpdateRetentionSettings applies version retention settings to the running filesystem.
 func (fs *FileSystem) UpdateRetentionSettings(maxVersions int, maxVersionAge time.Duration, minFreeSpace uint64, sweepInterval time.Duration) {
-	fs.mu.Lock()
+	fs.lockMutation()
 	defer fs.mu.Unlock()
 
 	if fs.config == nil {
@@ -515,7 +519,7 @@ func (fs *FileSystem) UpdateRetentionSettings(maxVersions int, maxVersionAge tim
 
 // UpdateRuntimePolicySettings publishes retention and deletion settings atomically.
 func (fs *FileSystem) UpdateRuntimePolicySettings(settings RuntimePolicySettings) {
-	fs.mu.Lock()
+	fs.lockMutation()
 	defer fs.mu.Unlock()
 
 	if fs.config == nil {
@@ -573,7 +577,7 @@ func deletePolicyToken(policy DeletePolicy) string {
 
 // UpdateVersioningSettings applies versioning policy settings to the running filesystem.
 func (fs *FileSystem) UpdateVersioningSettings(extensions, filenames []string, maxVersionedSize int64) {
-	fs.mu.Lock()
+	fs.lockMutation()
 	defer fs.mu.Unlock()
 
 	if fs.config != nil {
@@ -604,7 +608,7 @@ func (fs *FileSystem) currentVersioningPolicy() *versionstore.VersioningPolicy {
 
 // SetDataplaneClient swaps the dataplane client used by version storage operations.
 func (fs *FileSystem) SetDataplaneClient(client *dataplane.Client) {
-	fs.mu.Lock()
+	fs.lockMutation()
 	defer fs.mu.Unlock()
 
 	if fs.config != nil {
@@ -1175,7 +1179,7 @@ func (fs *FileSystem) DeleteWithExpectedPolicy(ctx context.Context, name string,
 }
 
 // PrepareDeleteIntents captures one deletion policy and every requested live
-// target tree under the same filesystem read lock.
+// target tree from one validated filesystem mutation epoch.
 func (fs *FileSystem) PrepareDeleteIntents(ctx context.Context, names []string, authorize DeletePathAuthorizer) (DeleteIntentSnapshot, error) {
 	normalized, err := normalizeDeleteIntentPaths(names)
 	if err != nil {
@@ -1198,26 +1202,75 @@ func (fs *FileSystem) PrepareObservedDeleteIntents(ctx context.Context, targets 
 	return fs.prepareDeleteIntents(ctx, normalized, authorize)
 }
 
+const maxOptimisticDeleteIntentAttempts = 2
+
 func (fs *FileSystem) prepareDeleteIntents(ctx context.Context, targets []ObservedDeleteTarget, authorize DeletePathAuthorizer) (DeleteIntentSnapshot, error) {
+	for attempt := 0; attempt < maxOptimisticDeleteIntentAttempts; attempt++ {
+		fs.mu.RLock()
+		if err := ctx.Err(); err != nil {
+			fs.mu.RUnlock()
+			return DeleteIntentSnapshot{}, err
+		}
+		epoch := fs.mutationEpoch
+		policy := fs.currentDeletePolicyLocked()
+		fs.mu.RUnlock()
+
+		preparedTargets, scanErr := fs.prepareDeleteIntentTargets(ctx, targets, authorize)
+		if scanErr != nil && (errors.Is(scanErr, context.Canceled) || errors.Is(scanErr, context.DeadlineExceeded)) {
+			return DeleteIntentSnapshot{}, scanErr
+		}
+		if err := ctx.Err(); err != nil {
+			return DeleteIntentSnapshot{}, err
+		}
+
+		fs.mu.RLock()
+		validationErr := ctx.Err()
+		stable := fs.mutationEpoch == epoch
+		fs.mu.RUnlock()
+		if validationErr != nil {
+			return DeleteIntentSnapshot{}, validationErr
+		}
+		if !stable {
+			continue
+		}
+		if scanErr != nil {
+			return DeleteIntentSnapshot{}, scanErr
+		}
+
+		return DeleteIntentSnapshot{Policy: policy, Targets: preparedTargets}, nil
+	}
+
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
 	if err := ctx.Err(); err != nil {
 		return DeleteIntentSnapshot{}, err
 	}
 
-	result := DeleteIntentSnapshot{
-		Policy:  fs.currentDeletePolicyLocked(),
-		Targets: make([]PreparedDeleteTarget, 0, len(targets)),
+	policy := fs.currentDeletePolicyLocked()
+	preparedTargets, err := fs.prepareDeleteIntentTargets(ctx, targets, authorize)
+	if err != nil {
+		return DeleteIntentSnapshot{}, err
 	}
+	if err := ctx.Err(); err != nil {
+		return DeleteIntentSnapshot{}, err
+	}
+	return DeleteIntentSnapshot{Policy: policy, Targets: preparedTargets}, nil
+}
+
+func (fs *FileSystem) prepareDeleteIntentTargets(ctx context.Context, targets []ObservedDeleteTarget, authorize DeletePathAuthorizer) ([]PreparedDeleteTarget, error) {
+	result := make([]PreparedDeleteTarget, 0, len(targets))
 	options := DeleteTargetSnapshotOptions{IncludeDescendants: true, IncludeContentHash: true}
 	for _, target := range targets {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		stream, err := newDeleteTreeMerkleStreamV3(target.Path)
 		if err != nil {
-			return DeleteIntentSnapshot{}, err
+			return nil, err
 		}
 		var root FileInfo
 		rootSeen := false
-		err = fs.walkDeleteTargetEntriesWithObservedIdentityLocked(ctx, target.Path, options, target.ObservedIdentityToken, authorize, func(entry FileInfo) error {
+		err = fs.walkDeleteTargetEntriesWithObservedIdentity(ctx, target.Path, options, target.ObservedIdentityToken, authorize, nil, func(entry FileInfo) error {
 			if entry.Path == target.Path {
 				root = entry
 				rootSeen = true
@@ -1225,19 +1278,19 @@ func (fs *FileSystem) prepareDeleteIntents(ctx context.Context, targets []Observ
 			return stream.add(entry)
 		})
 		if err != nil {
-			return DeleteIntentSnapshot{}, err
+			return nil, err
 		}
 		if !rootSeen {
-			return DeleteIntentSnapshot{}, ErrNotFound
+			return nil, ErrNotFound
 		}
 		token, err := stream.finish()
 		if err != nil {
-			return DeleteIntentSnapshot{}, err
+			return nil, err
 		}
 		if token == "" {
-			return DeleteIntentSnapshot{}, errEmptyDeleteTargetToken
+			return nil, errEmptyDeleteTargetToken
 		}
-		result.Targets = append(result.Targets, PreparedDeleteTarget{
+		result = append(result, PreparedDeleteTarget{
 			Path:                root.Path,
 			Name:                root.Name,
 			IsDir:               root.IsDir,
@@ -1363,6 +1416,10 @@ func (fs *FileSystem) deleteTargetSnapshotWithObservedIdentityLocked(ctx context
 }
 
 func (fs *FileSystem) walkDeleteTargetEntriesWithObservedIdentityLocked(ctx context.Context, name string, options DeleteTargetSnapshotOptions, observedIdentityToken string, authorize DeletePathAuthorizer, visit func(FileInfo) error) error {
+	return fs.walkDeleteTargetEntriesWithObservedIdentity(ctx, name, options, observedIdentityToken, authorize, fs.policy, visit)
+}
+
+func (fs *FileSystem) walkDeleteTargetEntriesWithObservedIdentity(ctx context.Context, name string, options DeleteTargetSnapshotOptions, observedIdentityToken string, authorize DeletePathAuthorizer, policy *versionstore.VersioningPolicy, visit func(FileInfo) error) error {
 	mountBoundary := fs.captureDeleteMountBoundary(fs.workspace.Root())
 	visitWorkspaceEntry := func(filePath string, info *workspace.FileInfo) error {
 		if info == nil {
@@ -1397,8 +1454,8 @@ func (fs *FileSystem) walkDeleteTargetEntriesWithObservedIdentityLocked(ctx cont
 			DeleteIdentityToken: info.DeleteIdentityToken,
 		}
 		if !info.IsDir {
-			if fs.policy != nil {
-				entry.Versioned = fs.policy.ShouldVersion(ctx, filePath, info.Size)
+			if policy != nil {
+				entry.Versioned = policy.ShouldVersion(ctx, filePath, info.Size)
 			}
 			if options.IncludeContentHash {
 				contentHash, err := fs.deleteTargetFileHash(ctx, filePath)
@@ -2113,6 +2170,9 @@ func (fs *FileSystem) RestoreVersion(ctx context.Context, name, hash string) err
 
 // SetVersioning sets the versioning override for a file
 func (fs *FileSystem) SetVersioning(ctx context.Context, name string, enabled bool) error {
+	release := fs.beginMutation()
+	defer release()
+
 	var err error
 	name, err = normalizeStorageWorkspacePath(name)
 	if err != nil {
@@ -3532,12 +3592,17 @@ func (fs *FileSystem) CleanupStaging(ctx context.Context) (files int, bytes int6
 
 func (fs *FileSystem) beginMutation() func() {
 	fs.gcMu.RLock()
-	fs.mu.Lock()
+	fs.lockMutation()
 
 	return func() {
 		fs.mu.Unlock()
 		fs.gcMu.RUnlock()
 	}
+}
+
+func (fs *FileSystem) lockMutation() {
+	fs.mu.Lock()
+	fs.mutationEpoch++
 }
 
 // cleanupVersions removes old versions based on retention policy
