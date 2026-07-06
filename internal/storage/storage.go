@@ -485,6 +485,9 @@ type FileSystem struct {
 	gcMu                      sync.RWMutex
 	mu                        sync.RWMutex
 	mutationEpoch             uint64 // guarded by mu
+
+	hashStagedDeleteSourceFile func(ctx context.Context, file *os.File) (string, error)
+	hashStagedTrashContentFile func(ctx context.Context, file *os.File) (string, error)
 }
 
 // UpdateTrashSettings applies trash settings to the running filesystem.

@@ -133,10 +133,16 @@ func (fs *FileSystem) copyStagedDeleteToTrashLocked(ctx context.Context, target 
 	if err := fs.checkStorageCopyMountBoundaries(srcRoot, target.stageAbs, dstRoot, dstAbs); err != nil {
 		return nil, &DeleteStageResidualError{Path: target.logicalName, StagePath: dstAbs, err: err}
 	}
-	if _, err := fs.snapshotStagedDeleteLockedWithHashes(ctx, target, true); err != nil {
+	if err := afterDeleteTrashContentHash(target.logicalName, target.stageAbs, dstAbs); err != nil {
 		return nil, &DeleteStageResidualError{Path: target.logicalName, StagePath: dstAbs, err: err}
 	}
-	if err := fs.verifyStagedTrashContentLocked(ctx, content); err != nil {
+	if err := fs.verifyStagedDeleteMetadataLocked(ctx, target, source); err != nil {
+		return nil, &DeleteStageResidualError{Path: target.logicalName, StagePath: dstAbs, err: err}
+	}
+	if err := fs.verifyStagedTrashContentMetadataLocked(ctx, content); err != nil {
+		return nil, &DeleteStageResidualError{Path: target.logicalName, StagePath: dstAbs, err: err}
+	}
+	if err := fs.checkStorageCopyMountBoundaries(srcRoot, target.stageAbs, dstRoot, dstAbs); err != nil {
 		return nil, &DeleteStageResidualError{Path: target.logicalName, StagePath: dstAbs, err: err}
 	}
 	return content, nil
@@ -180,7 +186,29 @@ func (fs *FileSystem) captureStagedDeleteModesLocked(target *stagedDeleteTarget)
 	return modes, nil
 }
 
+func sameStagedTrashContentMetadata(expected stagedTrashContentEntry, logical string, actual os.FileInfo) bool {
+	return expected.info != nil &&
+		expected.logical == logical &&
+		sameDeleteStageEntry(expected.info, expected.identity, actual) &&
+		expected.info.IsDir() == actual.IsDir() &&
+		expected.info.Mode() == actual.Mode() &&
+		expected.info.Size() == actual.Size() &&
+		expected.info.ModTime().Equal(actual.ModTime())
+}
+
 func (fs *FileSystem) scanStagedTrashContentLocked(ctx context.Context, content *stagedTrashContent, expectedManifest map[string]stagedTrashContentEntry) (map[string]stagedTrashContentEntry, error) {
+	return fs.scanStagedTrashContentWithHashesLocked(ctx, content, expectedManifest, true)
+}
+
+func (fs *FileSystem) verifyStagedTrashContentMetadataLocked(ctx context.Context, content *stagedTrashContent) error {
+	if content == nil || content.entries == nil {
+		return ErrDeleteTargetChanged
+	}
+	_, err := fs.scanStagedTrashContentWithHashesLocked(ctx, content, content.entries, false)
+	return err
+}
+
+func (fs *FileSystem) scanStagedTrashContentWithHashesLocked(ctx context.Context, content *stagedTrashContent, expectedManifest map[string]stagedTrashContentEntry, includeContentHashes bool) (map[string]stagedTrashContentEntry, error) {
 	if content == nil || content.rel == "" || content.abs == "" {
 		return nil, ErrDeleteTargetChanged
 	}
@@ -218,7 +246,7 @@ func (fs *FileSystem) scanStagedTrashContentLocked(ctx context.Context, content 
 		}
 		entry := stagedTrashContentEntry{info: info, identity: identity, logical: logical}
 		if expectedEntry, ok := expectedManifest[suffix]; expectedManifest != nil {
-			if !ok || expectedEntry.logical != logical || !sameDeleteStageEntry(expectedEntry.info, expectedEntry.identity, info) {
+			if !ok || !sameStagedTrashContentMetadata(expectedEntry, logical, info) {
 				return ErrDeleteTargetChanged
 			}
 		}
@@ -270,10 +298,17 @@ func (fs *FileSystem) scanStagedTrashContentLocked(ctx context.Context, content 
 			_ = file.Close()
 			return errors.Join(ErrDeleteTargetChanged, err)
 		}
-		hash, err := hashOpenWorkspaceFileContext(ctx, file)
-		if err != nil {
-			_ = file.Close()
-			return err
+		hash := ""
+		if includeContentHashes {
+			hashFile := fs.hashStagedTrashContentFile
+			if hashFile == nil {
+				hashFile = hashOpenWorkspaceFileContext
+			}
+			hash, err = hashFile(ctx, file)
+			if err != nil {
+				_ = file.Close()
+				return err
+			}
 		}
 		after, statErr := file.Stat()
 		closeErr := file.Close()
@@ -281,11 +316,11 @@ func (fs *FileSystem) scanStagedTrashContentLocked(ctx context.Context, content 
 			return errors.Join(ErrDeleteTargetChanged, statErr, closeErr)
 		}
 		current, err := fs.trashRootHandle.Lstat(rel)
-		if err != nil || !sameDeleteStageEntry(info, identity, current) || hash != expected.ContentHash {
+		if err != nil || !sameDeleteStageEntry(info, identity, current) || (includeContentHashes && hash != expected.ContentHash) {
 			return errors.Join(ErrDeleteTargetChanged, mapStorageRootPathError(err))
 		}
 		entry.hash = hash
-		if expectedEntry, ok := expectedManifest[suffix]; expectedManifest != nil {
+		if expectedEntry, ok := expectedManifest[suffix]; expectedManifest != nil && includeContentHashes {
 			if !ok || expectedEntry.hash != hash {
 				return ErrDeleteTargetChanged
 			}

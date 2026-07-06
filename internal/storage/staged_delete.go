@@ -21,6 +21,7 @@ var (
 	afterDeleteLeafRename        = func(string, string) error { return nil }
 	afterDeleteStageCapture      = func(string, string) error { return nil }
 	afterDeleteTrashCopy         = func(string, string) error { return nil }
+	afterDeleteTrashContentHash  = func(string, string, string) error { return nil }
 	beforeTrashRollbackCapture   = func(string, string) error { return nil }
 	afterTrashRollbackCapture    = func(string, string) error { return nil }
 	beforeDeleteStageRemoval     = func(string, string) error { return nil }
@@ -399,7 +400,11 @@ func (fs *FileSystem) hashStableStagedFile(ctx context.Context, target *stagedDe
 	beforeToken := workspace.DeleteIdentityTokenForFileInfo(before)
 	hash := ""
 	if expected.ContentHash != "" || forceHash {
-		hash, err = hashOpenWorkspaceFileContext(ctx, file)
+		hashFile := fs.hashStagedDeleteSourceFile
+		if hashFile == nil {
+			hashFile = hashOpenWorkspaceFileContext
+		}
+		hash, err = hashFile(ctx, file)
 		if err != nil {
 			return "", err
 		}
@@ -420,6 +425,13 @@ func (fs *FileSystem) hashStableStagedFile(ctx context.Context, target *stagedDe
 
 func (fs *FileSystem) snapshotStagedDeleteLocked(ctx context.Context, target *stagedDeleteTarget) (DeleteTargetSnapshot, error) {
 	return fs.snapshotStagedDeleteLockedWithHashes(ctx, target, false)
+}
+
+func (fs *FileSystem) verifyStagedDeleteMetadataLocked(ctx context.Context, target *stagedDeleteTarget, expected DeleteTargetSnapshot) error {
+	metadataTarget := *target
+	metadataTarget.expected = projectDeleteTargetSnapshot(expected, DeleteTargetSnapshotOptions{IncludeDescendants: true})
+	_, err := fs.snapshotStagedDeleteLocked(ctx, &metadataTarget)
+	return err
 }
 
 func (fs *FileSystem) snapshotStagedDeleteLockedWithHashes(ctx context.Context, target *stagedDeleteTarget, forceHash bool) (DeleteTargetSnapshot, error) {
