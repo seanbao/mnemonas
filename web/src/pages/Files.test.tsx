@@ -154,6 +154,24 @@ function createDeferred<T>() {
   return { promise, resolve, reject }
 }
 
+function createTrashDeleteIntent(paths: string[]): Awaited<ReturnType<typeof createFileDeleteIntent>> {
+  return {
+    deleteMode: 'trash',
+    deletePolicyToken: '1'.repeat(64),
+    trashRetentionDays: 30,
+    trashAutoCleanupEnabled: true,
+    targets: paths.map((path) => ({
+      path,
+      name: path.slice(1),
+      isDir: false,
+      size: path === '/video.mp4' ? 10240000 : 1024000,
+      modTime: path === '/video.mp4' ? '2024-01-03T00:00:00Z' : '2024-01-02T00:00:00Z',
+      deleteIdentityToken,
+      deleteTargetToken: '3'.repeat(64),
+    })),
+  }
+}
+
 function pendingFilesRefetch() {
   return new Promise<Awaited<ReturnType<typeof listFiles>>>(() => {})
 }
@@ -2423,6 +2441,253 @@ describe('FilesPage', () => {
       })
     })
 
+    it('cancels single-target intent preparation and ignores a late response', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const pendingIntent = createDeferred<Awaited<ReturnType<typeof createFileDeleteIntent>>>()
+      let intentSignal: AbortSignal | undefined
+      mockFilesStoreState.viewMode = 'grid'
+      mockCreateFileDeleteIntent.mockImplementationOnce((_targets, options) => {
+        intentSignal = options?.signal
+        return pendingIntent.promise
+      })
+
+      render(<FilesPage />)
+      const photoItem = await getFileItem('photo.jpg')
+      const menuTrigger = within(photoItem).getByLabelText('photo.jpg 操作菜单')
+      await clickFileAction(user, 'photo.jpg', '删除')
+
+      expect(await screen.findByRole('status')).toHaveTextContent('正在确认删除目标…')
+      expect(intentSignal).toBeInstanceOf(AbortSignal)
+      expect(intentSignal?.aborted).toBe(false)
+
+      await user.click(screen.getByRole('button', { name: '取消确认' }))
+
+      expect(intentSignal?.aborted).toBe(true)
+      expect(screen.queryByRole('status')).toBeNull()
+      await waitFor(() => expect(menuTrigger).toHaveFocus())
+
+      await act(async () => {
+        pendingIntent.resolve(createTrashDeleteIntent(['/photo.jpg']))
+        await pendingIntent.promise
+      })
+
+      expect(screen.queryByRole('status')).toBeNull()
+      expect(screen.queryByRole('heading', { name: '移入回收站' })).toBeNull()
+      expect(mockDeleteFile).not.toHaveBeenCalled()
+    })
+
+    it('restores the single-delete entry focus after preparation fails and allows retrying', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.viewMode = 'grid'
+      mockCreateFileDeleteIntent
+        .mockRejectedValueOnce(new Error('intent preparation failed'))
+        .mockResolvedValueOnce(createTrashDeleteIntent(['/photo.jpg']))
+
+      render(<FilesPage />)
+      const photoItem = await getFileItem('photo.jpg')
+      const menuTrigger = within(photoItem).getByLabelText('photo.jpg 操作菜单')
+
+      await clickFileAction(user, 'photo.jpg', '删除')
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+          title: '无法确认删除目标',
+          color: 'danger',
+        }))
+        expect(screen.queryByRole('status')).toBeNull()
+        expect(menuTrigger).toHaveFocus()
+      })
+
+      await clickFileAction(user, 'photo.jpg', '删除')
+
+      expect(mockCreateFileDeleteIntent).toHaveBeenCalledTimes(2)
+      expect(await screen.findByRole('heading', { name: '移入回收站' })).toBeTruthy()
+    })
+
+    it('cancels batch intent preparation and ignores a late response', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const pendingIntent = createDeferred<Awaited<ReturnType<typeof createFileDeleteIntent>>>()
+      let intentSignal: AbortSignal | undefined
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/video.mp4'])
+      mockCreateFileDeleteIntent.mockImplementationOnce((_targets, options) => {
+        intentSignal = options?.signal
+        return pendingIntent.promise
+      })
+
+      render(<FilesPage />)
+      const batchButton = await screen.findByRole('button', { name: '批量删除' })
+      await user.click(batchButton)
+
+      expect(await screen.findByRole('status')).toHaveTextContent('正在确认删除目标…')
+      expect(intentSignal).toBeInstanceOf(AbortSignal)
+      expect(intentSignal?.aborted).toBe(false)
+
+      await user.click(screen.getByRole('button', { name: '取消确认' }))
+
+      expect(intentSignal?.aborted).toBe(true)
+      expect(screen.queryByRole('status')).toBeNull()
+      await waitFor(() => expect(batchButton).toHaveFocus())
+
+      await act(async () => {
+        pendingIntent.resolve(createTrashDeleteIntent(['/photo.jpg', '/video.mp4']))
+        await pendingIntent.promise
+      })
+
+      expect(screen.queryByRole('status')).toBeNull()
+      expect(screen.queryByRole('heading', { name: '批量移入回收站' })).toBeNull()
+      expect(mockDeleteFile).not.toHaveBeenCalled()
+    })
+
+    it('aborts batch intent preparation on Escape, preserves selection, and ignores a late response', async () => {
+      const pendingIntent = createDeferred<Awaited<ReturnType<typeof createFileDeleteIntent>>>()
+      let intentSignal: AbortSignal | undefined
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/video.mp4'])
+      mockCreateFileDeleteIntent.mockImplementationOnce((_targets, options) => {
+        intentSignal = options?.signal
+        return pendingIntent.promise
+      })
+
+      render(<FilesPage />)
+      const batchButton = await screen.findByRole('button', { name: '批量删除' })
+      fireEvent.click(batchButton)
+
+      expect(await screen.findByRole('status')).toHaveTextContent('正在确认删除目标…')
+      expect(intentSignal).toBeInstanceOf(AbortSignal)
+      expect(intentSignal?.aborted).toBe(false)
+      mockFilesStoreState.clearSelection.mockClear()
+
+      act(() => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      })
+
+      expect(intentSignal?.aborted).toBe(true)
+      expect(mockFilesStoreState.clearSelection).not.toHaveBeenCalled()
+      expect(mockFilesStoreState.selectedFiles).toEqual(new Set(['/photo.jpg', '/video.mp4']))
+      expect(screen.queryByRole('status')).toBeNull()
+      expect(batchButton).not.toBeDisabled()
+      await waitFor(() => expect(batchButton).toHaveFocus())
+
+      await act(async () => {
+        pendingIntent.resolve(createTrashDeleteIntent(['/photo.jpg', '/video.mp4']))
+        await pendingIntent.promise
+      })
+
+      expect(screen.queryByRole('status')).toBeNull()
+      expect(screen.queryByRole('heading', { name: '批量移入回收站' })).toBeNull()
+      expect(mockCreateFileDeleteIntent).toHaveBeenCalledTimes(1)
+      expect(mockDeleteFile).not.toHaveBeenCalled()
+    })
+
+    it('moves focus to the file region when the preparation trigger is removed', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const pendingIntent = createDeferred<Awaited<ReturnType<typeof createFileDeleteIntent>>>()
+      mockFilesStoreState.viewMode = 'grid'
+      mockCreateFileDeleteIntent.mockImplementationOnce(() => pendingIntent.promise)
+
+      const { rerender } = render(<FilesPage />)
+      await clickFileAction(user, 'photo.jpg', '删除')
+      expect(await screen.findByRole('status')).toHaveTextContent('正在确认删除目标…')
+
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/video.mp4'])
+      rerender(<FilesPage />)
+      await waitFor(() => {
+        expect(screen.queryByLabelText('photo.jpg 操作菜单')).toBeNull()
+      })
+
+      const focusFallback = screen.getByRole('region', { name: '文件上传区域' })
+      await user.click(screen.getByRole('button', { name: '取消确认' }))
+
+      await waitFor(() => expect(focusFallback).toHaveFocus())
+
+      await act(async () => {
+        pendingIntent.resolve(createTrashDeleteIntent(['/photo.jpg']))
+        await pendingIntent.promise
+      })
+      expect(screen.queryByRole('heading', { name: '移入回收站' })).toBeNull()
+    })
+
+    it('disables batch deletion while a single-target intent is preparing', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const pendingIntent = createDeferred<Awaited<ReturnType<typeof createFileDeleteIntent>>>()
+      mockFilesStoreState.viewMode = 'grid'
+      mockFilesStoreState.selectedFiles = new Set(['/video.mp4'])
+      mockCreateFileDeleteIntent.mockImplementationOnce(() => pendingIntent.promise)
+
+      render(<FilesPage />)
+      await clickFileAction(user, 'photo.jpg', '删除')
+      expect(await screen.findByRole('status')).toHaveTextContent('正在确认删除目标…')
+
+      const batchButton = screen.getByRole('button', { name: '批量删除' })
+      expect(batchButton).toBeDisabled()
+      await user.click(batchButton)
+
+      expect(mockCreateFileDeleteIntent).toHaveBeenCalledTimes(1)
+      expect(screen.queryByRole('heading', { name: '移入回收站' })).toBeNull()
+      expect(screen.queryByRole('heading', { name: '批量移入回收站' })).toBeNull()
+    })
+
+    it('keeps batch deletion disabled while a single delete is confirming and committing', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const pendingDelete = createDeferred<typeof successActionResult>()
+      mockFilesStoreState.viewMode = 'grid'
+      mockFilesStoreState.selectedFiles = new Set(['/video.mp4'])
+      mockDeleteFile.mockImplementationOnce(() => pendingDelete.promise)
+
+      render(<FilesPage />)
+      const batchButton = await screen.findByRole('button', { name: '批量删除' })
+      expect(batchButton).not.toBeDisabled()
+
+      await clickFileAction(user, 'photo.jpg', '删除')
+      expect(await screen.findByRole('heading', { name: '移入回收站' })).toBeTruthy()
+      expect(batchButton).toBeDisabled()
+
+      await user.click(screen.getByRole('button', { name: '移入回收站 photo.jpg' }))
+      await waitFor(() => expect(mockDeleteFile).toHaveBeenCalledTimes(1))
+      expect(batchButton).toBeDisabled()
+
+      await act(async () => {
+        pendingDelete.resolve(successActionResult)
+        await pendingDelete.promise
+      })
+    })
+
+    it('disables single-target deletion while a batch intent is preparing', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const pendingIntent = createDeferred<Awaited<ReturnType<typeof createFileDeleteIntent>>>()
+      mockFilesStoreState.viewMode = 'grid'
+      mockFilesStoreState.selectedFiles = new Set(['/video.mp4'])
+      mockCreateFileDeleteIntent.mockImplementationOnce(() => pendingIntent.promise)
+
+      render(<FilesPage />)
+      await user.click(await screen.findByRole('button', { name: '批量删除' }))
+      expect(await screen.findByRole('status')).toHaveTextContent('正在确认删除目标…')
+
+      const photoActions = await getFileActionArea('photo.jpg')
+      const singleDeleteButton = within(photoActions).getByRole('button', { name: '删除' })
+      expect(singleDeleteButton).toBeDisabled()
+      await user.click(singleDeleteButton)
+
+      expect(mockCreateFileDeleteIntent).toHaveBeenCalledTimes(1)
+      expect(screen.queryByRole('heading', { name: '移入回收站' })).toBeNull()
+      expect(screen.queryByRole('heading', { name: '批量移入回收站' })).toBeNull()
+    })
+
+    it('keeps single-target deletion disabled while a batch delete is confirming', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.viewMode = 'grid'
+      mockFilesStoreState.selectedFiles = new Set(['/video.mp4'])
+
+      render(<FilesPage />)
+      const photoActions = await getFileActionArea('photo.jpg')
+      const singleDeleteButton = within(photoActions).getByRole('button', { name: '删除' })
+      expect(singleDeleteButton).not.toBeDisabled()
+
+      await user.click(await screen.findByRole('button', { name: '批量删除' }))
+      expect(await screen.findByRole('heading', { name: '批量移入回收站' })).toBeTruthy()
+
+      expect(singleDeleteButton).toBeDisabled()
+    })
+
     it('discards a pending batch intent when the same-size selection changes', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       const pendingIntent = createDeferred<Awaited<ReturnType<typeof createFileDeleteIntent>>>()
@@ -3064,6 +3329,86 @@ describe('FilesPage', () => {
       await waitFor(() => {
         const cachedRoot = queryClient.getQueryData<{ files: Array<{ path: string }> }>(['files', 'u1:admin:/', '/'])
         expect(cachedRoot?.files.map((file) => file.path)).toEqual(['/documents', '/video.mp4'])
+      })
+    })
+
+    it('keeps a new batch commit locked when an aborted previous-directory commit settles late', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const pendingRootDelete = createDeferred<typeof successActionResult>()
+      const pendingDocumentsDelete = createDeferred<typeof successActionResult>()
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
+      mockDeleteFile
+        .mockImplementationOnce(() => pendingRootDelete.promise)
+        .mockImplementationOnce(() => pendingDocumentsDelete.promise)
+
+      const view = render(<FilesPage />)
+
+      await user.click(await screen.findByRole('button', { name: '批量删除' }))
+      await user.click(await screen.findByRole('button', { name: batchTrashConfirmName }))
+
+      let rootDeleteSignal: AbortSignal | undefined
+      await waitFor(() => {
+        rootDeleteSignal = expectDeleteFileCalledWithAbortSignal('/photo.jpg')
+      })
+
+      mockFilesStoreState.currentPath = '/documents'
+      mockFilesStoreState.selectedFiles = new Set(['/documents/new.txt'])
+      mockLocationPathname = '/files/documents'
+      mockListFiles.mockResolvedValue({
+        files: [{
+          name: 'new.txt',
+          path: '/documents/new.txt',
+          isDir: false,
+          size: 1,
+          modTime: '2024-01-04T00:00:00Z',
+          deleteIdentityToken,
+        }],
+        path: '/documents',
+        deleteMode: 'trash',
+        deletePolicyToken: '1'.repeat(64),
+        trashRetentionDays: 30,
+        trashAutoCleanupEnabled: true,
+      })
+      view.rerender(<FilesPage />)
+
+      await waitFor(() => {
+        expect(rootDeleteSignal?.aborted).toBe(true)
+        expect(screen.queryByRole('heading', { name: '批量移入回收站' })).toBeNull()
+      })
+
+      const documentsBatchButton = await screen.findByRole('button', { name: '批量删除' })
+      await waitFor(() => expect(documentsBatchButton).toBeEnabled())
+      await user.click(documentsBatchButton)
+      await user.click(await screen.findByRole('button', { name: batchTrashConfirmName }))
+
+      let documentsDeleteSignal: AbortSignal | undefined
+      await waitFor(() => {
+        documentsDeleteSignal = expectDeleteFileCalledWithAbortSignal('/documents/new.txt')
+      })
+
+      const batchDialog = document.querySelector('[aria-labelledby="batch-delete-dialog-title"]')
+      expect(batchDialog).toBeInstanceOf(HTMLElement)
+      const cancelButton = within(batchDialog as HTMLElement).getByRole('button', { name: '取消' })
+      await waitFor(() => {
+        expect(batchDialog).toHaveAttribute('aria-busy', 'true')
+        expect(cancelButton).toBeDisabled()
+      })
+
+      await act(async () => {
+        pendingRootDelete.reject(new DOMException('previous batch delete aborted', 'AbortError'))
+        await Promise.resolve()
+      })
+
+      expect(batchDialog).toHaveAttribute('aria-busy', 'true')
+      expect(cancelButton).toBeDisabled()
+      fireEvent.click(cancelButton)
+      await user.keyboard('{Escape}')
+      expect(screen.getByRole('heading', { name: '批量移入回收站' })).toBeTruthy()
+      expect(documentsDeleteSignal?.aborted).toBe(false)
+
+      await act(async () => {
+        pendingDocumentsDelete.resolve(successActionResult)
+        await pendingDocumentsDelete.promise
       })
     })
 

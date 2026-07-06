@@ -247,6 +247,7 @@ type DeleteMutationVariables = {
   expectedDeleteMode: DeleteMode
   expectedDeletePolicyToken: string
   expectedDeleteTargetToken: string
+  sessionId: number
   signal: AbortSignal
 }
 
@@ -268,6 +269,20 @@ type BatchDeleteIntent = {
   policy: KnownDeletePolicy
   directoryPath: string
 }
+
+type DeleteFlowKind = 'single' | 'batch'
+type DeleteFlowPhase = 'preparing' | 'confirming' | 'committing'
+
+type DeleteFlowSession = {
+  id: number
+  kind: DeleteFlowKind
+  phase: DeleteFlowPhase
+  targetCount: number
+  controller: AbortController | null
+  returnFocusTarget: HTMLElement | null
+}
+
+type DeleteFlowView = Pick<DeleteFlowSession, 'id' | 'kind' | 'phase' | 'targetCount'>
 
 type DeleteTargetSnapshot = Pick<FileItem, 'path' | 'name' | 'isDir' | 'size' | 'modTime' | 'deleteIdentityToken'>
 
@@ -955,7 +970,7 @@ function FileRow({
               <button
                 type="button"
                 aria-label={`${file.name} 操作菜单`}
-                className="flex h-9 w-9 items-center justify-center rounded-lg opacity-100 transition-colors hover:bg-content2 sm:opacity-0 sm:group-hover:opacity-100"
+                className="flex h-9 w-9 items-center justify-center rounded-lg opacity-100 transition-colors hover:bg-content2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary focus-visible:ring-offset-2 focus-visible:ring-offset-content1 sm:opacity-0 sm:group-hover:opacity-100 sm:focus:opacity-100"
               >
                 <MoreVertical size={16} className="text-default-500" />
               </button>
@@ -1221,7 +1236,7 @@ function FileCard({
               <button
                 type="button"
                 aria-label={`${file.name} 操作菜单`}
-                className="flex h-9 w-9 items-center justify-center rounded-lg bg-content1/80 opacity-100 backdrop-blur-sm transition-colors hover:bg-content2 sm:opacity-0 sm:group-hover:opacity-100"
+                className="flex h-9 w-9 items-center justify-center rounded-lg bg-content1/80 opacity-100 backdrop-blur-sm transition-colors hover:bg-content2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary focus-visible:ring-offset-2 focus-visible:ring-offset-content1 sm:opacity-0 sm:group-hover:opacity-100 sm:focus:opacity-100"
               >
                 <MoreVertical size={14} className="text-default-500" />
               </button>
@@ -1382,11 +1397,15 @@ export function FilesPage() {
   const {
     initialFocusRef: deleteCancelButtonRef,
     captureReturnFocus: captureDeleteReturnFocus,
+    clearReturnFocus: clearDeleteReturnFocus,
+    restoreReturnFocus: restoreDeleteReturnFocus,
     setFallbackReturnFocus: setDeleteFallbackReturnFocus,
   } = useDestructiveDialogFocus(isDeleteOpen)
   const {
     initialFocusRef: batchDeleteCancelButtonRef,
     captureReturnFocus: captureBatchDeleteReturnFocus,
+    clearReturnFocus: clearBatchDeleteReturnFocus,
+    restoreReturnFocus: restoreBatchDeleteReturnFocus,
     setFallbackReturnFocus: setBatchDeleteFallbackReturnFocus,
   } = useDestructiveDialogFocus(isBatchDeleteOpen)
   const { isOpen: isShareOpen, onOpen: onShareOpen, onClose: onShareClose } = useDisclosure()
@@ -1400,8 +1419,6 @@ export function FilesPage() {
   // Preview modal state
   const { isOpen: isPreviewOpen, onOpen: onPreviewOpen, onClose: onPreviewClose } = useDisclosure()
   const [previewFile, setPreviewFile] = useState<PreviewFile | null>(null)
-  const [isBatchDeleting, setIsBatchDeleting] = useState(false)
-  
   const [newFolderName, setNewFolderName] = useState('')
   const [renameValue, setRenameValue] = useState('')
   const newFolderNameValidationError = getPathSegmentNameValidationError(newFolderName, '请输入文件夹名称')
@@ -1411,8 +1428,10 @@ export function FilesPage() {
   const [actionFile, setActionFile] = useState<FileItem | null>(null)
   const [deleteIntent, setDeleteIntent] = useState<SingleDeleteIntent | null>(null)
   const [batchDeleteIntent, setBatchDeleteIntent] = useState<BatchDeleteIntent | null>(null)
-  const [isDeleteIntentPreparing, setIsDeleteIntentPreparing] = useState(false)
-  const [isBatchDeleteIntentPreparing, setIsBatchDeleteIntentPreparing] = useState(false)
+  const [deleteFlowView, setDeleteFlowView] = useState<DeleteFlowView | null>(null)
+  const isBatchDeleteIntentPreparing = deleteFlowView?.kind === 'batch' && deleteFlowView.phase === 'preparing'
+  const isDeleteFlowBusy = deleteFlowView !== null
+  const isBatchDeleting = deleteFlowView?.kind === 'batch' && deleteFlowView.phase === 'committing'
   const [deletePolicyRefreshRequired, setDeletePolicyRefreshRequired] = useState(false)
   const newFolderSessionRef = useRef(0)
   const currentNewFolderNameRef = useRef('')
@@ -1421,11 +1440,10 @@ export function FilesPage() {
   const currentRenameValueRef = useRef('')
   const currentRenameFileRef = useRef<FileItem | null>(null)
   const renameAbortControllerRef = useRef<AbortController | null>(null)
-  const deleteIntentAbortControllerRef = useRef<AbortController | null>(null)
-  const batchDeleteIntentAbortControllerRef = useRef<AbortController | null>(null)
-  const deleteAbortControllerRef = useRef<AbortController | null>(null)
-  const batchDeleteAbortControllerRef = useRef<AbortController | null>(null)
+  const deleteFlowSessionIdRef = useRef(0)
+  const deleteFlowSessionRef = useRef<DeleteFlowSession | null>(null)
   const deleteFocusFallbackRef = useRef<HTMLDivElement>(null)
+  const batchDeleteButtonRef = useRef<HTMLButtonElement>(null)
   const isMountedRef = useRef(true)
   const deleteDialogCloseRef = useRef(onDeleteClose)
   const batchDeleteDialogCloseRef = useRef(onBatchDeleteClose)
@@ -1472,6 +1490,68 @@ export function FilesPage() {
 
   selectedFilesRef.current = selectedFiles
 
+  const beginDeleteFlow = useCallback((
+    kind: DeleteFlowKind,
+    targetCount: number,
+    returnFocusTarget: HTMLElement | null
+  ) => {
+    if (deleteFlowSessionRef.current) {
+      return null
+    }
+
+    const session: DeleteFlowSession = {
+      id: deleteFlowSessionIdRef.current + 1,
+      kind,
+      phase: 'preparing',
+      targetCount,
+      controller: new AbortController(),
+      returnFocusTarget,
+    }
+    deleteFlowSessionIdRef.current = session.id
+    deleteFlowSessionRef.current = session
+    setDeleteFlowView({
+      id: session.id,
+      kind: session.kind,
+      phase: session.phase,
+      targetCount: session.targetCount,
+    })
+    return session
+  }, [])
+
+  const transitionDeleteFlow = useCallback((
+    sessionId: number,
+    phase: DeleteFlowPhase,
+    controller: AbortController | null = null
+  ) => {
+    const session = deleteFlowSessionRef.current
+    if (!session || session.id !== sessionId) {
+      return false
+    }
+
+    session.phase = phase
+    session.controller = controller
+    setDeleteFlowView({
+      id: session.id,
+      kind: session.kind,
+      phase: session.phase,
+      targetCount: session.targetCount,
+    })
+    return true
+  }, [])
+
+  const releaseDeleteFlow = useCallback((sessionId?: number) => {
+    const session = deleteFlowSessionRef.current
+    if (!session || (sessionId !== undefined && session.id !== sessionId)) {
+      return false
+    }
+
+    deleteFlowSessionRef.current = null
+    setDeleteFlowView(null)
+    return true
+  }, [])
+
+  const hasActiveDeleteFlow = useCallback(() => deleteFlowSessionRef.current !== null, [])
+
   useEffect(() => {
     deleteDialogCloseRef.current = onDeleteClose
     batchDeleteDialogCloseRef.current = onBatchDeleteClose
@@ -1496,20 +1576,16 @@ export function FilesPage() {
       createFolderAbortControllerRef.current = null
       renameAbortControllerRef.current?.abort()
       renameAbortControllerRef.current = null
-      deleteIntentAbortControllerRef.current?.abort()
-      deleteIntentAbortControllerRef.current = null
-      batchDeleteIntentAbortControllerRef.current?.abort()
-      batchDeleteIntentAbortControllerRef.current = null
-      deleteAbortControllerRef.current?.abort()
-      deleteAbortControllerRef.current = null
-      batchDeleteAbortControllerRef.current?.abort()
-      batchDeleteAbortControllerRef.current = null
+      deleteFlowSessionRef.current?.controller?.abort()
+      deleteFlowSessionRef.current = null
+      clearDeleteReturnFocus()
+      clearBatchDeleteReturnFocus()
       pasteAbortControllerRef.current?.abort()
       pasteAbortControllerRef.current = null
       favoriteAbortControllerRef.current?.abort()
       favoriteAbortControllerRef.current = null
     }
-  }, [])
+  }, [clearBatchDeleteReturnFocus, clearDeleteReturnFocus])
 
   const setFilePathState = useCallback((filePath: string): string => {
     const normalizedPath = normalizePath(filePath)
@@ -1592,17 +1668,11 @@ export function FilesPage() {
     }
     resetForPathRef.current = currentPath
     lastSelectedIndexRef.current = null
-    deleteIntentAbortControllerRef.current?.abort()
-    deleteIntentAbortControllerRef.current = null
-    batchDeleteIntentAbortControllerRef.current?.abort()
-    batchDeleteIntentAbortControllerRef.current = null
-    deleteAbortControllerRef.current?.abort()
-    deleteAbortControllerRef.current = null
-    batchDeleteAbortControllerRef.current?.abort()
-    batchDeleteAbortControllerRef.current = null
-    setIsBatchDeleting(false)
-    setIsDeleteIntentPreparing(false)
-    setIsBatchDeleteIntentPreparing(false)
+    deleteFlowSessionRef.current?.controller?.abort()
+    deleteFlowSessionRef.current = null
+    clearDeleteReturnFocus()
+    clearBatchDeleteReturnFocus()
+    setDeleteFlowView(null)
     setDeleteIntent(null)
     setBatchDeleteIntent(null)
     deleteDialogCloseRef.current()
@@ -1610,7 +1680,7 @@ export function FilesPage() {
     clearSelection()
     setActiveFilePath(null)
     setFocusedIndex(-1)
-  }, [currentPath, clearSelection])
+  }, [clearBatchDeleteReturnFocus, clearDeleteReturnFocus, clearSelection, currentPath])
 
   useEffect(() => {
     currentNewFolderNameRef.current = newFolderName
@@ -1778,7 +1848,13 @@ export function FilesPage() {
       signal,
     }),
     onSuccess: (result, variables) => {
-      if (variables.signal.aborted) {
+      const session = deleteFlowSessionRef.current
+      if (
+        variables.signal.aborted
+        || !session
+        || session.id !== variables.sessionId
+        || session.kind !== 'single'
+      ) {
         return
       }
 
@@ -1792,6 +1868,7 @@ export function FilesPage() {
       if (variables.expectedDeleteMode === 'trash' && !isMissingFileActionResult(result)) {
         queryClient.invalidateQueries({ queryKey: ['trash'] })
       }
+      releaseDeleteFlow(variables.sessionId)
       onDeleteClose()
       setDeleteIntent(null)
       addToast(getFilesActionSuccessToast(result, {
@@ -1803,9 +1880,18 @@ export function FilesPage() {
       if (variables.signal.aborted || isAbortError(error)) {
         return
       }
+      const session = deleteFlowSessionRef.current
+      if (
+        !session
+        || session.id !== variables.sessionId
+        || session.kind !== 'single'
+      ) {
+        return
+      }
 
       if (isDeletePolicyChangedError(error)) {
         setDeletePolicyRefreshRequired(true)
+        releaseDeleteFlow(variables.sessionId)
         onDeleteClose()
         setDeleteIntent(null)
         refreshDeletePolicyAfterDrift()
@@ -1813,21 +1899,18 @@ export function FilesPage() {
       }
 
       if (isDeleteTargetChangedError(error)) {
+        releaseDeleteFlow(variables.sessionId)
         onDeleteClose()
         setDeleteIntent(null)
         refreshFilesAfterTargetDrift()
         return
       }
 
+      transitionDeleteFlow(variables.sessionId, 'confirming')
       addToast(getFilesActionErrorToast(error, {
         unavailable: '删除暂不可用',
         failure: '删除失败',
       }))
-    },
-    onSettled: (_result, _error, variables) => {
-      if (deleteAbortControllerRef.current?.signal === variables?.signal) {
-        deleteAbortControllerRef.current = null
-      }
     },
   })
   
@@ -2259,22 +2342,26 @@ export function FilesPage() {
   const handleDelete = useCallback(() => {
     if (deleteMutation.isPending) return
     if (!deleteIntent) return
+    const session = deleteFlowSessionRef.current
+    if (!session || session.kind !== 'single' || session.phase !== 'confirming') return
     if (currentPathRef.current !== deleteIntent.directoryPath) {
+      clearDeleteReturnFocus()
+      releaseDeleteFlow(session.id)
       onDeleteClose()
       setDeleteIntent(null)
       return
     }
     const controller = new AbortController()
-    deleteAbortControllerRef.current?.abort()
-    deleteAbortControllerRef.current = controller
+    if (!transitionDeleteFlow(session.id, 'committing', controller)) return
     deleteMutation.mutate({
       path: deleteIntent.target.path,
       expectedDeleteMode: deleteIntent.policy.mode,
       expectedDeletePolicyToken: deleteIntent.policy.token,
       expectedDeleteTargetToken: deleteIntent.target.deleteTargetToken,
+      sessionId: session.id,
       signal: controller.signal,
     })
-  }, [deleteIntent, deleteMutation, onDeleteClose])
+  }, [clearDeleteReturnFocus, deleteIntent, deleteMutation, onDeleteClose, releaseDeleteFlow, transitionDeleteFlow])
 
   const handleOpenNewFolderModal = useCallback(() => {
     if (!currentPathCanWrite) return
@@ -2296,10 +2383,34 @@ export function FilesPage() {
     onRenameOpen()
   }, [canWriteFile, onRenameOpen])
 
+  const restoreDeletePreparationFocus = useCallback((session: DeleteFlowSession) => {
+    const focusFallback = deleteFocusFallbackRef.current
+    if (focusFallback) {
+      focusFallback.tabIndex = -1
+    }
+    if (session.kind === 'single') {
+      clearDeleteReturnFocus()
+      restoreDeleteReturnFocus(focusFallback, session.returnFocusTarget)
+      return
+    }
+    clearBatchDeleteReturnFocus()
+    restoreBatchDeleteReturnFocus(focusFallback, session.returnFocusTarget)
+  }, [clearBatchDeleteReturnFocus, clearDeleteReturnFocus, restoreBatchDeleteReturnFocus, restoreDeleteReturnFocus])
+
+  const handleCancelDeleteIntentPreparation = useCallback(() => {
+    const session = deleteFlowSessionRef.current
+    if (!session || session.phase !== 'preparing') return
+
+    session.controller?.abort()
+    if (releaseDeleteFlow(session.id)) {
+      restoreDeletePreparationFocus(session)
+    }
+  }, [releaseDeleteFlow, restoreDeletePreparationFocus])
+
   const handleOpenDeleteModal = useCallback(async (file: FileItem) => {
+    if (hasActiveDeleteFlow()) return
     const observedIdentityToken = file.deleteIdentityToken
     if (!canDeleteFile(file) || observedIdentityToken === null) return
-    if (deleteIntentAbortControllerRef.current) return
 
     deleteFocusFallbackRef.current?.removeAttribute('tabindex')
     const menuTrigger = Array.from(document.querySelectorAll<HTMLElement>('[aria-label]'))
@@ -2307,19 +2418,24 @@ export function FilesPage() {
     captureDeleteReturnFocus(menuTrigger)
     const directoryPath = currentPathRef.current
     const targetSnapshot = snapshotDeleteTarget(file)
-    const controller = new AbortController()
-    deleteIntentAbortControllerRef.current = controller
-    setIsDeleteIntentPreparing(true)
+    const session = beginDeleteFlow('single', 1, menuTrigger ?? null)
+    if (!session || !session.controller) return
+    const { controller } = session
     try {
       const intent = await createFileDeleteIntent([{
         path: targetSnapshot.path,
         observedIdentityToken,
       }], { signal: controller.signal })
-      if (controller.signal.aborted || currentPathRef.current !== directoryPath) return
+      if (
+        controller.signal.aborted
+        || deleteFlowSessionRef.current?.id !== session.id
+        || currentPathRef.current !== directoryPath
+      ) return
       if (!deleteTargetMatchesSnapshot(intent.targets[0]!, targetSnapshot)) {
         discardReplacedDeleteIntent()
         return
       }
+      if (!transitionDeleteFlow(session.id, 'confirming')) return
       setDeleteIntent({
         target: intent.targets[0]!,
         policy: getKnownDeletePolicy(intent),
@@ -2328,7 +2444,11 @@ export function FilesPage() {
       captureDeleteReturnFocus(menuTrigger)
       onDeleteOpen()
     } catch (error) {
-      if (controller.signal.aborted || isAbortError(error)) return
+      if (
+        controller.signal.aborted
+        || deleteFlowSessionRef.current?.id !== session.id
+        || isAbortError(error)
+      ) return
       if (getErrorStatus(error) === 404) {
         queryClient.invalidateQueries({ queryKey: filesQueryKey })
         addToast({ title: '文件或文件夹已不存在，列表已刷新', color: 'warning' })
@@ -2343,14 +2463,20 @@ export function FilesPage() {
         failure: '无法确认删除目标',
       }))
     } finally {
-      if (deleteIntentAbortControllerRef.current === controller) {
-        deleteIntentAbortControllerRef.current = null
-        setIsDeleteIntentPreparing(false)
+      const currentSession = deleteFlowSessionRef.current
+      if (currentSession?.id === session.id && currentSession.phase === 'preparing') {
+        releaseDeleteFlow(session.id)
+        if (currentPathRef.current === directoryPath) {
+          restoreDeletePreparationFocus(session)
+        } else {
+          clearDeleteReturnFocus()
+        }
       }
     }
-  }, [canDeleteFile, captureDeleteReturnFocus, discardReplacedDeleteIntent, filesQueryKey, onDeleteOpen, queryClient, refreshFilesAfterTargetDrift])
+  }, [beginDeleteFlow, canDeleteFile, captureDeleteReturnFocus, clearDeleteReturnFocus, discardReplacedDeleteIntent, filesQueryKey, hasActiveDeleteFlow, onDeleteOpen, queryClient, refreshFilesAfterTargetDrift, releaseDeleteFlow, restoreDeletePreparationFocus, transitionDeleteFlow])
 
   const handleOpenBatchDeleteModal = useCallback(async (returnFocusTarget?: Element) => {
+    if (hasActiveDeleteFlow()) return
     if (!deletePolicyAvailable) {
       addToast({ title: '删除策略不可确认，删除操作已停用', color: 'warning' })
       return
@@ -2369,15 +2495,15 @@ export function FilesPage() {
       })
       return
     }
-    if (batchDeleteIntentAbortControllerRef.current) return
-
     deleteFocusFallbackRef.current?.removeAttribute('tabindex')
-    const returnFocusElement = returnFocusTarget instanceof HTMLElement ? returnFocusTarget : undefined
+    const returnFocusElement = returnFocusTarget instanceof HTMLElement
+      ? returnFocusTarget
+      : batchDeleteButtonRef.current
     captureBatchDeleteReturnFocus(returnFocusElement)
     const directoryPath = currentPathRef.current
-    const controller = new AbortController()
-    batchDeleteIntentAbortControllerRef.current = controller
-    setIsBatchDeleteIntentPreparing(true)
+    const session = beginDeleteFlow('batch', targets.length, returnFocusElement)
+    if (!session || !session.controller) return
+    const { controller } = session
     try {
       const targetSnapshots = targets.map(snapshotDeleteTarget)
       const requestedPaths = targets.map((file) => file.path)
@@ -2386,7 +2512,11 @@ export function FilesPage() {
         observedIdentityToken: target.deleteIdentityToken!,
       }))
       const intent = await createFileDeleteIntent(requestedTargets, { signal: controller.signal })
-      if (controller.signal.aborted || currentPathRef.current !== directoryPath) return
+      if (
+        controller.signal.aborted
+        || deleteFlowSessionRef.current?.id !== session.id
+        || currentPathRef.current !== directoryPath
+      ) return
       const currentSelection = selectedFilesRef.current
       if (
         currentSelection.size !== requestedPaths.length
@@ -2403,6 +2533,7 @@ export function FilesPage() {
         discardReplacedDeleteIntent()
         return
       }
+      if (!transitionDeleteFlow(session.id, 'confirming')) return
       setBatchDeleteIntent({
         targets: intent.targets,
         policy: getKnownDeletePolicy(intent),
@@ -2411,7 +2542,11 @@ export function FilesPage() {
       captureBatchDeleteReturnFocus(returnFocusElement)
       onBatchDeleteOpen()
     } catch (error) {
-      if (controller.signal.aborted || isAbortError(error)) return
+      if (
+        controller.signal.aborted
+        || deleteFlowSessionRef.current?.id !== session.id
+        || isAbortError(error)
+      ) return
       if (getErrorStatus(error) === 404) {
         queryClient.invalidateQueries({ queryKey: filesQueryKey })
         addToast({ title: '部分所选项目已不存在，列表已刷新', color: 'warning' })
@@ -2431,12 +2566,17 @@ export function FilesPage() {
         failure: '无法确认批量删除目标',
       }))
     } finally {
-      if (batchDeleteIntentAbortControllerRef.current === controller) {
-        batchDeleteIntentAbortControllerRef.current = null
-        setIsBatchDeleteIntentPreparing(false)
+      const currentSession = deleteFlowSessionRef.current
+      if (currentSession?.id === session.id && currentSession.phase === 'preparing') {
+        releaseDeleteFlow(session.id)
+        if (currentPathRef.current === directoryPath) {
+          restoreDeletePreparationFocus(session)
+        } else {
+          clearBatchDeleteReturnFocus()
+        }
       }
     }
-  }, [canDeleteFile, captureBatchDeleteReturnFocus, deletePolicy, deletePolicyAvailable, discardReplacedDeleteIntent, filesQueryKey, onBatchDeleteOpen, queryClient, refreshFilesAfterTargetDrift, selectedFiles, sortedFiles])
+  }, [beginDeleteFlow, canDeleteFile, captureBatchDeleteReturnFocus, clearBatchDeleteReturnFocus, deletePolicy, deletePolicyAvailable, discardReplacedDeleteIntent, filesQueryKey, hasActiveDeleteFlow, onBatchDeleteOpen, queryClient, refreshFilesAfterTargetDrift, releaseDeleteFlow, restoreDeletePreparationFocus, selectedFiles, sortedFiles, transitionDeleteFlow])
 
   const handleCloseRenameModal = useCallback(() => {
     if (renameMutation.isPending) return
@@ -2444,16 +2584,24 @@ export function FilesPage() {
   }, [renameMutation.isPending, onRenameClose])
 
   const handleCloseDeleteModal = useCallback(() => {
-    if (deleteMutation.isPending) return
+    const session = deleteFlowSessionRef.current
+    if (deleteMutation.isPending || (session?.kind === 'single' && session.phase === 'committing')) return
+    if (session?.kind === 'single') {
+      releaseDeleteFlow(session.id)
+    }
     onDeleteClose()
     setDeleteIntent(null)
-  }, [deleteMutation.isPending, onDeleteClose])
+  }, [deleteMutation.isPending, onDeleteClose, releaseDeleteFlow])
 
   const handleCloseBatchDeleteModal = useCallback(() => {
-    if (isBatchDeleting) return
+    const session = deleteFlowSessionRef.current
+    if (session?.kind === 'batch' && session.phase === 'committing') return
+    if (session?.kind === 'batch') {
+      releaseDeleteFlow(session.id)
+    }
     onBatchDeleteClose()
     setBatchDeleteIntent(null)
-  }, [isBatchDeleting, onBatchDeleteClose])
+  }, [onBatchDeleteClose, releaseDeleteFlow])
 
   const handleViewVersions = useCallback((file: FileItem) => {
     if (file.isDir) return
@@ -2835,17 +2983,19 @@ export function FilesPage() {
       addToast({ title: '删除策略不可确认，删除操作已停用', color: 'warning' })
       return
     }
+    const session = deleteFlowSessionRef.current
+    if (!session || session.kind !== 'batch' || session.phase !== 'confirming') return
     if (currentPathRef.current !== batchDeleteIntent.directoryPath) {
+      clearBatchDeleteReturnFocus()
+      releaseDeleteFlow(session.id)
       onBatchDeleteClose()
       setBatchDeleteIntent(null)
       return
     }
 
-    batchDeleteAbortControllerRef.current?.abort()
     const controller = new AbortController()
-    batchDeleteAbortControllerRef.current = controller
+    if (!transitionDeleteFlow(session.id, 'committing', controller)) return
     const { signal } = controller
-    setIsBatchDeleting(true)
     const targets = batchDeleteIntent.targets
     const paths = targets.map((target) => target.path)
     let deletedCount = 0
@@ -2915,6 +3065,7 @@ export function FilesPage() {
             synchronizeSucceededPaths()
             setSelection(preservedPaths)
             setDeletePolicyRefreshRequired(true)
+            releaseDeleteFlow(session.id)
             onBatchDeleteClose()
             setBatchDeleteIntent(null)
             refreshDeletePolicyAfterDrift({
@@ -2933,6 +3084,7 @@ export function FilesPage() {
             ]))
             synchronizeSucceededPaths()
             setSelection(preservedPaths)
+            releaseDeleteFlow(session.id)
             onBatchDeleteClose()
             setBatchDeleteIntent(null)
             refreshFilesAfterTargetDrift({
@@ -2957,6 +3109,7 @@ export function FilesPage() {
       synchronizeSucceededPaths()
 
       if (errorCount === 0) {
+        releaseDeleteFlow(session.id)
         onBatchDeleteClose()
         setBatchDeleteIntent(null)
         clearSelection()
@@ -3025,15 +3178,16 @@ export function FilesPage() {
         }
       }
 
-      const ownsController = batchDeleteAbortControllerRef.current === controller
-      if (ownsController) {
-        batchDeleteAbortControllerRef.current = null
-      }
-      if (isMountedRef.current && (ownsController || batchDeleteAbortControllerRef.current === null)) {
-        setIsBatchDeleting(false)
+      const currentSession = deleteFlowSessionRef.current
+      if (
+        currentSession?.id === session.id
+        && currentSession.phase === 'committing'
+        && currentSession.controller === controller
+      ) {
+        transitionDeleteFlow(session.id, 'confirming')
       }
     }
-  }, [batchDeleteIntent, clearSelection, deleteFileWithMissingSync, filesQueryKey, isBatchDeleting, onBatchDeleteClose, queryClient, refreshDeletePolicyAfterDrift, refreshFilesAfterTargetDrift, removeFilesFromCache, setBatchDeleteFallbackReturnFocus, setSelection])
+  }, [batchDeleteIntent, clearBatchDeleteReturnFocus, clearSelection, deleteFileWithMissingSync, filesQueryKey, isBatchDeleting, onBatchDeleteClose, queryClient, refreshDeletePolicyAfterDrift, refreshFilesAfterTargetDrift, releaseDeleteFlow, removeFilesFromCache, setBatchDeleteFallbackReturnFocus, setSelection, transitionDeleteFlow])
 
   // Batch download handler
   const handleBatchDownload = useCallback(async () => {
@@ -3386,11 +3540,19 @@ export function FilesPage() {
   }, [getFocusedOrActiveFile, setFocusedIndex, sortedFiles, toggleFileSelection])
 
   const handleKeyboardEscape = useCallback(() => {
+    const session = deleteFlowSessionRef.current
+    if (session) {
+      if (session.phase === 'preparing') {
+        handleCancelDeleteIntentPreparation()
+      }
+      return
+    }
+
     clearSelection()
     setActiveFilePath(null)
     setFocusedIndex(-1)
     lastSelectedIndexRef.current = null
-  }, [clearSelection, setFocusedIndex])
+  }, [clearSelection, handleCancelDeleteIntentPreparation, setFocusedIndex])
 
   const handleKeyboardRefresh = useCallback(() => {
     void refetch().then((result) => {
@@ -3430,19 +3592,19 @@ export function FilesPage() {
 
   // Register keyboard shortcuts
   useKeyboardShortcuts({
-    onDelete: canWrite && deletePolicyAvailable ? handleKeyboardDelete : undefined,
-    onSelectAll: handleSelectAll,
+    onDelete: !isDeleteFlowBusy && canWrite && deletePolicyAvailable ? handleKeyboardDelete : undefined,
+    onSelectAll: isDeleteFlowBusy ? undefined : handleSelectAll,
     onEscape: handleKeyboardEscape,
-    onCopy: canWrite ? handleKeyboardCopy : undefined,
-    onCut: canWrite ? handleKeyboardCut : undefined,
-    onPaste: currentPathCanWrite ? handleKeyboardPaste : undefined,
-    onRename: canWrite ? handleKeyboardRename : undefined,
-    onEnter: handleKeyboardEnter,
-    onSpace: handleKeyboardToggleFocusedSelection,
-    onArrowDown: handleKeyboardArrowDown,
-    onArrowUp: handleKeyboardArrowUp,
-    onRefresh: handleKeyboardRefresh,
-    onNewFolder: currentPathCanWrite ? handleOpenNewFolderModal : undefined,
+    onCopy: !isDeleteFlowBusy && canWrite ? handleKeyboardCopy : undefined,
+    onCut: !isDeleteFlowBusy && canWrite ? handleKeyboardCut : undefined,
+    onPaste: !isDeleteFlowBusy && currentPathCanWrite ? handleKeyboardPaste : undefined,
+    onRename: !isDeleteFlowBusy && canWrite ? handleKeyboardRename : undefined,
+    onEnter: isDeleteFlowBusy ? undefined : handleKeyboardEnter,
+    onSpace: isDeleteFlowBusy ? undefined : handleKeyboardToggleFocusedSelection,
+    onArrowDown: isDeleteFlowBusy ? undefined : handleKeyboardArrowDown,
+    onArrowUp: isDeleteFlowBusy ? undefined : handleKeyboardArrowUp,
+    onRefresh: isDeleteFlowBusy ? undefined : handleKeyboardRefresh,
+    onNewFolder: !isDeleteFlowBusy && currentPathCanWrite ? handleOpenNewFolderModal : undefined,
   }, {
     enabled: fileShortcutsEnabled,
   })
@@ -3791,14 +3953,23 @@ export function FilesPage() {
             </Button>
           </div>
         )}
-        {(isDeleteIntentPreparing || isBatchDeleteIntentPreparing) && (
-          <div
-            role="status"
-            aria-live="polite"
-            className="mb-4 flex items-center gap-2 rounded-lg border border-divider bg-content1 px-4 py-3 text-sm text-default-600"
-          >
-            <span className="h-4 w-4 animate-spin rounded-full border-2 border-accent-primary border-t-transparent" aria-hidden="true" />
-            正在确认删除目标…
+        {deleteFlowView?.phase === 'preparing' && (
+          <div className="mb-4 flex items-center justify-between gap-3 rounded-lg border border-divider bg-content1 px-4 py-3 text-sm text-default-600">
+            <div role="status" aria-live="polite" className="flex min-w-0 items-center gap-2">
+              <span className="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-accent-primary border-t-transparent" aria-hidden="true" />
+              <span>
+                正在确认删除目标…
+                {deleteFlowView.kind === 'batch' ? `（${deleteFlowView.targetCount} 项）` : ''}
+              </span>
+            </div>
+            <Button
+              size="sm"
+              variant="light"
+              className="shrink-0 rounded-lg"
+              onPress={handleCancelDeleteIntentPreparation}
+            >
+              取消确认
+            </Button>
           </div>
         )}
         
@@ -3857,12 +4028,13 @@ export function FilesPage() {
                   )}
                   {canWrite && (
                     <Button
+                      ref={batchDeleteButtonRef}
                       color="danger"
                       variant="flat"
                       className="rounded-lg"
                       startContent={<Trash2 size={16} />}
                       onPress={(event) => handleOpenBatchDeleteModal(event.target)}
-                      isDisabled={!canDeleteSelectedItems || isBatchDeleteIntentPreparing}
+                      isDisabled={!canDeleteSelectedItems || isDeleteFlowBusy}
                       isLoading={isBatchDeleteIntentPreparing}
                     >
                       批量删除
@@ -4147,7 +4319,7 @@ export function FilesPage() {
                         isMultiSelection={hasMultiSelection}
                         canWrite={canWriteFile(file)}
                         canDelete={canDeleteFile(file)}
-                        deletePreparing={isDeleteIntentPreparing}
+                        deletePreparing={isDeleteFlowBusy}
                         canShareFile={canUseFileSource(file)}
                         onSelect={(e) => handleFileSelection(file, virtualItem.index, e, 'toggle')}
                         onOpen={() => handleFileOpen(file)}
@@ -4236,7 +4408,7 @@ export function FilesPage() {
                       isMultiSelection={hasMultiSelection}
                       canWrite={canWriteFile(file)}
                       canDelete={canDeleteFile(file)}
-                      deletePreparing={isDeleteIntentPreparing}
+                      deletePreparing={isDeleteFlowBusy}
                       canShareFile={canUseFileSource(file)}
                       onSelect={(e) => handleFileSelection(file, index, e, 'toggle')}
                       onOpen={() => handleFileOpen(file)}
@@ -4629,7 +4801,7 @@ export function FilesPage() {
                       handleOpenBatchDeleteModal()
                       contextMenu.hide()
                     }}
-                    disabled={!canDeleteSelectedItems || isBatchDeleteIntentPreparing}
+                    disabled={!canDeleteSelectedItems || isDeleteFlowBusy}
                   >
                     {deletePolicy?.mode === 'permanent'
                       ? '批量永久删除'
@@ -4756,7 +4928,7 @@ export function FilesPage() {
                         handleOpenDeleteModal(contextMenuFile)
                         contextMenu.hide()
                       }}
-                      disabled={isDeleteIntentPreparing}
+                      disabled={isDeleteFlowBusy}
                     >
                       删除
                     </ContextMenuItem>

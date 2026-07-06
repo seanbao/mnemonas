@@ -1,60 +1,113 @@
 import { useCallback, useEffect, useRef } from 'react'
 
+function isFocusTargetDisabled(target: HTMLElement): boolean {
+  return (target instanceof HTMLButtonElement && target.disabled)
+    || target.getAttribute('aria-disabled') === 'true'
+}
+
+function getConnectedFocusTarget(
+  targets: Array<HTMLElement | null | undefined>,
+  includeDisabled: boolean
+): HTMLElement | null {
+  return targets.find((target) => (
+    target?.isConnected
+    && (includeDisabled || !isFocusTargetDisabled(target))
+  )) ?? null
+}
+
 export function useDestructiveDialogFocus(isOpen: boolean) {
   const initialFocusRef = useRef<HTMLButtonElement>(null)
   const returnFocusRef = useRef<HTMLElement | null>(null)
   const fallbackReturnFocusRef = useRef<HTMLElement | null>(null)
   const wasOpenRef = useRef(false)
+  const animationFrameRef = useRef(0)
 
-  const captureReturnFocus = useCallback((fallback?: HTMLElement | null) => {
-    const activeElement = document.activeElement
-    if (activeElement instanceof HTMLElement && activeElement !== document.body) {
-      returnFocusRef.current = activeElement
-    }
-    if (fallback) {
-      fallbackReturnFocusRef.current = fallback
+  const cancelScheduledFocus = useCallback(() => {
+    if (animationFrameRef.current !== 0) {
+      window.cancelAnimationFrame(animationFrameRef.current)
+      animationFrameRef.current = 0
     }
   }, [])
+
+  const captureReturnFocus = useCallback((fallback?: HTMLElement | null) => {
+    cancelScheduledFocus()
+    const activeElement = document.activeElement
+    returnFocusRef.current = activeElement instanceof HTMLElement && activeElement !== document.body
+      ? activeElement
+      : null
+    fallbackReturnFocusRef.current = fallback ?? null
+  }, [cancelScheduledFocus])
 
   const setFallbackReturnFocus = useCallback((fallback: HTMLElement | null) => {
     fallbackReturnFocusRef.current = fallback
   }, [])
+
+  const clearReturnFocus = useCallback(() => {
+    cancelScheduledFocus()
+    returnFocusRef.current = null
+    fallbackReturnFocusRef.current = null
+  }, [cancelScheduledFocus])
+
+  const restoreReturnFocus = useCallback((
+    lastResort?: HTMLElement | null,
+    preferredOverride?: HTMLElement | null
+  ) => {
+    cancelScheduledFocus()
+    const returnTarget = returnFocusRef.current
+    const fallbackTarget = fallbackReturnFocusRef.current
+    returnFocusRef.current = null
+    fallbackReturnFocusRef.current = null
+    const focusTargets = [preferredOverride, returnTarget, fallbackTarget, lastResort]
+    const scheduleRestore = (attempt: number) => {
+      animationFrameRef.current = window.requestAnimationFrame(() => {
+        if (initialFocusRef.current?.isConnected && attempt < 30) {
+          scheduleRestore(attempt + 1)
+          return
+        }
+
+        const preferredTarget = getConnectedFocusTarget(focusTargets, true)
+        if (preferredTarget && isFocusTargetDisabled(preferredTarget) && attempt < 30) {
+          scheduleRestore(attempt + 1)
+          return
+        }
+
+        const target = getConnectedFocusTarget(focusTargets, false)
+        target?.focus({ preventScroll: true })
+        animationFrameRef.current = 0
+      })
+    }
+    scheduleRestore(0)
+  }, [cancelScheduledFocus])
 
   useEffect(() => {
     if (!isOpen && !wasOpenRef.current) {
       return
     }
 
-    let animationFrame = 0
+    cancelScheduledFocus()
     if (isOpen) {
       wasOpenRef.current = true
-      animationFrame = window.requestAnimationFrame(() => {
-        animationFrame = window.requestAnimationFrame(() => {
+      animationFrameRef.current = window.requestAnimationFrame(() => {
+        animationFrameRef.current = window.requestAnimationFrame(() => {
           initialFocusRef.current?.focus({ preventScroll: true })
+          animationFrameRef.current = 0
         })
       })
     } else {
       wasOpenRef.current = false
-      const returnTarget = returnFocusRef.current
-      const fallbackTarget = fallbackReturnFocusRef.current
-      const restoreFocus = (attempt: number) => {
-        if (initialFocusRef.current?.isConnected && attempt < 30) {
-          animationFrame = window.requestAnimationFrame(() => restoreFocus(attempt + 1))
-          return
-        }
-
-        const target = returnTarget?.isConnected ? returnTarget : fallbackTarget
-        if (target?.isConnected) {
-          target.focus({ preventScroll: true })
-        }
-        returnFocusRef.current = null
-        fallbackReturnFocusRef.current = null
-      }
-      animationFrame = window.requestAnimationFrame(() => restoreFocus(0))
+      restoreReturnFocus()
     }
 
-    return () => window.cancelAnimationFrame(animationFrame)
-  }, [isOpen])
+    return cancelScheduledFocus
+  }, [cancelScheduledFocus, isOpen, restoreReturnFocus])
 
-  return { initialFocusRef, captureReturnFocus, setFallbackReturnFocus }
+  useEffect(() => cancelScheduledFocus, [cancelScheduledFocus])
+
+  return {
+    initialFocusRef,
+    captureReturnFocus,
+    clearReturnFocus,
+    restoreReturnFocus,
+    setFallbackReturnFocus,
+  }
 }

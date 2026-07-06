@@ -140,9 +140,19 @@ async function openDeleteDialogFromFileMenu(
   const menuButton = page.getByLabel(`${fileName} 操作菜单`).first()
   const deleteMenuItem = page.getByRole('menuitem', { name: /^删除$/ })
   const deleteDialogHeading = page.getByRole('heading', { name: expectedHeading })
+  const preparationStatus = page.getByRole('status').filter({ hasText: '正在确认删除目标…' })
+  const readDeleteState = async (): Promise<'idle' | 'preparing' | 'dialog'> => {
+    if (await deleteDialogHeading.isVisible().catch(() => false)) {
+      return 'dialog'
+    }
+    if (await preparationStatus.isVisible().catch(() => false)) {
+      return 'preparing'
+    }
+    return 'idle'
+  }
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    if (!(await deleteMenuItem.isVisible({ timeout: 500 }).catch(() => false))) {
+    if (!(await deleteMenuItem.isVisible().catch(() => false))) {
       await menuButton.click()
       await expect(deleteMenuItem).toBeVisible({ timeout: 5_000 })
     }
@@ -153,15 +163,31 @@ async function openDeleteDialogFromFileMenu(
     } catch (error) {
       clickError = error
     }
-    if (await deleteDialogHeading.isVisible({ timeout: 2_000 }).catch(() => false)) {
+    await expect.poll(readDeleteState, { timeout: 2_000 }).not.toBe('idle').catch(() => {})
+    const observedState = await readDeleteState()
+
+    if (observedState === 'dialog') {
+      return
+    }
+    if (observedState === 'preparing') {
+      await expect(preparationStatus).toBeHidden({ timeout: 30_000 })
+      if (await deleteDialogHeading.waitFor({ state: 'visible', timeout: 5_000 }).then(
+        () => true,
+        () => false
+      )) {
+        return
+      }
+    }
+    if (await deleteDialogHeading.waitFor({ state: 'visible', timeout: 500 }).then(
+      () => true,
+      () => false
+    )) {
       return
     }
 
     if (clickError && attempt === 1) {
       throw clickError
     }
-
-    await page.keyboard.press('Escape').catch(() => {})
   }
 
   await expect(deleteDialogHeading).toBeVisible({ timeout: 5_000 })
@@ -427,6 +453,69 @@ test.describe('文件批量操作', () => {
 test.describe('文件删除策略确认', () => {
   test.use({ colorScheme: 'light' })
 
+  test('删除目标确认可取消且迟到响应不会打开对话框', async ({ page }) => {
+    const fileName = 'cancel-delete-review.txt'
+    let releaseIntentResponse: (() => void) | undefined
+    let markIntentSettled: (() => void) | undefined
+    const intentResponseGate = new Promise<void>((resolve) => {
+      releaseIntentResponse = resolve
+    })
+    const intentSettled = new Promise<void>((resolve) => {
+      markIntentSettled = resolve
+    })
+    let intentRequestCount = 0
+
+    await page.route('**/api/v1/files**', async (route) => {
+      const request = route.request()
+      const requestURL = new URL(request.url())
+      if (request.method() === 'POST' && requestURL.pathname === '/api/v1/files-delete-intents') {
+        intentRequestCount += 1
+        const body = request.postDataJSON() as { targets: StubObservedDeleteTarget[] }
+        await intentResponseGate
+        try {
+          await route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify(buildStubDeleteIntentResponse('trash', body.targets, TRASH_POLICY_TOKEN)),
+          })
+        } catch {
+          // The browser may have already aborted the routed request.
+        } finally {
+          markIntentSettled?.()
+        }
+        return
+      }
+      if (request.method() === 'GET') {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(buildStubFileListResponse('trash', [fileName])),
+        })
+        return
+      }
+      await route.continue()
+    })
+
+    await ensureAuthenticatedAt(page, '/files')
+    await waitForFileBrowser(page)
+    const menuButton = page.getByLabel(`${fileName} 操作菜单`).first()
+    await menuButton.click()
+    await page.getByRole('menuitem', { name: /^删除$/ }).click()
+
+    const preparationStatus = page.getByRole('status')
+    await expect(preparationStatus).toContainText('正在确认删除目标…')
+    await page.getByRole('button', { name: '取消确认' }).click()
+
+    await expect(preparationStatus).toBeHidden()
+    await expect(menuButton).toBeFocused()
+    await expect(menuButton).toHaveCSS('opacity', '1')
+    expect(intentRequestCount).toBe(1)
+
+    releaseIntentResponse?.()
+    await intentSettled
+    await expect(page.getByRole('heading', { name: '移入回收站' })).toBeHidden()
+  })
+
   test('删除方式变化时应保留文件并要求按新后果重新确认', async ({ page }) => {
     const fileName = 'policy-review.txt'
     let deleteMode: StubDeleteMode = 'trash'
@@ -441,6 +530,9 @@ test.describe('文件删除策略确认', () => {
       if (request.method() === 'POST' && requestURL.pathname === '/api/v1/files-delete-intents') {
         const body = request.postDataJSON() as { targets: StubObservedDeleteTarget[] }
         intentTargets.push(body.targets)
+        if (intentTargets.length === 1) {
+          await new Promise((resolve) => setTimeout(resolve, 2_500))
+        }
         await route.fulfill({
           status: 200,
           contentType: 'application/json',
