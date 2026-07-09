@@ -202,7 +202,7 @@ func TestManagerReadinessSnapshotRejectsStaleBackupBindingAndMissingManifest(t *
 			name: "source changed under same job id",
 			mutate: func(t *testing.T, manager *Manager) {
 				job := manager.jobs["job"]
-				job.Source = filepath.Join(t.TempDir(), "new-source")
+				job.Source = filepath.Join(secureBackupTestTempDir(t), "new-source")
 				manager.jobs["job"] = job
 			},
 		},
@@ -210,7 +210,7 @@ func TestManagerReadinessSnapshotRejectsStaleBackupBindingAndMissingManifest(t *
 			name: "destination changed under same job id",
 			mutate: func(t *testing.T, manager *Manager) {
 				job := manager.jobs["job"]
-				job.Destination = filepath.Join(t.TempDir(), "new-destination")
+				job.Destination = filepath.Join(secureBackupTestTempDir(t), "new-destination")
 				manager.jobs["job"] = job
 			},
 		},
@@ -323,7 +323,7 @@ func TestManagerReadinessSnapshotRejectsStaleBackupBindingAndMissingManifest(t *
 				if err := os.Remove(manifestPath); err != nil {
 					t.Fatalf("Remove(manifest) error: %v", err)
 				}
-				target := filepath.Join(t.TempDir(), "outside-manifest.json")
+				target := filepath.Join(secureBackupTestTempDir(t), "outside-manifest.json")
 				if err := os.WriteFile(target, []byte(`{}`), 0o600); err != nil {
 					t.Fatalf("WriteFile(outside manifest) error: %v", err)
 				}
@@ -379,7 +379,7 @@ func TestManagerReadinessSnapshotRejectsCredentialFileIdentityDrift(t *testing.T
 			if len(tt.initial) != len(tt.replacement) {
 				t.Fatalf("credential fixtures must have equal length")
 			}
-			credentialPath := filepath.Join(t.TempDir(), "credential.conf")
+			credentialPath := filepath.Join(secureBackupTestTempDir(t), "credential.conf")
 			if err := os.WriteFile(credentialPath, []byte(tt.initial), 0o600); err != nil {
 				t.Fatalf("WriteFile(credential) error: %v", err)
 			}
@@ -556,12 +556,16 @@ func TestManagerReadinessSnapshotUnavailableAfterStatePersistenceFailure(t *test
 		LastSuccessfulRun: completedReadinessRun("job", now.Add(-time.Hour)),
 	})
 	run := cloneRunResultRaw(manager.state.Jobs["job"].LastSuccessfulRun)
-	originalRoot := manager.root
-	blockedRoot := filepath.Join(t.TempDir(), "blocked-root")
-	if err := os.WriteFile(blockedRoot, []byte("not a directory"), 0o600); err != nil {
-		t.Fatalf("WriteFile(blocked root) error: %v", err)
+	originalWriteBackupStateFile := writeBackupStateFile
+	t.Cleanup(func() { writeBackupStateFile = originalWriteBackupStateFile })
+	persistErr := errors.New("injected state persistence failure")
+	failWrite := true
+	writeBackupStateFile = func(lock *backupStateLock, path string, value any, perm os.FileMode) error {
+		if failWrite {
+			return persistErr
+		}
+		return originalWriteBackupStateFile(lock, path, value, perm)
 	}
-	manager.root = blockedRoot
 	if err := manager.updateLastRun(run); err == nil {
 		t.Fatal("updateLastRun() succeeded with an unusable state root")
 	}
@@ -569,7 +573,7 @@ func TestManagerReadinessSnapshotUnavailableAfterStatePersistenceFailure(t *test
 		t.Fatalf("readiness after persistence failure = %+v, want unavailable zero value", got)
 	}
 
-	manager.root = originalRoot
+	failWrite = false
 	if err := manager.updateLastRun(run); err != nil {
 		t.Fatalf("updateLastRun() recovery error: %v", err)
 	}
@@ -590,7 +594,7 @@ func TestManagerReadinessSnapshotUnavailableAfterStateDirectorySyncFailure(t *te
 	originalSyncBackupJSONDir := syncBackupJSONDir
 	t.Cleanup(func() { syncBackupJSONDir = originalSyncBackupJSONDir })
 	syncErr := errors.New("injected directory sync failure")
-	syncBackupJSONDir = func(string) error { return syncErr }
+	syncBackupJSONDir = func(*os.File, string) error { return syncErr }
 	if err := manager.updateLastRun(run); !errors.Is(err, syncErr) {
 		t.Fatalf("updateLastRun() error = %v, want %v", err, syncErr)
 	}
@@ -1051,7 +1055,7 @@ func TestManagerReadinessSnapshotUsesLatestRestoreEvidenceAndReturnsCopies(t *te
 
 func newReadinessTestManager(t *testing.T, now time.Time, jobs []config.BackupJobConfig) *Manager {
 	t.Helper()
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	storageRoot := filepath.Join(tmpDir, "storage")
 	for i := range jobs {
 		if jobs[i].Source == "" {
@@ -1077,7 +1081,7 @@ func newReadinessTestManager(t *testing.T, now time.Time, jobs []config.BackupJo
 			}
 		}
 	}
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: storageRoot,
 		Jobs:        jobs,

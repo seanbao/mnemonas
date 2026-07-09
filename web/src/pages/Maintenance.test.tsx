@@ -25,10 +25,12 @@ vi.mock('@/api/files', () => ({
   ApiError: class ApiError extends Error {
     status: number
     code?: string
-    constructor(message: string, status: number, code?: string) {
+    details?: unknown
+    constructor(message: string, status: number, statusTextOrCode?: string, code?: string, details?: unknown) {
       super(message)
       this.status = status
-      this.code = code
+      this.code = code ?? statusTextOrCode
+      this.details = details
     }
     get isUnavailable() {
       return this.status === 503 || this.code === 'SERVICE_UNAVAILABLE'
@@ -1882,6 +1884,34 @@ describe('MaintenancePage', () => {
           title: '备份任务已停用',
           description: '请先在配置文件中启用该任务并重启服务。',
           color: 'warning',
+        })
+      })
+    })
+
+    it('shows the persisted backup failure detail returned by the server', async () => {
+      const user = userEvent.setup()
+      mockListBackupJobs.mockResolvedValue(mockBackupJobs)
+      mockRunBackupJob.mockRejectedValueOnce(new ApiError(
+        'backup operation failed',
+        500,
+        'Internal Server Error',
+        'INTERNAL_ERROR',
+        { error_message: 'disk full' },
+      ))
+
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByText('外置硬盘备份')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: /立即备份/ }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '执行备份失败',
+          description: '磁盘空间不足',
+          color: 'danger',
         })
       })
     })

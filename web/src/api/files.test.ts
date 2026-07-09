@@ -4775,6 +4775,34 @@ describe('API: files', () => {
       })
     })
 
+    it('preserves backup failure details for the maintenance UI', async () => {
+      const failedRun = {
+        ...backupJob.last_run,
+        status: 'failed',
+        error_message: 'disk full',
+      }
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        statusText: 'Internal Server Error',
+        json: () => Promise.resolve({
+          code: 'INTERNAL_ERROR',
+          message: 'backup operation failed',
+          details: failedRun,
+        }),
+      })
+
+      const error = await runBackupJob('external-disk').catch((caught: unknown) => caught)
+
+      expect(error).toBeInstanceOf(ApiError)
+      expect(error).toMatchObject({
+        message: 'backup operation failed',
+        status: 500,
+        code: 'INTERNAL_ERROR',
+        details: failedRun,
+      })
+    })
+
     it('normalizes backup restore target paths before sending requests', async () => {
       const previewResult = {
         id: '20260509T035900.000000000Z',

@@ -10,10 +10,15 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/seanbao/mnemonas/internal/auth"
+	"github.com/seanbao/mnemonas/internal/backup"
 )
 
 func TestNewServerRejectsCorruptAuthSessionState(t *testing.T) {
 	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("Chmod(test dir) error: %v", err)
+	}
+	backupRoot := filepath.Join(dir, "backup-state")
 	usersFile := filepath.Join(dir, "users.json")
 	userStore, _, err := auth.NewUserStore(usersFile)
 	if err != nil {
@@ -25,6 +30,7 @@ func TestNewServerRejectsCorruptAuthSessionState(t *testing.T) {
 	}
 
 	server, err := NewServer(zerolog.Nop(), &ServerConfig{
+		BackupRoot:     backupRoot,
 		AuthEnabled:    true,
 		AuthUsersFile:  usersFile,
 		AuthUserStore:  userStore,
@@ -37,5 +43,12 @@ func TestNewServerRejectsCorruptAuthSessionState(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "failed to initialize auth session store") {
 		t.Fatalf("NewServer() error = %q, want auth session initialization context", err)
+	}
+	manager, lockErr := backup.NewManager(backup.ManagerConfig{Root: backupRoot})
+	if lockErr != nil {
+		t.Fatalf("backup state lock was not released after NewServer failure: %v", lockErr)
+	}
+	if closeErr := manager.Close(); closeErr != nil {
+		t.Fatalf("Close(reacquired backup manager) error: %v", closeErr)
 	}
 }

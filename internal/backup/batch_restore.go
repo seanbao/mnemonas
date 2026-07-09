@@ -2,6 +2,7 @@ package backup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -91,6 +92,7 @@ func (m *Manager) RunBatchRestorePreview(ctx context.Context, opts BatchRestoreO
 	}
 
 	targets := map[string]int{}
+	var infrastructureErrs []error
 	for index, item := range opts.Items {
 		item = normalizeBatchRestoreItem(item)
 		itemResult := BatchRestorePreviewItemResult{
@@ -120,6 +122,9 @@ func (m *Manager) RunBatchRestorePreview(ctx context.Context, opts BatchRestoreO
 			itemResult.TargetPath = normalizeBatchRestoreTargetPath(item.TargetPath)
 		}
 		if err != nil {
+			if isBatchRestoreInfrastructureError(err) {
+				infrastructureErrs = append(infrastructureErrs, err)
+			}
 			itemResult.Status = StatusFailed
 			itemResult.Preview = preview
 			itemResult.ErrorMessage = err.Error()
@@ -138,7 +143,7 @@ func (m *Manager) RunBatchRestorePreview(ctx context.Context, opts BatchRestoreO
 		result.Items = append(result.Items, itemResult)
 	}
 	finishBatchRestorePreview(result, m.now().UTC())
-	return cloneBatchRestorePreviewResult(result), nil
+	return cloneBatchRestorePreviewResult(result), errors.Join(infrastructureErrs...)
 }
 
 // RunBatchRestore executes multiple restore requests sequentially.
@@ -148,7 +153,11 @@ func (m *Manager) RunBatchRestore(ctx context.Context, opts BatchRestoreOptions)
 	}
 	preview, err := m.RunBatchRestorePreview(ctx, opts)
 	if err != nil {
-		return nil, err
+		if preview == nil {
+			return nil, err
+		}
+		failed := batchRestoreResultFromFailedPreflight(preview, m.now().UTC())
+		return cloneBatchRestoreResult(failed), err
 	}
 	if batchRestorePreviewHasFailure(preview) {
 		return cloneBatchRestoreResult(batchRestoreResultFromFailedPreflight(preview, m.now().UTC())), nil
@@ -164,6 +173,7 @@ func (m *Manager) RunBatchRestore(ctx context.Context, opts BatchRestoreOptions)
 	}
 
 	targets := map[string]int{}
+	var infrastructureErrs []error
 	for index, item := range opts.Items {
 		item = normalizeBatchRestoreItem(item)
 		itemResult := BatchRestoreItemResult{
@@ -194,6 +204,9 @@ func (m *Manager) RunBatchRestore(ctx context.Context, opts BatchRestoreOptions)
 			itemResult.TargetPath = normalizeBatchRestoreTargetPath(item.TargetPath)
 		}
 		if err != nil {
+			if isBatchRestoreInfrastructureError(err) {
+				infrastructureErrs = append(infrastructureErrs, err)
+			}
 			itemResult.Status = StatusFailed
 			itemResult.ErrorMessage = err.Error()
 			result.Items = append(result.Items, itemResult)
@@ -203,6 +216,9 @@ func (m *Manager) RunBatchRestore(ctx context.Context, opts BatchRestoreOptions)
 		verify, verifyErr := m.RunRestoreVerify(ctx, item.JobID, RestoreVerifyOptions{TargetPath: normalizeBatchRestoreTargetPath(item.TargetPath)})
 		itemResult.Verify = verify
 		if verifyErr != nil {
+			if isBatchRestoreInfrastructureError(verifyErr) {
+				infrastructureErrs = append(infrastructureErrs, verifyErr)
+			}
 			itemResult.Status = StatusFailed
 			itemResult.ErrorMessage = verifyErr.Error()
 			result.Items = append(result.Items, itemResult)
@@ -215,7 +231,16 @@ func (m *Manager) RunBatchRestore(ctx context.Context, opts BatchRestoreOptions)
 		result.Items = append(result.Items, itemResult)
 	}
 	finishBatchRestore(result, m.now().UTC())
-	return cloneBatchRestoreResult(result), nil
+	return cloneBatchRestoreResult(result), errors.Join(infrastructureErrs...)
+}
+
+func isBatchRestoreInfrastructureError(err error) bool {
+	return errors.Is(err, ErrBackupStateNamespaceChanged) ||
+		errors.Is(err, ErrManagerClosed) ||
+		errors.Is(err, ErrBackupStatePersistence) ||
+		errors.Is(err, ErrBackupTargetLockRelease) ||
+		errors.Is(err, ErrBackupTargetLockUnsafeDirectory) ||
+		errors.Is(err, ErrBackupTargetLockUnsafeAncestor)
 }
 
 func batchRestorePreviewHasFailure(result *BatchRestorePreviewResult) bool {

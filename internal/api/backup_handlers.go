@@ -24,6 +24,7 @@ import (
 const (
 	defaultLocalBackupScheduleInterval = 24 * time.Hour
 	defaultLocalBackupMaxSnapshots     = 7
+	backupRunWarningHeader             = `199 MnemoNAS "backup run completed with warnings"`
 )
 
 var startBackupScheduler = func(manager *backup.Manager) bool {
@@ -46,7 +47,7 @@ type createLocalBackupJobRequest struct {
 }
 
 func (s *Server) backupService() (*backup.Manager, bool) {
-	if s.backupManager == nil {
+	if s.backupManager == nil || !s.backupManager.Available() {
 		return nil, false
 	}
 	return s.backupManager, true
@@ -276,7 +277,12 @@ func (s *Server) handleRunBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	NewAPIResponse(result).WithMessage("backup completed").Write(w, http.StatusOK)
+	message := "backup completed"
+	if result.Warning {
+		w.Header().Add("Warning", backupRunWarningHeader)
+		message = "backup completed with warnings"
+	}
+	NewAPIResponse(result).WithMessage(message).Write(w, http.StatusOK)
 }
 
 func safeBackupReportFilenamePart(value string) string {
@@ -447,9 +453,30 @@ func (s *Server) handleRunBatchBackupRestore(w http.ResponseWriter, r *http.Requ
 
 func (s *Server) writeBackupError(w http.ResponseWriter, operation string, err error, details any) {
 	switch {
+	case errors.Is(err, backup.ErrBackupStateNamespaceChanged), errors.Is(err, backup.ErrManagerClosed):
+		s.logger.Error().Err(err).Str("operation", operation).Msg("backup manager became unavailable")
+		apiErr := NewAPIError(ErrCodeServiceUnavail, "backup manager unavailable")
+		if details != nil {
+			apiErr.WithDetails(details)
+		}
+		apiErr.Write(w, http.StatusServiceUnavailable)
+	case errors.Is(err, backup.ErrBackupStatePersistence):
+		s.logger.Error().Err(err).Str("operation", operation).Msg("backup state persistence failed")
+		apiErr := NewAPIError(ErrCodeInternal, "backup state persistence failed")
+		if details != nil {
+			apiErr.WithDetails(details)
+		}
+		apiErr.Write(w, http.StatusInternalServerError)
+	case errors.Is(err, backup.ErrBackupTargetLockRelease):
+		s.logger.Error().Err(err).Str("operation", operation).Msg("backup target lock release failed")
+		apiErr := NewAPIError(ErrCodeInternal, "backup operation finalization failed")
+		if details != nil {
+			apiErr.WithDetails(details)
+		}
+		apiErr.Write(w, http.StatusInternalServerError)
 	case errors.Is(err, backup.ErrJobNotFound):
 		NotFound(w, "backup job not found")
-	case errors.Is(err, backup.ErrJobAlreadyRunning):
+	case errors.Is(err, backup.ErrJobAlreadyRunning), errors.Is(err, backup.ErrBackupTargetLockHeld):
 		Conflict(w, "backup job is already running")
 	case errors.Is(err, backup.ErrJobDisabled):
 		Conflict(w, "backup job is disabled")

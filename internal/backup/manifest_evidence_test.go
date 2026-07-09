@@ -16,12 +16,12 @@ import (
 )
 
 func TestRunLocalBackupRejectsManifestReplacementAfterFinalize(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	writeManifestEvidenceTestFile(t, filepath.Join(source, "note.txt"), []byte("trusted backup content"))
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -85,12 +85,12 @@ func TestRunLocalBackupRejectsManifestReplacementAfterFinalize(t *testing.T) {
 }
 
 func TestTrustedManifestEvidenceRejectsCoordinatedManifestAndSnapshotTampering(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	writeManifestEvidenceTestFile(t, filepath.Join(source, "note.txt"), []byte("original snapshot bytes"))
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{

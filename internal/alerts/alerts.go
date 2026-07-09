@@ -160,7 +160,6 @@ func storageStatsFromUsage(path string, totalBytes, freeBytes uint64, checkedAt 
 	}
 }
 
-var sendSMTPMail = smtp.SendMail
 var telegramAPIBaseURL = "https://api.telegram.org"
 
 const storageAlertPathOmitted = "<omitted>"
@@ -1105,7 +1104,10 @@ func (m *Monitor) sendEmail(ctx context.Context, cfg Config, subject, body strin
 		auth = smtp.PlainAuth("", strings.TrimSpace(cfg.SMTPUsername), cfg.SMTPPassword, strings.TrimSpace(cfg.SMTPHost))
 	}
 	message := buildEmailMessage(from, recipients, subject, body)
-	if err := sendSMTPMail(addr, auth, from, recipients, message); err != nil {
+	if err := sendSMTPMail(ctx, addr, auth, from, recipients, message); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		return errors.New("send email alert failed")
 	}
 	m.logger.Info().

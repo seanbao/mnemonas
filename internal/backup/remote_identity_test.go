@@ -12,7 +12,7 @@ func TestValidateResticRepositoryFormAllowsOnlyExplicitCredentialModels(t *testi
 		repository string
 		wantErr    bool
 	}{
-		{name: "absolute local", repository: filepath.Join(t.TempDir(), "repository")},
+		{name: "absolute local", repository: filepath.Join(secureBackupTestTempDir(t), "repository")},
 		{name: "rest https", repository: "rest:https://backup.example/repository"},
 		{name: "rest http", repository: "rest:http://backup.example/repository"},
 		{name: "rest missing host", repository: "rest:https:///repository", wantErr: true},
@@ -37,7 +37,7 @@ func TestValidateResticRepositoryFormAllowsOnlyExplicitCredentialModels(t *testi
 }
 
 func TestValidateResticRepositoryBoundaryRejectsProtectedTrees(t *testing.T) {
-	root := t.TempDir()
+	root := secureBackupTestTempDir(t)
 	source := filepath.Join(root, "source")
 	storageRoot := filepath.Join(root, "storage")
 	for _, repository := range []string{

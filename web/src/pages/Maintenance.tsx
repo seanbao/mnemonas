@@ -2021,8 +2021,12 @@ function getBackupConflictTitle(error: unknown, fallback: string): string {
 }
 
 function getBackupConflictDescription(error: unknown, fallback: string): string {
-  if (!(error instanceof ApiError) || error.status !== 409) {
+  if (!(error instanceof ApiError)) {
     return fallback
+  }
+  const detailsDescription = getBackupApiErrorDetailsDescription(error)
+  if (error.status !== 409) {
+    return detailsDescription ?? fallback
   }
   const message = normalizeDiagnosticMessageKey(error.message)
   if (message.includes('disabled')) {
@@ -2034,7 +2038,29 @@ function getBackupConflictDescription(error: unknown, fallback: string): string 
   if (message.includes('already running')) {
     return '已有备份或恢复演练正在执行，请稍后刷新状态。'
   }
-  return fallback
+  return detailsDescription ?? fallback
+}
+
+function getBackupApiErrorDetailsDescription(error: ApiError): string | null {
+  const details = error.details
+  if (!details || typeof details !== 'object' || Array.isArray(details)) {
+    return null
+  }
+
+  const errorMessage = 'error_message' in details ? details.error_message : undefined
+  if (typeof errorMessage === 'string' && errorMessage.trim()) {
+    return getBackupDiagnosticDisplayMessage(errorMessage)
+  }
+
+  const warnings = 'warnings' in details ? details.warnings : undefined
+  if (Array.isArray(warnings)) {
+    const warning = warnings.find((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    if (warning) {
+      return getBackupDiagnosticDisplayMessage(warning)
+    }
+  }
+
+  return null
 }
 
 function normalizeRestoreTargetForCompare(value: string): string {

@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -75,10 +76,17 @@ const (
 	restoreDrillCleanupWarning      = "恢复演练已完成，但临时恢复目录清理失败；请检查备份目标中的 restore-drills 目录。"
 
 	defaultSchedulerPollInterval = time.Minute
+	defaultNotificationTimeout   = 10 * time.Second
 	externalCommandStderrLimit   = 4096
 	externalCommandStdoutLimit   = 4 * 1024 * 1024
 	credentialEvidenceSizeLimit  = 4 * 1024 * 1024
 	credentialSnapshotDirPrefix  = "mnemonas-backup-credential-"
+	maxBackupJSONTempAttempts    = 32
+	restoreDrillStateWarning     = "恢复演练结果已生成，但状态目录同步失败"
+	restoreVerifyStateWarning    = "恢复校验结果已生成，但状态目录同步失败"
+	restoreStateWarning          = "恢复结果已生成，但状态目录同步失败"
+	retentionCheckStateWarning   = "保留策略检查结果已生成，但状态目录同步失败"
+	stateNamespaceChangedWarning = "备份状态目录身份发生变化；当前结果已生成，但备份服务已停止后续操作。请检查状态目录并重启服务"
 
 	redactedBackupSecretValue        = "<redacted>"
 	backupSensitiveNamePartPattern   = `(?:[A-Za-z0-9_.-]|%[0-9A-Fa-f]{2})*`
@@ -93,20 +101,34 @@ var afterCopyHostFileLstat = func(string) {}
 var afterCopyOpenFileBeforeMetadata = func(string) {}
 var afterValidateLocalBackupDestination = func(string) {}
 var afterFinalizeLocalBackupSnapshot = func(string) {}
-var syncBackupJSONDir = syncBackupJSONDirectory
+var syncBackupJSONDir = syncBackupJSONDirectoryHandle
+var backupJSONRandomRead = rand.Read
+var writeBackupStateFile = writeBackupJSONFile
+var renameBackupJSONFile = func(root *os.Root, oldName, newName string) error {
+	return root.Rename(oldName, newName)
+}
+var afterRenameBackupJSONFile = func(string) {}
+var syncLocalBackupSnapshotTree = syncOpenedBackupSnapshotDirectoryTree
+var renameLocalBackupSnapshot = renameBackupSnapshotNoReplace
+var syncLocalBackupDirectory = syncBackupDirectory
+var syncLocalBackupDirectoryHandle = syncBackupDirectoryHandle
+var removeLocalBackupSnapshotEntry = removeLocalSnapshotEntryNoFollowChecked
 
 var (
-	ErrJobNotFound           = errors.New("backup job not found")
-	ErrJobAlreadyExists      = errors.New("backup job already exists")
-	ErrJobAlreadyRunning     = errors.New("backup job already running")
-	ErrJobDisabled           = errors.New("backup job disabled")
-	ErrNoSnapshots           = errors.New("backup job has no completed snapshots")
-	ErrUnsupportedJobType    = errors.New("unsupported backup job type")
-	ErrUnsafePath            = errors.New("unsafe backup path")
-	ErrInvalidRestoreRequest = errors.New("invalid restore request")
-	ErrRestoreTargetExists   = errors.New("restore target already exists")
-	ErrSourceContainsSymlink = errors.New("backup source contains a symlink")
-	ErrUnsupportedFileType   = errors.New("backup source contains an unsupported file type")
+	ErrJobNotFound                 = errors.New("backup job not found")
+	ErrJobAlreadyExists            = errors.New("backup job already exists")
+	ErrJobAlreadyRunning           = errors.New("backup job already running")
+	ErrManagerClosed               = errors.New("backup manager is closed")
+	ErrBackupStatePersistence      = errors.New("backup state persistence failed")
+	ErrBackupStateNamespaceChanged = errors.New("backup state namespace changed; restart the backup manager")
+	ErrJobDisabled                 = errors.New("backup job disabled")
+	ErrNoSnapshots                 = errors.New("backup job has no completed snapshots")
+	ErrUnsupportedJobType          = errors.New("unsupported backup job type")
+	ErrUnsafePath                  = errors.New("unsafe backup path")
+	ErrInvalidRestoreRequest       = errors.New("invalid restore request")
+	ErrRestoreTargetExists         = errors.New("restore target already exists")
+	ErrSourceContainsSymlink       = errors.New("backup source contains a symlink")
+	ErrUnsupportedFileType         = errors.New("backup source contains an unsupported file type")
 
 	backupURLUserinfoPattern                     = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)([^\s/?#]*@)`)
 	backupSensitivePathDoubleQuotedAssignPattern = regexp.MustCompile(`(?i)([/\\])(-{0,2}` + backupSensitiveNamePattern + `=)"([^"/\\]*)"`)
@@ -130,6 +152,53 @@ var (
 
 type invalidRestoreRequestError struct {
 	err error
+}
+
+type backupPersistenceWarningError struct {
+	err error
+}
+
+type backupStatePersistenceError struct {
+	err error
+}
+
+func (e *backupStatePersistenceError) Error() string {
+	return ErrBackupStatePersistence.Error() + ": " + e.err.Error()
+}
+
+func (e *backupStatePersistenceError) Unwrap() []error {
+	return []error{ErrBackupStatePersistence, e.err}
+}
+
+func (e *backupPersistenceWarningError) Error() string {
+	return e.err.Error()
+}
+
+func (e *backupPersistenceWarningError) Unwrap() error {
+	return e.err
+}
+
+func wrapBackupPersistenceWarning(err error) error {
+	if err == nil {
+		return nil
+	}
+	var warning *backupPersistenceWarningError
+	if errors.As(err, &warning) {
+		return err
+	}
+	return &backupPersistenceWarningError{err: err}
+}
+
+func isBackupPersistenceWarning(err error) bool {
+	var warning *backupPersistenceWarningError
+	return errors.As(err, &warning)
+}
+
+func backupStateWarningMessage(err error, fallback string) string {
+	if errors.Is(err, ErrBackupStateNamespaceChanged) {
+		return stateNamespaceChangedWarning
+	}
+	return fallback
 }
 
 func (e invalidRestoreRequestError) Error() string {
@@ -193,17 +262,29 @@ type Manager struct {
 	configPath  string
 	jobs        map[string]config.BackupJobConfig
 	notifier    Notifier
+	stateLock   *backupStateLock
 
 	mu                      sync.Mutex
 	running                 map[string]struct{}
 	state                   persistedState
 	now                     func() time.Time
 	statePersistenceHealthy bool
+	stateNamespaceUnsafe    bool
+	stateNamespaceErr       error
 	readinessGate           chan struct{}
 	readinessManifestCache  sync.Map
+	reminderMu              sync.Mutex
 
 	schedulerStarted bool
 	schedulerPoll    time.Duration
+	schedulerCancel  context.CancelFunc
+	schedulerDone    chan struct{}
+	operations       sync.WaitGroup
+	closed           bool
+	closeOnce        sync.Once
+	closeErr         error
+	shutdownCtx      context.Context
+	shutdownCancel   context.CancelFunc
 }
 
 type persistedState struct {
@@ -553,14 +634,28 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	if err := ensureBackupStateRoot(root); err != nil {
 		return nil, fmt.Errorf("create backup state directory: %w", err)
 	}
+	stateLock, err := acquireBackupStateLock(root)
+	if err != nil {
+		return nil, err
+	}
+	keepStateLock := false
+	defer func() {
+		if !keepStateLock {
+			_ = stateLock.Close()
+		}
+	}()
 
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	m := &Manager{
-		root:        root,
-		storageRoot: cfg.StorageRoot,
-		configPath:  cfg.ConfigPath,
-		jobs:        make(map[string]config.BackupJobConfig, len(cfg.Jobs)),
-		notifier:    cfg.Notifier,
-		running:     map[string]struct{}{},
+		root:           root,
+		storageRoot:    cfg.StorageRoot,
+		configPath:     cfg.ConfigPath,
+		jobs:           make(map[string]config.BackupJobConfig, len(cfg.Jobs)),
+		notifier:       cfg.Notifier,
+		stateLock:      stateLock,
+		shutdownCtx:    shutdownCtx,
+		shutdownCancel: shutdownCancel,
+		running:        map[string]struct{}{},
 		state: persistedState{
 			Jobs: map[string]JobState{},
 		},
@@ -591,6 +686,10 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	if err := m.loadState(); err != nil {
 		return nil, err
 	}
+	if err := m.verifyStateNamespaceLocked(); err != nil {
+		return nil, m.quarantineStateNamespaceLocked(err, err)
+	}
+	keepStateLock = true
 	return m, nil
 }
 
@@ -618,16 +717,37 @@ func ensureBackupStateRoot(root string) error {
 	if isProtectedBackupSystemDirectory(root) {
 		return fmt.Errorf("%w: backup state root must not be protected system directory", ErrUnsafePath)
 	}
-	if _, err := rootio.MkdirAllPathNoFollowTracked(root, 0700); err != nil {
+	createdDirs, err := rootio.MkdirAllPathNoFollowTracked(root, 0700)
+	if err != nil {
 		if rootio.IsSymlinkError(err) {
 			return fmt.Errorf("%w: backup state root must not contain symlink", ErrUnsafePath)
 		}
 		return err
 	}
+	if err := syncCreatedBackupDirectories(createdDirs, syncBackupDirectory); err != nil {
+		return fmt.Errorf("sync backup state directory tree: %w", err)
+	}
 	return nil
 }
 
 // ListJobs returns all configured backup jobs with latest status.
+// Available reports whether the manager can safely accept new operations.
+func (m *Manager) Available() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return false
+	}
+	if err := m.verifyStateNamespaceLocked(); err != nil {
+		_ = m.quarantineStateNamespaceLocked(err, err)
+		return false
+	}
+	return true
+}
+
 func (m *Manager) ListJobs() []JobView {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -667,6 +787,9 @@ func (m *Manager) ValidateNewJob(job config.BackupJobConfig) error {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closed {
+		return ErrManagerClosed
+	}
 	return m.validateNewJobIDLocked(normalized.ID)
 }
 
@@ -679,6 +802,9 @@ func (m *Manager) AddJob(job config.BackupJobConfig) (JobView, error) {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closed {
+		return JobView{}, ErrManagerClosed
+	}
 	if err := m.validateNewJobIDLocked(normalized.ID); err != nil {
 		return JobView{}, err
 	}
@@ -718,7 +844,7 @@ func (m *Manager) RunJob(ctx context.Context, id string) (*RunResult, error) {
 	return m.runJobWithTrigger(ctx, id, "manual")
 }
 
-func (m *Manager) runJobWithTrigger(ctx context.Context, id string, trigger string) (*RunResult, error) {
+func (m *Manager) runJobWithTrigger(ctx context.Context, id string, trigger string) (returnedResult *RunResult, returnedErr error) {
 	job, err := m.beginJob(id)
 	if err != nil {
 		return nil, err
@@ -738,16 +864,71 @@ func (m *Manager) runJobWithTrigger(ctx context.Context, id string, trigger stri
 		ConfigIncluded:   job.IncludeConfig && strings.TrimSpace(m.configPath) != "",
 		Trigger:          trigger,
 	}
-	_ = m.updateLastRun(result)
+	var scheduledAt *time.Time
+	if trigger == "scheduled" {
+		scheduledAt = cloneTime(&startedAt)
+	}
+	if saveErr := m.updateLastRunWithScheduledAt(result, scheduledAt); saveErr != nil {
+		finishBackupRun(result, StatusFailed, fmt.Errorf("persist running backup state: %w", saveErr), m.now().UTC())
+		if isBackupPersistenceWarning(saveErr) {
+			if terminalSaveErr := m.updateLastRun(result); terminalSaveErr != nil {
+				if !isBackupPersistenceWarning(terminalSaveErr) {
+					m.recordVolatileLastRun(result)
+				}
+				saveErr = errors.Join(saveErr, terminalSaveErr)
+			}
+		}
+		return cloneRunResult(result), saveErr
+	}
 
-	err = bindingErr
+	targetLock, targetLockErr := m.acquireJobTargetLockForBackup(job)
+	if targetLock != nil {
+		defer appendBackupTargetLockCloseError(targetLock, &returnedErr)
+	}
+	err = targetLockErr
+	if err == nil {
+		err = bindingErr
+	}
 	if err == nil {
 		err = m.runBackup(ctx, job, result)
 	}
 	if err == nil {
 		err = m.ensureJobConfigEvidenceUnchanged(ctx, job, result.JobConfigBinding)
 	}
-	if err == nil && job.Type == JobTypeLocal {
+	if err != nil {
+		finishBackupRun(result, StatusFailed, err, m.now().UTC())
+		if saveErr := m.updateLastRun(result); saveErr != nil {
+			m.recordVolatileLastRun(result)
+			m.notifyRun(ctx, job, result)
+			return cloneRunResult(result), errors.Join(err, saveErr)
+		}
+		m.notifyRun(ctx, job, result)
+		return cloneRunResult(result), err
+	}
+
+	finishBackupRun(result, StatusCompleted, nil, m.now().UTC())
+	if saveErr := m.updateLastRun(result); saveErr != nil {
+		if isBackupPersistenceWarning(saveErr) {
+			result.Warning = true
+			result.Warnings = append(result.Warnings, backupStateWarningMessage(saveErr, "备份快照已完成，但备份状态目录同步失败；已保留旧快照并跳过清理"))
+			if warningSaveErr := m.updateLastRun(result); warningSaveErr != nil && !isBackupPersistenceWarning(warningSaveErr) {
+				m.recordVolatileLastRun(result)
+			}
+			m.notifyRun(ctx, job, result)
+			return cloneRunResult(result), nil
+		}
+		commitErr := fmt.Errorf("persist completed backup state: %w", saveErr)
+		finishBackupRun(result, StatusFailed, commitErr, m.now().UTC())
+		if terminalSaveErr := m.updateLastRun(result); terminalSaveErr != nil {
+			commitErr = errors.Join(commitErr, terminalSaveErr)
+			m.recordVolatileLastRun(result)
+		}
+		m.notifyRun(ctx, job, result)
+		return cloneRunResult(result), commitErr
+	}
+	committedResult := cloneRunResultRaw(result)
+
+	if job.Type == JobTypeLocal {
 		pruned, warnings := m.applyRetention(ctx, job, result.SnapshotPath)
 		result.PrunedSnapshots = pruned
 		if len(warnings) > 0 {
@@ -755,41 +936,51 @@ func (m *Manager) runJobWithTrigger(ctx context.Context, id string, trigger stri
 			result.Warnings = append(result.Warnings, warnings...)
 		}
 	}
-	if err == nil {
-		retentionCheck, checkErr := m.runRetentionCheckForJob(ctx, job, false)
-		if retentionCheck != nil && (retentionCheck.Warning || retentionCheck.Status == StatusFailed) {
-			result.Warning = true
-			if retentionCheck.ErrorMessage != "" {
-				result.Warnings = append(result.Warnings, "保留策略检测失败: "+retentionCheck.ErrorMessage)
-			}
-			result.Warnings = append(result.Warnings, retentionCheck.Warnings...)
-		} else if checkErr != nil {
-			result.Warning = true
-			result.Warnings = append(result.Warnings, "保留策略检测失败: "+checkErr.Error())
+	retentionCheck, checkErr := m.runRetentionCheckForJob(ctx, job, false, false)
+	if retentionCheck != nil && (retentionCheck.Warning || retentionCheck.Status == StatusFailed) {
+		result.Warning = true
+		if retentionCheck.ErrorMessage != "" {
+			result.Warnings = append(result.Warnings, "保留策略检测失败: "+retentionCheck.ErrorMessage)
 		}
+		result.Warnings = append(result.Warnings, retentionCheck.Warnings...)
+	} else if checkErr != nil {
+		result.Warning = true
+		result.Warnings = append(result.Warnings, "保留策略检测失败: "+checkErr.Error())
 	}
-	finishedAt := m.now().UTC()
-	result.FinishedAt = &finishedAt
-	result.DurationMs = finishedAt.Sub(result.StartedAt).Milliseconds()
-	if err != nil {
-		result.Status = StatusFailed
-		result.ErrorMessage = err.Error()
-	} else {
-		result.Status = StatusCompleted
-	}
+	finishBackupRun(result, StatusCompleted, nil, m.now().UTC())
 	if saveErr := m.updateLastRun(result); saveErr != nil {
-		if err != nil {
-			return cloneRunResult(result), errors.Join(err, saveErr)
+		result.Warning = true
+		result.Warnings = append(result.Warnings, backupStateWarningMessage(saveErr, "备份已完成，但保留策略结果未能可靠保存"))
+		warningState := cloneRunResultRaw(committedResult)
+		warningState.Warning = true
+		warningState.Warnings = cloneStringSlice(result.Warnings)
+		if warningSaveErr := m.updateLastRun(warningState); warningSaveErr != nil && !isBackupPersistenceWarning(warningSaveErr) {
+			m.recordVolatileLastRun(result)
 		}
-		return cloneRunResult(result), saveErr
+		m.notifyRun(ctx, job, result)
+		return cloneRunResult(result), nil
 	}
 	m.notifyRun(ctx, job, result)
-	return cloneRunResult(result), err
+	return cloneRunResult(result), nil
+}
+
+func finishBackupRun(result *RunResult, status string, runErr error, finishedAt time.Time) {
+	result.Status = status
+	result.FinishedAt = &finishedAt
+	result.DurationMs = finishedAt.Sub(result.StartedAt).Milliseconds()
+	if result.DurationMs < 0 {
+		result.DurationMs = 0
+	}
+	if runErr == nil {
+		result.ErrorMessage = ""
+		return
+	}
+	result.ErrorMessage = runErr.Error()
 }
 
 // RunRestoreDrill restores the latest completed snapshot to a temporary
 // directory and verifies every file against the snapshot manifest.
-func (m *Manager) RunRestoreDrill(ctx context.Context, id string, opts RestoreDrillOptions) (*RestoreDrillResult, error) {
+func (m *Manager) RunRestoreDrill(ctx context.Context, id string, opts RestoreDrillOptions) (returnedResult *RestoreDrillResult, returnedErr error) {
 	job, err := m.beginJob(id)
 	if err != nil {
 		return nil, err
@@ -806,7 +997,53 @@ func (m *Manager) RunRestoreDrill(ctx context.Context, id string, opts RestoreDr
 		StartedAt:        startedAt,
 		ArtifactKept:     opts.KeepArtifact,
 	}
-	_ = m.updateLastRestoreDrill(result, false)
+	if saveErr := m.updateLastRestoreDrill(result, false); saveErr != nil {
+		finishedAt := m.now().UTC()
+		result.FinishedAt = &finishedAt
+		result.DurationMs = max(finishedAt.Sub(result.StartedAt).Milliseconds(), 0)
+		result.Status = StatusFailed
+		result.ErrorMessage = fmt.Sprintf("persist running restore drill state: %v", saveErr)
+		result.FailureCategory = FailureCategoryIO
+		if isBackupPersistenceWarning(saveErr) {
+			if terminalErr := m.updateLastRestoreDrill(result, true); terminalErr != nil {
+				if !isBackupPersistenceWarning(terminalErr) {
+					m.recordVolatileLastRestoreDrill(result, true)
+				}
+				saveErr = errors.Join(saveErr, terminalErr)
+			}
+		}
+		return cloneRestoreDrillResult(result), saveErr
+	}
+	targetLock, lockErr := m.acquireJobTargetLock(job)
+	if lockErr != nil {
+		finishedAt := m.now().UTC()
+		result.FinishedAt = &finishedAt
+		result.DurationMs = max(finishedAt.Sub(result.StartedAt).Milliseconds(), 0)
+		result.Status = StatusFailed
+		result.ErrorMessage = lockErr.Error()
+		result.FailureCategory = classifyRestoreDrillFailure(lockErr)
+		if saveErr := m.updateLastRestoreDrill(result, true); saveErr != nil {
+			if isBackupPersistenceWarning(saveErr) {
+				result.Warning = true
+				result.Warnings = append(result.Warnings, backupStateWarningMessage(saveErr, restoreDrillStateWarning))
+				warningSaveErr := m.updateLastRestoreDrill(result, true)
+				if warningSaveErr != nil && !isBackupPersistenceWarning(warningSaveErr) {
+					m.recordVolatileLastRestoreDrill(result, true)
+				}
+				m.notifyRestoreDrill(ctx, job, result)
+				return cloneRestoreDrillResult(result), errors.Join(lockErr, saveErr, warningSaveErr)
+			}
+			if !isBackupPersistenceWarning(saveErr) {
+				m.recordVolatileLastRestoreDrill(result, true)
+			}
+			lockErr = errors.Join(lockErr, saveErr)
+		}
+		m.notifyRestoreDrill(ctx, job, result)
+		return cloneRestoreDrillResult(result), lockErr
+	}
+	if targetLock != nil {
+		defer appendBackupTargetLockCloseError(targetLock, &returnedErr)
+	}
 
 	err = bindingErr
 	if err == nil {
@@ -826,6 +1063,23 @@ func (m *Manager) RunRestoreDrill(ctx context.Context, id string, opts RestoreDr
 		result.Status = StatusCompleted
 	}
 	if saveErr := m.updateLastRestoreDrill(result, true); saveErr != nil {
+		if isBackupPersistenceWarning(saveErr) {
+			result.Warning = true
+			result.Warnings = append(result.Warnings, backupStateWarningMessage(saveErr, restoreDrillStateWarning))
+			warningSaveErr := m.updateLastRestoreDrill(result, true)
+			if warningSaveErr != nil && !isBackupPersistenceWarning(warningSaveErr) {
+				m.recordVolatileLastRestoreDrill(result, true)
+			}
+			m.notifyRestoreDrill(ctx, job, result)
+			if err != nil {
+				return cloneRestoreDrillResult(result), errors.Join(err, saveErr, warningSaveErr)
+			}
+			return cloneRestoreDrillResult(result), nil
+		}
+		if !isBackupPersistenceWarning(saveErr) {
+			m.recordVolatileLastRestoreDrill(result, true)
+		}
+		m.notifyRestoreDrill(ctx, job, result)
 		if err != nil {
 			return cloneRestoreDrillResult(result), errors.Join(err, saveErr)
 		}
@@ -837,7 +1091,7 @@ func (m *Manager) RunRestoreDrill(ctx context.Context, id string, opts RestoreDr
 
 // RunRestorePreview validates an explicit restore request and returns a
 // non-destructive snapshot summary. It does not persist restore history.
-func (m *Manager) RunRestorePreview(ctx context.Context, id string, opts RestorePreviewOptions) (*RestorePreviewResult, error) {
+func (m *Manager) RunRestorePreview(ctx context.Context, id string, opts RestorePreviewOptions) (returnedResult *RestorePreviewResult, returnedErr error) {
 	job, err := m.beginJob(id)
 	if err != nil {
 		return nil, err
@@ -853,6 +1107,18 @@ func (m *Manager) RunRestorePreview(ctx context.Context, id string, opts Restore
 		Source:      effectiveSource(job, m.storageRoot),
 		Destination: backupTarget(job),
 		TargetPath:  strings.TrimSpace(opts.TargetPath),
+	}
+	targetLock, lockErr := m.acquireJobTargetLock(job)
+	if lockErr != nil {
+		finishedAt := m.now().UTC()
+		result.FinishedAt = &finishedAt
+		result.DurationMs = max(finishedAt.Sub(result.StartedAt).Milliseconds(), 0)
+		result.Status = StatusFailed
+		result.ErrorMessage = lockErr.Error()
+		return cloneRestorePreviewResult(result), lockErr
+	}
+	if targetLock != nil {
+		defer appendBackupTargetLockCloseError(targetLock, &returnedErr)
 	}
 
 	err = m.runRestorePreview(ctx, job, opts, result)
@@ -870,7 +1136,7 @@ func (m *Manager) RunRestorePreview(ctx context.Context, id string, opts Restore
 
 // RunRestoreVerify performs a read-only verification of a restored target
 // directory. It does not persist restore history or modify target data.
-func (m *Manager) RunRestoreVerify(ctx context.Context, id string, opts RestoreVerifyOptions) (*RestoreVerifyResult, error) {
+func (m *Manager) RunRestoreVerify(ctx context.Context, id string, opts RestoreVerifyOptions) (returnedResult *RestoreVerifyResult, returnedErr error) {
 	job, err := m.beginJob(id)
 	if err != nil {
 		return nil, err
@@ -893,7 +1159,50 @@ func (m *Manager) RunRestoreVerify(ctx context.Context, id string, opts RestoreV
 		Destination:      backupTarget(job),
 		TargetPath:       targetPath,
 	}
-	_ = m.updateLastRestoreVerify(result)
+	if saveErr := m.updateLastRestoreVerify(result); saveErr != nil {
+		finishedAt := m.now().UTC()
+		result.FinishedAt = &finishedAt
+		result.DurationMs = max(finishedAt.Sub(result.StartedAt).Milliseconds(), 0)
+		result.Status = StatusFailed
+		result.ErrorMessage = fmt.Sprintf("persist running restore verification state: %v", saveErr)
+		if isBackupPersistenceWarning(saveErr) {
+			if terminalErr := m.updateLastRestoreVerify(result); terminalErr != nil {
+				if !isBackupPersistenceWarning(terminalErr) {
+					m.recordVolatileLastRestoreVerify(result)
+				}
+				saveErr = errors.Join(saveErr, terminalErr)
+			}
+		}
+		return cloneRestoreVerifyResult(result), saveErr
+	}
+	targetLock, lockErr := m.acquireJobTargetLock(job)
+	if lockErr != nil {
+		finishedAt := m.now().UTC()
+		result.FinishedAt = &finishedAt
+		result.DurationMs = max(finishedAt.Sub(result.StartedAt).Milliseconds(), 0)
+		result.Status = StatusFailed
+		result.ErrorMessage = lockErr.Error()
+		if saveErr := m.updateLastRestoreVerify(result); saveErr != nil {
+			if isBackupPersistenceWarning(saveErr) {
+				result.Warnings = append(result.Warnings, backupStateWarningMessage(saveErr, restoreVerifyStateWarning))
+				warningSaveErr := m.updateLastRestoreVerify(result)
+				if warningSaveErr != nil && !isBackupPersistenceWarning(warningSaveErr) {
+					m.recordVolatileLastRestoreVerify(result)
+				}
+				m.notifyRestoreVerify(ctx, job, result)
+				return cloneRestoreVerifyResult(result), errors.Join(lockErr, saveErr, warningSaveErr)
+			}
+			if !isBackupPersistenceWarning(saveErr) {
+				m.recordVolatileLastRestoreVerify(result)
+			}
+			lockErr = errors.Join(lockErr, saveErr)
+		}
+		m.notifyRestoreVerify(ctx, job, result)
+		return cloneRestoreVerifyResult(result), lockErr
+	}
+	if targetLock != nil {
+		defer appendBackupTargetLockCloseError(targetLock, &returnedErr)
+	}
 
 	err = bindingErr
 	if err == nil {
@@ -912,6 +1221,22 @@ func (m *Manager) RunRestoreVerify(ctx context.Context, id string, opts RestoreV
 		result.Status = StatusCompleted
 	}
 	if saveErr := m.updateLastRestoreVerify(result); saveErr != nil {
+		if isBackupPersistenceWarning(saveErr) {
+			result.Warnings = append(result.Warnings, backupStateWarningMessage(saveErr, restoreVerifyStateWarning))
+			warningSaveErr := m.updateLastRestoreVerify(result)
+			if warningSaveErr != nil && !isBackupPersistenceWarning(warningSaveErr) {
+				m.recordVolatileLastRestoreVerify(result)
+			}
+			m.notifyRestoreVerify(ctx, job, result)
+			if err != nil {
+				return cloneRestoreVerifyResult(result), errors.Join(err, saveErr, warningSaveErr)
+			}
+			return cloneRestoreVerifyResult(result), nil
+		}
+		if !isBackupPersistenceWarning(saveErr) {
+			m.recordVolatileLastRestoreVerify(result)
+		}
+		m.notifyRestoreVerify(ctx, job, result)
 		if err != nil {
 			return cloneRestoreVerifyResult(result), errors.Join(err, saveErr)
 		}
@@ -929,13 +1254,13 @@ func (m *Manager) RunRetentionCheck(ctx context.Context, id string) (*RetentionC
 	}
 	defer m.endJob(id)
 
-	return m.runRetentionCheckForJob(ctx, job, true)
+	return m.runRetentionCheckForJob(ctx, job, true, true)
 }
 
 // RunRestore restores a completed backup into a caller-chosen target directory.
 // The target is created atomically from a partial sibling and must be outside
 // the live source, storage root, and any local backup destination.
-func (m *Manager) RunRestore(ctx context.Context, id string, opts RestoreOptions) (*RestoreResult, error) {
+func (m *Manager) RunRestore(ctx context.Context, id string, opts RestoreOptions) (returnedResult *RestoreResult, returnedErr error) {
 	job, err := m.beginJob(id)
 	if err != nil {
 		return nil, err
@@ -956,7 +1281,50 @@ func (m *Manager) RunRestore(ctx context.Context, id string, opts RestoreOptions
 		StartedAt:        startedAt,
 		TargetPath:       targetPath,
 	}
-	_ = m.updateLastRestore(result, false)
+	if saveErr := m.updateLastRestore(result, false); saveErr != nil {
+		finishedAt := m.now().UTC()
+		result.FinishedAt = &finishedAt
+		result.DurationMs = max(finishedAt.Sub(result.StartedAt).Milliseconds(), 0)
+		result.Status = StatusFailed
+		result.ErrorMessage = fmt.Sprintf("persist running restore state: %v", saveErr)
+		if isBackupPersistenceWarning(saveErr) {
+			if terminalErr := m.updateLastRestore(result, true); terminalErr != nil {
+				if !isBackupPersistenceWarning(terminalErr) {
+					m.recordVolatileLastRestore(result, true)
+				}
+				saveErr = errors.Join(saveErr, terminalErr)
+			}
+		}
+		return cloneRestoreResult(result), saveErr
+	}
+	targetLock, lockErr := m.acquireJobTargetLock(job)
+	if lockErr != nil {
+		finishedAt := m.now().UTC()
+		result.FinishedAt = &finishedAt
+		result.DurationMs = max(finishedAt.Sub(result.StartedAt).Milliseconds(), 0)
+		result.Status = StatusFailed
+		result.ErrorMessage = lockErr.Error()
+		if saveErr := m.updateLastRestore(result, true); saveErr != nil {
+			if isBackupPersistenceWarning(saveErr) {
+				result.Warnings = append(result.Warnings, backupStateWarningMessage(saveErr, restoreStateWarning))
+				warningSaveErr := m.updateLastRestore(result, true)
+				if warningSaveErr != nil && !isBackupPersistenceWarning(warningSaveErr) {
+					m.recordVolatileLastRestore(result, true)
+				}
+				m.notifyRestore(ctx, job, result)
+				return cloneRestoreResult(result), errors.Join(lockErr, saveErr, warningSaveErr)
+			}
+			if !isBackupPersistenceWarning(saveErr) {
+				m.recordVolatileLastRestore(result, true)
+			}
+			lockErr = errors.Join(lockErr, saveErr)
+		}
+		m.notifyRestore(ctx, job, result)
+		return cloneRestoreResult(result), lockErr
+	}
+	if targetLock != nil {
+		defer appendBackupTargetLockCloseError(targetLock, &returnedErr)
+	}
 
 	preflightErr := bindingErr
 	if preflightErr == nil {
@@ -972,6 +1340,19 @@ func (m *Manager) RunRestore(ctx context.Context, id string, opts RestoreOptions
 		result.Status = StatusFailed
 		result.ErrorMessage = preflightErr.Error()
 		if saveErr := m.updateLastRestore(result, true); saveErr != nil {
+			if isBackupPersistenceWarning(saveErr) {
+				result.Warnings = append(result.Warnings, backupStateWarningMessage(saveErr, restoreStateWarning))
+				warningSaveErr := m.updateLastRestore(result, true)
+				if warningSaveErr != nil && !isBackupPersistenceWarning(warningSaveErr) {
+					m.recordVolatileLastRestore(result, true)
+				}
+				m.notifyRestore(ctx, job, result)
+				return cloneRestoreResult(result), errors.Join(preflightErr, saveErr, warningSaveErr)
+			}
+			if !isBackupPersistenceWarning(saveErr) {
+				m.recordVolatileLastRestore(result, true)
+			}
+			m.notifyRestore(ctx, job, result)
 			return cloneRestoreResult(result), errors.Join(preflightErr, saveErr)
 		}
 		m.notifyRestore(ctx, job, result)
@@ -992,6 +1373,22 @@ func (m *Manager) RunRestore(ctx context.Context, id string, opts RestoreOptions
 		result.Status = StatusCompleted
 	}
 	if saveErr := m.updateLastRestore(result, true); saveErr != nil {
+		if isBackupPersistenceWarning(saveErr) {
+			result.Warnings = append(result.Warnings, backupStateWarningMessage(saveErr, restoreStateWarning))
+			warningSaveErr := m.updateLastRestore(result, true)
+			if warningSaveErr != nil && !isBackupPersistenceWarning(warningSaveErr) {
+				m.recordVolatileLastRestore(result, true)
+			}
+			m.notifyRestore(ctx, job, result)
+			if err != nil {
+				return cloneRestoreResult(result), errors.Join(err, saveErr, warningSaveErr)
+			}
+			return cloneRestoreResult(result), nil
+		}
+		if !isBackupPersistenceWarning(saveErr) {
+			m.recordVolatileLastRestore(result, true)
+		}
+		m.notifyRestore(ctx, job, result)
 		if err != nil {
 			return cloneRestoreResult(result), errors.Join(err, saveErr)
 		}
@@ -1016,7 +1413,9 @@ func (m *Manager) notifyRun(ctx context.Context, job config.BackupJobConfig, res
 		message = "backup run failed"
 	}
 
-	_ = m.notifier.NotifyBackupEvent(context.WithoutCancel(ctx), NotificationEvent{
+	notificationCtx, cancel := m.notificationContext(ctx)
+	defer cancel()
+	_ = m.notifier.NotifyBackupEvent(notificationCtx, NotificationEvent{
 		Type:                NotificationTypeBackupRun,
 		Level:               level,
 		Message:             message,
@@ -1052,7 +1451,9 @@ func (m *Manager) notifyRestoreDrill(ctx context.Context, job config.BackupJobCo
 		message = "backup restore drill failed"
 	}
 
-	_ = m.notifier.NotifyBackupEvent(context.WithoutCancel(ctx), NotificationEvent{
+	notificationCtx, cancel := m.notificationContext(ctx)
+	defer cancel()
+	_ = m.notifier.NotifyBackupEvent(notificationCtx, NotificationEvent{
 		Type:                NotificationTypeRestoreDrill,
 		Level:               level,
 		Message:             message,
@@ -1087,7 +1488,9 @@ func (m *Manager) notifyRestore(ctx context.Context, job config.BackupJobConfig,
 		message = "backup restore failed"
 	}
 
-	_ = m.notifier.NotifyBackupEvent(context.WithoutCancel(ctx), NotificationEvent{
+	notificationCtx, cancel := m.notificationContext(ctx)
+	defer cancel()
+	_ = m.notifier.NotifyBackupEvent(notificationCtx, NotificationEvent{
 		Type:                NotificationTypeRestore,
 		Level:               level,
 		Message:             message,
@@ -1121,7 +1524,9 @@ func (m *Manager) notifyRestoreVerify(ctx context.Context, job config.BackupJobC
 		message = "backup restore verification failed"
 	}
 
-	_ = m.notifier.NotifyBackupEvent(context.WithoutCancel(ctx), NotificationEvent{
+	notificationCtx, cancel := m.notificationContext(ctx)
+	defer cancel()
+	_ = m.notifier.NotifyBackupEvent(notificationCtx, NotificationEvent{
 		Type:                NotificationTypeRestoreVerify,
 		Level:               level,
 		Message:             message,
@@ -1155,7 +1560,9 @@ func (m *Manager) notifyRetentionCheck(ctx context.Context, job config.BackupJob
 		message = "backup retention check failed"
 	}
 
-	_ = m.notifier.NotifyBackupEvent(context.WithoutCancel(ctx), NotificationEvent{
+	notificationCtx, cancel := m.notificationContext(ctx)
+	defer cancel()
+	_ = m.notifier.NotifyBackupEvent(notificationCtx, NotificationEvent{
 		Type:                NotificationTypeRetention,
 		Level:               level,
 		Message:             message,
@@ -1187,21 +1594,56 @@ func notificationLocationDetailsOmitted(values ...string) bool {
 // SendRestoreDrillReminders emits warning notifications for jobs whose restore
 // drills are missing or stale. Reminder timestamps are persisted to avoid
 // repeating the same warning on every scheduler tick.
-func (m *Manager) SendRestoreDrillReminders(ctx context.Context) []NotificationEvent {
+func (m *Manager) SendRestoreDrillReminders(ctx context.Context) ([]NotificationEvent, error) {
 	if m.notifier == nil {
-		return nil
+		return nil, nil
 	}
+	if !m.beginManagerOperation() {
+		return nil, ErrManagerClosed
+	}
+	defer m.endManagerOperation()
+	m.reminderMu.Lock()
+	defer m.reminderMu.Unlock()
 
-	events := m.restoreDrillReminderEvents(m.now().UTC())
-	for _, event := range events {
-		_ = m.notifier.NotifyBackupEvent(context.WithoutCancel(ctx), event)
+	now := m.now().UTC()
+	events, err := m.restoreDrillReminderEvents(now)
+	if err != nil {
+		return nil, err
 	}
-	return events
+	sent := make([]NotificationEvent, 0, len(events))
+	var reminderErrs []error
+	for _, event := range events {
+		if ctx != nil && ctx.Err() != nil {
+			reminderErrs = append(reminderErrs, ctx.Err())
+			break
+		}
+		notificationCtx, cancel := m.notificationContext(ctx)
+		if err := m.notifier.NotifyBackupEvent(notificationCtx, event); err != nil {
+			reminderErrs = append(reminderErrs, fmt.Errorf("send restore drill reminder notification: %s", sanitizeBackupMessageForAPI(err.Error())))
+			cancel()
+			continue
+		}
+		cancel()
+		sent = append(sent, event)
+		if err := m.recordRestoreDrillReminder(event.JobID, now); err != nil {
+			reminderErrs = append(reminderErrs, err)
+			if errors.Is(err, ErrManagerClosed) || errors.Is(err, ErrBackupStateNamespaceChanged) {
+				break
+			}
+		}
+	}
+	return sent, errors.Join(reminderErrs...)
 }
 
-func (m *Manager) restoreDrillReminderEvents(now time.Time) []NotificationEvent {
+func (m *Manager) restoreDrillReminderEvents(now time.Time) ([]NotificationEvent, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.stateNamespaceUnsafe {
+		return nil, m.stateNamespaceErrorLocked()
+	}
+	if m.closed {
+		return nil, ErrManagerClosed
+	}
 
 	ids := make([]string, 0, len(m.jobs))
 	for id := range m.jobs {
@@ -1217,15 +1659,29 @@ func (m *Manager) restoreDrillReminderEvents(now time.Time) []NotificationEvent 
 		if !ok {
 			continue
 		}
-		remindedAt := now.UTC()
-		state.LastRestoreDrillReminderAt = &remindedAt
-		m.state.Jobs[id] = state
 		events = append(events, event)
 	}
-	if len(events) > 0 {
-		_ = m.saveStateLocked()
+	return events, nil
+}
+
+func (m *Manager) recordRestoreDrillReminder(jobID string, remindedAt time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.stateNamespaceUnsafe {
+		return m.stateNamespaceErrorLocked()
 	}
-	return events
+	if m.closed {
+		return ErrManagerClosed
+	}
+	if _, ok := m.jobs[jobID]; !ok {
+		return ErrJobNotFound
+	}
+	candidate := clonePersistedState(m.state)
+	state := candidate.Jobs[jobID]
+	remindedAt = remindedAt.UTC()
+	state.LastRestoreDrillReminderAt = &remindedAt
+	candidate.Jobs[jobID] = state
+	return m.persistStateCandidateLocked(candidate)
 }
 
 func (m *Manager) restoreDrillReminderEventLocked(job config.BackupJobConfig, state JobState, now time.Time) (NotificationEvent, bool) {
@@ -1291,6 +1747,15 @@ func (m *Manager) beginJob(id string) (config.BackupJobConfig, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if m.stateNamespaceUnsafe {
+		return config.BackupJobConfig{}, m.stateNamespaceErrorLocked()
+	}
+	if m.closed {
+		return config.BackupJobConfig{}, ErrManagerClosed
+	}
+	if err := m.verifyStateNamespaceLocked(); err != nil {
+		return config.BackupJobConfig{}, m.quarantineStateNamespaceLocked(err, err)
+	}
 	job, ok := m.jobs[id]
 	if !ok {
 		return config.BackupJobConfig{}, ErrJobNotFound
@@ -1302,19 +1767,21 @@ func (m *Manager) beginJob(id string) (config.BackupJobConfig, error) {
 		return config.BackupJobConfig{}, ErrJobAlreadyRunning
 	}
 	m.running[id] = struct{}{}
+	m.operations.Add(1)
 	return cloneJob(job), nil
 }
 
 func (m *Manager) endJob(id string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	delete(m.running, id)
+	m.mu.Unlock()
+	m.operations.Done()
 }
 
 func (m *Manager) jobViewLocked(id string, job config.BackupJobConfig) JobView {
 	state := m.state.Jobs[id]
 	_, running := m.running[id]
-	nextRunAt := m.nextRunAtLocked(job, state)
+	nextRunAt := m.nextRunAtLocked(job, state, m.now())
 	healthStatus, healthMessage := m.healthLocked(job, state, running, m.now().UTC())
 	restoreDrillStatus, restoreDrillMessage := m.restoreDrillHealthLocked(job, state, m.now().UTC())
 	retentionStatus, retentionMessage := retentionHealth(job, state)
@@ -1404,7 +1871,7 @@ func (m *Manager) ensureJobConfigEvidenceUnchanged(ctx context.Context, job conf
 	return nil
 }
 
-func (m *Manager) runLocalBackup(ctx context.Context, job config.BackupJobConfig, result *RunResult) error {
+func (m *Manager) runLocalBackup(ctx context.Context, job config.BackupJobConfig, result *RunResult) (runErr error) {
 	source := effectiveSource(job, m.storageRoot)
 	if err := validateSourceDirectory(source); err != nil {
 		return err
@@ -1417,16 +1884,44 @@ func (m *Manager) runLocalBackup(ctx context.Context, job config.BackupJobConfig
 	snapshotRoot := filepath.Join(job.Destination, job.ID, "snapshots")
 	partialPath := filepath.Join(snapshotRoot, result.ID+".partial")
 	finalPath := filepath.Join(snapshotRoot, result.ID)
-	if err := rootio.MkdirAllPathNoFollow(snapshotRoot, 0700); err != nil {
+	createdSnapshotDirs, err := rootio.MkdirAllPathNoFollowTracked(snapshotRoot, 0700)
+	if err != nil {
 		return fmt.Errorf("create snapshot directory: %w", mapBackupNoFollowError(err, "destination"))
 	}
-	if err := rootio.MkdirPathNoFollow(partialPath, 0700); err != nil {
+	if err := syncCreatedBackupDirectories(createdSnapshotDirs, syncLocalBackupDirectory); err != nil {
+		return fmt.Errorf("sync snapshot directory tree: %w", mapBackupNoFollowError(err, "destination"))
+	}
+	snapshotRootHandle, snapshotRootDir, snapshotRootInfo, err := openLocalSnapshotRoot(snapshotRoot)
+	if err != nil {
+		return fmt.Errorf("open snapshot directory: %w", err)
+	}
+	defer snapshotRootHandle.Close()
+	defer snapshotRootDir.Close()
+
+	partialName := filepath.Base(partialPath)
+	finalName := filepath.Base(finalPath)
+	if err := rootio.MkdirNoFollow(snapshotRootHandle, partialName, 0700); err != nil {
 		return fmt.Errorf("create partial snapshot: %w", mapBackupNoFollowError(err, "destination"))
+	}
+	partialDir, err := rootio.OpenDirNoFollow(snapshotRootHandle, partialName)
+	if err != nil {
+		return fmt.Errorf("open partial snapshot: %w", mapBackupNoFollowError(err, "destination"))
+	}
+	defer partialDir.Close()
+	partialInfo, err := partialDir.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect partial snapshot: %w", err)
 	}
 	cleanupPartial := true
 	defer func() {
 		if cleanupPartial {
-			_ = removeAllBackupPath(partialPath, "partial snapshot")
+			cleanupErr := removeLocalBackupSnapshotEntry(snapshotRootDir, snapshotRoot, partialName, partialInfo)
+			if cleanupErr == nil {
+				cleanupErr = syncLocalBackupDirectoryHandle(snapshotRootDir)
+			}
+			if cleanupErr != nil {
+				runErr = errors.Join(runErr, fmt.Errorf("clean partial snapshot: %w", cleanupErr))
+			}
 		}
 	}()
 
@@ -1485,26 +1980,55 @@ func (m *Manager) runLocalBackup(ctx context.Context, job config.BackupJobConfig
 			return fmt.Errorf("verify backup snapshot: %w", err)
 		}
 	}
-	if err := rootio.ReplaceEmptyDirPathNoFollow(partialPath, finalPath); err != nil {
-		return fmt.Errorf("finalize backup snapshot: %w", mapBackupNoFollowError(err, "destination"))
+	if err := verifyLocalSnapshotRootIdentity(snapshotRoot, snapshotRootInfo); err != nil {
+		return err
+	}
+	if err := verifyLocalSnapshotEntryIdentity(snapshotRootHandle, partialName, partialInfo); err != nil {
+		return err
+	}
+	if err := syncLocalBackupSnapshotTree(partialDir, partialPath); err != nil {
+		return fmt.Errorf("sync partial backup snapshot: %w", mapBackupNoFollowError(err, "destination"))
+	}
+	if err := verifyLocalSnapshotEntryIdentity(snapshotRootHandle, partialName, partialInfo); err != nil {
+		return err
+	}
+	renameErr := renameLocalBackupSnapshot(snapshotRootHandle, partialName, finalName)
+	renamed, reconcileErr := reconcileLocalSnapshotRename(snapshotRootHandle, partialName, finalName, partialInfo)
+	if !renamed {
+		if renameErr == nil {
+			renameErr = fmt.Errorf("%w: local snapshot rename was not committed", ErrUnsafePath)
+		}
+		return errors.Join(fmt.Errorf("finalize backup snapshot: %w", mapBackupNoFollowError(renameErr, "destination")), reconcileErr)
 	}
 	cleanupPartial = false
+	if err := syncLocalBackupDirectoryHandle(snapshotRootDir); err != nil {
+		return fmt.Errorf("sync finalized backup snapshot directory: %w", mapBackupNoFollowError(err, "destination"))
+	}
+	if err := verifyLocalSnapshotRootIdentity(snapshotRoot, snapshotRootInfo); err != nil {
+		return err
+	}
 	afterFinalizeLocalBackupSnapshot(finalPath)
 
 	digest, observation, err := manifestEvidenceDigest(ctx, result.ManifestPath, int64(len(manifestData)), result)
 	if err != nil {
 		captureErr := fmt.Errorf("verify finalized backup manifest evidence: %w", err)
-		if cleanupErr := removeAllBackupPath(finalPath, "invalid finalized snapshot"); cleanupErr != nil {
+		if cleanupErr := removeLocalSnapshotEntryDurably(snapshotRootDir, snapshotRoot, finalName, partialInfo); cleanupErr != nil {
 			return errors.Join(captureErr, cleanupErr)
 		}
 		return captureErr
 	}
 	if digest != trustedDigest {
 		captureErr := fmt.Errorf("%w: finalized backup manifest differs from generated manifest", ErrUnsafePath)
-		if cleanupErr := removeAllBackupPath(finalPath, "invalid finalized snapshot"); cleanupErr != nil {
+		if cleanupErr := removeLocalSnapshotEntryDurably(snapshotRootDir, snapshotRoot, finalName, partialInfo); cleanupErr != nil {
 			return errors.Join(captureErr, cleanupErr)
 		}
 		return captureErr
+	}
+	if err := verifyLocalSnapshotRootIdentity(snapshotRoot, snapshotRootInfo); err != nil {
+		return err
+	}
+	if err := verifyLocalSnapshotEntryIdentity(snapshotRootHandle, finalName, partialInfo); err != nil {
+		return err
 	}
 	result.ManifestSize = observation.size
 	result.ManifestDigest = trustedDigest
@@ -2096,7 +2620,7 @@ func (m *Manager) runRcloneRestoreDrill(ctx context.Context, job config.BackupJo
 	return nil
 }
 
-func (m *Manager) runRetentionCheckForJob(ctx context.Context, job config.BackupJobConfig, notify bool) (*RetentionCheckResult, error) {
+func (m *Manager) runRetentionCheckForJob(ctx context.Context, job config.BackupJobConfig, notify, acquireTargetLock bool) (returnedResult *RetentionCheckResult, returnedErr error) {
 	startedAt := m.now().UTC()
 	result := &RetentionCheckResult{
 		ID:        formatRunID(startedAt),
@@ -2106,7 +2630,62 @@ func (m *Manager) runRetentionCheckForJob(ctx context.Context, job config.Backup
 		Target:    backupTarget(job),
 		Policy:    job.RetentionPolicy,
 	}
-	_ = m.updateLastRetentionCheck(result)
+	if saveErr := m.updateLastRetentionCheck(result); saveErr != nil {
+		finishedAt := m.now().UTC()
+		result.FinishedAt = &finishedAt
+		result.DurationMs = max(finishedAt.Sub(result.StartedAt).Milliseconds(), 0)
+		result.Status = StatusFailed
+		result.ErrorMessage = fmt.Sprintf("persist running retention check state: %v", saveErr)
+		if isBackupPersistenceWarning(saveErr) {
+			if terminalErr := m.updateLastRetentionCheck(result); terminalErr != nil {
+				if !isBackupPersistenceWarning(terminalErr) {
+					m.recordVolatileLastRetentionCheck(result)
+				}
+				saveErr = errors.Join(saveErr, terminalErr)
+			}
+		}
+		if notify {
+			m.notifyRetentionCheck(ctx, job, result)
+		}
+		return cloneRetentionCheckResult(result), saveErr
+	}
+	var targetLock *backupStateLock
+	if acquireTargetLock {
+		var lockErr error
+		targetLock, lockErr = m.acquireJobTargetLock(job)
+		if lockErr != nil {
+			finishedAt := m.now().UTC()
+			result.FinishedAt = &finishedAt
+			result.DurationMs = max(finishedAt.Sub(result.StartedAt).Milliseconds(), 0)
+			result.Status = StatusFailed
+			result.ErrorMessage = lockErr.Error()
+			if saveErr := m.updateLastRetentionCheck(result); saveErr != nil {
+				if isBackupPersistenceWarning(saveErr) {
+					result.Warning = true
+					result.Warnings = append(result.Warnings, backupStateWarningMessage(saveErr, retentionCheckStateWarning))
+					warningSaveErr := m.updateLastRetentionCheck(result)
+					if warningSaveErr != nil && !isBackupPersistenceWarning(warningSaveErr) {
+						m.recordVolatileLastRetentionCheck(result)
+					}
+					if notify {
+						m.notifyRetentionCheck(ctx, job, result)
+					}
+					return cloneRetentionCheckResult(result), errors.Join(lockErr, saveErr, warningSaveErr)
+				}
+				if !isBackupPersistenceWarning(saveErr) {
+					m.recordVolatileLastRetentionCheck(result)
+				}
+				lockErr = errors.Join(lockErr, saveErr)
+			}
+			if notify {
+				m.notifyRetentionCheck(ctx, job, result)
+			}
+			return cloneRetentionCheckResult(result), lockErr
+		}
+	}
+	if targetLock != nil {
+		defer appendBackupTargetLockCloseError(targetLock, &returnedErr)
+	}
 
 	err := m.runRetentionCheck(ctx, job, result)
 	finishedAt := m.now().UTC()
@@ -2122,6 +2701,24 @@ func (m *Manager) runRetentionCheckForJob(ctx context.Context, job config.Backup
 		result.Warning = true
 	}
 	saveErr := m.updateLastRetentionCheck(result)
+	if isBackupPersistenceWarning(saveErr) {
+		result.Warning = true
+		result.Warnings = append(result.Warnings, backupStateWarningMessage(saveErr, retentionCheckStateWarning))
+		warningSaveErr := m.updateLastRetentionCheck(result)
+		if warningSaveErr != nil && !isBackupPersistenceWarning(warningSaveErr) {
+			m.recordVolatileLastRetentionCheck(result)
+		}
+		if notify {
+			m.notifyRetentionCheck(ctx, job, result)
+		}
+		if err != nil {
+			return cloneRetentionCheckResult(result), errors.Join(err, saveErr, warningSaveErr)
+		}
+		return cloneRetentionCheckResult(result), nil
+	}
+	if saveErr != nil && !isBackupPersistenceWarning(saveErr) {
+		m.recordVolatileLastRetentionCheck(result)
+	}
 	if notify {
 		m.notifyRetentionCheck(ctx, job, result)
 	}
@@ -2480,7 +3077,18 @@ func (m *Manager) applyRetention(ctx context.Context, job config.BackupJobConfig
 	if job.MaxSnapshots <= 0 && job.MaxAge <= 0 {
 		return 0, nil
 	}
-	snapshots, err := listLocalSnapshots(ctx, job)
+	snapshotRoot := filepath.Join(job.Destination, job.ID, "snapshots")
+	snapshotRootHandle, snapshotDir, snapshotRootInfo, err := openLocalSnapshotRoot(snapshotRoot)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, []string{fmt.Sprintf("apply retention: %v", err)}
+	}
+	defer snapshotRootHandle.Close()
+	defer snapshotDir.Close()
+
+	snapshots, err := listLocalSnapshotsFromRoot(ctx, job, snapshotRoot, snapshotRootHandle, snapshotDir, snapshotRootInfo)
 	if err != nil {
 		return 0, []string{fmt.Sprintf("apply retention: %v", err)}
 	}
@@ -2495,64 +3103,87 @@ func (m *Manager) applyRetention(ctx context.Context, job config.BackupJobConfig
 	currentClean := filepath.Clean(currentSnapshotPath)
 	latestSnapshot := filepath.Clean(snapshots[0].Path)
 	cutoff := m.now().UTC().Add(-job.MaxAge)
-	deleteSet := map[string]snapshotInfo{}
+	deleteSet := make([]snapshotInfo, 0)
 	for index, snapshot := range snapshots {
 		snapshotPath := filepath.Clean(snapshot.Path)
 		if snapshotPath == currentClean || snapshotPath == latestSnapshot {
 			continue
 		}
-		if job.MaxSnapshots > 0 && index >= job.MaxSnapshots {
-			deleteSet[snapshotPath] = snapshot
-			continue
-		}
-		if job.MaxAge > 0 && snapshot.CreatedAt.Before(cutoff) {
-			deleteSet[snapshotPath] = snapshot
+		deleteForCount := job.MaxSnapshots > 0 && index >= job.MaxSnapshots
+		deleteForAge := job.MaxAge > 0 && snapshot.CreatedAt.Before(cutoff)
+		if deleteForCount || deleteForAge {
+			deleteSet = append(deleteSet, snapshot)
 		}
 	}
+	sort.Slice(deleteSet, func(i, j int) bool {
+		if deleteSet[i].CreatedAt.Equal(deleteSet[j].CreatedAt) {
+			return deleteSet[i].Name < deleteSet[j].Name
+		}
+		return deleteSet[i].CreatedAt.Before(deleteSet[j].CreatedAt)
+	})
 
-	snapshotRoot := filepath.Join(job.Destination, job.ID, "snapshots")
 	var warnings []string
-	pruned := 0
+	removed := 0
 	for _, snapshot := range deleteSet {
 		if err := ctx.Err(); err != nil {
 			warnings = append(warnings, fmt.Sprintf("retention interrupted: %v", err))
 			break
 		}
-		if !pathContainsOrEquals(snapshotRoot, snapshot.Path) {
-			warnings = append(warnings, fmt.Sprintf("skip unsafe snapshot path %s", snapshot.Path))
-			continue
+		if err := verifyLocalSnapshotRootIdentity(snapshotRoot, snapshotRootInfo); err != nil {
+			warnings = append(warnings, fmt.Sprintf("stop retention because snapshot root changed: %v", err))
+			break
 		}
-		if err := removeAllBackupPath(snapshot.Path, "backup snapshot"); err != nil {
+		if err := removeLocalBackupSnapshotEntry(snapshotDir, snapshotRoot, snapshot.Name, snapshot.Identity); err != nil {
 			warnings = append(warnings, fmt.Sprintf("remove snapshot %s: %v", snapshot.Name, err))
 			continue
 		}
-		pruned++
+		removed++
 	}
-	return pruned, warnings
+	if removed > 0 {
+		if err := syncLocalBackupDirectoryHandle(snapshotDir); err != nil {
+			warnings = append(warnings, fmt.Sprintf("sync snapshot retention changes: %v", err))
+			return 0, warnings
+		}
+		if err := verifyLocalSnapshotRootIdentity(snapshotRoot, snapshotRootInfo); err != nil {
+			warnings = append(warnings, fmt.Sprintf("snapshot root changed after retention: %v", err))
+			return 0, warnings
+		}
+	}
+	return removed, warnings
 }
 
 type snapshotInfo struct {
 	Name      string
 	Path      string
 	CreatedAt time.Time
+	Identity  os.FileInfo
 }
 
 func listLocalSnapshots(ctx context.Context, job config.BackupJobConfig) ([]snapshotInfo, error) {
 	snapshotRoot := filepath.Join(job.Destination, job.ID, "snapshots")
-	snapshotDir, err := rootio.OpenDirPathNoFollow(snapshotRoot)
+	snapshotRootHandle, snapshotDir, snapshotRootInfo, err := openLocalSnapshotRoot(snapshotRoot)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("list snapshots: %w", mapBackupNoFollowError(err, "backup snapshots"))
+		return nil, fmt.Errorf("list snapshots: %w", err)
 	}
-	entries, readErr := snapshotDir.ReadDir(-1)
-	closeErr := snapshotDir.Close()
-	if readErr != nil {
-		return nil, fmt.Errorf("list snapshots: %w", readErr)
-	}
-	if closeErr != nil {
-		return nil, fmt.Errorf("close snapshots: %w", closeErr)
+	defer snapshotRootHandle.Close()
+	defer snapshotDir.Close()
+	return listLocalSnapshotsFromRoot(ctx, job, snapshotRoot, snapshotRootHandle, snapshotDir, snapshotRootInfo)
+}
+
+func listLocalSnapshotsFromRoot(
+	ctx context.Context,
+	job config.BackupJobConfig,
+	snapshotRoot string,
+	snapshotRootHandle *os.Root,
+	snapshotDir *os.File,
+	snapshotRootInfo os.FileInfo,
+) ([]snapshotInfo, error) {
+	entries, err := snapshotDir.ReadDir(-1)
+	if err != nil {
+		return nil, fmt.Errorf("list snapshots: %w", err)
 	}
 
 	names, err := localSnapshotDirectoryNames(entries)
@@ -2564,6 +3195,24 @@ func listLocalSnapshots(ctx context.Context, job config.BackupJobConfig) ([]snap
 	for _, name := range names {
 		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+		if err := verifyLocalSnapshotRootIdentity(snapshotRoot, snapshotRootInfo); err != nil {
+			return nil, err
+		}
+		snapshotEntry, err := openLocalSnapshotEntry(snapshotDir, snapshotRoot, name)
+		if err != nil {
+			return nil, fmt.Errorf("open snapshot %s: %w", name, mapBackupNoFollowError(err, "backup snapshot"))
+		}
+		snapshotIdentity, statErr := snapshotEntry.Stat()
+		closeErr := snapshotEntry.Close()
+		if statErr != nil {
+			return nil, fmt.Errorf("inspect snapshot %s: %w", name, statErr)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("close snapshot %s: %w", name, closeErr)
+		}
+		if !snapshotIdentity.IsDir() {
+			return nil, fmt.Errorf("%w: backup snapshot %s is not a directory", ErrUnsafePath, name)
 		}
 		snapshotPath := filepath.Join(snapshotRoot, name)
 		createdAt := parseSnapshotTime(name)
@@ -2577,6 +3226,12 @@ func listLocalSnapshots(ctx context.Context, job config.BackupJobConfig) ([]snap
 		if err := verifyManifestTreeContents(ctx, snapshotPath, manifest); err != nil {
 			return nil, fmt.Errorf("read snapshot manifest %s: %w", name, err)
 		}
+		if err := verifyLocalSnapshotRootIdentity(snapshotRoot, snapshotRootInfo); err != nil {
+			return nil, err
+		}
+		if err := verifyLocalSnapshotEntryIdentity(snapshotRootHandle, name, snapshotIdentity); err != nil {
+			return nil, fmt.Errorf("recheck snapshot %s: %w", name, err)
+		}
 		if !manifest.CreatedAt.IsZero() {
 			createdAt = manifest.CreatedAt
 		}
@@ -2584,6 +3239,7 @@ func listLocalSnapshots(ctx context.Context, job config.BackupJobConfig) ([]snap
 			Name:      name,
 			Path:      snapshotPath,
 			CreatedAt: createdAt.UTC(),
+			Identity:  snapshotIdentity,
 		})
 	}
 	return snapshots, nil
@@ -3090,6 +3746,75 @@ func (r contextReader) Read(p []byte) (int, error) {
 }
 
 func (m *Manager) updateLastRun(result *RunResult) error {
+	return m.updateLastRunWithScheduledAt(result, nil)
+}
+
+func (m *Manager) updateLastRunWithScheduledAt(result *RunResult, scheduledAt *time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.updateJobStateLocked(result.JobID, func(state *JobState) {
+		state.LastRun = cloneRunResultRaw(result)
+		if scheduledAt != nil {
+			state.LastScheduledRunAt = cloneTime(scheduledAt)
+		}
+		if result.Status == StatusCompleted {
+			state.LastSuccessfulRun = cloneRunResultRaw(result)
+		}
+	})
+}
+
+func (m *Manager) updateLastRestoreDrill(result *RestoreDrillResult, appendHistory bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.updateJobStateLocked(result.JobID, func(state *JobState) {
+		state.LastRestoreDrill = cloneRestoreDrillResultRaw(result)
+		if appendHistory {
+			state.RestoreDrillHistory = prependRestoreDrillHistory(state.RestoreDrillHistory, result)
+		}
+	})
+}
+
+func (m *Manager) updateLastRestore(result *RestoreResult, appendHistory bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.updateJobStateLocked(result.JobID, func(state *JobState) {
+		state.LastRestore = cloneRestoreResultRaw(result)
+		if appendHistory {
+			state.RestoreHistory = prependRestoreHistory(state.RestoreHistory, result)
+		}
+	})
+}
+
+func (m *Manager) updateLastRestoreVerify(result *RestoreVerifyResult) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.updateJobStateLocked(result.JobID, func(state *JobState) {
+		state.LastRestoreVerify = cloneRestoreVerifyResultRaw(result)
+	})
+}
+
+func (m *Manager) updateLastRetentionCheck(result *RetentionCheckResult) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.updateJobStateLocked(result.JobID, func(state *JobState) {
+		state.LastRetentionCheck = cloneRetentionCheckResultRaw(result)
+	})
+}
+
+func (m *Manager) updateJobStateLocked(jobID string, update func(*JobState)) error {
+	candidate := clonePersistedState(m.state)
+	state := candidate.Jobs[jobID]
+	update(&state)
+	candidate.Jobs[jobID] = state
+	return m.persistStateCandidateLocked(candidate)
+}
+
+func (m *Manager) recordVolatileLastRun(result *RunResult) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -3099,10 +3824,9 @@ func (m *Manager) updateLastRun(result *RunResult) error {
 		state.LastSuccessfulRun = cloneRunResultRaw(result)
 	}
 	m.state.Jobs[result.JobID] = state
-	return m.saveStateLocked()
 }
 
-func (m *Manager) updateLastRestoreDrill(result *RestoreDrillResult, appendHistory bool) error {
+func (m *Manager) recordVolatileLastRestoreDrill(result *RestoreDrillResult, appendHistory bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -3112,10 +3836,9 @@ func (m *Manager) updateLastRestoreDrill(result *RestoreDrillResult, appendHisto
 		state.RestoreDrillHistory = prependRestoreDrillHistory(state.RestoreDrillHistory, result)
 	}
 	m.state.Jobs[result.JobID] = state
-	return m.saveStateLocked()
 }
 
-func (m *Manager) updateLastRestore(result *RestoreResult, appendHistory bool) error {
+func (m *Manager) recordVolatileLastRestore(result *RestoreResult, appendHistory bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -3125,27 +3848,32 @@ func (m *Manager) updateLastRestore(result *RestoreResult, appendHistory bool) e
 		state.RestoreHistory = prependRestoreHistory(state.RestoreHistory, result)
 	}
 	m.state.Jobs[result.JobID] = state
-	return m.saveStateLocked()
 }
 
-func (m *Manager) updateLastRestoreVerify(result *RestoreVerifyResult) error {
+func (m *Manager) recordVolatileLastRestoreVerify(result *RestoreVerifyResult) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	state := m.state.Jobs[result.JobID]
 	state.LastRestoreVerify = cloneRestoreVerifyResultRaw(result)
 	m.state.Jobs[result.JobID] = state
-	return m.saveStateLocked()
 }
 
-func (m *Manager) updateLastRetentionCheck(result *RetentionCheckResult) error {
+func (m *Manager) recordVolatileLastRetentionCheck(result *RetentionCheckResult) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	state := m.state.Jobs[result.JobID]
 	state.LastRetentionCheck = cloneRetentionCheckResultRaw(result)
 	m.state.Jobs[result.JobID] = state
-	return m.saveStateLocked()
+}
+
+func clonePersistedState(state persistedState) persistedState {
+	jobs := make(map[string]JobState, len(state.Jobs))
+	for jobID, jobState := range state.Jobs {
+		jobs[jobID] = jobState
+	}
+	return persistedState{Jobs: jobs}
 }
 
 func (m *Manager) loadState() error {
@@ -3268,16 +3996,97 @@ func finishInterruptedTask(finishedAt **time.Time, durationMs *int64, startedAt 
 }
 
 func (m *Manager) saveStateLocked() error {
-	if m.state.Jobs == nil {
-		m.state.Jobs = map[string]JobState{}
+	return m.persistStateCandidateLocked(clonePersistedState(m.state))
+}
+
+func (m *Manager) persistStateCandidateLocked(candidate persistedState) error {
+	if candidate.Jobs == nil {
+		candidate.Jobs = map[string]JobState{}
 	}
-	err := writeJSONFile(m.statePath(), m.state, 0600)
+	if m.stateNamespaceUnsafe {
+		m.statePersistenceHealthy = false
+		return m.stateNamespaceErrorLocked()
+	}
+	if err := m.verifyStateNamespaceLocked(); err != nil {
+		return m.quarantineStateNamespaceLocked(err, err)
+	}
+
+	err := writeBackupStateFile(m.stateLock, m.statePath(), candidate, 0600)
+	identityErr := m.verifyStateNamespaceLocked()
+	if identityErr != nil {
+		switch {
+		case err == nil:
+			err = wrapBackupPersistenceWarning(identityErr)
+		case isBackupPersistenceWarning(err):
+			err = errors.Join(err, wrapBackupPersistenceWarning(identityErr))
+		default:
+			err = errors.Join(&backupStatePersistenceError{err: err}, identityErr)
+		}
+	}
 	m.statePersistenceHealthy = err == nil
+	if err == nil || isBackupPersistenceWarning(err) {
+		m.state = candidate
+	}
+	if identityErr != nil {
+		return m.quarantineStateNamespaceLocked(identityErr, err)
+	}
+	if errors.Is(err, ErrUnsafePath) {
+		return m.quarantineStateNamespaceLocked(backupPersistenceWarningCause(err), err)
+	}
+	if err != nil && !isBackupPersistenceWarning(err) {
+		if errors.Is(err, ErrBackupStatePersistence) {
+			return err
+		}
+		return &backupStatePersistenceError{err: err}
+	}
+	return err
+}
+
+func (m *Manager) verifyStateNamespaceLocked() error {
+	if m.stateLock == nil {
+		return fmt.Errorf("%w: backup state lock is unavailable", ErrUnsafePath)
+	}
+	if err := m.stateLock.verifyDirectoryIdentity(m.root); err != nil {
+		return fmt.Errorf("verify backup state namespace: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) quarantineStateNamespaceLocked(cause, returnedErr error) error {
+	m.statePersistenceHealthy = false
+	m.stateNamespaceUnsafe = true
+	if m.stateNamespaceErr == nil {
+		m.stateNamespaceErr = backupPersistenceWarningCause(cause)
+	}
+	m.closed = true
+	return errors.Join(ErrBackupStateNamespaceChanged, returnedErr)
+}
+
+func (m *Manager) stateNamespaceErrorLocked() error {
+	return errors.Join(ErrBackupStateNamespaceChanged, m.stateNamespaceErr)
+}
+
+func backupPersistenceWarningCause(err error) error {
+	var warning *backupPersistenceWarningError
+	if errors.As(err, &warning) {
+		return warning.err
+	}
 	return err
 }
 
 func (m *Manager) statePath() string {
 	return filepath.Join(m.root, stateFileName)
+}
+
+func writeBackupJSONFile(lock *backupStateLock, filePath string, value any, perm os.FileMode) error {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	if lock == nil {
+		return fmt.Errorf("%w: backup state lock is unavailable", ErrUnsafePath)
+	}
+	return lock.writeJSONData(filePath, data, perm)
 }
 
 func writeJSONFile(filePath string, value any, perm os.FileMode) error {
@@ -3292,15 +4101,68 @@ func writeJSONData(filePath string, data []byte, perm os.FileMode) error {
 	if err := rootio.MkdirAllPathNoFollow(filepath.Dir(filePath), 0700); err != nil {
 		return mapBackupNoFollowError(err, "backup json")
 	}
-	tmpPath := filePath + ".tmp"
-	tmpFile, err := rootio.OpenFilePathNoFollow(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, perm)
+	parentPath := filepath.Dir(filePath)
+	parentRoot, parentDir, parentInfo, err := openBackupJSONParent(parentPath)
 	if err != nil {
-		return mapBackupNoFollowError(err, "backup json")
+		return err
+	}
+	defer parentRoot.Close()
+	defer parentDir.Close()
+	return writeJSONDataInParent(parentRoot, parentDir, parentInfo, parentPath, filepath.Base(filePath), data, perm)
+}
+
+func (l *backupStateLock) writeJSONData(filePath string, data []byte, perm os.FileMode) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.root == nil {
+		return fmt.Errorf("%w: backup state lock directory is closed", ErrUnsafePath)
+	}
+	parentPath := filepath.Dir(filePath)
+	if filepath.Clean(parentPath) != filepath.Clean(filepath.Dir(l.path)) {
+		return fmt.Errorf("%w: backup state path is outside the locked directory", ErrUnsafePath)
+	}
+	parentDir, err := rootio.OpenDirNoFollow(l.root, ".")
+	if err != nil {
+		return mapBackupNoFollowError(err, "locked backup json parent")
+	}
+	defer parentDir.Close()
+	parentInfo, err := parentDir.Stat()
+	if err != nil {
+		return err
+	}
+	rootInfo, err := l.root.Stat(".")
+	if err != nil {
+		return err
+	}
+	if !parentInfo.IsDir() || !os.SameFile(parentInfo, rootInfo) {
+		return fmt.Errorf("%w: locked backup json parent identity changed", ErrUnsafePath)
+	}
+	if err := verifyBackupJSONParentIdentity(parentPath, parentInfo); err != nil {
+		return err
+	}
+	return writeJSONDataInParent(l.root, parentDir, parentInfo, parentPath, filepath.Base(filePath), data, perm)
+}
+
+func writeJSONDataInParent(
+	parentRoot *os.Root,
+	parentDir *os.File,
+	parentInfo os.FileInfo,
+	parentPath string,
+	targetName string,
+	data []byte,
+	perm os.FileMode,
+) (writeErr error) {
+
+	tmpFile, tmpName, err := createBackupJSONTempFile(parentRoot, targetName, perm)
+	if err != nil {
+		return err
 	}
 	cleanup := true
 	defer func() {
 		if cleanup {
-			_ = rootio.RemoveAllPathNoFollow(tmpPath)
+			if cleanupErr := parentRoot.Remove(tmpName); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
+				writeErr = errors.Join(writeErr, fmt.Errorf("cleanup backup json temp file: %w", cleanupErr))
+			}
 		}
 	}()
 	if err := tmpFile.Chmod(perm); err != nil {
@@ -3315,27 +4177,160 @@ func writeJSONData(filePath string, data []byte, perm os.FileMode) error {
 		_ = tmpFile.Close()
 		return err
 	}
+	tmpInfo, err := tmpFile.Stat()
+	if err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
 	if err := tmpFile.Close(); err != nil {
 		return err
 	}
-	if err := rootio.ReplaceFilePathNoFollow(tmpPath, filePath); err != nil {
-		return mapBackupNoFollowError(err, "backup json")
+	if err := validateBackupJSONTarget(parentRoot, targetName); err != nil {
+		return err
+	}
+	if err := verifyBackupJSONParentIdentity(parentPath, parentInfo); err != nil {
+		return err
+	}
+	renameErr := renameBackupJSONFile(parentRoot, tmpName, targetName)
+	renamed := renameErr == nil
+	var reconcileErr error
+	if renameErr != nil {
+		renamed, reconcileErr = reconcileBackupJSONRename(parentRoot, tmpName, targetName, tmpInfo)
+	}
+	if !renamed {
+		return errors.Join(mapBackupNoFollowError(renameErr, "backup json"), reconcileErr)
 	}
 	cleanup = false
-	if err := syncBackupJSONDir(filepath.Dir(filePath)); err != nil {
-		return fmt.Errorf("sync backup json parent directory: %w", err)
+	afterRenameBackupJSONFile(filepath.Join(parentPath, targetName))
+	if err := verifyBackupJSONParentIdentity(parentPath, parentInfo); err != nil {
+		return wrapBackupPersistenceWarning(fmt.Errorf("verify backup json parent after replacement: %w", err))
+	}
+	if err := syncBackupJSONDir(parentDir, parentPath); err != nil {
+		if identityErr := verifyBackupJSONParentIdentity(parentPath, parentInfo); identityErr != nil {
+			return wrapBackupPersistenceWarning(errors.Join(fmt.Errorf("sync backup json parent directory: %w", err), identityErr))
+		}
+		return wrapBackupPersistenceWarning(fmt.Errorf("sync backup json parent directory: %w", err))
+	}
+	if err := verifyBackupJSONParentIdentity(parentPath, parentInfo); err != nil {
+		return wrapBackupPersistenceWarning(fmt.Errorf("verify backup json parent after sync: %w", err))
 	}
 	return nil
 }
 
-func syncBackupJSONDirectory(dir string) error {
+func reconcileBackupJSONRename(root *os.Root, tmpName, targetName string, expected os.FileInfo) (bool, error) {
+	tmpInfo, tmpErr := root.Lstat(tmpName)
+	targetInfo, targetErr := root.Lstat(targetName)
+	tmpMissing := errors.Is(tmpErr, os.ErrNotExist)
+	targetMissing := errors.Is(targetErr, os.ErrNotExist)
+
+	if tmpMissing && targetErr == nil && targetInfo.Mode().IsRegular() && os.SameFile(targetInfo, expected) {
+		return true, nil
+	}
+	if tmpErr == nil && tmpInfo.Mode().IsRegular() && os.SameFile(tmpInfo, expected) {
+		return false, nil
+	}
+	if tmpErr != nil && !tmpMissing {
+		return false, fmt.Errorf("inspect backup json temp after rename: %w", tmpErr)
+	}
+	if targetErr != nil && !targetMissing {
+		return false, fmt.Errorf("inspect backup json target after rename: %w", targetErr)
+	}
+	return false, fmt.Errorf("%w: backup json rename result is ambiguous", ErrUnsafePath)
+}
+
+func openBackupJSONParent(parentPath string) (*os.Root, *os.File, os.FileInfo, error) {
+	root, err := os.OpenRoot(parentPath)
+	if err != nil {
+		return nil, nil, nil, mapBackupNoFollowError(err, "backup json parent")
+	}
+	closeRoot := true
+	defer func() {
+		if closeRoot {
+			_ = root.Close()
+		}
+	}()
+	dir, err := rootio.OpenDirNoFollow(root, ".")
+	if err != nil {
+		return nil, nil, nil, mapBackupNoFollowError(err, "backup json parent")
+	}
+	info, err := dir.Stat()
+	if err != nil {
+		_ = dir.Close()
+		return nil, nil, nil, err
+	}
+	if err := verifyBackupJSONParentIdentity(parentPath, info); err != nil {
+		_ = dir.Close()
+		return nil, nil, nil, err
+	}
+	closeRoot = false
+	return root, dir, info, nil
+}
+
+func verifyBackupJSONParentIdentity(parentPath string, expected os.FileInfo) error {
+	info, err := os.Lstat(parentPath)
+	if err != nil {
+		return fmt.Errorf("inspect backup json parent: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || !os.SameFile(info, expected) {
+		return fmt.Errorf("%w: backup json parent changed during persistence", ErrUnsafePath)
+	}
+	return nil
+}
+
+func validateBackupJSONTarget(root *os.Root, name string) error {
+	info, err := root.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("%w: backup json target must be a regular file", ErrUnsafePath)
+	}
+	return nil
+}
+
+func createBackupJSONTempFile(root *os.Root, fileName string, perm os.FileMode) (*os.File, string, error) {
+	for range maxBackupJSONTempAttempts {
+		randomPart := make([]byte, 16)
+		if _, err := backupJSONRandomRead(randomPart); err != nil {
+			return nil, "", fmt.Errorf("generate backup json temp name: %w", err)
+		}
+		tmpName := "." + fileName + "." + hex.EncodeToString(randomPart) + ".tmp"
+		tmpFile, err := rootio.OpenFileNoFollow(root, tmpName, os.O_CREATE|os.O_EXCL|os.O_WRONLY, perm)
+		if err == nil {
+			return tmpFile, tmpName, nil
+		}
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		return nil, "", mapBackupNoFollowError(err, "backup json")
+	}
+	return nil, "", errors.New("allocate unique backup json temp file")
+}
+
+func syncBackupJSONDirectoryHandle(dir *os.File, _ string) error {
+	return syncBackupDirectoryHandle(dir)
+}
+
+func syncBackupDirectory(dir string) error {
 	dirHandle, err := rootio.OpenDirPathNoFollow(dir)
 	if err != nil {
-		return mapBackupNoFollowError(err, "backup json directory")
+		return mapBackupNoFollowError(err, "backup directory")
 	}
 	defer dirHandle.Close()
 
 	return dirHandle.Sync()
+}
+
+func syncCreatedBackupDirectories(createdDirs []string, syncDir func(string) error) error {
+	for _, createdDir := range createdDirs {
+		if err := syncDir(filepath.Dir(createdDir)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func readManifest(filePath string) (Manifest, error) {

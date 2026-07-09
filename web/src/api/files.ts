@@ -309,18 +309,21 @@ export class ApiError extends Error {
   status: number
   statusText: string
   code?: string
+  details?: unknown
   
   constructor(
     message: string,
     status: number,
     statusText: string,
-    code?: string
+    code?: string,
+    details?: unknown,
   ) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.statusText = statusText
     this.code = code
+    this.details = details
   }
   
   get isNotFound(): boolean {
@@ -347,7 +350,7 @@ export class ApiError extends Error {
 // Helper to handle API responses
 async function handleResponse<T>(response: Response, errorPrefix: string): Promise<T> {
   if (!response.ok) {
-    let details: { message: string; code?: string }
+    let details: { message: string; code?: string; details?: unknown }
     try {
       details = extractApiErrorDetails(await response.json(), errorPrefix)
     } catch {
@@ -355,7 +358,7 @@ async function handleResponse<T>(response: Response, errorPrefix: string): Promi
       throw new ApiError(`${errorPrefix}: ${response.statusText}`, response.status, response.statusText)
     }
 
-    throw new ApiError(details.message, response.status, response.statusText, details.code)
+    throw new ApiError(details.message, response.status, response.statusText, details.code, details.details)
   }
   
   try {
@@ -478,16 +481,18 @@ function localizedDownloadApiErrorMessage(message: string): string | undefined {
 function extractApiErrorDetails(body: unknown, fallback: string): {
   message: string
   code?: string
+  details?: unknown
 } {
   if (!isRecord(body)) {
     return { message: fallback }
   }
 
   const topLevelCode = getNonBlankJsonString(body.code)
+  const details = body.details
 
   const stringError = getNonBlankJsonString(body.error)
   if (stringError !== undefined) {
-    return { message: stringError, code: topLevelCode }
+    return { message: stringError, code: topLevelCode, details }
   }
 
   if (isRecord(body.error)) {
@@ -495,23 +500,23 @@ function extractApiErrorDetails(body: unknown, fallback: string): {
     const code = getNonBlankJsonString(body.error.code) ?? topLevelCode
 
     if (message !== undefined) {
-      return { message, code }
+      return { message, code, details }
     }
 
     const topLevelMessage = getNonBlankJsonString(body.message)
     if (topLevelMessage !== undefined) {
-      return { message: topLevelMessage, code }
+      return { message: topLevelMessage, code, details }
     }
 
-    return { message: fallback, code }
+    return { message: fallback, code, details }
   }
 
   const topLevelMessage = getNonBlankJsonString(body.message)
   if (topLevelMessage !== undefined) {
-    return { message: topLevelMessage, code: topLevelCode }
+    return { message: topLevelMessage, code: topLevelCode, details }
   }
 
-  return { message: fallback, code: topLevelCode }
+  return { message: fallback, code: topLevelCode, details }
 }
 
 function createApiErrorFromXhr(xhr: XMLHttpRequest, fallback: string): ApiError {

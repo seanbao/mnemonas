@@ -96,6 +96,15 @@ Limits:
 - Restic/rclone commands still use the original configured `repository` or `remote` values. Clients that call `restore-verify` after a restore should reuse the original request `target_path`, not the redacted response `target_path` intended for display.
 - `schedule_interval` is a lightweight in-process scheduler for fixed intervals. For complex windows, bandwidth limits, network wake-up, and multi-stage recovery, continue to use systemd timers or external orchestration.
 
+Concurrency and locking boundaries:
+
+- The backup manager holds a cross-process lock on `<storage.root>/.mnemonas/backup/backup-state.lock` until the manager closes. Only one writer can own a state root at a time. The lock file remains after a normal shutdown, and lock ownership is determined by the operating-system file lock. The file is not a stale-lock marker and must not be removed while MnemoNAS is running.
+- On Unix, the backup state root must be owned by the effective service account or `root` and must not be writable by group or other users. Its ancestors must have trusted owners and must not allow another local account to replace the state root. The backup manager does not initialize when these requirements are not met.
+- The manager retains the filesystem identity of the locked state root and verifies that the original path still identifies that directory before operations and around state writes. Moving, removing, or replacing the state root causes the identity check to quarantine the current manager immediately; the manager does not follow the new path or write into the replacement directory. If the operation's `completed` result was already committed by atomic replacement, that operation remains completed and returns a warning that instructs the operator to inspect the state directory and restart the service. Later backup API requests return `503`. An ordinary hard persistence failure before atomic commit returns `500`.
+- A `local` job holds a cross-process lock on `<destination>/<job-id>/.mnemonas-target.lock`. Backup, restore preview, restore drill, restore, post-restore read-only verification, and retention-check operations all use this lock, so managers with different state roots cannot operate on the same local job directory concurrently. On Unix, the job directory must be owned by the effective service account or `root` and must not be writable by group or other users. Its ancestors must have trusted owners; a writable ancestor is accepted only when the sticky bit is set and prevents another account from replacing a trusted child directory. Local operations fail closed when these requirements are not met.
+- External disks using FAT, exFAT, or another filesystem that does not persist Unix ownership and mode must be mounted with secure `uid`, `gid`, `dmask`, and `fmask` values. The job directory must appear to be owned by a trusted account and must not be writable by group or other users. For example, use the actual service UID/GID with `uid=<mnemonas-uid>,gid=<mnemonas-gid>,dmask=0077,fmask=0177`. A target without reliable Unix mode or equivalent mount constraints is rejected by `local` jobs.
+- Remote jobs do not create a local target lock. MnemoNAS relies on restic's native repository locking to coordinate processes that address the same repository. Rclone has no generic distributed mutex that applies to every remote. When multiple jobs or MnemoNAS instances address the same rclone path, external scheduling must serialize backup, restore, and verification operations.
+
 Example config:
 
 ```toml
@@ -166,7 +175,16 @@ extra_args = ["--fast-list"]
 
 `schedule_window_start` and `schedule_window_end` only restrict automatic scheduling; manual run-now operations are unaffected. The window uses the server local time in `HH:MM` format and may cross midnight.
 
-Local retention runs after a successful backup and always keeps the current snapshot. `max_snapshots = 0` and `max_age = "0"` disable the corresponding pruning dimension.
+Local retention runs after the successful backup state is committed and always keeps the current snapshot. `max_snapshots = 0` and `max_age = "0"` disable the corresponding pruning dimension.
+
+Backup runs commit in this order:
+
+1. Persist the `running` state before creating a local snapshot or starting a remote command.
+2. For local jobs, sync snapshot files, the manifest, and the staging directory, then rename the staging directory to the final snapshot and sync the snapshot root.
+3. Persist the successful run with the snapshot path and manifest size/digest evidence.
+4. Prune old snapshots and run the retention check only after the successful state is committed.
+
+If the `running` state cannot be persisted, the run fails without creating a snapshot or starting a remote backup command. If successful-state persistence fails before atomic replacement, the run fails and preserves the previous `last_successful_run`; even if a final snapshot directory exists, a snapshot not bound to successful state is not used for preview, restore, or restore drills. If the state file was replaced but its parent-directory sync is uncertain, the run remains `completed`, preserves the existing snapshots, and skips later cleanup. The API returns `warning=true`, `warnings[]`, `message="backup completed with warnings"`, and `Warning: 199 MnemoNAS "backup run completed with warnings"`.
 
 Restic and rclone retention is managed by the external tool, such as `restic forget --prune`, a systemd timer, or lifecycle rules on the remote. Set `retention_policy` to mark that external policy as confirmed in the Maintenance page; otherwise the task shows a retention warning.
 
@@ -188,7 +206,7 @@ The Dashboard summarizes the number of backup tasks needing attention, their mai
 
 When a task has a backup failure, retention issue, restore-drill attention state, latest-backup or latest-restore warning, pending restore verification, or failed/warning restore check, the job row also summarizes the attention reasons and suggested next steps.
 
-Backup, restore, restore-drill, read-only verification, and retention-check operations persist a `running` record before execution. During service startup, `running` records left by a previous process exit are marked failed and written back to the state file.
+Backup, restore, restore-drill, read-only verification, and retention-check operations persist a `running` record before execution. During service startup, `running` records left by a previous process exit are marked failed and written back to the state file. If a backup is committed but later retention cleanup, retention checking, or result persistence is incomplete, the run remains `completed` and returns a warning instead of rewriting the committed backup as a full failure.
 
 Restore-drill history and explicit restore history both keep the latest 20 entries by default, including failed attempts and their error messages. Failed drills also record a stable `failure_category` for common causes such as missing snapshots, integrity-check failures, external-command failures, and I/O errors.
 
@@ -547,7 +565,7 @@ Built-in `[[backup.jobs]]` reuse `[alerts]` notification channels. MnemoNAS send
 
 The event `message` is a fixed public summary and does not include job names, paths, or raw error text. Event details contain only job ID, run ID, job type, trigger, status, timestamps, file/byte/snapshot counts, warning count, error-message presence, failure category, and whether location details were omitted. They do not include job names, sources, backup targets, restore target paths, snapshot paths, manifest paths, raw warnings, or raw error text.
 
-Restore-drill reminders are rate-limited and recorded as `last_restore_drill_reminder_at` in the job view. Webhook, Telegram, WeCom, DingTalk, and SMTP email channels can receive these events. A Webhook channel can be enabled with:
+Restore-drill reminders are rate-limited and recorded as `last_restore_drill_reminder_at` in the job view only after a notification channel returns success. Delivery failure does not advance the cooldown. If delivery succeeds but marker persistence fails, the next scheduler pass retries and may deliver a duplicate. Webhook, Telegram, WeCom, DingTalk, and SMTP email channels can receive these events. A Webhook channel can be enabled with:
 
 ```toml
 [alerts]
@@ -557,6 +575,8 @@ webhook_method = "POST"
 ```
 
 `POST` sends a JSON body with `type`, `level`, `message`, `timestamp`, `hostname`, and `details`. `details` uses only the redacted summary fields listed above. `GET` mode encodes the same base fields into the query string and sends `details` as a JSON string. Neither mode sends job names, sources, backup targets, restore target paths, snapshot paths, manifest paths, raw warnings, or raw error text.
+
+A custom `backup.Notifier` receives synchronous `NotifyBackupEvent` calls. The backup manager gives each call a 10-second deadline and cancels its context when the manager shuts down. Implementations must observe `ctx.Done()` and return promptly after cancellation or deadline expiry. A blocking implementation that ignores the context can stall the current backup operation or service shutdown. The built-in SMTP transport also has a 30-second default timeout and honors an earlier upstream context deadline, so backup events remain bounded by the 10-second notification budget.
 
 For external restic/rclone scripts, keep an exit trap:
 

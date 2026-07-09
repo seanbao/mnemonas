@@ -194,7 +194,7 @@ func protectedSystemDirectoryForTest(t *testing.T) string {
 }
 
 func TestNewManagerRejectsSymlinkStateRoot(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	realRoot := filepath.Join(tmpDir, "real-state")
 	linkRoot := filepath.Join(tmpDir, "state-link")
 	if err := os.Mkdir(realRoot, 0700); err != nil {
@@ -204,7 +204,7 @@ func TestNewManagerRejectsSymlinkStateRoot(t *testing.T) {
 		t.Fatalf("Symlink(stateRoot) error: %v", err)
 	}
 
-	_, err := NewManager(ManagerConfig{
+	_, err := newBackupTestManager(t, ManagerConfig{
 		Root:        linkRoot,
 		StorageRoot: filepath.Join(tmpDir, "source"),
 	})
@@ -214,7 +214,7 @@ func TestNewManagerRejectsSymlinkStateRoot(t *testing.T) {
 }
 
 func TestNewManagerRejectsSymlinkStateRootParent(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	realParent := filepath.Join(tmpDir, "real-parent")
 	linkParent := filepath.Join(tmpDir, "linked-parent")
 	if err := os.Mkdir(realParent, 0700); err != nil {
@@ -224,7 +224,7 @@ func TestNewManagerRejectsSymlinkStateRootParent(t *testing.T) {
 		t.Fatalf("Symlink(linkParent) error: %v", err)
 	}
 
-	_, err := NewManager(ManagerConfig{
+	_, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(linkParent, "state"),
 		StorageRoot: filepath.Join(tmpDir, "source"),
 	})
@@ -237,7 +237,7 @@ func TestNewManagerRejectsSymlinkStateRootParent(t *testing.T) {
 }
 
 func TestNewManagerRejectsSymlinkStateFile(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	stateRoot := filepath.Join(tmpDir, "state")
 	outsideState := filepath.Join(tmpDir, "outside-status.json")
 	if err := os.Mkdir(stateRoot, 0700); err != nil {
@@ -250,7 +250,7 @@ func TestNewManagerRejectsSymlinkStateFile(t *testing.T) {
 		t.Skipf("symlink unavailable: %v", err)
 	}
 
-	_, err := NewManager(ManagerConfig{
+	_, err := newBackupTestManager(t, ManagerConfig{
 		Root:        stateRoot,
 		StorageRoot: filepath.Join(tmpDir, "source"),
 	})
@@ -260,7 +260,7 @@ func TestNewManagerRejectsSymlinkStateFile(t *testing.T) {
 }
 
 func TestNewManagerRejectsUnsafeJobID(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	if err := os.Mkdir(source, 0700); err != nil {
@@ -272,7 +272,7 @@ func TestNewManagerRejectsUnsafeJobID(t *testing.T) {
 
 	for i, id := range []string{"../escape", "nested/job", ".", strings.Repeat("a", 65)} {
 		t.Run(id, func(t *testing.T) {
-			_, err := NewManager(ManagerConfig{
+			_, err := newBackupTestManager(t, ManagerConfig{
 				Root:        filepath.Join(tmpDir, "state-"+strconv.Itoa(i)),
 				StorageRoot: source,
 				Jobs: []config.BackupJobConfig{{
@@ -291,7 +291,7 @@ func TestNewManagerRejectsUnsafeJobID(t *testing.T) {
 }
 
 func TestNewManagerRejectsDuplicateJobID(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	if err := os.Mkdir(source, 0700); err != nil {
@@ -301,7 +301,7 @@ func TestNewManagerRejectsDuplicateJobID(t *testing.T) {
 		t.Fatalf("Mkdir(destination) error: %v", err)
 	}
 
-	_, err := NewManager(ManagerConfig{
+	_, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{
@@ -327,14 +327,14 @@ func TestNewManagerRejectsDuplicateJobID(t *testing.T) {
 }
 
 func TestManagerAddJobMakesLocalJobRunnableWithoutRestart(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	configPath := filepath.Join(tmpDir, "config.toml")
 	mustWriteFile(t, filepath.Join(source, "docs", "note.txt"), "hot added")
 	mustWriteFile(t, configPath, "[server]\nport = 8080\n")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		ConfigPath:  configPath,
@@ -376,13 +376,13 @@ func TestManagerAddJobMakesLocalJobRunnableWithoutRestart(t *testing.T) {
 }
 
 func TestManagerAddJobRejectsCaseInsensitiveDuplicate(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	if err := os.MkdirAll(source, 0700); err != nil {
 		t.Fatalf("MkdirAll(source) error: %v", err)
 	}
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -414,7 +414,7 @@ func TestManagerAddJobRejectsCaseInsensitiveDuplicate(t *testing.T) {
 }
 
 func TestManagerValidateNewJobRejectsExistingFileDestination(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backup-file")
 	if err := os.MkdirAll(source, 0700); err != nil {
@@ -423,7 +423,7 @@ func TestManagerValidateNewJobRejectsExistingFileDestination(t *testing.T) {
 	if err := os.WriteFile(destination, []byte("not a directory"), 0600); err != nil {
 		t.Fatalf("WriteFile(destination) error: %v", err)
 	}
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 	})
@@ -442,8 +442,8 @@ func TestManagerValidateNewJobRejectsExistingFileDestination(t *testing.T) {
 	}
 }
 
-func TestWriteJSONFileRejectsTempSymlink(t *testing.T) {
-	tmpDir := t.TempDir()
+func TestWriteJSONFileIgnoresPredictableTempSymlink(t *testing.T) {
+	tmpDir := secureBackupTestTempDir(t)
 	filePath := filepath.Join(tmpDir, "state", stateFileName)
 	outsideState := filepath.Join(tmpDir, "outside-status.json")
 	if err := os.MkdirAll(filepath.Dir(filePath), 0700); err != nil {
@@ -457,17 +457,24 @@ func TestWriteJSONFileRejectsTempSymlink(t *testing.T) {
 	}
 
 	err := writeJSONFile(filePath, map[string]string{"status": "updated"}, 0600)
-	if !errors.Is(err, ErrUnsafePath) {
-		t.Fatalf("writeJSONFile() error = %v, want %v", err, ErrUnsafePath)
+	if err != nil {
+		t.Fatalf("writeJSONFile() error: %v", err)
 	}
 	assertFileContent(t, outsideState, "original")
-	if _, statErr := os.Lstat(filePath); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("state file stat error = %v, want not exist", statErr)
+	data, readErr := os.ReadFile(filePath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(state) error: %v", readErr)
+	}
+	if !strings.Contains(string(data), `"status": "updated"`) {
+		t.Fatalf("state file = %q, want updated JSON", data)
+	}
+	if info, statErr := os.Lstat(filePath + ".tmp"); statErr != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("predictable temp symlink was changed: info=%v error=%v", info, statErr)
 	}
 }
 
 func TestWriteJSONFileRejectsFinalSymlink(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	filePath := filepath.Join(tmpDir, "state", stateFileName)
 	outsideState := filepath.Join(tmpDir, "outside-status.json")
 	if err := os.MkdirAll(filepath.Dir(filePath), 0700); err != nil {
@@ -491,13 +498,13 @@ func TestWriteJSONFileRejectsFinalSymlink(t *testing.T) {
 }
 
 func TestWriteJSONFileReturnsParentDirectorySyncFailure(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	filePath := filepath.Join(tmpDir, "state", stateFileName)
 	originalSyncBackupJSONDir := syncBackupJSONDir
 	t.Cleanup(func() { syncBackupJSONDir = originalSyncBackupJSONDir })
 	syncErr := errors.New("injected directory sync failure")
 	var syncedDir string
-	syncBackupJSONDir = func(dir string) error {
+	syncBackupJSONDir = func(_ *os.File, dir string) error {
 		syncedDir = dir
 		return syncErr
 	}
@@ -505,6 +512,9 @@ func TestWriteJSONFileReturnsParentDirectorySyncFailure(t *testing.T) {
 	err := writeJSONFile(filePath, map[string]string{"status": "updated"}, 0o600)
 	if !errors.Is(err, syncErr) {
 		t.Fatalf("writeJSONFile() error = %v, want %v", err, syncErr)
+	}
+	if !isBackupPersistenceWarning(err) {
+		t.Fatalf("writeJSONFile() error = %v, want post-replace persistence warning", err)
 	}
 	if syncedDir != filepath.Dir(filePath) {
 		t.Fatalf("synced directory = %q, want %q", syncedDir, filepath.Dir(filePath))
@@ -518,6 +528,421 @@ func TestWriteJSONFileReturnsParentDirectorySyncFailure(t *testing.T) {
 	}
 	if _, statErr := os.Lstat(filePath + ".tmp"); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("temp state file stat error = %v, want not exist", statErr)
+	}
+}
+
+func TestWriteJSONFileReconcilesCommittedRenameError(t *testing.T) {
+	tmpDir := secureBackupTestTempDir(t)
+	filePath := filepath.Join(tmpDir, "state", stateFileName)
+	originalRename := renameBackupJSONFile
+	t.Cleanup(func() { renameBackupJSONFile = originalRename })
+	renameErr := errors.New("injected ambiguous backup json rename error")
+	renameBackupJSONFile = func(root *os.Root, oldName, newName string) error {
+		if err := originalRename(root, oldName, newName); err != nil {
+			return err
+		}
+		return renameErr
+	}
+
+	if err := writeJSONFile(filePath, map[string]string{"status": "updated"}, 0o600); err != nil {
+		t.Fatalf("writeJSONFile() error after committed rename: %v", err)
+	}
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("ReadFile(state) error: %v", err)
+	}
+	if !strings.Contains(string(data), `"status": "updated"`) {
+		t.Fatalf("state file = %q, want updated JSON", data)
+	}
+}
+
+func TestManagerStateKeepsCommittedCandidateAfterPostRenameIdentityWarning(t *testing.T) {
+	tmpDir := secureBackupTestTempDir(t)
+	stateRoot := filepath.Join(tmpDir, "state")
+	movedStateRoot := filepath.Join(tmpDir, "state-moved")
+	manager, err := newBackupTestManager(t, ManagerConfig{Root: stateRoot})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+
+	originalAfterRename := afterRenameBackupJSONFile
+	t.Cleanup(func() { afterRenameBackupJSONFile = originalAfterRename })
+	afterRenameBackupJSONFile = func(filePath string) {
+		if filePath != manager.statePath() {
+			return
+		}
+		if err := os.Rename(stateRoot, movedStateRoot); err != nil {
+			t.Fatalf("Rename(state root) error: %v", err)
+		}
+		if err := os.Mkdir(stateRoot, 0o700); err != nil {
+			t.Fatalf("Mkdir(replacement state root) error: %v", err)
+		}
+	}
+
+	result := &RunResult{
+		ID:        "committed-run",
+		JobID:     "home",
+		Status:    StatusRunning,
+		StartedAt: time.Date(2026, 7, 15, 6, 0, 0, 0, time.UTC),
+	}
+	err = manager.updateLastRun(result)
+	if !isBackupPersistenceWarning(err) || !errors.Is(err, ErrUnsafePath) || !errors.Is(err, ErrBackupStateNamespaceChanged) {
+		t.Fatalf("updateLastRun() error = %v, want post-replace namespace warning", err)
+	}
+	manager.mu.Lock()
+	lastRun := cloneRunResultRaw(manager.state.Jobs["home"].LastRun)
+	healthy := manager.statePersistenceHealthy
+	manager.mu.Unlock()
+	if lastRun == nil || lastRun.ID != result.ID || lastRun.Status != StatusRunning {
+		t.Fatalf("in-memory LastRun = %+v, want committed candidate", lastRun)
+	}
+	if healthy {
+		t.Fatal("state persistence health = true, want false after identity warning")
+	}
+	if manager.Available() {
+		t.Fatal("Available() = true after state namespace changed")
+	}
+	data, readErr := os.ReadFile(filepath.Join(movedStateRoot, stateFileName))
+	if readErr != nil {
+		t.Fatalf("ReadFile(committed state) error: %v", readErr)
+	}
+	var persisted persistedState
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatalf("Unmarshal(committed state) error: %v", err)
+	}
+	if persisted.Jobs["home"].LastRun == nil || persisted.Jobs["home"].LastRun.ID != result.ID {
+		t.Fatalf("persisted LastRun = %+v, want committed candidate", persisted.Jobs["home"].LastRun)
+	}
+
+	next := cloneRunResultRaw(result)
+	next.ID = "must-not-write"
+	if err := manager.updateLastRun(next); !errors.Is(err, ErrBackupStateNamespaceChanged) || isBackupPersistenceWarning(err) {
+		t.Fatalf("second updateLastRun() error = %v, want non-warning %v", err, ErrBackupStateNamespaceChanged)
+	}
+	if _, err := os.Lstat(filepath.Join(stateRoot, stateFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("replacement state root status error = %v, want not exist", err)
+	}
+
+	replacementManager, err := newBackupTestManager(t, ManagerConfig{Root: stateRoot})
+	if err != nil {
+		t.Fatalf("NewManager(replacement state root) error: %v", err)
+	}
+	if !replacementManager.Available() {
+		t.Fatal("replacement manager is unavailable")
+	}
+}
+
+func TestManagerStateRejectsReplacementRootBetweenWrites(t *testing.T) {
+	tmpDir := secureBackupTestTempDir(t)
+	stateRoot := filepath.Join(tmpDir, "state")
+	movedStateRoot := filepath.Join(tmpDir, "state-moved")
+	manager, err := newBackupTestManager(t, ManagerConfig{Root: stateRoot})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+
+	first := &RunResult{
+		ID:        "first-run",
+		JobID:     "home",
+		Status:    StatusRunning,
+		StartedAt: time.Date(2026, 7, 15, 6, 30, 0, 0, time.UTC),
+	}
+	if err := manager.updateLastRun(first); err != nil {
+		t.Fatalf("first updateLastRun() error: %v", err)
+	}
+	if err := os.Rename(stateRoot, movedStateRoot); err != nil {
+		t.Fatalf("Rename(state root) error: %v", err)
+	}
+	if err := os.Mkdir(stateRoot, 0o700); err != nil {
+		t.Fatalf("Mkdir(replacement state root) error: %v", err)
+	}
+	if manager.Available() {
+		t.Fatal("Available() = true after state root replacement")
+	}
+
+	second := cloneRunResultRaw(first)
+	second.ID = "must-not-write"
+	err = manager.updateLastRun(second)
+	if !errors.Is(err, ErrBackupStateNamespaceChanged) || !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("second updateLastRun() error = %v, want namespace replacement failure", err)
+	}
+	if _, err := os.Lstat(filepath.Join(stateRoot, stateFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("replacement state root status error = %v, want not exist", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(movedStateRoot, stateFileName))
+	if err != nil {
+		t.Fatalf("ReadFile(original state) error: %v", err)
+	}
+	var persisted persistedState
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatalf("Unmarshal(original state) error: %v", err)
+	}
+	if persisted.Jobs["home"].LastRun == nil || persisted.Jobs["home"].LastRun.ID != first.ID {
+		t.Fatalf("persisted LastRun = %+v, want first committed state", persisted.Jobs["home"].LastRun)
+	}
+
+	replacementManager, err := newBackupTestManager(t, ManagerConfig{Root: stateRoot})
+	if err != nil {
+		t.Fatalf("NewManager(replacement state root) error: %v", err)
+	}
+	t.Cleanup(func() { _ = replacementManager.Close() })
+	if !replacementManager.Available() {
+		t.Fatal("replacement manager is unavailable")
+	}
+}
+
+func TestManagerStateWriterNeverFollowsReplacementRoot(t *testing.T) {
+	tmpDir := secureBackupTestTempDir(t)
+	stateRoot := filepath.Join(tmpDir, "state")
+	movedStateRoot := filepath.Join(tmpDir, "state-moved")
+	manager, err := newBackupTestManager(t, ManagerConfig{Root: stateRoot})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+
+	originalWriteBackupStateFile := writeBackupStateFile
+	t.Cleanup(func() { writeBackupStateFile = originalWriteBackupStateFile })
+	replaced := false
+	writeBackupStateFile = func(lock *backupStateLock, path string, value any, perm os.FileMode) error {
+		if !replaced {
+			replaced = true
+			if err := os.Rename(stateRoot, movedStateRoot); err != nil {
+				t.Fatalf("Rename(state root) error: %v", err)
+			}
+			if err := os.Mkdir(stateRoot, 0o700); err != nil {
+				t.Fatalf("Mkdir(replacement state root) error: %v", err)
+			}
+		}
+		return originalWriteBackupStateFile(lock, path, value, perm)
+	}
+
+	result := &RunResult{
+		ID:        "must-not-commit",
+		JobID:     "home",
+		Status:    StatusRunning,
+		StartedAt: time.Date(2026, 7, 15, 6, 40, 0, 0, time.UTC),
+	}
+	err = manager.updateLastRun(result)
+	if !errors.Is(err, ErrBackupStateNamespaceChanged) || isBackupPersistenceWarning(err) {
+		t.Fatalf("updateLastRun() error = %v, want non-warning namespace failure", err)
+	}
+	entries, err := os.ReadDir(stateRoot)
+	if err != nil {
+		t.Fatalf("ReadDir(replacement state root) error: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("replacement state root entries = %+v, want no status or temp files", entries)
+	}
+	movedEntries, err := os.ReadDir(movedStateRoot)
+	if err != nil {
+		t.Fatalf("ReadDir(original state root) error: %v", err)
+	}
+	for _, entry := range movedEntries {
+		if entry.Name() == stateFileName || strings.HasPrefix(entry.Name(), "."+stateFileName+".") {
+			t.Fatalf("original locked state root retained uncommitted file %q", entry.Name())
+		}
+	}
+}
+
+func TestManagerRunJobSurfacesStateNamespaceChangeAsRestartWarning(t *testing.T) {
+	tmpDir := secureBackupTestTempDir(t)
+	stateRoot := filepath.Join(tmpDir, "state")
+	movedStateRoot := filepath.Join(tmpDir, "state-moved")
+	source := filepath.Join(tmpDir, "source")
+	destination := filepath.Join(tmpDir, "backups")
+	mustWriteFile(t, filepath.Join(source, "note.txt"), "backup")
+	manager, err := newBackupTestManager(t, ManagerConfig{
+		Root:        stateRoot,
+		StorageRoot: source,
+		Jobs: []config.BackupJobConfig{{
+			ID:          "home",
+			Name:        "Home backup",
+			Type:        JobTypeLocal,
+			Source:      source,
+			Destination: destination,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+
+	originalAfterRename := afterRenameBackupJSONFile
+	t.Cleanup(func() { afterRenameBackupJSONFile = originalAfterRename })
+	stateWriteCount := 0
+	afterRenameBackupJSONFile = func(filePath string) {
+		if filePath != manager.statePath() {
+			return
+		}
+		stateWriteCount++
+		if stateWriteCount != 2 {
+			return
+		}
+		if err := os.Rename(stateRoot, movedStateRoot); err != nil {
+			t.Fatalf("Rename(state root) error: %v", err)
+		}
+		if err := os.Mkdir(stateRoot, 0o700); err != nil {
+			t.Fatalf("Mkdir(replacement state root) error: %v", err)
+		}
+	}
+
+	result, err := manager.RunJob(context.Background(), "home")
+	if err != nil {
+		t.Fatalf("RunJob() error = %v, want completed result with restart warning", err)
+	}
+	if result == nil || result.Status != StatusCompleted || !result.Warning {
+		t.Fatalf("RunJob() result = %+v, want completed warning", result)
+	}
+	if len(result.Warnings) != 1 || result.Warnings[0] != stateNamespaceChangedWarning {
+		t.Fatalf("RunJob() warnings = %#v, want explicit restart warning", result.Warnings)
+	}
+	if manager.Available() {
+		t.Fatal("Available() = true after state namespace changed")
+	}
+	if info, err := os.Stat(result.SnapshotPath); err != nil || !info.IsDir() {
+		t.Fatalf("completed snapshot status = %v, error = %v", info, err)
+	}
+}
+
+func TestManagerStateQuarantinesMissingRootAfterCommittedWrite(t *testing.T) {
+	tmpDir := secureBackupTestTempDir(t)
+	stateRoot := filepath.Join(tmpDir, "state")
+	movedStateRoot := filepath.Join(tmpDir, "state-moved")
+	manager, err := newBackupTestManager(t, ManagerConfig{Root: stateRoot})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+
+	originalAfterRename := afterRenameBackupJSONFile
+	t.Cleanup(func() { afterRenameBackupJSONFile = originalAfterRename })
+	afterRenameBackupJSONFile = func(filePath string) {
+		if filePath != manager.statePath() {
+			return
+		}
+		if err := os.Rename(stateRoot, movedStateRoot); err != nil {
+			t.Fatalf("Rename(state root) error: %v", err)
+		}
+	}
+
+	result := &RunResult{
+		ID:        "committed-run",
+		JobID:     "home",
+		Status:    StatusRunning,
+		StartedAt: time.Date(2026, 7, 15, 6, 45, 0, 0, time.UTC),
+	}
+	err = manager.updateLastRun(result)
+	if !isBackupPersistenceWarning(err) || !errors.Is(err, ErrBackupStateNamespaceChanged) {
+		t.Fatalf("updateLastRun() error = %v, want committed namespace warning", err)
+	}
+	if manager.Available() {
+		t.Fatal("Available() = true after state root disappeared")
+	}
+	data, err := os.ReadFile(filepath.Join(movedStateRoot, stateFileName))
+	if err != nil {
+		t.Fatalf("ReadFile(committed state) error: %v", err)
+	}
+	var persisted persistedState
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatalf("Unmarshal(committed state) error: %v", err)
+	}
+	if persisted.Jobs["home"].LastRun == nil || persisted.Jobs["home"].LastRun.ID != result.ID {
+		t.Fatalf("persisted LastRun = %+v, want committed candidate", persisted.Jobs["home"].LastRun)
+	}
+}
+
+func TestWriteJSONFileRetriesUniqueTempNameCollision(t *testing.T) {
+	tmpDir := secureBackupTestTempDir(t)
+	filePath := filepath.Join(tmpDir, stateFileName)
+	collisionName := "." + stateFileName + "." + strings.Repeat("00", 16) + ".tmp"
+	collisionPath := filepath.Join(tmpDir, collisionName)
+	if err := os.WriteFile(collisionPath, []byte("collision"), 0o600); err != nil {
+		t.Fatalf("WriteFile(collision) error: %v", err)
+	}
+
+	originalRandomRead := backupJSONRandomRead
+	t.Cleanup(func() { backupJSONRandomRead = originalRandomRead })
+	calls := 0
+	backupJSONRandomRead = func(buffer []byte) (int, error) {
+		calls++
+		for index := range buffer {
+			buffer[index] = byte(calls - 1)
+		}
+		return len(buffer), nil
+	}
+	if err := writeJSONFile(filePath, map[string]string{"status": "updated"}, 0o600); err != nil {
+		t.Fatalf("writeJSONFile() error: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("random read calls = %d, want 2", calls)
+	}
+	assertFileContent(t, collisionPath, "collision")
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("ReadFile(state) error: %v", err)
+	}
+	if !strings.Contains(string(data), `"status": "updated"`) {
+		t.Fatalf("state file = %q, want updated JSON", data)
+	}
+}
+
+func TestWriteJSONFileRandomFailurePreservesExistingState(t *testing.T) {
+	tmpDir := secureBackupTestTempDir(t)
+	filePath := filepath.Join(tmpDir, stateFileName)
+	if err := os.WriteFile(filePath, []byte("previous"), 0o600); err != nil {
+		t.Fatalf("WriteFile(previous) error: %v", err)
+	}
+
+	originalRandomRead := backupJSONRandomRead
+	t.Cleanup(func() { backupJSONRandomRead = originalRandomRead })
+	randomErr := errors.New("injected random source failure")
+	backupJSONRandomRead = func([]byte) (int, error) { return 0, randomErr }
+	err := writeJSONFile(filePath, map[string]string{"status": "updated"}, 0o600)
+	if !errors.Is(err, randomErr) {
+		t.Fatalf("writeJSONFile() error = %v, want %v", err, randomErr)
+	}
+	assertFileContent(t, filePath, "previous")
+	entries, readErr := os.ReadDir(tmpDir)
+	if readErr != nil {
+		t.Fatalf("ReadDir() error: %v", readErr)
+	}
+	if len(entries) != 1 || entries[0].Name() != stateFileName {
+		t.Fatalf("state directory entries = %#v, want only %s", entries, stateFileName)
+	}
+}
+
+func TestWriteJSONFileConcurrentWritersLeaveCompleteDocument(t *testing.T) {
+	tmpDir := secureBackupTestTempDir(t)
+	filePath := filepath.Join(tmpDir, stateFileName)
+	type document struct {
+		Writer int    `json:"writer"`
+		Value  string `json:"value"`
+	}
+	const writerCount = 16
+	start := make(chan struct{})
+	errorsByWriter := make(chan error, writerCount)
+	for writer := range writerCount {
+		go func() {
+			<-start
+			errorsByWriter <- writeJSONFile(filePath, document{Writer: writer, Value: strings.Repeat("x", 2048)}, 0o600)
+		}()
+	}
+	close(start)
+	for range writerCount {
+		if err := <-errorsByWriter; err != nil {
+			t.Fatalf("concurrent writeJSONFile() error: %v", err)
+		}
+	}
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("ReadFile(state) error: %v", err)
+	}
+	var persisted document
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatalf("Unmarshal(state) error: %v; data=%q", err, data)
+	}
+	if persisted.Writer < 0 || persisted.Writer >= writerCount || persisted.Value != strings.Repeat("x", 2048) {
+		t.Fatalf("persisted document = %+v, want one complete writer payload", persisted)
 	}
 }
 
@@ -628,7 +1053,7 @@ func TestReadManifestRejectsUnsafeEntries(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			manifestPath := filepath.Join(t.TempDir(), "manifest.json")
+			manifestPath := filepath.Join(secureBackupTestTempDir(t), "manifest.json")
 			manifest := Manifest{
 				Version:    manifestVersion,
 				FileCount:  1,
@@ -651,7 +1076,7 @@ func TestReadManifestRejectsUnsafeEntries(t *testing.T) {
 
 func TestReadManifestRejectsDuplicateArchivePaths(t *testing.T) {
 	validDigest := strings.Repeat("a", 64)
-	manifestPath := filepath.Join(t.TempDir(), "manifest.json")
+	manifestPath := filepath.Join(secureBackupTestTempDir(t), "manifest.json")
 	manifest := Manifest{
 		Version:    manifestVersion,
 		FileCount:  2,
@@ -776,7 +1201,7 @@ func TestReadManifestRejectsInconsistentSummary(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			manifestPath := filepath.Join(t.TempDir(), "manifest.json")
+			manifestPath := filepath.Join(secureBackupTestTempDir(t), "manifest.json")
 			if err := writeJSONFile(manifestPath, tt.manifest, 0600); err != nil {
 				t.Fatalf("writeJSONFile(manifest) error: %v", err)
 			}
@@ -801,7 +1226,7 @@ func TestReadManifestRejectsInvalidSHA256(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			manifestPath := filepath.Join(t.TempDir(), "manifest.json")
+			manifestPath := filepath.Join(secureBackupTestTempDir(t), "manifest.json")
 			manifest := Manifest{
 				Version:    manifestVersion,
 				FileCount:  1,
@@ -827,7 +1252,7 @@ func TestReadManifestRejectsInvalidSHA256(t *testing.T) {
 }
 
 func TestReadManifestRejectsInvalidMode(t *testing.T) {
-	manifestPath := filepath.Join(t.TempDir(), "manifest.json")
+	manifestPath := filepath.Join(secureBackupTestTempDir(t), "manifest.json")
 	manifest := Manifest{
 		Version:    manifestVersion,
 		FileCount:  1,
@@ -852,7 +1277,7 @@ func TestReadManifestRejectsInvalidMode(t *testing.T) {
 }
 
 func TestReadManifestRejectsDirectory(t *testing.T) {
-	manifestPath := filepath.Join(t.TempDir(), "manifest.json")
+	manifestPath := filepath.Join(secureBackupTestTempDir(t), "manifest.json")
 	if err := os.Mkdir(manifestPath, 0700); err != nil {
 		t.Fatalf("Mkdir(manifestPath) error: %v", err)
 	}
@@ -864,7 +1289,7 @@ func TestReadManifestRejectsDirectory(t *testing.T) {
 }
 
 func TestVerifyManifestFilesRejectsInconsistentSummary(t *testing.T) {
-	root := t.TempDir()
+	root := secureBackupTestTempDir(t)
 	filePath := filepath.Join(root, "data", "note.txt")
 	mustWriteFile(t, filePath, "verified")
 
@@ -894,7 +1319,7 @@ func TestVerifyManifestFilesRejectsInconsistentSummary(t *testing.T) {
 }
 
 func TestVerifyManifestFilesRejectsUnmanifestedFiles(t *testing.T) {
-	root := t.TempDir()
+	root := secureBackupTestTempDir(t)
 	filePath := filepath.Join(root, "data", "note.txt")
 	mustWriteFile(t, filePath, "verified")
 	mustWriteFile(t, filepath.Join(root, "data", "extra.txt"), "unexpected")
@@ -926,7 +1351,7 @@ func TestVerifyManifestFilesRejectsUnmanifestedFiles(t *testing.T) {
 }
 
 func TestVerifyManifestFilesRejectsUnexpectedTopLevelDirectory(t *testing.T) {
-	root := t.TempDir()
+	root := secureBackupTestTempDir(t)
 	filePath := filepath.Join(root, "data", "note.txt")
 	mustWriteFile(t, filePath, "verified")
 	if err := os.Mkdir(filepath.Join(root, "unexpected"), 0700); err != nil {
@@ -959,7 +1384,7 @@ func TestVerifyManifestFilesRejectsUnexpectedTopLevelDirectory(t *testing.T) {
 }
 
 func TestVerifyManifestFilesRejectsMissingDataDirectory(t *testing.T) {
-	root := t.TempDir()
+	root := secureBackupTestTempDir(t)
 	mustWriteFile(t, filepath.Join(root, manifestFileName), "{}")
 	manifest := Manifest{
 		Version:    manifestVersion,
@@ -974,12 +1399,12 @@ func TestVerifyManifestFilesRejectsMissingDataDirectory(t *testing.T) {
 }
 
 func TestManager_JobViewUsesEmptyExcludeArray(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	if err := os.Mkdir(source, 0700); err != nil {
 		t.Fatalf("Mkdir(source) error: %v", err)
 	}
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -1011,7 +1436,7 @@ func TestManager_JobViewUsesEmptyExcludeArray(t *testing.T) {
 }
 
 func TestManager_JobViewRedactsRemoteTargetSecrets(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	passwordFile := filepath.Join(tmpDir, "restic.pass")
 	if err := os.Mkdir(source, 0700); err != nil {
@@ -1019,7 +1444,7 @@ func TestManager_JobViewRedactsRemoteTargetSecrets(t *testing.T) {
 	}
 	mustWriteFile(t, passwordFile, "secret")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{
@@ -1066,7 +1491,7 @@ func TestManager_JobViewRedactsRemoteTargetSecrets(t *testing.T) {
 }
 
 func TestManager_PublicResultsRedactSensitiveLocalPathSegments(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source", "token=source-secret")
 	destination := filepath.Join(tmpDir, "backups", "token=destination-secret")
 	restoreTarget := filepath.Join(tmpDir, "restore", "token=restore-secret")
@@ -1078,7 +1503,7 @@ func TestManager_PublicResultsRedactSensitiveLocalPathSegments(t *testing.T) {
 		t.Fatalf("MkdirAll(restore parent) error: %v", err)
 	}
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        stateRoot,
 		StorageRoot: source,
 		ConfigPath:  configPath,
@@ -1217,7 +1642,7 @@ func TestManager_PublicResultsRedactSensitiveLocalPathSegments(t *testing.T) {
 }
 
 func TestManager_RunJobAndRestoreDrill(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	stateRoot := filepath.Join(tmpDir, "state")
@@ -1244,7 +1669,7 @@ func TestManager_RunJobAndRestoreDrill(t *testing.T) {
 		_ = os.Chmod(filepath.Join(source, "locked"), 0700)
 	})
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        stateRoot,
 		StorageRoot: source,
 		ConfigPath:  configPath,
@@ -1426,8 +1851,11 @@ func TestManager_RunJobAndRestoreDrill(t *testing.T) {
 			t.Fatalf("%s binding = %q, want %q", evidence.name, evidence.binding, expectedBinding)
 		}
 	}
+	if err := manager.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
 
-	reloaded, err := NewManager(ManagerConfig{
+	reloaded, err := newBackupTestManager(t, ManagerConfig{
 		Root:        stateRoot,
 		StorageRoot: source,
 		ConfigPath:  configPath,
@@ -1486,13 +1914,13 @@ func TestManager_RunJobAndRestoreDrill(t *testing.T) {
 }
 
 func TestManager_RunRestoreDrillWarnsWhenArtifactCleanupFails(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "docs", "note.txt"), "restore drill cleanup")
 	notifier := &recordingNotifier{}
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -1783,12 +2211,12 @@ func TestRestoreReportFindingsRedactsSensitiveMessages(t *testing.T) {
 }
 
 func TestRestoreReportMatchingUsesRawTargetsBeforeRedaction(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore report")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -1896,7 +2324,7 @@ func TestRestoreReportFindingsReportRunningRestore(t *testing.T) {
 }
 
 func TestNewManagerMarksInterruptedJobStateFailed(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	root := filepath.Join(tmpDir, "state")
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
@@ -1954,7 +2382,7 @@ func TestNewManagerMarksInterruptedJobStateFailed(t *testing.T) {
 		t.Fatalf("writeJSONFile(state) error: %v", err)
 	}
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        root,
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -1994,8 +2422,11 @@ func TestNewManagerMarksInterruptedJobStateFailed(t *testing.T) {
 	if job.LastRetentionCheck == nil || job.LastRetentionCheck.Status != StatusFailed || job.LastRetentionCheck.ErrorMessage != interruptedStatusMessage {
 		t.Fatalf("LastRetentionCheck = %+v, want interrupted failed retention check", job.LastRetentionCheck)
 	}
+	if err := manager.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
 
-	reloaded, err := NewManager(ManagerConfig{
+	reloaded, err := newBackupTestManager(t, ManagerConfig{
 		Root:        root,
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -2022,12 +2453,12 @@ func TestNewManagerMarksInterruptedJobStateFailed(t *testing.T) {
 }
 
 func TestManager_RunRestoreDrillWithoutSnapshot(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	if err := os.MkdirAll(source, 0700); err != nil {
 		t.Fatal(err)
 	}
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -2062,12 +2493,12 @@ func TestManager_RunRestoreDrillWithoutSnapshot(t *testing.T) {
 }
 
 func TestManager_RestoreDrillHistoryCapsLatestResults(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	if err := os.MkdirAll(source, 0700); err != nil {
 		t.Fatal(err)
 	}
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -2120,12 +2551,12 @@ func TestManager_RestoreDrillHistoryCapsLatestResults(t *testing.T) {
 }
 
 func TestManager_RunRestoreRejectsUnsafeTarget(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -2212,7 +2643,7 @@ func TestManager_RunRestoreRejectsUnsafeTarget(t *testing.T) {
 }
 
 func TestManager_RunRestoreVerifyWarnsWhenLocalTargetDiffersFromManifest(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	restoreTarget := filepath.Join(tmpDir, "restore-target")
@@ -2229,7 +2660,7 @@ func TestManager_RunRestoreVerifyWarnsWhenLocalTargetDiffersFromManifest(t *test
 		t.Fatalf("Chmod(source empty-mode) error: %v", err)
 	}
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		ConfigPath:  configPath,
@@ -2298,7 +2729,7 @@ func TestManager_RunRestoreVerifyWarnsWhenLocalTargetDiffersFromManifest(t *test
 }
 
 func TestManager_RunRestoreVerifyWarnsWhenLocalTargetContainsSymlink(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	restoreTarget := filepath.Join(tmpDir, "restore-target")
@@ -2306,7 +2737,7 @@ func TestManager_RunRestoreVerifyWarnsWhenLocalTargetContainsSymlink(t *testing.
 	mustWriteFile(t, filepath.Join(source, "docs", "note.txt"), "original")
 	mustWriteFile(t, outsideFile, "outside")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -2338,13 +2769,13 @@ func TestManager_RunRestoreVerifyWarnsWhenLocalTargetContainsSymlink(t *testing.
 }
 
 func TestManager_RunRestoreVerifyUsesRestoreSnapshotWhenNewerBackupExists(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	restoreTarget := filepath.Join(tmpDir, "restore-target")
 	mustWriteFile(t, filepath.Join(source, "docs", "note.txt"), "first")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -2418,7 +2849,7 @@ func TestManager_LatestCompletedRestoreForTargetRequiresCanonicalTarget(t *testi
 }
 
 func TestManager_RunRestoreVerifyWarnsWhenRestoredConfigPathIsDirectory(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	restoreTarget := filepath.Join(tmpDir, "restore-target")
@@ -2426,7 +2857,7 @@ func TestManager_RunRestoreVerifyWarnsWhenRestoredConfigPathIsDirectory(t *testi
 	mustWriteFile(t, filepath.Join(source, "docs", "note.txt"), "restore")
 	mustWriteFile(t, configPath, "[server]\nport = 8080\n")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		ConfigPath:  configPath,
@@ -2468,12 +2899,12 @@ func TestManager_RunRestoreVerifyWarnsWhenRestoredConfigPathIsDirectory(t *testi
 }
 
 func TestManager_RunRestorePreviewRejectsUnsafeManifestArchivePath(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -2502,12 +2933,12 @@ func TestManager_RunRestorePreviewRejectsUnsafeManifestArchivePath(t *testing.T)
 }
 
 func TestManager_RunRestorePreviewRejectsUnsafeManifestSize(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -2536,12 +2967,12 @@ func TestManager_RunRestorePreviewRejectsUnsafeManifestSize(t *testing.T) {
 }
 
 func TestManager_RunRestorePreviewRejectsMismatchedManifestJobID(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -2570,13 +3001,13 @@ func TestManager_RunRestorePreviewRejectsMismatchedManifestJobID(t *testing.T) {
 }
 
 func TestManager_RunRestorePreviewRejectsStateManifestOutsideDestination(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 
 	mustWriteFile(t, filepath.Join(source, "docs", "note.txt"), "hello backup")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -2624,12 +3055,12 @@ func TestManager_RunRestorePreviewRejectsStateManifestOutsideDestination(t *test
 }
 
 func TestManager_RunRestorePreviewRejectsBrokenSymlinkManifest(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -2678,7 +3109,7 @@ func TestManager_RunRestorePreviewRejectsBrokenSymlinkManifest(t *testing.T) {
 }
 
 func TestManager_RunRestorePreviewRejectsSymlinkedLatestSnapshotWithoutFallback(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	outside := filepath.Join(tmpDir, "outside-empty")
@@ -2687,7 +3118,7 @@ func TestManager_RunRestorePreviewRejectsSymlinkedLatestSnapshotWithoutFallback(
 		t.Fatalf("Mkdir(outside) error: %v", err)
 	}
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -2733,12 +3164,12 @@ func TestManager_RunRestorePreviewRejectsSymlinkedLatestSnapshotWithoutFallback(
 }
 
 func TestManager_RunRestorePreviewRejectsUnmanifestedSnapshotFile(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -2769,12 +3200,12 @@ func TestManager_RunRestorePreviewRejectsUnmanifestedSnapshotFile(t *testing.T) 
 }
 
 func TestManager_RunRestorePreviewIgnoresUntrustedSnapshotRootEntry(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -2803,12 +3234,12 @@ func TestManager_RunRestorePreviewIgnoresUntrustedSnapshotRootEntry(t *testing.T
 }
 
 func TestManager_RunRestorePreviewIgnoresUntrustedSnapshotRootDirectory(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -2839,12 +3270,12 @@ func TestManager_RunRestorePreviewIgnoresUntrustedSnapshotRootDirectory(t *testi
 }
 
 func TestManager_RunRestorePreviewRejectsLatestSnapshotMissingManifestWithoutFallback(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -2889,12 +3320,12 @@ func TestManager_RunRestorePreviewRejectsLatestSnapshotMissingManifestWithoutFal
 }
 
 func TestManager_RunRestorePreviewRejectsMissingLatestSnapshotWithoutFallback(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -2939,12 +3370,12 @@ func TestManager_RunRestorePreviewRejectsMissingLatestSnapshotWithoutFallback(t 
 }
 
 func TestManager_RunRestoreRejectsMissingLatestSnapshotWithoutFallback(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -2996,12 +3427,12 @@ func TestManager_RunRestoreRejectsMissingLatestSnapshotWithoutFallback(t *testin
 }
 
 func TestManager_RunRestoreDrillRejectsMissingLatestSnapshotWithoutFallback(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -3049,12 +3480,12 @@ func TestManager_RunRestoreDrillRejectsMissingLatestSnapshotWithoutFallback(t *t
 }
 
 func TestManager_RunRestoreRejectsUnsafeManifestSize(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -3087,12 +3518,12 @@ func TestManager_RunRestoreRejectsUnsafeManifestSize(t *testing.T) {
 }
 
 func TestManager_RunRestoreRejectsUnsafeManifestArchivePath(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -3133,12 +3564,12 @@ func TestManager_RunRestoreRejectsUnsafeManifestArchivePath(t *testing.T) {
 }
 
 func TestManager_RunRestoreDrillRejectsUnsafeManifestSize(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -3173,12 +3604,12 @@ func TestManager_RunRestoreDrillRejectsUnsafeManifestSize(t *testing.T) {
 }
 
 func TestManager_RunRestoreDrillRejectsUnsafeManifestArchivePath(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -3213,12 +3644,12 @@ func TestManager_RunRestoreDrillRejectsUnsafeManifestArchivePath(t *testing.T) {
 }
 
 func TestManager_RunRestoreDrillRejectsSnapshotModeMismatch(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -3255,12 +3686,12 @@ func TestManager_RunRestoreDrillRejectsSnapshotModeMismatch(t *testing.T) {
 }
 
 func TestManager_RunRestoreDrillRejectsUnmanifestedSnapshotFile(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -3295,12 +3726,12 @@ func TestManager_RunRestoreDrillRejectsUnmanifestedSnapshotFile(t *testing.T) {
 }
 
 func TestManager_RunRestoreRejectsUnmanifestedSnapshotFile(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -3332,7 +3763,7 @@ func TestManager_RunRestoreRejectsUnmanifestedSnapshotFile(t *testing.T) {
 
 func TestValidateRestoreTargetPathRejectsProtectedSystemDirectory(t *testing.T) {
 	protectedDir := protectedSystemDirectoryForTest(t)
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	if err := os.MkdirAll(source, 0700); err != nil {
@@ -3346,7 +3777,7 @@ func TestValidateRestoreTargetPathRejectsProtectedSystemDirectory(t *testing.T) 
 }
 
 func TestValidateRestoreTargetPathRejectsControlCharacters(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	storageRoot := filepath.Join(tmpDir, "storage")
@@ -3379,7 +3810,7 @@ func TestValidateRestoreTargetPathRejectsControlCharacters(t *testing.T) {
 }
 
 func TestValidateRestoreTargetPathRejectsDotSegments(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	storageRoot := filepath.Join(tmpDir, "storage")
@@ -3395,7 +3826,7 @@ func TestValidateRestoreTargetPathRejectsDotSegments(t *testing.T) {
 }
 
 func TestValidateRestoreTargetPathRejectsBackslashTargets(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	storageRoot := filepath.Join(tmpDir, "storage")
@@ -3412,7 +3843,7 @@ func TestValidateRestoreTargetPathRejectsBackslashTargets(t *testing.T) {
 }
 
 func TestManager_RunRestoreRejectsTargetSymlinkAncestor(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	realParent := filepath.Join(tmpDir, "real-parent")
@@ -3425,7 +3856,7 @@ func TestManager_RunRestoreRejectsTargetSymlinkAncestor(t *testing.T) {
 		t.Skipf("symlink unavailable: %v", err)
 	}
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -3454,7 +3885,7 @@ func TestManager_RunRestoreRejectsTargetSymlinkAncestor(t *testing.T) {
 }
 
 func TestCreateNamedRestoreTargetRejectsSwappedSymlinkParent(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	parent := filepath.Join(tmpDir, "restore-parent")
 	originalParent := filepath.Join(tmpDir, "restore-parent-original")
 	outside := filepath.Join(tmpDir, "outside")
@@ -3482,7 +3913,7 @@ func TestCreateNamedRestoreTargetRejectsSwappedSymlinkParent(t *testing.T) {
 }
 
 func TestInstallRestoreTargetRejectsSwappedSymlinkParentBeforeRemovingTarget(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	parent := filepath.Join(tmpDir, "restore-parent")
 	originalParent := filepath.Join(tmpDir, "restore-parent-original")
 	outside := filepath.Join(tmpDir, "outside")
@@ -3522,7 +3953,7 @@ func TestInstallRestoreTargetRejectsSwappedSymlinkParentBeforeRemovingTarget(t *
 }
 
 func TestMoveResticRestoredSourceRejectsSwappedPartialSymlink(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	rawPath := filepath.Join(tmpDir, "raw")
 	restoredSourcePath, err := resticRestoredSourcePath(rawPath, source)
@@ -3559,7 +3990,7 @@ func TestMoveResticRestoredSourceRejectsSwappedPartialSymlink(t *testing.T) {
 }
 
 func TestMoveResticRestoredSourceRejectsRestoredSymlinkBeforeMove(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	rawPath := filepath.Join(tmpDir, "raw")
 	restoredSourcePath, err := resticRestoredSourcePath(rawPath, source)
@@ -3604,7 +4035,7 @@ func TestMoveResticRestoredSourceRejectsUnsafeEntryNames(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tmpDir := t.TempDir()
+			tmpDir := secureBackupTestTempDir(t)
 			source := filepath.Join(tmpDir, "source")
 			rawPath := filepath.Join(tmpDir, "raw")
 			restoredSourcePath, err := resticRestoredSourcePath(rawPath, source)
@@ -3640,7 +4071,7 @@ func TestMoveResticRestoredSourceRejectsUnsafeEntryNames(t *testing.T) {
 }
 
 func TestManager_RunRestoreCleanupRejectsSwappedSymlinkParent(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	restoreParent := filepath.Join(tmpDir, "restore-parent")
@@ -3657,7 +4088,7 @@ func TestManager_RunRestoreCleanupRejectsSwappedSymlinkParent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -3715,7 +4146,7 @@ func TestManager_RunRestoreCleanupRejectsSwappedSymlinkParent(t *testing.T) {
 }
 
 func TestManager_RunRestoreBlocksFailedPreflight(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "large.bin"), strings.Repeat("x", 32))
@@ -3728,7 +4159,7 @@ func TestManager_RunRestoreBlocksFailedPreflight(t *testing.T) {
 		restoreAvailableBytesFunc = oldAvailableBytesFunc
 	}()
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -3772,12 +4203,12 @@ func TestManager_RunRestoreBlocksFailedPreflight(t *testing.T) {
 }
 
 func TestManager_RunRestorePreviewChecksCapacityOnExistingEmptyTarget(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -3826,12 +4257,12 @@ func TestManager_RunRestorePreviewChecksCapacityOnExistingEmptyTarget(t *testing
 }
 
 func TestManager_RunBatchRestorePreviewAndRestore(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "docs", "note.txt"), "batch restore")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -3924,13 +4355,60 @@ func TestManager_RunBatchRestorePreviewAndRestore(t *testing.T) {
 	}
 }
 
+func TestManager_BatchRestorePropagatesTargetLockReleaseFailure(t *testing.T) {
+	tmpDir := secureBackupTestTempDir(t)
+	source := filepath.Join(tmpDir, "source")
+	mustWriteFile(t, filepath.Join(source, "note.txt"), "batch restore")
+	manager, err := newBackupTestManager(t, ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Jobs: []config.BackupJobConfig{{
+			ID:          "home",
+			Name:        "Home backup",
+			Type:        JobTypeLocal,
+			Source:      source,
+			Destination: filepath.Join(tmpDir, "backups"),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+
+	originalClose := closeBackupTargetLock
+	t.Cleanup(func() { closeBackupTargetLock = originalClose })
+	closeErr := errors.New("injected batch target lock release failure")
+	closeBackupTargetLock = func(lock *backupStateLock) error {
+		return errors.Join(lock.Close(), closeErr)
+	}
+	opts := BatchRestoreOptions{Items: []BatchRestoreItemOptions{{
+		JobID:      "home",
+		TargetPath: filepath.Join(tmpDir, "restore"),
+	}}}
+
+	preview, err := manager.RunBatchRestorePreview(context.Background(), opts)
+	if !errors.Is(err, ErrNoSnapshots) || !errors.Is(err, ErrBackupTargetLockRelease) || !errors.Is(err, closeErr) {
+		t.Fatalf("RunBatchRestorePreview() error = %v, want business and infrastructure causes", err)
+	}
+	if preview == nil || preview.Status != StatusFailed || len(preview.Items) != 1 || preview.Items[0].Status != StatusFailed {
+		t.Fatalf("RunBatchRestorePreview() result = %+v, want failed item details", preview)
+	}
+
+	result, err := manager.RunBatchRestore(context.Background(), opts)
+	if !errors.Is(err, ErrBackupTargetLockRelease) || !errors.Is(err, closeErr) {
+		t.Fatalf("RunBatchRestore() error = %v, want target lock release failure", err)
+	}
+	if result == nil || result.Status != StatusFailed || len(result.Items) != 1 || result.Items[0].Status != StatusFailed {
+		t.Fatalf("RunBatchRestore() result = %+v, want failed preflight details", result)
+	}
+}
+
 func TestManager_RunBatchRestoreReportsTargetCreatedAfterPreflight(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "docs", "note.txt"), "batch restore")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -4004,12 +4482,12 @@ func TestManager_RunBatchRestoreReportsTargetCreatedAfterPreflight(t *testing.T)
 }
 
 func TestManager_BatchRestoreRejectsDotSegmentTargets(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "docs", "note.txt"), "batch restore")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -4045,12 +4523,12 @@ func TestManager_BatchRestoreRejectsDotSegmentTargets(t *testing.T) {
 }
 
 func TestManager_BatchRestoreRejectsBackslashTargetsBeforeRunning(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "docs", "note.txt"), "batch restore")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -4219,14 +4697,14 @@ func TestFinishBatchRestorePreviewRejectsOverflowingSummaryTotals(t *testing.T) 
 }
 
 func TestManager_RunBatchRestoreCancelledContextDoesNotPersistSkippedRestores(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	if err := os.MkdirAll(source, 0700); err != nil {
 		t.Fatalf("MkdirAll(source) error: %v", err)
 	}
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -4270,7 +4748,7 @@ func TestManager_RunBatchRestoreCancelledContextDoesNotPersistSkippedRestores(t 
 }
 
 func TestManager_BatchRestorePreviewRedactsExternalCommandErrors(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	commandPath := filepath.Join(tmpDir, "failing-rclone")
 	remote := ":s3,access_key_id=AKIASECRET,secret_access_key=secret-access-key:bucket/path"
@@ -4282,7 +4760,7 @@ func TestManager_BatchRestorePreviewRedactsExternalCommandErrors(t *testing.T) {
 		t.Fatalf("WriteFile(command) error: %v", err)
 	}
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -4321,13 +4799,13 @@ func TestManager_BatchRestorePreviewRedactsExternalCommandErrors(t *testing.T) {
 }
 
 func TestManager_JobViewRestoreDrillAndRetentionHealth(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	if err := os.MkdirAll(source, 0700); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 5, 13, 10, 0, 0, 0, time.UTC)
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{
@@ -4401,12 +4879,12 @@ func TestManager_JobViewRestoreDrillAndRetentionHealth(t *testing.T) {
 }
 
 func TestManager_RunJobRejectsDestinationInsideSource(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	if err := os.MkdirAll(source, 0700); err != nil {
 		t.Fatal(err)
 	}
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -4428,7 +4906,7 @@ func TestManager_RunJobRejectsDestinationInsideSource(t *testing.T) {
 }
 
 func TestValidateDestinationRejectsFilesystemRoot(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	if err := os.MkdirAll(source, 0700); err != nil {
 		t.Fatal(err)
@@ -4442,7 +4920,7 @@ func TestValidateDestinationRejectsFilesystemRoot(t *testing.T) {
 
 func TestValidateDestinationRejectsProtectedSystemDirectory(t *testing.T) {
 	protectedDir := protectedSystemDirectoryForTest(t)
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	if err := os.MkdirAll(source, 0700); err != nil {
 		t.Fatal(err)
@@ -4455,7 +4933,7 @@ func TestValidateDestinationRejectsProtectedSystemDirectory(t *testing.T) {
 }
 
 func TestManager_RunJobRejectsDestinationSymlink(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	realDestination := filepath.Join(tmpDir, "real-destination")
 	destinationLink := filepath.Join(tmpDir, "destination-link")
@@ -4467,7 +4945,7 @@ func TestManager_RunJobRejectsDestinationSymlink(t *testing.T) {
 		t.Skipf("symlink unavailable: %v", err)
 	}
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -4489,7 +4967,7 @@ func TestManager_RunJobRejectsDestinationSymlink(t *testing.T) {
 }
 
 func TestManager_RunJobRejectsDestinationSymlinkInsertedAfterValidation(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	outside := filepath.Join(tmpDir, "outside")
@@ -4510,7 +4988,7 @@ func TestManager_RunJobRejectsDestinationSymlinkInsertedAfterValidation(t *testi
 		afterValidateLocalBackupDestination = oldHook
 	}()
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -4538,7 +5016,7 @@ func TestManager_RunJobRejectsDestinationSymlinkInsertedAfterValidation(t *testi
 }
 
 func TestCopySourceTreeRejectsDestinationSymlink(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	outside := filepath.Join(tmpDir, "outside")
 	destinationLink := filepath.Join(tmpDir, "data-link")
@@ -4573,7 +5051,7 @@ func TestCopySourceTreeRejectsUnsafeSourceEntryNames(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tmpDir := t.TempDir()
+			tmpDir := secureBackupTestTempDir(t)
 			source := filepath.Join(tmpDir, "source")
 			destination := filepath.Join(tmpDir, "data")
 			if err := os.MkdirAll(source, 0700); err != nil {
@@ -4592,13 +5070,13 @@ func TestCopySourceTreeRejectsUnsafeSourceEntryNames(t *testing.T) {
 }
 
 func TestManager_RunRestoreDrillRejectsDestinationSymlinkInsertedAfterBackup(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	redirectedDestination := filepath.Join(tmpDir, "redirected-backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "backup")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -4633,14 +5111,14 @@ func TestManager_RunRestoreDrillRejectsDestinationSymlinkInsertedAfterBackup(t *
 }
 
 func TestManager_RunRestorePreviewRejectsDestinationSymlinkInsertedAfterBackup(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	redirectedDestination := filepath.Join(tmpDir, "redirected-backups")
 	restoreTarget := filepath.Join(tmpDir, "restore-target")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "backup")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -4675,7 +5153,7 @@ func TestManager_RunRestorePreviewRejectsDestinationSymlinkInsertedAfterBackup(t
 }
 
 func TestManager_RunJobRejectsSourceSymlink(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	if err := os.MkdirAll(source, 0700); err != nil {
 		t.Fatal(err)
@@ -4683,7 +5161,7 @@ func TestManager_RunJobRejectsSourceSymlink(t *testing.T) {
 	if err := os.Symlink("/etc/passwd", filepath.Join(source, "passwd-link")); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
 	}
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -4705,7 +5183,7 @@ func TestManager_RunJobRejectsSourceSymlink(t *testing.T) {
 }
 
 func TestManager_RunJobCleansPartialSnapshotOnFailure(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	runAt := time.Date(2026, 5, 24, 11, 0, 0, 0, time.UTC)
@@ -4715,7 +5193,7 @@ func TestManager_RunJobCleansPartialSnapshotOnFailure(t *testing.T) {
 		t.Skipf("symlink unavailable: %v", err)
 	}
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -4743,7 +5221,7 @@ func TestManager_RunJobCleansPartialSnapshotOnFailure(t *testing.T) {
 }
 
 func TestManager_RunRemoteBackupRejectsSourceSymlink(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	passwordFile := filepath.Join(tmpDir, "restic.pass")
 	rcloneConfigFile := filepath.Join(tmpDir, "rclone.conf")
@@ -4787,7 +5265,7 @@ func TestManager_RunRemoteBackupRejectsSourceSymlink(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			manager, err := NewManager(ManagerConfig{
+			manager, err := newBackupTestManager(t, ManagerConfig{
 				Root:        filepath.Join(tmpDir, "state-"+tt.name),
 				StorageRoot: source,
 				Jobs:        []config.BackupJobConfig{tt.job},
@@ -4805,7 +5283,7 @@ func TestManager_RunRemoteBackupRejectsSourceSymlink(t *testing.T) {
 }
 
 func TestManager_RunRemoteBackupRejectsCredentialFileInsideSource(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	resticPasswordFile := filepath.Join(source, "restic.pass")
 	rcloneConfigFile := filepath.Join(source, "rclone.conf")
@@ -4846,7 +5324,7 @@ func TestManager_RunRemoteBackupRejectsCredentialFileInsideSource(t *testing.T) 
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			manager, err := NewManager(ManagerConfig{
+			manager, err := newBackupTestManager(t, ManagerConfig{
 				Root:        filepath.Join(tmpDir, "state-"+tt.name),
 				StorageRoot: source,
 				Jobs:        []config.BackupJobConfig{tt.job},
@@ -4869,7 +5347,7 @@ func TestManager_RunRemoteBackupRejectsCredentialFileInsideSource(t *testing.T) 
 }
 
 func TestCopyHostFileWithHashRejectsSymlinkInsertedAfterStat(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	sourcePath := filepath.Join(tmpDir, "mnemonas.toml")
 	outsidePath := filepath.Join(tmpDir, "outside.toml")
 	destinationPath := filepath.Join(tmpDir, "snapshot", "config", "config.toml")
@@ -4909,7 +5387,7 @@ func TestCopyHostFileWithHashRejectsSymlinkInsertedAfterStat(t *testing.T) {
 }
 
 func TestCopyOpenFileWithHashRejectsDestinationReplacedBeforeMetadata(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	sourcePath := filepath.Join(tmpDir, "source.txt")
 	destinationPath := filepath.Join(tmpDir, "snapshot", "data", "source.txt")
 	outsidePath := filepath.Join(tmpDir, "outside.txt")
@@ -4962,7 +5440,7 @@ func TestCopyOpenFileWithHashRejectsDestinationReplacedBeforeMetadata(t *testing
 }
 
 func TestCopyOpenFileWithHashCleanupDoesNotFollowReplacedParentSymlink(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	sourcePath := filepath.Join(tmpDir, "source.txt")
 	destinationParent := filepath.Join(tmpDir, "snapshot", "data")
 	destinationPath := filepath.Join(destinationParent, "source.txt")
@@ -5015,12 +5493,12 @@ func TestCopyOpenFileWithHashCleanupDoesNotFollowReplacedParentSymlink(t *testin
 }
 
 func TestManager_RunDueJobsRunsScheduledBackup(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "scheduled")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -5061,13 +5539,108 @@ func TestManager_RunDueJobsRunsScheduledBackup(t *testing.T) {
 	}
 }
 
+func TestManager_RunDueJobsUsesOneTickTimeForFirstRun(t *testing.T) {
+	tmpDir := secureBackupTestTempDir(t)
+	source := filepath.Join(tmpDir, "source")
+	mustWriteFile(t, filepath.Join(source, "note.txt"), "scheduled")
+	manager, err := newBackupTestManager(t, ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Jobs: []config.BackupJobConfig{{
+			ID:               "home",
+			Name:             "Home backup",
+			Type:             JobTypeLocal,
+			Source:           source,
+			Destination:      filepath.Join(tmpDir, "backups"),
+			ScheduleInterval: time.Hour,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+	firstTick := time.Date(2026, 7, 15, 7, 30, 0, 0, time.UTC)
+	clockReads := 0
+	manager.now = func() time.Time {
+		value := firstTick.Add(time.Duration(clockReads) * time.Nanosecond)
+		clockReads++
+		return value
+	}
+
+	results := manager.RunDueJobs(context.Background())
+	if len(results) != 1 || results[0].Error != "" || results[0].Result == nil || results[0].Result.Status != StatusCompleted {
+		t.Fatalf("RunDueJobs() first-run result = %+v, want one completed job", results)
+	}
+	if !results[0].DueAt.Equal(firstTick) {
+		t.Fatalf("RunDueJobs() due_at = %v, want first tick %v", results[0].DueAt, firstTick)
+	}
+}
+
+func TestManager_RunDueJobsRetriesAfterScheduleMarkerPersistenceFailure(t *testing.T) {
+	tmpDir := secureBackupTestTempDir(t)
+	source := filepath.Join(tmpDir, "source")
+	destination := filepath.Join(tmpDir, "backups")
+	mustWriteFile(t, filepath.Join(source, "note.txt"), "scheduled")
+	manager, err := newBackupTestManager(t, ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Jobs: []config.BackupJobConfig{{
+			ID:               "home",
+			Name:             "Home backup",
+			Type:             JobTypeLocal,
+			Source:           source,
+			Destination:      destination,
+			ScheduleInterval: time.Hour,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+	now := time.Date(2026, 7, 15, 7, 0, 0, 0, time.UTC)
+	manager.now = func() time.Time { return now }
+
+	originalWriteBackupStateFile := writeBackupStateFile
+	t.Cleanup(func() { writeBackupStateFile = originalWriteBackupStateFile })
+	persistErr := errors.New("injected schedule marker persistence failure")
+	failMarker := true
+	writeBackupStateFile = func(lock *backupStateLock, path string, value any, perm os.FileMode) error {
+		state, ok := value.(persistedState)
+		if ok && failMarker {
+			jobState := state.Jobs["home"]
+			if jobState.LastScheduledRunAt != nil && jobState.LastRun != nil && jobState.LastRun.Status == StatusRunning && jobState.LastRun.Trigger == "scheduled" {
+				return persistErr
+			}
+		}
+		return originalWriteBackupStateFile(lock, path, value, perm)
+	}
+
+	results := manager.RunDueJobs(context.Background())
+	if len(results) != 1 || results[0].Error == "" || results[0].Result == nil || results[0].Result.Status != StatusFailed {
+		t.Fatalf("RunDueJobs() failed marker result = %+v, want surfaced error without backup side effect", results)
+	}
+	manager.mu.Lock()
+	lastScheduled := cloneTime(manager.state.Jobs["home"].LastScheduledRunAt)
+	manager.mu.Unlock()
+	if lastScheduled != nil {
+		t.Fatalf("LastScheduledRunAt = %v after failed persistence, want nil", lastScheduled)
+	}
+	if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("backup destination status error = %v, want no scheduled side effect", err)
+	}
+
+	failMarker = false
+	results = manager.RunDueJobs(context.Background())
+	if len(results) != 1 || results[0].Error != "" || results[0].Result == nil || results[0].Result.Status != StatusCompleted {
+		t.Fatalf("RunDueJobs() retry result = %+v, want completed backup", results)
+	}
+}
+
 func TestManager_RunDueJobsRespectsScheduleWindow(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "windowed")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -5137,7 +5710,7 @@ func TestScheduleWindowSupportsCrossMidnight(t *testing.T) {
 }
 
 func TestManager_RunJobPrunesOldSnapshots(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "v1")
@@ -5155,7 +5728,7 @@ func TestManager_RunJobPrunesOldSnapshots(t *testing.T) {
 		})
 	})
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -5202,12 +5775,12 @@ func TestManager_RunJobPrunesOldSnapshots(t *testing.T) {
 }
 
 func TestManager_RunRetentionCheckLocalReportsSnapshotRange(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "v1")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -5252,12 +5825,12 @@ func TestManager_RunRetentionCheckLocalReportsSnapshotRange(t *testing.T) {
 }
 
 func TestManager_RunRetentionCheckLocalRejectsUnsafeManifest(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "retention")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -5294,12 +5867,12 @@ func TestManager_RunRetentionCheckLocalRejectsUnsafeManifest(t *testing.T) {
 }
 
 func TestManager_RunRetentionCheckLocalRejectsSymlinkManifest(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "retention")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -5349,12 +5922,12 @@ func TestManager_RunRetentionCheckLocalRejectsSymlinkManifest(t *testing.T) {
 }
 
 func TestManager_RunRetentionCheckLocalRejectsMismatchedManifestRunID(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "retention")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -5391,12 +5964,12 @@ func TestManager_RunRetentionCheckLocalRejectsMismatchedManifestRunID(t *testing
 }
 
 func TestManager_RunRetentionCheckLocalRejectsMismatchedManifestCreatedAt(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "retention")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -5433,12 +6006,12 @@ func TestManager_RunRetentionCheckLocalRejectsMismatchedManifestCreatedAt(t *tes
 }
 
 func TestManager_RunRetentionCheckLocalRejectsUnmanifestedSnapshotFile(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "retention")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -5475,12 +6048,12 @@ func TestManager_RunRetentionCheckLocalRejectsUnmanifestedSnapshotFile(t *testin
 }
 
 func TestManager_RunRetentionCheckLocalRejectsUnexpectedSnapshotRootEntry(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "retention")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -5509,12 +6082,12 @@ func TestManager_RunRetentionCheckLocalRejectsUnexpectedSnapshotRootEntry(t *tes
 }
 
 func TestManager_RunRetentionCheckLocalRejectsPartialSnapshotFile(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "retention")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -5543,12 +6116,12 @@ func TestManager_RunRetentionCheckLocalRejectsPartialSnapshotFile(t *testing.T) 
 }
 
 func TestManager_RunRetentionCheckLocalRejectsInvalidSnapshotRunID(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "retention")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -5590,7 +6163,7 @@ func TestManager_RunRetentionCheckLocalRejectsInvalidSnapshotRunID(t *testing.T)
 }
 
 func TestManager_RemoteRunResultAndNotificationRedactTargetSecrets(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	passwordFile := filepath.Join(tmpDir, "restic.pass")
 	commandPath := filepath.Join(tmpDir, "failing-restic")
@@ -5606,7 +6179,7 @@ func TestManager_RemoteRunResultAndNotificationRedactTargetSecrets(t *testing.T)
 	}
 	notifier := &recordingNotifier{}
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Notifier:    notifier,
@@ -5657,7 +6230,7 @@ func TestManager_RemoteRunResultAndNotificationRedactTargetSecrets(t *testing.T)
 }
 
 func TestManager_RunRetentionCheckResticParsesSnapshotsAndWarnsMissingPolicy(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	passwordFile := filepath.Join(tmpDir, "restic.pass")
 	commandPath, _ := newRecordingResticCommand(t, source)
@@ -5665,7 +6238,7 @@ func TestManager_RunRetentionCheckResticParsesSnapshotsAndWarnsMissingPolicy(t *
 	mustWriteFile(t, passwordFile, "secret")
 	notifier := &recordingNotifier{}
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Notifier:    notifier,
@@ -5709,14 +6282,14 @@ func TestManager_RunRetentionCheckResticParsesSnapshotsAndWarnsMissingPolicy(t *
 }
 
 func TestManager_RunRetentionCheckRcloneParsesRemoteFiles(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	configFile := filepath.Join(tmpDir, "rclone.conf")
 	commandPath, _ := newRecordingRcloneCommand(t)
 	mustWriteFile(t, filepath.Join(source, "docs", "note.txt"), "rclone")
 	mustWriteFile(t, configFile, "[backup]\ntype = local\n")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -5747,14 +6320,14 @@ func TestManager_RunRetentionCheckRcloneParsesRemoteFiles(t *testing.T) {
 }
 
 func TestManager_RunResticBackupUsesExternalCommand(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	passwordFile := filepath.Join(tmpDir, "restic.pass")
 	commandPath, logPath := newRecordingResticCommand(t, source)
 	mustWriteFile(t, filepath.Join(source, "docs", "note.txt"), "restic")
 	mustWriteFile(t, passwordFile, "secret")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -5893,14 +6466,14 @@ func TestManager_RunResticBackupUsesExternalCommand(t *testing.T) {
 }
 
 func TestManager_RunRcloneBackupUsesExternalCommand(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	configFile := filepath.Join(tmpDir, "rclone.conf")
 	commandPath, logPath := newRecordingRcloneCommand(t)
 	mustWriteFile(t, filepath.Join(source, "docs", "note.txt"), "rclone")
 	mustWriteFile(t, configFile, "[backup]\ntype = local\n")
 
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -6044,12 +6617,12 @@ func TestRunExternalCommandIncludesStderrOnFailure(t *testing.T) {
 }
 
 func TestManager_DisabledJobCannotRun(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	if err := os.MkdirAll(source, 0700); err != nil {
 		t.Fatal(err)
 	}
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Jobs: []config.BackupJobConfig{{
@@ -6072,7 +6645,7 @@ func TestManager_DisabledJobCannotRun(t *testing.T) {
 }
 
 func TestManager_RunJobFailureNotifies(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source", "token=source-secret")
 	if err := os.MkdirAll(source, 0700); err != nil {
 		t.Fatal(err)
@@ -6081,7 +6654,7 @@ func TestManager_RunJobFailureNotifies(t *testing.T) {
 		t.Skipf("symlink unavailable: %v", err)
 	}
 	notifier := &recordingNotifier{}
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Notifier:    notifier,
@@ -6125,7 +6698,7 @@ func TestManager_RunJobFailureNotifies(t *testing.T) {
 }
 
 func TestValidateRemoteCredentialFilesRejectsSymlinkParent(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	realCredentialDir := filepath.Join(tmpDir, "real-credentials")
 	linkedCredentialDir := filepath.Join(tmpDir, "linked-credentials")
@@ -6153,7 +6726,7 @@ func TestValidateRemoteCredentialFilesRejectsSymlinkParent(t *testing.T) {
 }
 
 func TestValidateRemoteCredentialFileRejectsUnicodeControlCharacters(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	storageRoot := filepath.Join(tmpDir, "storage")
 	credentialPath := filepath.Join(tmpDir, "restic\u0081.pass")
@@ -6302,7 +6875,7 @@ func TestValidateJobEvidenceInputsAllowsOnlyRcloneFastList(t *testing.T) {
 }
 
 func TestSanitizedRemoteCommandEnvironmentUsesPrivateAllowlist(t *testing.T) {
-	privateDir := filepath.Join(t.TempDir(), "private")
+	privateDir := filepath.Join(secureBackupTestTempDir(t), "private")
 	environment := []string{
 		"PATH=/usr/bin:/bin",
 		"LANG=en_US.UTF-8",
@@ -6377,7 +6950,7 @@ func TestManager_RemoteChildProcessDoesNotReceiveCredentialEnvironment(t *testin
 		t.Setenv(name, value)
 	}
 
-	baseDir := t.TempDir()
+	baseDir := secureBackupTestTempDir(t)
 	source := filepath.Join(baseDir, "source")
 	if err := os.Mkdir(source, 0o700); err != nil {
 		t.Fatalf("Mkdir(source) error: %v", err)
@@ -6465,7 +7038,7 @@ func TestManager_RemoteChildProcessDoesNotReceiveCredentialEnvironment(t *testin
 }
 
 func TestManager_RemoteCommandCannotModifyCredentialSnapshot(t *testing.T) {
-	baseDir := t.TempDir()
+	baseDir := secureBackupTestTempDir(t)
 	source := filepath.Join(baseDir, "source")
 	if err := os.Mkdir(source, 0o700); err != nil {
 		t.Fatalf("Mkdir(source) error: %v", err)
@@ -6545,7 +7118,7 @@ func TestManager_RemoteCommandCannotModifyCredentialSnapshot(t *testing.T) {
 }
 
 func TestManager_CredentialSnapshotResolvesSymlinkedTempDir(t *testing.T) {
-	baseDir := t.TempDir()
+	baseDir := secureBackupTestTempDir(t)
 	realTempDir := filepath.Join(baseDir, "real-temp")
 	linkedTempDir := filepath.Join(baseDir, "linked-temp")
 	if err := os.Mkdir(realTempDir, 0o700); err != nil {
@@ -6605,13 +7178,13 @@ func TestManager_CredentialSnapshotResolvesSymlinkedTempDir(t *testing.T) {
 }
 
 func TestManager_RestoreDrillFailureNotifies(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	if err := os.MkdirAll(source, 0700); err != nil {
 		t.Fatal(err)
 	}
 	notifier := &recordingNotifier{}
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Notifier:    notifier,
@@ -6655,7 +7228,7 @@ func TestManager_RestoreDrillFailureNotifies(t *testing.T) {
 }
 
 func TestManager_RestoreFailureNotifies(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	if err := os.MkdirAll(source, 0700); err != nil {
 		t.Fatal(err)
@@ -6666,7 +7239,7 @@ func TestManager_RestoreFailureNotifies(t *testing.T) {
 	}
 	stateRoot := filepath.Join(tmpDir, "state", "token=state-secret")
 	notifier := &recordingNotifier{}
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        stateRoot,
 		StorageRoot: source,
 		Notifier:    notifier,
@@ -6710,7 +7283,7 @@ func TestManager_RestoreFailureNotifies(t *testing.T) {
 }
 
 func TestManager_RestoreVerifyWarningsNotify(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups", "token=destination-secret")
 	mustWriteFile(t, filepath.Join(source, "files", "docs", "note.txt"), "restore verify")
@@ -6723,7 +7296,7 @@ func TestManager_RestoreVerifyWarningsNotify(t *testing.T) {
 		t.Fatalf("MkdirAll(restore target parent) error: %v", err)
 	}
 	notifier := &recordingNotifier{}
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Notifier:    notifier,
@@ -6783,14 +7356,14 @@ func TestManager_RestoreVerifyWarningsNotify(t *testing.T) {
 }
 
 func TestManager_RestoreDrillReminderNotifiesWhenDueAndStale(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupTestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups", "token=destination-secret")
 	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore reminder")
 
 	now := time.Date(2026, 5, 10, 2, 0, 0, 0, time.UTC)
 	notifier := &recordingNotifier{}
-	manager, err := NewManager(ManagerConfig{
+	manager, err := newBackupTestManager(t, ManagerConfig{
 		Root:        filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		Notifier:    notifier,
@@ -6812,12 +7385,15 @@ func TestManager_RestoreDrillReminderNotifiesWhenDueAndStale(t *testing.T) {
 	if _, err := manager.RunJob(context.Background(), "home"); err != nil {
 		t.Fatalf("RunJob() error: %v", err)
 	}
-	if events := manager.SendRestoreDrillReminders(context.Background()); len(events) != 0 {
-		t.Fatalf("SendRestoreDrillReminders() immediate events = %+v, want none", events)
+	if events, err := manager.SendRestoreDrillReminders(context.Background()); err != nil || len(events) != 0 {
+		t.Fatalf("SendRestoreDrillReminders() immediate result = (%+v, %v), want no events or error", events, err)
 	}
 
 	now = now.Add(2 * time.Hour)
-	events := manager.SendRestoreDrillReminders(context.Background())
+	events, err := manager.SendRestoreDrillReminders(context.Background())
+	if err != nil {
+		t.Fatalf("SendRestoreDrillReminders() due error: %v", err)
+	}
 	if len(events) != 1 {
 		t.Fatalf("SendRestoreDrillReminders() due event count = %d, want 1", len(events))
 	}
@@ -6836,25 +7412,28 @@ func TestManager_RestoreDrillReminderNotifiesWhenDueAndStale(t *testing.T) {
 	}
 
 	now = now.Add(time.Hour)
-	if events := manager.SendRestoreDrillReminders(context.Background()); len(events) != 0 {
-		t.Fatalf("SendRestoreDrillReminders() cooldown events = %+v, want none", events)
+	if events, err := manager.SendRestoreDrillReminders(context.Background()); err != nil || len(events) != 0 {
+		t.Fatalf("SendRestoreDrillReminders() cooldown result = (%+v, %v), want no events or error", events, err)
 	}
 
 	now = now.Add(24 * time.Hour)
-	if events := manager.SendRestoreDrillReminders(context.Background()); len(events) != 1 || events[0].Status != "due" {
-		t.Fatalf("SendRestoreDrillReminders() after cooldown = %+v, want due reminder", events)
+	if events, err := manager.SendRestoreDrillReminders(context.Background()); err != nil || len(events) != 1 || events[0].Status != "due" {
+		t.Fatalf("SendRestoreDrillReminders() after cooldown = (%+v, %v), want due reminder", events, err)
 	}
 
 	now = now.Add(time.Minute)
 	if _, err := manager.RunRestoreDrill(context.Background(), "home", RestoreDrillOptions{}); err != nil {
 		t.Fatalf("RunRestoreDrill() error: %v", err)
 	}
-	if events := manager.SendRestoreDrillReminders(context.Background()); len(events) != 0 {
-		t.Fatalf("SendRestoreDrillReminders() after fresh drill = %+v, want none", events)
+	if events, err := manager.SendRestoreDrillReminders(context.Background()); err != nil || len(events) != 0 {
+		t.Fatalf("SendRestoreDrillReminders() after fresh drill = (%+v, %v), want no events or error", events, err)
 	}
 
 	now = now.Add(25 * time.Hour)
-	events = manager.SendRestoreDrillReminders(context.Background())
+	events, err = manager.SendRestoreDrillReminders(context.Background())
+	if err != nil {
+		t.Fatalf("SendRestoreDrillReminders() stale error: %v", err)
+	}
 	if len(events) != 1 {
 		t.Fatalf("SendRestoreDrillReminders() stale event count = %d, want 1", len(events))
 	}
@@ -6867,16 +7446,139 @@ func TestManager_RestoreDrillReminderNotifiesWhenDueAndStale(t *testing.T) {
 	assertBackupNotificationEventOmitsLocationAndMessageText(t, events[0])
 }
 
+func TestManager_RestoreDrillReminderRetriesAfterMarkerPersistenceFailure(t *testing.T) {
+	tmpDir := secureBackupTestTempDir(t)
+	source := filepath.Join(tmpDir, "source")
+	destination := filepath.Join(tmpDir, "backups")
+	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore reminder")
+	now := time.Date(2026, 7, 15, 8, 0, 0, 0, time.UTC)
+	notifier := &recordingNotifier{}
+	manager, err := newBackupTestManager(t, ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Notifier:    notifier,
+		Jobs: []config.BackupJobConfig{{
+			ID:                     "home",
+			Name:                   "Home backup",
+			Type:                   JobTypeLocal,
+			Source:                 source,
+			Destination:            destination,
+			RestoreDrillStaleAfter: time.Hour,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+	manager.now = func() time.Time { return now }
+	if _, err := manager.RunJob(context.Background(), "home"); err != nil {
+		t.Fatalf("RunJob() error: %v", err)
+	}
+	initialEventCount := len(notifier.Events())
+	now = now.Add(2 * time.Hour)
+
+	originalWriteBackupStateFile := writeBackupStateFile
+	t.Cleanup(func() { writeBackupStateFile = originalWriteBackupStateFile })
+	persistErr := errors.New("injected reminder marker persistence failure")
+	failMarker := true
+	writeBackupStateFile = func(lock *backupStateLock, path string, value any, perm os.FileMode) error {
+		state, ok := value.(persistedState)
+		if ok && failMarker && state.Jobs["home"].LastRestoreDrillReminderAt != nil {
+			return persistErr
+		}
+		return originalWriteBackupStateFile(lock, path, value, perm)
+	}
+
+	events, err := manager.SendRestoreDrillReminders(context.Background())
+	if len(events) != 1 || !errors.Is(err, persistErr) || !errors.Is(err, ErrBackupStatePersistence) {
+		t.Fatalf("SendRestoreDrillReminders() failed marker result = (%+v, %v)", events, err)
+	}
+	if len(notifier.Events()) != initialEventCount+1 {
+		t.Fatalf("notifier events after failed marker = %+v, want delivered reminder pending marker retry", notifier.Events())
+	}
+	manager.mu.Lock()
+	remindedAt := cloneTime(manager.state.Jobs["home"].LastRestoreDrillReminderAt)
+	manager.mu.Unlock()
+	if remindedAt != nil {
+		t.Fatalf("LastRestoreDrillReminderAt = %v after failed persistence, want nil", remindedAt)
+	}
+
+	failMarker = false
+	events, err = manager.SendRestoreDrillReminders(context.Background())
+	if err != nil || len(events) != 1 || len(notifier.Events()) != initialEventCount+2 {
+		t.Fatalf("SendRestoreDrillReminders() retry result = (%+v, %v), notifications = %+v", events, err, notifier.Events())
+	}
+}
+
+func TestManager_RestoreDrillReminderPersistsMarkerOnlyAfterDelivery(t *testing.T) {
+	tmpDir := secureBackupTestTempDir(t)
+	source := filepath.Join(tmpDir, "source")
+	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore reminder")
+	now := time.Date(2026, 7, 15, 9, 0, 0, 0, time.UTC)
+	manager, err := newBackupTestManager(t, ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Jobs: []config.BackupJobConfig{{
+			ID:                     "home",
+			Name:                   "Home backup",
+			Type:                   JobTypeLocal,
+			Source:                 source,
+			Destination:            filepath.Join(tmpDir, "backups"),
+			RestoreDrillStaleAfter: time.Hour,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+	manager.now = func() time.Time { return now }
+	if _, err := manager.RunJob(context.Background(), "home"); err != nil {
+		t.Fatalf("RunJob() error: %v", err)
+	}
+	now = now.Add(2 * time.Hour)
+	deliveryErr := errors.New("injected reminder delivery failure")
+	failDelivery := true
+	deliveries := 0
+	manager.notifier = NotifierFunc(func(_ context.Context, _ NotificationEvent) error {
+		deliveries++
+		if failDelivery {
+			return deliveryErr
+		}
+		return nil
+	})
+
+	events, err := manager.SendRestoreDrillReminders(context.Background())
+	if len(events) != 0 || err == nil || deliveries != 1 {
+		t.Fatalf("SendRestoreDrillReminders() failed delivery result = (%+v, %v), deliveries = %d", events, err, deliveries)
+	}
+	manager.mu.Lock()
+	remindedAt := cloneTime(manager.state.Jobs["home"].LastRestoreDrillReminderAt)
+	manager.mu.Unlock()
+	if remindedAt != nil {
+		t.Fatalf("LastRestoreDrillReminderAt = %v after failed delivery, want nil", remindedAt)
+	}
+
+	failDelivery = false
+	events, err = manager.SendRestoreDrillReminders(context.Background())
+	if err != nil || len(events) != 1 || deliveries != 2 {
+		t.Fatalf("SendRestoreDrillReminders() retry result = (%+v, %v), deliveries = %d", events, err, deliveries)
+	}
+	manager.mu.Lock()
+	remindedAt = cloneTime(manager.state.Jobs["home"].LastRestoreDrillReminderAt)
+	manager.mu.Unlock()
+	if remindedAt == nil || !remindedAt.Equal(now) {
+		t.Fatalf("LastRestoreDrillReminderAt = %v after delivery, want %v", remindedAt, now)
+	}
+}
+
 func TestSafeJoinRejectsTraversalManifestPaths(t *testing.T) {
 	for _, archivePath := range []string{"../secret", "data/../secret", "data//secret", "./data/secret", `data\secret`, `data/report\2026.txt`, "data/report\n2026.txt", "data/report\x7f.txt"} {
-		if _, err := safeJoin(t.TempDir(), archivePath); !errors.Is(err, ErrUnsafePath) {
+		if _, err := safeJoin(secureBackupTestTempDir(t), archivePath); !errors.Is(err, ErrUnsafePath) {
 			t.Fatalf("safeJoin(%q) error = %v, want ErrUnsafePath", archivePath, err)
 		}
 	}
 }
 
 func TestSummarizeRestoredTreeRejectsSymlink(t *testing.T) {
-	root := t.TempDir()
+	root := secureBackupTestTempDir(t)
 	mustWriteFile(t, filepath.Join(root, "docs", "note.txt"), "restored")
 	if err := os.Symlink("/etc/passwd", filepath.Join(root, "docs", "passwd-link")); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
@@ -6892,7 +7594,7 @@ func TestSummarizeRestoredTreeRejectsUnsafeEntryName(t *testing.T) {
 	if os.PathSeparator == '\\' {
 		t.Skip("backslash is a path separator on this platform")
 	}
-	root := t.TempDir()
+	root := secureBackupTestTempDir(t)
 	mustWriteFile(t, filepath.Join(root, `docs\secret.txt`), "restored")
 
 	_, _, err := summarizeRestoredTree(context.Background(), root)
@@ -6905,7 +7607,7 @@ func TestSummarizeRestoreVerificationTreeRejectsUnsafeEntryName(t *testing.T) {
 	if os.PathSeparator == '\\' {
 		t.Skip("backslash is a path separator on this platform")
 	}
-	root := t.TempDir()
+	root := secureBackupTestTempDir(t)
 	mustWriteFile(t, filepath.Join(root, `docs\secret.txt`), "restored")
 
 	_, _, _, err := summarizeRestoreVerificationTree(context.Background(), root)
@@ -6918,7 +7620,7 @@ func TestAppendRestoreDirectoryComparisonWarningsRejectsUnsafeTargetEntryName(t 
 	if os.PathSeparator == '\\' {
 		t.Skip("backslash is a path separator on this platform")
 	}
-	root := t.TempDir()
+	root := secureBackupTestTempDir(t)
 	snapshotPath := filepath.Join(root, "snapshot")
 	targetPath := filepath.Join(root, "target")
 	if err := os.MkdirAll(filepath.Join(snapshotPath, "data"), 0700); err != nil {
@@ -6938,7 +7640,7 @@ func TestAppendRestoreFileComparisonWarningsRejectsUnsafeTargetEntryName(t *test
 	if os.PathSeparator == '\\' {
 		t.Skip("backslash is a path separator on this platform")
 	}
-	targetPath := t.TempDir()
+	targetPath := secureBackupTestTempDir(t)
 	mustWriteFile(t, filepath.Join(targetPath, `docs\secret.txt`), "restored")
 
 	_, err := appendRestoreFileComparisonWarnings(context.Background(), targetPath, Manifest{}, nil)
@@ -6948,7 +7650,7 @@ func TestAppendRestoreFileComparisonWarningsRejectsUnsafeTargetEntryName(t *test
 }
 
 func TestRestoreVerificationExistsHelpersRejectParentSymlink(t *testing.T) {
-	root := t.TempDir()
+	root := secureBackupTestTempDir(t)
 	target := filepath.Join(root, "target")
 	outside := filepath.Join(root, "outside", ".mnemonas")
 	if err := os.MkdirAll(target, 0700); err != nil {
@@ -7243,7 +7945,7 @@ func corruptManifestCreatedAt(t *testing.T, manifestPath string, createdAt time.
 
 func newRecordingCommand(t *testing.T, exitCode int, stderr string) (string, string) {
 	t.Helper()
-	dir := t.TempDir()
+	dir := secureBackupTestTempDir(t)
 	commandPath := filepath.Join(dir, "mnemonas-test-command")
 	logPath := filepath.Join(dir, "args.log")
 	script := "#!/bin/sh\n" +
@@ -7265,7 +7967,7 @@ func newRecordingCommand(t *testing.T, exitCode int, stderr string) (string, str
 
 func newRecordingResticCommand(t *testing.T, source string) (string, string) {
 	t.Helper()
-	dir := t.TempDir()
+	dir := secureBackupTestTempDir(t)
 	commandPath := filepath.Join(dir, "mnemonas-test-restic")
 	logPath := filepath.Join(dir, "args.log")
 	sourceRel := filepath.Clean(source)
@@ -7312,7 +8014,7 @@ func newRecordingResticCommand(t *testing.T, source string) (string, string) {
 
 func newRecordingRcloneCommand(t *testing.T) (string, string) {
 	t.Helper()
-	dir := t.TempDir()
+	dir := secureBackupTestTempDir(t)
 	commandPath := filepath.Join(dir, "mnemonas-test-rclone")
 	logPath := filepath.Join(dir, "args.log")
 	script := "#!/bin/sh\n" +

@@ -840,6 +840,11 @@ func main() {
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to create API server")
 	}
+	defer func() {
+		if err := apiServer.Close(); err != nil {
+			log.Warn().Err(err).Msg("failed to close API server")
+		}
+	}()
 	router.Mount("/", apiServer.Router())
 
 	frontendDir := discoverFrontendAssets()

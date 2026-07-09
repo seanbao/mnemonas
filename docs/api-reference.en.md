@@ -100,6 +100,7 @@ Some write endpoints may commit the visible mutation but fail a later persistenc
 - `199 MnemoNAS "share persistence incomplete"`
 - `199 MnemoNAS "favorites persistence incomplete"`
 - `199 MnemoNAS "scrub result persistence incomplete"`
+- `199 MnemoNAS "backup run completed with warnings"`
 - `199 MnemoNAS "trash restore metadata reconciliation failed"`
 - `199 MnemoNAS "delete cleanup incomplete"`
 - `199 MnemoNAS "trash delete cleanup incomplete"`
@@ -2343,11 +2344,16 @@ Scheduling, retention, and status:
   Local checks count the local snapshot range, restic checks run `restic snapshots --json --tag mnemonas --tag job:<id>`, and rclone checks run `rclone lsjson <remote> --recursive --files-only`.
 - Results persist as `last_retention_check` and feed `retention_status`/`retention_message`.
   `retention_policy` marks restic/rclone remote retention as externally confirmed; otherwise remote jobs report a retention warning.
+- The backup manager holds a lifetime lock on `<storage.root>/.mnemonas/backup/backup-state.lock`, allowing only one writer for a state root. On Unix, the state root must be owned by the effective service account or `root`, must not be writable by group or other users, and its ancestors must not allow another local account to replace the state root. Backup endpoints return `503` when the manager cannot acquire this lock.
+- The manager retains the filesystem identity of the locked state root and verifies the original path during API availability checks and around state writes. Moving, removing, or replacing the state root immediately quarantines the manager; it does not follow the new path or write into the replacement directory. An operation's atomically committed `completed` result remains completed. Its `warnings[]` explicitly states that the state-directory identity changed, the current result was generated, later backup work stopped, and the operator must inspect the state directory and restart the service. Later backup API requests return `503`. An ordinary hard persistence failure before atomic commit returns `500`.
+- A `local` job uses `<destination>/<job-id>/.mnemonas-target.lock` for backup, restore preview, restore drill, restore, post-restore read-only verification, and retention-check operations. An operation returns `409` when another process holds the local target lock. If target-lock release cannot be confirmed, the operation returns `500`; a concurrent business conflict such as “no snapshots” does not downgrade that response to `409`. On Unix, the job directory must be owned by the effective service account or `root` and must not be writable by group or other users. Its ancestors must have trusted owners; a writable ancestor is accepted only when the sticky bit is set and prevents replacement of a trusted child directory. An unsafe target rejects the operation with `500`.
+- External disks using FAT, exFAT, or another filesystem that does not persist Unix ownership and mode require secure `uid`, `gid`, `dmask`, and `fmask` mount values. For example, use the actual service UID/GID with `uid=<mnemonas-uid>,gid=<mnemonas-gid>,dmask=0077,fmask=0177`. A `local` operation is rejected when the target has neither reliable Unix mode nor equivalent mount constraints.
+- Remote jobs do not create a local target lock. Restic jobs rely on native repository locking, while rclone has no generic distributed mutex that applies to every remote. External scheduling must serialize backup, restore, and verification operations when multiple jobs or instances share the same rclone path.
 
 Restore drills and restore reports:
 
 - `restore_drill_stale_after` defaults to 30 days when empty or omitted and drives restore-drill reminder status.
-  When alert channels are configured, stale or missing restore drills send rate-limited `backup_restore_drill` warning events with `trigger=restore_drill_reminder` and persist `last_restore_drill_reminder_at`.
+  When alert channels are configured, stale or missing restore drills send rate-limited `backup_restore_drill` warning events with `trigger=restore_drill_reminder`. The manager persists `last_restore_drill_reminder_at` only after a notification channel returns success. Delivery failure does not advance the cooldown; successful delivery followed by marker-persistence failure is retried on the next scheduler pass and may produce a duplicate.
 - Restore-drill history is capped to the latest 20 entries and records status, file/byte counts, artifact paths, failure messages, and stable `failure_category` values for failed drills.
   Current categories are `no_snapshot`, `unsupported_job_type`, `unsafe_path`, `integrity_check`, `external_command`, `cancelled`, `io`, and `unknown`.
 - Failure categories are forwarded to alert event details.
@@ -2365,10 +2371,14 @@ Backup alert events:
 - The `message` is a fixed public summary and does not include job names, paths, or raw error text.
 - Non-empty `details` summary fields can include job ID, run ID, job type, trigger, status, timestamps, file/byte/snapshot counts, warning count, error-message presence, failure category, and whether location details were omitted.
   They do not include job names, sources, backup targets, restore target paths, snapshot paths, manifest paths, raw warnings, or raw error text.
+- A custom `backup.Notifier` receives synchronous `NotifyBackupEvent` calls with a 10-second deadline and manager-shutdown cancellation. Implementations must observe `ctx.Done()` and return promptly after cancellation or deadline expiry; otherwise they can block the current operation or service shutdown. The built-in SMTP transport uses a 30-second default timeout and honors an earlier upstream deadline, so backup events remain subject to the 10-second notification budget.
 
 Backup operation semantics:
 
-- `POST /run` accepts an empty body or `{}`.
+- `POST /run` accepts an empty body or `{}`. The endpoint persists the `running` state before creating a local snapshot or starting a remote command. If that write fails, it returns `500` without backup-target side effects.
+  After a local snapshot syncs its files, manifest, and directories and is published to the final directory, the endpoint commits the successful run with manifest evidence before snapshot cleanup and retention checking. If successful-state persistence fails before atomic replacement, it returns `500` with the failed run in `details`, preserves the previously bound successful snapshot, and does not use the unbound final snapshot for restore.
+  If the backup is committed but the state parent-directory sync, later cleanup, retention check, or result persistence is incomplete, the endpoint returns `200 OK`; the result remains `status="completed"` and sets `warning=true` and `warnings[]`. The response also sets `message="backup completed with warnings"` and `Warning: 199 MnemoNAS "backup run completed with warnings"`. Successful responses without warnings continue to use `message="backup completed"`.
+  If the state-directory identity changes after the current result is atomically committed, the run uses the same warning-success response, but the manager is quarantined and later requests return `503`. An ordinary hard persistence failure does not use this warning behavior and returns `500`.
 - `POST /retention-check` accepts an empty body or `{}` and returns `snapshot_count`, `file_count`, `total_bytes`, snapshot time range, `warning`, and `warnings`; failures return `500` with the failed check in `details`.
 - `POST /restore-drill` accepts optional `{"keep_artifact": true}`.
   Local jobs temporarily restore and verify the latest snapshot, restic jobs run `restic check`, and rclone jobs run `rclone check --one-way`.
@@ -2385,6 +2395,7 @@ Batch restore:
   Responses return per-item `restore`, `verify`, `warnings`, and `error_message` fields.
 - Top-level `total_files` and `verified_bytes` aggregate completed items' read-only verification results. Batch restore error and warning text uses the same remote-target credential redaction.
 - Partial failures return overall `status="completed"` with `warning=true`; all item failures return `status="failed"`, so clients must inspect `items[]`.
+- That aggregation behavior applies only to ordinary item failures. A state-persistence failure or unconfirmed target-lock release makes the batch endpoint return `500`; a changed state-directory identity or quarantined manager returns `503`. Error-response `details` preserves the batch and item results generated so far.
 - For the batch preview response, per-item preview warnings are reported under `items[].preview.warnings`; aggregate messages are reported under top-level `warnings`.
 
 Explicit restore and read-only verification:
@@ -2409,7 +2420,7 @@ Errors and boundary conditions:
 
 - Invalid restore `target_path` values and invalid batch restore request entries return `400`.
 - Backup task execution failures caused by configured paths, backup source contents, or external commands return `500` with the failed run, drill, or restore result in `details`.
-- Unknown jobs return `404`; disabled jobs, concurrent operations, local restore/restore-drill operations without any completed snapshot, and non-empty restore targets return `409`.
+- Unknown jobs return `404`; disabled jobs, an operation already running for the same job, a local target lock held by another process, local restore/restore-drill operations without any completed snapshot, and non-empty restore targets return `409`.
 - Restore target paths containing backslashes are rejected as invalid Windows or UNC-style syntax for `restore-preview`, `restore`, and `restore-verify`.
 - Restic preview and rclone preview or retention listings reject unsafe output file paths, including empty paths, control characters, backslashes, Windows/UNC syntax, `.`/`..` path segments, or absolute paths outside the configured source boundary.
 - Backup, restore, restore-drill, read-only verification, and retention-check operations persist a `running` record before execution.

@@ -1022,7 +1022,7 @@ func TestSendEventSendsEmailWhenWebhookIsNotConfigured(t *testing.T) {
 		msg  string
 	}
 	reqCh := make(chan smtpRequest, 1)
-	sendSMTPMail = func(addr string, auth smtp.Auth, from string, to []string, msg []byte) error {
+	sendSMTPMail = func(_ context.Context, addr string, auth smtp.Auth, from string, to []string, msg []byte) error {
 		reqCh <- smtpRequest{
 			addr: addr,
 			auth: auth,
@@ -1082,7 +1082,7 @@ func TestEmailErrorDoesNotExposeSMTPSettings(t *testing.T) {
 	originalSendSMTPMail := sendSMTPMail
 	defer func() { sendSMTPMail = originalSendSMTPMail }()
 
-	sendSMTPMail = func(string, smtp.Auth, string, []string, []byte) error {
+	sendSMTPMail = func(context.Context, string, smtp.Auth, string, []string, []byte) error {
 		return errors.New("smtp.example.com rejected alerts@example.com with smtp-password for admin@example.com")
 	}
 
@@ -1150,7 +1150,7 @@ func TestSendEmailSanitizesEnvelopeAndMessageHeaders(t *testing.T) {
 		msg  string
 	}
 	reqCh := make(chan smtpRequest, 1)
-	sendSMTPMail = func(_ string, _ smtp.Auth, from string, to []string, msg []byte) error {
+	sendSMTPMail = func(_ context.Context, _ string, _ smtp.Auth, from string, to []string, msg []byte) error {
 		reqCh <- smtpRequest{
 			from: from,
 			to:   append([]string(nil), to...),

@@ -25,6 +25,28 @@ type backupEventRecorder struct {
 	events []alerts.EventPayload
 }
 
+func secureBackupAPITestTempDir(t testing.TB) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("Chmod(test temp dir) error: %v", err)
+	}
+	return dir
+}
+
+func newBackupAPITestServer(t testing.TB, logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
+	t.Helper()
+	server, err := NewServer(logger, cfg)
+	if err == nil {
+		t.Cleanup(func() {
+			if closeErr := server.Close(); closeErr != nil {
+				t.Errorf("Close(test API server) error: %v", closeErr)
+			}
+		})
+	}
+	return server, err
+}
+
 func (r *backupEventRecorder) UpdateConfig(alerts.Config) {}
 
 func (r *backupEventRecorder) SendEvent(_ context.Context, event alerts.EventPayload) error {
@@ -34,7 +56,7 @@ func (r *backupEventRecorder) SendEvent(_ context.Context, event alerts.EventPay
 
 func setupMutableBackupServer(t *testing.T) (*Server, string, string) {
 	t.Helper()
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupAPITestTempDir(t)
 	storageRoot := filepath.Join(tmpDir, "storage")
 	if err := os.MkdirAll(storageRoot, 0700); err != nil {
 		t.Fatalf("MkdirAll(storageRoot) error: %v", err)
@@ -48,7 +70,7 @@ func setupMutableBackupServer(t *testing.T) (*Server, string, string) {
 	if err := cfg.Save(configPath); err != nil {
 		t.Fatalf("Save(configPath) error: %v", err)
 	}
-	server, err := NewServer(zerolog.Nop(), &ServerConfig{
+	server, err := newBackupAPITestServer(t, zerolog.Nop(), &ServerConfig{
 		BackupRoot:  filepath.Join(tmpDir, "backup-state"),
 		StorageRoot: storageRoot,
 		BackupJobs:  cfg.Backup.Jobs,
@@ -321,14 +343,14 @@ func TestServerCreateLocalBackupAddFailureRollsBackConfig(t *testing.T) {
 }
 
 func TestServer_BackupEndpoints_RunAndRestoreDrill(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupAPITestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	destination := filepath.Join(tmpDir, "backups")
 	configPath := filepath.Join(tmpDir, "mnemonas.toml")
 	mustWriteAPITestFile(t, filepath.Join(source, "docs", "note.txt"), "hello")
 	mustWriteAPITestFile(t, configPath, "[server]\nport = 8080\n")
 
-	server, err := NewServer(zerolog.Nop(), &ServerConfig{
+	server, err := newBackupAPITestServer(t, zerolog.Nop(), &ServerConfig{
 		BackupRoot:  filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		ConfigPath:  configPath,
@@ -509,13 +531,106 @@ func TestServer_BackupEndpoints_RunAndRestoreDrill(t *testing.T) {
 	}
 }
 
+func TestServer_BackupEndpoints_RunReturnsWarningContract(t *testing.T) {
+	tmpDir := secureBackupAPITestTempDir(t)
+	source := filepath.Join(tmpDir, "source")
+	mustWriteAPITestFile(t, filepath.Join(source, "docs", "note.txt"), "hello")
+
+	server, err := newBackupAPITestServer(t, zerolog.Nop(), &ServerConfig{
+		BackupRoot:  filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		BackupJobs: []config.BackupJobConfig{{
+			ID:          "home",
+			Name:        "Home backup",
+			Type:        backup.JobTypeLocal,
+			Source:      source,
+			Destination: filepath.Join(tmpDir, "backups"),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/maintenance/backups/home/run", nil)
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("run backup status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got := rec.Header().Get("Warning"); got != backupRunWarningHeader {
+		t.Fatalf("warning header = %q, want %q", got, backupRunWarningHeader)
+	}
+
+	var response struct {
+		Success bool             `json:"success"`
+		Message string           `json:"message"`
+		Data    backup.RunResult `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode run response: %v; body=%s", err, rec.Body.String())
+	}
+	if !response.Success || response.Message != "backup completed with warnings" {
+		t.Fatalf("run response success/message = %t/%q", response.Success, response.Message)
+	}
+	if response.Data.Status != backup.StatusCompleted || !response.Data.Warning || len(response.Data.Warnings) == 0 {
+		t.Fatalf("run response data = %+v, want completed warning result", response.Data)
+	}
+}
+
+func TestServer_BackupEndpoints_RunWithoutWarningKeepsSuccessContract(t *testing.T) {
+	tmpDir := secureBackupAPITestTempDir(t)
+	source := filepath.Join(tmpDir, "source")
+	mustWriteAPITestFile(t, filepath.Join(source, "docs", "note.txt"), "hello")
+
+	server, err := newBackupAPITestServer(t, zerolog.Nop(), &ServerConfig{
+		BackupRoot:  filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		BackupJobs: []config.BackupJobConfig{{
+			ID:           "home",
+			Name:         "Home backup",
+			Type:         backup.JobTypeLocal,
+			Source:       source,
+			Destination:  filepath.Join(tmpDir, "backups"),
+			MaxSnapshots: 2,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/maintenance/backups/home/run", nil)
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("run backup status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got := rec.Header().Get("Warning"); got != "" {
+		t.Fatalf("warning header = %q, want empty", got)
+	}
+
+	var response struct {
+		Success bool             `json:"success"`
+		Message string           `json:"message"`
+		Data    backup.RunResult `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode run response: %v; body=%s", err, rec.Body.String())
+	}
+	if !response.Success || response.Message != "backup completed" {
+		t.Fatalf("run response success/message = %t/%q", response.Success, response.Message)
+	}
+	if response.Data.Status != backup.StatusCompleted || response.Data.Warning {
+		t.Fatalf("run response data = %+v, want completed result without warning", response.Data)
+	}
+}
+
 func TestServer_BackupEndpoints_ErrorMapping(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupAPITestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	if err := os.MkdirAll(source, 0700); err != nil {
 		t.Fatal(err)
 	}
-	server, err := NewServer(zerolog.Nop(), &ServerConfig{
+	server, err := newBackupAPITestServer(t, zerolog.Nop(), &ServerConfig{
 		BackupRoot:  filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		BackupJobs: []config.BackupJobConfig{{
@@ -571,7 +686,7 @@ func TestServer_BackupEndpoints_ErrorMapping(t *testing.T) {
 	runBackupAPIRequest[json.RawMessage](t, server, http.MethodPost, "/api/v1/maintenance/backups/home/restore-verify", []byte(`{"target_path":"relative"}`), http.StatusBadRequest)
 	runBackupAPIRequest[json.RawMessage](t, server, http.MethodPost, "/api/v1/maintenance/backups/home/restore", []byte(`{"target_path":"relative"}`), http.StatusBadRequest)
 
-	disabledServer, err := NewServer(zerolog.Nop(), &ServerConfig{
+	disabledServer, err := newBackupAPITestServer(t, zerolog.Nop(), &ServerConfig{
 		BackupRoot:  filepath.Join(tmpDir, "disabled-state"),
 		StorageRoot: source,
 		BackupJobs: []config.BackupJobConfig{{
@@ -591,12 +706,12 @@ func TestServer_BackupEndpoints_ErrorMapping(t *testing.T) {
 }
 
 func TestServer_BackupEndpoints_RunUnsafeConfiguredPathReturnsInternalDetails(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupAPITestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	if err := os.MkdirAll(source, 0700); err != nil {
 		t.Fatal(err)
 	}
-	server, err := NewServer(zerolog.Nop(), &ServerConfig{
+	server, err := newBackupAPITestServer(t, zerolog.Nop(), &ServerConfig{
 		BackupRoot:  filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		BackupJobs: []config.BackupJobConfig{{
@@ -636,8 +751,118 @@ func TestServer_BackupEndpoints_RunUnsafeConfiguredPathReturnsInternalDetails(t 
 	}
 }
 
+func TestServer_BackupErrorPrioritizesStatePersistenceFailureOverTargetLockConflict(t *testing.T) {
+	server := &Server{logger: zerolog.Nop()}
+	result := backup.RunResult{JobID: "home", Status: backup.StatusFailed}
+	rec := httptest.NewRecorder()
+
+	server.writeBackupError(
+		rec,
+		"run backup job",
+		errors.Join(backup.ErrBackupTargetLockHeld, backup.ErrBackupStatePersistence),
+		result,
+	)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	var response struct {
+		Code    string           `json:"code"`
+		Details backup.RunResult `json:"details"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if response.Code != ErrCodeInternal || response.Details.JobID != result.JobID {
+		t.Fatalf("response = %+v, want internal error with backup details", response)
+	}
+}
+
+func TestServer_BackupErrorPrioritizesTargetLockReleaseFailureOverBusinessConflict(t *testing.T) {
+	server := &Server{logger: zerolog.Nop()}
+	result := backup.RestorePreviewResult{JobID: "home", Status: backup.StatusFailed}
+	rec := httptest.NewRecorder()
+
+	server.writeBackupError(
+		rec,
+		"preview backup restore",
+		errors.Join(backup.ErrNoSnapshots, backup.ErrBackupTargetLockRelease),
+		result,
+	)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	var response struct {
+		Code    string                      `json:"code"`
+		Message string                      `json:"message"`
+		Details backup.RestorePreviewResult `json:"details"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if response.Code != ErrCodeInternal || response.Message != "backup operation finalization failed" || response.Details.JobID != result.JobID {
+		t.Fatalf("response = %+v, want internal finalization error with backup details", response)
+	}
+}
+
+func TestServer_BatchRestoreInfrastructureFailureReturnsBatchDetails(t *testing.T) {
+	server := &Server{logger: zerolog.Nop()}
+	result := backup.BatchRestoreResult{
+		ID:     "batch-restore",
+		Status: backup.StatusFailed,
+		Items: []backup.BatchRestoreItemResult{{
+			JobID:  "home",
+			Status: backup.StatusFailed,
+		}},
+	}
+	rec := httptest.NewRecorder()
+
+	server.writeBackupError(
+		rec,
+		"run batch backup restore",
+		errors.Join(backup.ErrNoSnapshots, backup.ErrBackupTargetLockRelease),
+		result,
+	)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	var response struct {
+		Code    string                    `json:"code"`
+		Details backup.BatchRestoreResult `json:"details"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if response.Code != ErrCodeInternal || response.Details.ID != result.ID || len(response.Details.Items) != 1 {
+		t.Fatalf("response = %+v, want internal error with batch details", response)
+	}
+}
+
+func TestServer_BackupEndpoints_ClosedManagerReturnsServiceUnavailable(t *testing.T) {
+	tmpDir := secureBackupAPITestTempDir(t)
+	server, err := newBackupAPITestServer(t, zerolog.Nop(), &ServerConfig{
+		BackupRoot: filepath.Join(tmpDir, "state"),
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+	if err := server.backupManager.Close(); err != nil {
+		t.Fatalf("backup manager Close() error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/maintenance/backups", nil)
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	}
+}
+
 func TestServer_BackupEndpoints_RedactsExternalCommandSecretsFromErrorLogs(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupAPITestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	passwordFile := filepath.Join(tmpDir, "restic.pass")
 	commandPath := filepath.Join(tmpDir, "failing-restic")
@@ -651,7 +876,7 @@ func TestServer_BackupEndpoints_RedactsExternalCommandSecretsFromErrorLogs(t *te
 	}
 
 	var logBuffer bytes.Buffer
-	server, err := NewServer(zerolog.New(&logBuffer), &ServerConfig{
+	server, err := newBackupAPITestServer(t, zerolog.New(&logBuffer), &ServerConfig{
 		BackupRoot:  filepath.Join(tmpDir, "state"),
 		StorageRoot: source,
 		BackupJobs: []config.BackupJobConfig{{
@@ -682,7 +907,7 @@ func TestServer_BackupEndpoints_RedactsExternalCommandSecretsFromErrorLogs(t *te
 }
 
 func TestServer_BackupEndpoints_FailureSendsAlertEvent(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := secureBackupAPITestTempDir(t)
 	source := filepath.Join(tmpDir, "source")
 	if err := os.MkdirAll(source, 0700); err != nil {
 		t.Fatal(err)
@@ -692,7 +917,7 @@ func TestServer_BackupEndpoints_FailureSendsAlertEvent(t *testing.T) {
 	}
 
 	recorder := &backupEventRecorder{}
-	server, err := NewServer(zerolog.Nop(), &ServerConfig{
+	server, err := newBackupAPITestServer(t, zerolog.Nop(), &ServerConfig{
 		BackupRoot:   filepath.Join(tmpDir, "state"),
 		StorageRoot:  source,
 		AlertMonitor: recorder,
@@ -871,7 +1096,7 @@ func assertBackupAlertStringNoSecrets(t *testing.T, value string) {
 }
 
 func TestServer_BackupEndpoints_Uninitialized(t *testing.T) {
-	server, err := NewServer(zerolog.Nop(), &ServerConfig{})
+	server, err := newBackupAPITestServer(t, zerolog.Nop(), &ServerConfig{})
 	if err != nil {
 		t.Fatalf("NewServer() error: %v", err)
 	}

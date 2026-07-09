@@ -2,6 +2,7 @@ package backup
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strings"
 	"time"
@@ -16,26 +17,31 @@ func (m *Manager) StartScheduler(ctx context.Context) bool {
 	}
 
 	m.mu.Lock()
-	if m.schedulerStarted {
+	if m.schedulerStarted || m.closed {
 		m.mu.Unlock()
 		return false
 	}
+	schedulerCtx, cancel := context.WithCancel(ctx)
 	m.schedulerStarted = true
 	pollInterval := m.schedulerPoll
+	m.schedulerCancel = cancel
+	m.schedulerDone = make(chan struct{})
+	done := m.schedulerDone
 	m.mu.Unlock()
 
 	go func() {
-		_ = m.RunDueJobs(ctx)
-		_ = m.SendRestoreDrillReminders(ctx)
+		defer close(done)
+		_ = m.RunDueJobs(schedulerCtx)
+		_, _ = m.SendRestoreDrillReminders(schedulerCtx)
 		ticker := time.NewTicker(pollInterval)
 		defer ticker.Stop()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-schedulerCtx.Done():
 				return
 			case <-ticker.C:
-				_ = m.RunDueJobs(ctx)
-				_ = m.SendRestoreDrillReminders(ctx)
+				_ = m.RunDueJobs(schedulerCtx)
+				_, _ = m.SendRestoreDrillReminders(schedulerCtx)
 			}
 		}
 	}()
@@ -73,21 +79,24 @@ func (m *Manager) hasRestoreDrillReminderJobs() bool {
 
 // RunDueJobs runs scheduled jobs that are due at the manager's current time.
 func (m *Manager) RunDueJobs(ctx context.Context) []ScheduledRunResult {
+	if !m.beginManagerOperation() {
+		return nil
+	}
+	defer m.endManagerOperation()
+
 	now := m.now()
 	dueJobs := m.dueJobs(now)
 	results := make([]ScheduledRunResult, 0, len(dueJobs))
 
-	for _, job := range dueJobs {
-		dueAt := now.UTC()
-		if nextRunAt := m.nextRunAt(job.ID); nextRunAt != nil {
-			dueAt = *nextRunAt
+	for _, dueJob := range dueJobs {
+		if ctx != nil && ctx.Err() != nil {
+			break
 		}
 		result := ScheduledRunResult{
-			JobID: job.ID,
-			DueAt: dueAt,
+			JobID: dueJob.job.ID,
+			DueAt: dueJob.dueAt,
 		}
-		m.recordScheduledRun(job.ID, now)
-		runResult, err := m.runJobWithTrigger(ctx, job.ID, "scheduled")
+		runResult, err := m.runJobWithTrigger(ctx, dueJob.job.ID, "scheduled")
 		if err != nil {
 			result.Error = sanitizeBackupMessageForAPI(err.Error())
 			result.Result = runResult
@@ -95,12 +104,20 @@ func (m *Manager) RunDueJobs(ctx context.Context) []ScheduledRunResult {
 			result.Result = runResult
 		}
 		results = append(results, result)
+		if errors.Is(err, ErrManagerClosed) || errors.Is(err, ErrBackupStateNamespaceChanged) {
+			break
+		}
 	}
 
 	return results
 }
 
-func (m *Manager) dueJobs(now time.Time) []config.BackupJobConfig {
+type dueBackupJob struct {
+	job   config.BackupJobConfig
+	dueAt time.Time
+}
+
+func (m *Manager) dueJobs(now time.Time) []dueBackupJob {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -110,7 +127,7 @@ func (m *Manager) dueJobs(now time.Time) []config.BackupJobConfig {
 	}
 	sort.Strings(ids)
 
-	jobs := make([]config.BackupJobConfig, 0, len(ids))
+	jobs := make([]dueBackupJob, 0, len(ids))
 	for _, id := range ids {
 		job := m.jobs[id]
 		if job.Disabled || job.ScheduleInterval <= 0 {
@@ -122,11 +139,11 @@ func (m *Manager) dueJobs(now time.Time) []config.BackupJobConfig {
 		if _, running := m.running[id]; running {
 			continue
 		}
-		nextRunAt := m.nextRunAtLocked(job, m.state.Jobs[id])
+		nextRunAt := m.nextRunAtLocked(job, m.state.Jobs[id], now)
 		if nextRunAt == nil || nextRunAt.After(now) {
 			continue
 		}
-		jobs = append(jobs, cloneJob(job))
+		jobs = append(jobs, dueBackupJob{job: cloneJob(job), dueAt: *nextRunAt})
 	}
 	return jobs
 }
@@ -139,10 +156,10 @@ func (m *Manager) nextRunAt(jobID string) *time.Time {
 	if !ok {
 		return nil
 	}
-	return m.nextRunAtLocked(job, m.state.Jobs[jobID])
+	return m.nextRunAtLocked(job, m.state.Jobs[jobID], m.now())
 }
 
-func (m *Manager) nextRunAtLocked(job config.BackupJobConfig, state JobState) *time.Time {
+func (m *Manager) nextRunAtLocked(job config.BackupJobConfig, state JobState, now time.Time) *time.Time {
 	if job.Disabled || job.ScheduleInterval <= 0 {
 		return nil
 	}
@@ -157,11 +174,9 @@ func (m *Manager) nextRunAtLocked(job config.BackupJobConfig, state JobState) *t
 		}
 	}
 	if base == nil {
-		now := m.now()
 		next := now.UTC()
 		return adjustNextRunForScheduleWindow(job, next, now)
 	}
-	now := m.now()
 	next := base.UTC().Add(job.ScheduleInterval)
 	return adjustNextRunForScheduleWindow(job, next, now)
 }
@@ -247,15 +262,4 @@ func parseScheduleWindowClock(value string) (int, bool) {
 func minuteOfDay(when time.Time) int {
 	local := when.In(time.Local)
 	return local.Hour()*60 + local.Minute()
-}
-
-func (m *Manager) recordScheduledRun(jobID string, when time.Time) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	state := m.state.Jobs[jobID]
-	scheduledAt := when.UTC()
-	state.LastScheduledRunAt = &scheduledAt
-	m.state.Jobs[jobID] = state
-	_ = m.saveStateLocked()
 }

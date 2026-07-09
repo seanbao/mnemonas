@@ -1473,6 +1473,12 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 		appVersion: appVersion,
 		buildTime:  buildTime,
 	}
+	constructed := false
+	defer func() {
+		if !constructed {
+			_ = s.Close()
+		}
+	}()
 	defaultConfig := config.Default()
 	requestip.SetTrustedProxyHops(defaultConfig.Server.TrustedProxyHops)
 	_ = requestip.SetTrustedProxyCIDRs(defaultConfig.Server.TrustedProxyCIDRs)
@@ -1683,6 +1689,7 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 	}
 
 	s.setupRoutes()
+	constructed = true
 	return s, nil
 }
 
@@ -2076,6 +2083,29 @@ func (s *Server) setupRoutes() {
 // Router returns the HTTP router
 func (s *Server) Router() http.Handler {
 	return s.router
+}
+
+// Close stops background work owned by the API server.
+func (s *Server) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.scrubSchedulerMu.Lock()
+	if s.scrubSchedulerCancel != nil {
+		s.scrubSchedulerCancel()
+		s.scrubSchedulerCancel = nil
+	}
+	s.scrubSchedulerMu.Unlock()
+	s.shareExpiryReminderMu.Lock()
+	if s.shareExpiryReminderCancel != nil {
+		s.shareExpiryReminderCancel()
+		s.shareExpiryReminderCancel = nil
+	}
+	s.shareExpiryReminderMu.Unlock()
+	if s.backupManager != nil {
+		return s.backupManager.Close()
+	}
+	return nil
 }
 
 // validatePath validates and cleans a file path, preventing path traversal attacks.
