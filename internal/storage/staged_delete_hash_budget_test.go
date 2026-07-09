@@ -32,6 +32,10 @@ func installStagedDeleteHashCounters(t *testing.T, fs *FileSystem) (*atomic.Int6
 		destinationHashes.Add(1)
 		return hashOpenWorkspaceFileContext(ctx, file)
 	}
+	fs.hashStorageCopiedFile = func(file *os.File) (string, error) {
+		destinationHashes.Add(1)
+		return hashOpenWorkspaceFile(file)
+	}
 
 	return &liveHashes, &sourceHashes, &destinationHashes
 }
@@ -93,11 +97,11 @@ func TestFileSystemStagedTrashDeleteConfirmedFileHashBudget(t *testing.T) {
 	if got := sourceHashes.Load(); got != 4 {
 		t.Errorf("staged source content hash count = %d, want 4", got)
 	}
-	if got := destinationHashes.Load(); got != 1 {
-		t.Errorf("trash destination content hash count = %d, want 1", got)
+	if got := destinationHashes.Load(); got != 3 {
+		t.Errorf("trash destination content hash count = %d, want 3", got)
 	}
-	if got := liveHashes.Load() + sourceHashes.Load() + destinationHashes.Load(); got != 7 {
-		t.Errorf("total delete content hash count = %d, want 7", got)
+	if got := liveHashes.Load() + sourceHashes.Load() + destinationHashes.Load(); got != 9 {
+		t.Errorf("total delete content hash count = %d, want 9", got)
 	}
 	items, err := fs.ListTrash(ctx)
 	if err != nil || len(items) != 1 || items[0].OriginalPath != targetPath {

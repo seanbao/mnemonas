@@ -229,15 +229,17 @@ var storageRandomRead = rand.Read
 var movePathRename = func(root *os.Root, oldRel, newRel, oldAbs, newAbs string) error {
 	return rootio.RenameNoFollow(root, oldRel, newRel)
 }
-var movePathRemove = func(root *os.Root, rel, abs string) error {
-	return root.Remove(rel)
-}
+var movePathRemove = removeCopiedMoveSource
 var movePathRemoveAll = func(root *os.Root, rel, abs string) error {
 	return rootio.RemoveAllNoFollow(root, rel)
 }
 var beforeStorageWorkspaceWrite = func() error { return nil }
 var afterValidateStoragePaths = func() error { return nil }
 var afterStorageCopySourceStat = func(string) error { return nil }
+var beforeCopiedFileDestinationCleanup = func(string) error { return nil }
+var beforeCopiedFileSourceIsolation = func(string, string) error { return nil }
+var afterCopiedFileSourceIsolation = func(string, string, string) error { return nil }
+var afterCopiedFilePublish = func(string, string) error { return nil }
 var createStorageCopyTempFile = createStorageTempFile
 var walkStorageWorkspace = func(ctx context.Context, ws *workspace.Workspace, root string, fn workspace.WalkFunc) error {
 	return ws.Walk(ctx, root, fn)
@@ -486,8 +488,10 @@ type FileSystem struct {
 	mu                        sync.RWMutex
 	mutationEpoch             uint64 // guarded by mu
 
-	hashStagedDeleteSourceFile func(ctx context.Context, file *os.File) (string, error)
-	hashStagedTrashContentFile func(ctx context.Context, file *os.File) (string, error)
+	hashStagedDeleteSourceFile    func(ctx context.Context, file *os.File) (string, error)
+	hashStagedTrashContentFile    func(ctx context.Context, file *os.File) (string, error)
+	hashStorageCopiedFile         func(file *os.File) (string, error)
+	hashDeleteWitnessRecoveryFile func(file *os.File) (string, error)
 }
 
 // UpdateTrashSettings applies trash settings to the running filesystem.
@@ -2417,6 +2421,10 @@ func (fs *FileSystem) RestoreFromTrash(ctx context.Context, id string) error {
 	// Move back from trash
 	trashContentPath := path.Join(fs.trashRoot, id, "content")
 	destPath := fs.workspace.FullPath(item.OriginalPath)
+	trashItemInfo, err := fs.trashRootHandle.Lstat(filepath.FromSlash(id))
+	if err != nil || !trashItemInfo.IsDir() {
+		return fmt.Errorf("failed to identify trash item directory: %w", errors.Join(mapStorageRootPathError(err), ErrDeleteTargetChanged))
+	}
 
 	var restoreWarning error
 	if err := fs.movePath(trashContentPath, destPath); err != nil {
@@ -2442,7 +2450,7 @@ func (fs *FileSystem) RestoreFromTrash(ctx context.Context, id string) error {
 		}
 		return fmt.Errorf("failed to remove trash metadata: %w", err)
 	}
-	fs.cleanupTrashItemDir(path.Join(fs.trashRoot, id))
+	fs.cleanupTrashItemDir(path.Join(fs.trashRoot, id), trashItemInfo)
 	if err := fs.syncRestoredIndexEntries(ctx, item.OriginalPath, item.IsDir); err != nil {
 		rollbackErr := fs.movePath(destPath, trashContentPath)
 		metadataErr := fs.versions.AddToTrash(ctx, item)
@@ -2531,6 +2539,10 @@ func (fs *FileSystem) RestoreFromTrashTo(ctx context.Context, id, newPath string
 	// Move from trash
 	trashContentPath := path.Join(fs.trashRoot, id, "content")
 	destPath := fs.workspace.FullPath(newPath)
+	trashItemInfo, err := fs.trashRootHandle.Lstat(filepath.FromSlash(id))
+	if err != nil || !trashItemInfo.IsDir() {
+		return fmt.Errorf("failed to identify trash item directory: %w", errors.Join(mapStorageRootPathError(err), ErrDeleteTargetChanged))
+	}
 
 	var restoreWarning error
 	if err := fs.movePath(trashContentPath, destPath); err != nil {
@@ -2559,7 +2571,7 @@ func (fs *FileSystem) RestoreFromTrashTo(ctx context.Context, id, newPath string
 		return fmt.Errorf("failed to remove trash metadata: %w", err)
 	}
 
-	fs.cleanupTrashItemDir(path.Join(fs.trashRoot, id))
+	fs.cleanupTrashItemDir(path.Join(fs.trashRoot, id), trashItemInfo)
 	if err := fs.syncRestoredIndexEntries(ctx, newPath, item.IsDir); err != nil {
 		var rollbackErrs []error
 		if rollbackErr := fs.movePath(destPath, trashContentPath); rollbackErr != nil {
@@ -3895,6 +3907,9 @@ func mapStorageRootPathError(err error) error {
 	if err == nil {
 		return nil
 	}
+	if errors.Is(err, rootio.ErrEntryChanged) {
+		return ErrDeleteTargetChanged
+	}
 	if isStorageRootEscapeError(err) || rootio.IsSymlinkError(err) {
 		return errStoragePathSymlink
 	}
@@ -4011,30 +4026,37 @@ func syncCreatedStorageManagedDirs(root *storagePathRoot, createdDirs []string) 
 }
 
 func (fs *FileSystem) cleanupCreatedStorageManagedTrees(root *storagePathRoot, createdDirs []string) error {
-	var cleanupErr error
+	if len(createdDirs) == 0 {
+		return nil
+	}
+	paths := make([]string, 0, len(createdDirs))
 	for _, dir := range createdDirs {
-		if dir == "." {
-			continue
-		}
-		absDir := storageAbsolutePath(root, dir)
-		if err := fs.captureDeleteMountBoundary(root.absRoot).checkHostTree(absDir); err != nil {
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("cleanup created directory %s: %w", absDir, err))
-			break
-		}
-		if err := rootio.RemoveAllNoFollow(root.handle, dir); err != nil && !errors.Is(err, os.ErrNotExist) {
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("cleanup created directory %s: %w", absDir, mapStorageRootPathError(err)))
-			break
+		if dir != "." {
+			paths = append(paths, storageAbsolutePath(root, dir))
 		}
 	}
-	return cleanupErr
+	if len(paths) == 0 {
+		return nil
+	}
+	// Mkdir does not return an identity-bearing handle. A directory captured
+	// after creation could already be an external replacement, so failed
+	// operations retain created parent directories instead of deleting by path.
+	return fmt.Errorf("created directories retained after failed operation: %s", strings.Join(paths, ", "))
 }
 
-func (fs *FileSystem) cleanupStorageTempPath(root *storagePathRoot, tmpRel, tmpAbs string) error {
+func (fs *FileSystem) cleanupStorageTempPath(root *storagePathRoot, tmpRel, tmpAbs string, expected os.FileInfo) error {
 	if err := fs.captureDeleteMountBoundary(root.absRoot).checkHostTree(tmpAbs); err != nil {
 		return fmt.Errorf("cleanup temp file %s: %w", tmpRel, err)
 	}
-	if err := root.handle.Remove(tmpRel); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if expected == nil {
+		return fmt.Errorf("cleanup temp file %s: identity unavailable; retained at %s", tmpRel, tmpAbs)
+	}
+	if err := removeCopiedMoveSource(root.handle, tmpRel, tmpAbs, expected); err != nil {
 		return fmt.Errorf("cleanup temp file %s: %w", tmpRel, mapStorageRootPathError(err))
+	}
+	parentRel := filepath.Dir(tmpRel)
+	if err := syncManagedStorageDir(root.handle, parentRel, storageAbsolutePath(root, parentRel)); err != nil {
+		return fmt.Errorf("sync cleaned temp file %s: %w", tmpRel, err)
 	}
 	return nil
 }
@@ -4152,109 +4174,239 @@ func (fs *FileSystem) copyFile(src, dst string) error {
 	if err := checkCopyMountBoundaries(); err != nil {
 		return err
 	}
-	if err := fs.copyFileBetweenRoots(srcRoot, srcRel, srcAbs, dstRoot, dstRel, dstAbs); err != nil {
+	proof, err := fs.copyFileBetweenRootsWithIdentity(srcRoot, srcRel, srcAbs, dstRoot, dstRel, dstAbs)
+	if err != nil {
 		return err
 	}
 	if err := checkCopyMountBoundaries(); err != nil {
-		cleanupErr := fs.removeCopiedMoveDestination(dstRoot, dstRel, dstAbs)
+		cleanupErr := fs.removeCopiedFileDestination(dstRoot, dstRel, dstAbs, proof)
 		return errors.Join(err, cleanupErr)
 	}
 	return nil
 }
 
 func (fs *FileSystem) copyFileBetweenRoots(srcRoot *storagePathRoot, srcRel, srcAbs string, dstRoot *storagePathRoot, dstRel, dstAbs string) error {
+	_, err := fs.copyFileBetweenRootsWithIdentity(srcRoot, srcRel, srcAbs, dstRoot, dstRel, dstAbs)
+	return err
+}
+
+type copiedFileProof struct {
+	source      os.FileInfo
+	destination os.FileInfo
+	contentHash string
+}
+
+type copiedDestinationResidualError struct {
+	path string
+	err  error
+}
+
+func (e *copiedDestinationResidualError) Error() string {
+	return fmt.Sprintf("copied destination retained after uncommitted operation: %s", e.path)
+}
+
+func (e *copiedDestinationResidualError) Unwrap() error {
+	return e.err
+}
+
+type copiedDestinationCleanupDurabilityError struct {
+	err error
+}
+
+func (e *copiedDestinationCleanupDurabilityError) Error() string {
+	return e.err.Error()
+}
+
+func (e *copiedDestinationCleanupDurabilityError) Unwrap() error {
+	return e.err
+}
+
+func copiedDestinationRetentionError(root *storagePathRoot, rel, abs string, cause error) error {
+	if root == nil || root.handle == nil {
+		return &copiedDestinationResidualError{path: abs, err: cause}
+	}
+	if _, err := root.handle.Lstat(rel); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return cause
+		}
+		cause = errors.Join(cause, mapStorageRootPathError(err))
+	}
+	return &copiedDestinationResidualError{path: abs, err: cause}
+}
+
+func (fs *FileSystem) copyFileBetweenRootsWithIdentity(srcRoot *storagePathRoot, srcRel, srcAbs string, dstRoot *storagePathRoot, dstRel, dstAbs string) (*copiedFileProof, error) {
 	if err := fs.checkStorageCopyMountBoundaries(srcRoot, srcAbs, dstRoot, dstAbs); err != nil {
-		return err
+		return nil, err
 	}
 	srcInfo, err := srcRoot.handle.Lstat(srcRel)
 	if err != nil {
-		return mapStorageRootPathError(err)
+		return nil, mapStorageRootPathError(err)
 	}
 	if srcInfo.Mode()&os.ModeSymlink != 0 {
-		return errStoragePathSymlink
+		return nil, errStoragePathSymlink
 	}
 	if !srcInfo.Mode().IsRegular() {
-		return ErrNotRegular
+		return nil, ErrNotRegular
 	}
 	if err := afterStorageCopySourceStat(srcAbs); err != nil {
-		return err
+		return nil, err
 	}
 	if err := fs.checkStorageCopyMountBoundaries(srcRoot, srcAbs, dstRoot, dstAbs); err != nil {
-		return err
+		return nil, err
 	}
 
 	srcFile, err := rootio.OpenRegularFileNoFollow(srcRoot.handle, srcRel)
 	if err != nil {
 		mappedErr := mapStorageRootPathError(err)
 		if mappedErr != err {
-			return mappedErr
+			return nil, mappedErr
 		}
 		currentInfo, statErr := srcRoot.handle.Lstat(srcRel)
 		if statErr == nil && currentInfo.Mode()&os.ModeSymlink == 0 && !currentInfo.Mode().IsRegular() {
-			return ErrNotRegular
+			return nil, ErrNotRegular
 		}
 		if errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENXIO) {
-			return ErrNotRegular
+			return nil, ErrNotRegular
 		}
-		return err
+		return nil, err
 	}
 	defer srcFile.Close()
+	openedInfo, err := srcFile.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !sameStorageCopySource(srcInfo, openedInfo) {
+		return nil, ErrDeleteTargetChanged
+	}
 	dstParentRel := filepath.Dir(dstRel)
 	createdDirs, err := fs.ensureStorageManagedDirTracked(dstRoot, filepath.Dir(dstAbs), 0755)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := fs.checkStorageCopyMountBoundaries(srcRoot, srcAbs, dstRoot, dstAbs); err != nil {
 		cleanupErr := fs.cleanupCreatedStorageManagedTrees(dstRoot, createdDirs)
-		return errors.Join(err, cleanupErr)
+		return nil, errors.Join(err, cleanupErr)
 	}
 
 	dstFile, tmpRel, err := createStorageCopyTempFile(dstRoot.handle, dstParentRel, ".storage-copy-")
 	if err != nil {
 		cleanupErr := fs.cleanupCreatedStorageManagedTrees(dstRoot, createdDirs)
-		return errors.Join(err, cleanupErr)
+		return nil, errors.Join(err, cleanupErr)
 	}
 	tmpAbs := storageAbsolutePath(dstRoot, tmpRel)
-	defer func() {
-		_ = fs.cleanupStorageTempPath(dstRoot, tmpRel, tmpAbs)
-	}()
 	abortTempCopy := func(cause error) error {
-		tempCleanupErr := fs.cleanupStorageTempPath(dstRoot, tmpRel, tmpAbs)
+		tempInfo, statErr := dstFile.Stat()
+		closeErr := dstFile.Close()
+		tempCleanupErr := fs.cleanupStorageTempPath(dstRoot, tmpRel, tmpAbs, tempInfo)
 		createdDirsCleanupErr := fs.cleanupCreatedStorageManagedTrees(dstRoot, createdDirs)
-		return errors.Join(cause, tempCleanupErr, createdDirsCleanupErr)
+		return errors.Join(cause, statErr, closeErr, tempCleanupErr, createdDirsCleanupErr)
 	}
 	if err := dstFile.Chmod(storagePreservedMode(srcInfo.Mode())); err != nil {
-		dstFile.Close()
-		return abortTempCopy(err)
+		return nil, abortTempCopy(err)
 	}
 
-	_, err = io.Copy(dstFile, srcFile)
-	if err != nil {
-		dstFile.Close()
-		return abortTempCopy(err)
+	copyHasher := blake3.New()
+	copied, err := io.Copy(io.MultiWriter(dstFile, copyHasher), srcFile)
+	if err != nil || copied != openedInfo.Size() {
+		return nil, abortTempCopy(errors.Join(err, func() error {
+			if copied != openedInfo.Size() {
+				return fmt.Errorf("copied %d bytes from %d-byte source", copied, openedInfo.Size())
+			}
+			return nil
+		}()))
+	}
+	contentHash := fmt.Sprintf("%x", copyHasher.Sum(nil))
+	afterCopyInfo, sourceStatErr := srcFile.Stat()
+	currentSourceInfo, sourcePathErr := srcRoot.handle.Lstat(srcRel)
+	if sourceStatErr != nil || sourcePathErr != nil || !sameStorageCopySource(openedInfo, afterCopyInfo) || !sameStorageCopySource(openedInfo, currentSourceInfo) {
+		return nil, abortTempCopy(errors.Join(ErrDeleteTargetChanged, sourceStatErr, mapStorageRootPathError(sourcePathErr)))
 	}
 	if err := dstFile.Sync(); err != nil {
-		dstFile.Close()
-		return abortTempCopy(err)
+		return nil, abortTempCopy(err)
 	}
-	if err := dstFile.Close(); err != nil {
-		return abortTempCopy(err)
+	tempInfo, err := dstFile.Stat()
+	if err != nil {
+		return nil, abortTempCopy(err)
 	}
 
 	if err := rootio.RenamePathIntoDirNoFollow(tmpAbs, filepath.Dir(dstAbs), filepath.Base(dstRel)); err != nil {
-		return abortTempCopy(mapStorageCreateTargetError(err))
+		return nil, abortTempCopy(mapStorageCreateTargetError(err))
 	}
-	if err := syncManagedStorageDir(dstRoot.handle, dstParentRel, filepath.Dir(dstAbs)); err != nil {
-		cleanupErr := fs.removeCopiedMoveDestination(dstRoot, dstRel, dstAbs)
-		createdDirsCleanupErr := fs.cleanupCreatedStorageManagedTrees(dstRoot, createdDirs)
-		return errors.Join(
-			fmt.Errorf("failed to sync copied file: %w", err),
-			cleanupErr,
-			createdDirsCleanupErr,
+	if err := afterCopiedFilePublish(srcAbs, dstAbs); err != nil {
+		closeErr := dstFile.Close()
+		return nil, errors.Join(err, closeErr, &copiedDestinationResidualError{path: dstAbs, err: errors.New("published destination hook failed")})
+	}
+	publishedInfo, publishedStatErr := dstFile.Stat()
+	if publishedStatErr != nil || !sameStorageFileObject(tempInfo, publishedInfo) {
+		closeErr := dstFile.Close()
+		return nil, errors.Join(
+			ErrDeleteTargetChanged,
+			publishedStatErr,
+			closeErr,
+			&copiedDestinationResidualError{path: dstAbs, err: errors.New("published destination identity could not be established")},
 		)
 	}
+	proof := &copiedFileProof{source: afterCopyInfo, destination: publishedInfo, contentHash: contentHash}
+	publishedFailure := func(cause error) (*copiedFileProof, error) {
+		cleanupErr := fs.removeCopiedFileDestination(dstRoot, dstRel, dstAbs, proof)
+		createdDirsCleanupErr := fs.cleanupCreatedStorageManagedTrees(dstRoot, createdDirs)
+		if cleanupErr != nil {
+			var durabilityErr *copiedDestinationCleanupDurabilityError
+			if !errors.As(cleanupErr, &durabilityErr) {
+				residualPath := dstAbs
+				var isolationResidual *copiedSourceResidualError
+				if errors.As(cleanupErr, &isolationResidual) && isolationResidual.path != "" {
+					residualPath = isolationResidual.path
+				}
+				cleanupErr = &copiedDestinationResidualError{path: residualPath, err: cleanupErr}
+			}
+		}
+		return nil, errors.Join(cause, cleanupErr, createdDirsCleanupErr)
+	}
+	currentDestination, err := dstRoot.handle.Lstat(dstRel)
+	if err != nil || !sameStorageCopySource(publishedInfo, currentDestination) {
+		closeErr := dstFile.Close()
+		return publishedFailure(errors.Join(ErrDeleteTargetChanged, mapStorageRootPathError(err), closeErr))
+	}
+	hashCopiedFile := fs.hashStorageCopiedFile
+	if hashCopiedFile == nil {
+		hashCopiedFile = hashOpenWorkspaceFile
+	}
+	destinationHash, hashErr := hashCopiedFile(dstFile)
+	afterHashInfo, afterHashStatErr := dstFile.Stat()
+	currentDestination, currentErr := dstRoot.handle.Lstat(dstRel)
+	closeErr := dstFile.Close()
+	if hashErr != nil || afterHashStatErr != nil || currentErr != nil || closeErr != nil || destinationHash != contentHash ||
+		!sameStorageCopySource(publishedInfo, afterHashInfo) || !sameStorageCopySource(afterHashInfo, currentDestination) {
+		proof.destination = afterHashInfo
+		return publishedFailure(errors.Join(ErrDeleteTargetChanged, hashErr, afterHashStatErr, mapStorageRootPathError(currentErr), closeErr))
+	}
+	proof.destination = afterHashInfo
+	if err := syncManagedStorageDir(dstRoot.handle, dstParentRel, filepath.Dir(dstAbs)); err != nil {
+		return publishedFailure(fmt.Errorf("failed to sync copied file: %w", err))
+	}
+	if err := fs.captureDeleteMountBoundary(dstRoot.absRoot).checkHostTree(dstAbs); err != nil {
+		return publishedFailure(err)
+	}
+	currentDestination, err = dstRoot.handle.Lstat(dstRel)
+	if err != nil || !sameStorageCopySource(proof.destination, currentDestination) {
+		return publishedFailure(errors.Join(ErrDeleteTargetChanged, mapStorageRootPathError(err)))
+	}
 
-	return nil
+	return proof, nil
+}
+
+func sameStorageCopySource(expected, actual os.FileInfo) bool {
+	if !sameStorageFileObject(expected, actual) {
+		return false
+	}
+	expectedIdentity := deleteStageIdentity(expected)
+	actualIdentity := deleteStageIdentity(actual)
+	return expectedIdentity == "" && actualIdentity == "" || expectedIdentity != "" && expectedIdentity == actualIdentity
+}
+
+func sameStorageFileObject(expected, actual os.FileInfo) bool {
+	return expected != nil && actual != nil && os.SameFile(expected, actual) && expected.IsDir() == actual.IsDir() && expected.Mode() == actual.Mode() && expected.Size() == actual.Size() && expected.ModTime().Equal(actual.ModTime())
 }
 
 func (fs *FileSystem) readExistingFileForRollback(ctx context.Context, name string) ([]byte, bool, error) {
@@ -4479,7 +4631,7 @@ func (fs *FileSystem) cleanupTrashStagingDir(stagedTrashPath string) {
 	_ = root.handle.Remove(stagingDir)
 }
 
-func (fs *FileSystem) cleanupTrashItemDir(trashItemPath string) {
+func (fs *FileSystem) cleanupTrashItemDir(trashItemPath string, expected os.FileInfo) {
 	if fs.captureDeleteMountBoundary(fs.trashRoot).checkHostTree(trashItemPath) != nil {
 		return
 	}
@@ -4490,7 +4642,21 @@ func (fs *FileSystem) cleanupTrashItemDir(trashItemPath string) {
 	if relPath == "." {
 		return
 	}
-	_ = rootio.RemoveAllNoFollow(root.handle, relPath)
+	parent, err := rootio.OpenDirNoFollow(root.handle, filepath.Dir(relPath))
+	if err != nil {
+		return
+	}
+	defer parent.Close()
+	base := filepath.Base(relPath)
+	if err := rootio.RemoveAllFromDirNoFollowChecked(parent, base, func(entryPath string, info os.FileInfo) error {
+		if entryPath != base || expected == nil || info == nil || !info.IsDir() || !os.SameFile(expected, info) {
+			return rootio.ErrEntryChanged
+		}
+		return nil
+	}); err != nil {
+		return
+	}
+	_ = syncManagedStorageDir(root.handle, filepath.Dir(relPath), storageAbsolutePath(root, filepath.Dir(relPath)))
 }
 
 func (fs *FileSystem) movePath(src, dst string) error {
@@ -4598,18 +4764,63 @@ func (fs *FileSystem) movePath(src, dst string) error {
 		return syncRemovedStorageSourceDir(srcRoot, srcRel)
 	}
 
-	if err := fs.copyFileBetweenRoots(srcRoot, srcRel, srcAbs, dstRoot, dstRel, dstAbs); err != nil {
+	proof, err := fs.copyFileBetweenRootsWithIdentity(srcRoot, srcRel, srcAbs, dstRoot, dstRel, dstAbs)
+	if err != nil {
 		return abortMove(err)
 	}
 	if err := checkMoveMountBoundaries(); err != nil {
-		cleanupErr := fs.removeCopiedMoveDestination(dstRoot, dstRel, dstAbs)
+		cleanupErr := fs.removeCopiedFileDestination(dstRoot, dstRel, dstAbs, proof)
 		return abortMove(errors.Join(err, cleanupErr))
 	}
-	if err := movePathRemove(srcRoot.handle, srcRel, srcAbs); err != nil {
-		cleanupErr := fs.removeCopiedMoveDestination(dstRoot, dstRel, dstAbs)
-		return abortMove(errors.Join(mapStorageRootPathError(err), cleanupErr))
+	if err := beforeCopiedFileSourceIsolation(srcAbs, dstAbs); err != nil {
+		cleanupErr := fs.removeCopiedFileDestination(dstRoot, dstRel, dstAbs, proof)
+		return abortMove(errors.Join(err, cleanupErr))
 	}
-	return syncRemovedStorageSourceDir(srcRoot, srcRel)
+	isolatedSource, err := fs.isolateCopiedFile(srcRoot, srcRel, srcAbs, proof.source, proof.contentHash)
+	if err != nil {
+		var residual *copiedSourceResidualError
+		if errors.As(err, &residual) {
+			return abortMove(errors.Join(err, copiedDestinationRetentionError(
+				dstRoot,
+				dstRel,
+				dstAbs,
+				errors.New("published destination retained because copied source isolation could not be restored"),
+			)))
+		}
+		cleanupErr := fs.removeCopiedFileDestination(dstRoot, dstRel, dstAbs, proof)
+		return abortMove(errors.Join(err, cleanupErr))
+	}
+	abortIsolatedMove := func(cause error) error {
+		restored, rollbackErr := fs.restoreIsolatedCopiedFile(isolatedSource)
+		if !restored || rollbackErr != nil {
+			residualPath := isolatedSource.isolatedAbs
+			if restored {
+				residualPath = isolatedSource.originalAbs
+			}
+			return abortMove(errors.Join(
+				cause,
+				&copiedSourceResidualError{path: residualPath, err: rollbackErr},
+				copiedDestinationRetentionError(
+					dstRoot,
+					dstRel,
+					dstAbs,
+					errors.New("published destination retained because isolated copied source could not be restored"),
+				),
+			))
+		}
+		cleanupErr := fs.removeCopiedFileDestination(dstRoot, dstRel, dstAbs, proof)
+		return abortMove(errors.Join(cause, rollbackErr, cleanupErr))
+	}
+	if err := afterCopiedFileSourceIsolation(srcAbs, isolatedSource.isolatedAbs, dstAbs); err != nil {
+		return abortIsolatedMove(err)
+	}
+	if err := fs.verifyCopiedFileDestination(dstRoot, dstRel, dstAbs, proof); err != nil {
+		return abortIsolatedMove(err)
+	}
+	if err := movePathRemove(srcRoot.handle, isolatedSource.isolatedRel, isolatedSource.isolatedAbs, isolatedSource.info); err != nil {
+		return abortIsolatedMove(mapStorageRootPathError(err))
+	}
+	return syncRemovedStorageSourceDir(srcRoot, isolatedSource.isolatedRel)
 }
 
 func (fs *FileSystem) removeCopiedMoveDestination(root *storagePathRoot, rel, abs string) error {
@@ -4622,6 +4833,180 @@ func (fs *FileSystem) removeCopiedMoveDestination(root *storagePathRoot, rel, ab
 	parentRel := filepath.Dir(rel)
 	if err := syncManagedStorageDir(root.handle, parentRel, storageAbsolutePath(root, parentRel)); err != nil {
 		return fmt.Errorf("failed to sync copied destination cleanup: %w", err)
+	}
+	return nil
+}
+
+type isolatedCopiedFile struct {
+	root        *storagePathRoot
+	originalRel string
+	originalAbs string
+	isolatedRel string
+	isolatedAbs string
+	info        os.FileInfo
+	contentHash string
+}
+
+type copiedSourceResidualError struct {
+	path string
+	err  error
+}
+
+func (e *copiedSourceResidualError) Error() string {
+	return fmt.Sprintf("copied source retained in internal isolation: %s", e.path)
+}
+
+func (e *copiedSourceResidualError) Unwrap() error {
+	return e.err
+}
+
+func (fs *FileSystem) isolateCopiedFile(root *storagePathRoot, rel, abs string, expected os.FileInfo, expectedHash string) (*isolatedCopiedFile, error) {
+	if err := fs.captureDeleteMountBoundary(root.absRoot).checkHostTree(abs); err != nil {
+		return nil, err
+	}
+	current, err := root.handle.Lstat(rel)
+	if err != nil || !sameStorageCopySource(expected, current) {
+		return nil, errors.Join(ErrDeleteTargetChanged, mapStorageRootPathError(err))
+	}
+	for range 32 {
+		isolatedRel, err := newStorageTempName(filepath.Dir(rel), ".mnemonas-move-")
+		if err != nil {
+			return nil, err
+		}
+		isolatedAbs := storageAbsolutePath(root, isolatedRel)
+		if err := rootio.RenameNoFollow(root.handle, rel, isolatedRel); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				continue
+			}
+			return nil, mapStorageRootPathError(err)
+		}
+		isolatedInfo, statErr := root.handle.Lstat(isolatedRel)
+		if statErr != nil || !sameStorageFileObject(expected, isolatedInfo) {
+			rollbackErr := rootio.RenameNoFollow(root.handle, isolatedRel, rel)
+			syncErr := syncStorageManagedRenameDirs(root, isolatedRel, root, rel)
+			if rollbackErr != nil {
+				return nil, errors.Join(ErrDeleteTargetChanged, statErr, &copiedSourceResidualError{path: isolatedAbs, err: mapStorageRootPathError(rollbackErr)}, syncErr)
+			}
+			if syncErr != nil {
+				return nil, errors.Join(ErrDeleteTargetChanged, statErr, &copiedSourceResidualError{path: abs, err: syncErr})
+			}
+			return nil, errors.Join(ErrDeleteTargetChanged, statErr, syncErr)
+		}
+		isolated := &isolatedCopiedFile{
+			root:        root,
+			originalRel: rel,
+			originalAbs: abs,
+			isolatedRel: isolatedRel,
+			isolatedAbs: isolatedAbs,
+			info:        isolatedInfo,
+			contentHash: expectedHash,
+		}
+		if err := fs.verifyStorageFileProof(root, isolatedRel, isolatedAbs, isolatedInfo, expectedHash); err != nil {
+			restored, rollbackErr := fs.restoreCapturedIsolatedFile(isolated)
+			if !restored {
+				return nil, errors.Join(err, &copiedSourceResidualError{path: isolatedAbs, err: rollbackErr})
+			}
+			if rollbackErr != nil {
+				return nil, errors.Join(err, &copiedSourceResidualError{path: abs, err: rollbackErr})
+			}
+			return nil, errors.Join(err, rollbackErr)
+		}
+		return isolated, nil
+	}
+	return nil, errors.New("failed to allocate copied source isolation path")
+}
+
+func (fs *FileSystem) restoreCapturedIsolatedFile(isolated *isolatedCopiedFile) (bool, error) {
+	if isolated == nil || isolated.root == nil {
+		return false, ErrDeleteTargetChanged
+	}
+	if err := rootio.RenameNoFollow(isolated.root.handle, isolated.isolatedRel, isolated.originalRel); err != nil {
+		return false, mapStorageRootPathError(err)
+	}
+	restoredInfo, err := isolated.root.handle.Lstat(isolated.originalRel)
+	if err != nil || !sameStorageFileObject(isolated.info, restoredInfo) {
+		return true, errors.Join(ErrDeleteTargetChanged, mapStorageRootPathError(err))
+	}
+	return true, syncStorageManagedRenameDirs(isolated.root, isolated.isolatedRel, isolated.root, isolated.originalRel)
+}
+
+func (fs *FileSystem) restoreIsolatedCopiedFile(isolated *isolatedCopiedFile) (bool, error) {
+	if isolated == nil || isolated.root == nil {
+		return false, ErrDeleteTargetChanged
+	}
+	if err := fs.verifyStorageFileProof(isolated.root, isolated.isolatedRel, isolated.isolatedAbs, isolated.info, isolated.contentHash); err != nil {
+		return false, err
+	}
+	if err := rootio.RenameNoFollow(isolated.root.handle, isolated.isolatedRel, isolated.originalRel); err != nil {
+		return false, mapStorageRootPathError(err)
+	}
+	restoredInfo, err := isolated.root.handle.Lstat(isolated.originalRel)
+	if err != nil || !sameStorageFileObject(isolated.info, restoredInfo) {
+		return true, errors.Join(ErrDeleteTargetChanged, mapStorageRootPathError(err))
+	}
+	if err := fs.verifyStorageFileProof(isolated.root, isolated.originalRel, isolated.originalAbs, restoredInfo, isolated.contentHash); err != nil {
+		return true, err
+	}
+	return true, syncStorageManagedRenameDirs(isolated.root, isolated.isolatedRel, isolated.root, isolated.originalRel)
+}
+
+func (fs *FileSystem) removeCopiedFileDestination(root *storagePathRoot, rel, abs string, proof *copiedFileProof) error {
+	if proof == nil {
+		return ErrDeleteTargetChanged
+	}
+	if err := beforeCopiedFileDestinationCleanup(abs); err != nil {
+		return err
+	}
+	isolated, err := fs.isolateCopiedFile(root, rel, abs, proof.destination, proof.contentHash)
+	if err != nil {
+		return fmt.Errorf("failed to isolate copied file cleanup: %w", err)
+	}
+	if err := movePathRemove(root.handle, isolated.isolatedRel, isolated.isolatedAbs, isolated.info); err != nil {
+		restored, rollbackErr := fs.restoreIsolatedCopiedFile(isolated)
+		if !restored || rollbackErr != nil {
+			residualPath := isolated.isolatedAbs
+			if restored {
+				residualPath = isolated.originalAbs
+			}
+			return errors.Join(fmt.Errorf("failed to cleanup copied file: %w", mapStorageRootPathError(err)), &copiedSourceResidualError{path: residualPath, err: rollbackErr})
+		}
+		return errors.Join(fmt.Errorf("failed to cleanup copied file: %w", mapStorageRootPathError(err)), rollbackErr)
+	}
+	parentRel := filepath.Dir(rel)
+	if err := syncManagedStorageDir(root.handle, parentRel, storageAbsolutePath(root, parentRel)); err != nil {
+		return &copiedDestinationCleanupDurabilityError{err: fmt.Errorf("failed to sync copied file cleanup: %w", err)}
+	}
+	return nil
+}
+
+func (fs *FileSystem) verifyCopiedFileDestination(root *storagePathRoot, rel, abs string, proof *copiedFileProof) error {
+	if proof == nil {
+		return ErrDeleteTargetChanged
+	}
+	return fs.verifyStorageFileProof(root, rel, abs, proof.destination, proof.contentHash)
+}
+
+func (fs *FileSystem) verifyStorageFileProof(root *storagePathRoot, rel, abs string, expected os.FileInfo, expectedHash string) error {
+	if err := fs.captureDeleteMountBoundary(root.absRoot).checkHostTree(abs); err != nil {
+		return err
+	}
+	file, err := rootio.OpenRegularFileNoFollow(root.handle, rel)
+	if err != nil {
+		return errors.Join(ErrDeleteTargetChanged, mapStorageRootPathError(err))
+	}
+	before, statErr := file.Stat()
+	current, pathErr := root.handle.Lstat(rel)
+	if statErr != nil || pathErr != nil || !sameStorageCopySource(expected, before) || !sameStorageCopySource(before, current) {
+		closeErr := file.Close()
+		return errors.Join(ErrDeleteTargetChanged, statErr, mapStorageRootPathError(pathErr), closeErr)
+	}
+	hash, hashErr := hashOpenWorkspaceFile(file)
+	after, afterStatErr := file.Stat()
+	current, pathErr = root.handle.Lstat(rel)
+	closeErr := file.Close()
+	if hashErr != nil || afterStatErr != nil || pathErr != nil || closeErr != nil || hash != expectedHash ||
+		!sameStorageCopySource(before, after) || !sameStorageCopySource(after, current) {
+		return errors.Join(ErrDeleteTargetChanged, hashErr, afterStatErr, mapStorageRootPathError(pathErr), closeErr)
 	}
 	return nil
 }

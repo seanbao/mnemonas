@@ -140,9 +140,13 @@ func TestCleanupStorageTempPath_JoinsRemoveError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveStoragePathRoot() error: %v", err)
 	}
+	expected, err := root.handle.Lstat(rel)
+	if err != nil {
+		t.Fatalf("Lstat(busy temp dir) error: %v", err)
+	}
 
 	operationErr := errors.New("copy failed")
-	err = errors.Join(operationErr, fs.cleanupStorageTempPath(root, rel, abs))
+	err = errors.Join(operationErr, fs.cleanupStorageTempPath(root, rel, abs, expected))
 	if err == nil {
 		t.Fatal("expected cleanup error")
 	}
@@ -9262,7 +9266,7 @@ func TestCopyFile_RollsBackDestinationWhenDirectorySyncFails(t *testing.T) {
 	}
 }
 
-func TestCopyFile_CleansCreatedDirectoriesWhenTempCreateFails(t *testing.T) {
+func TestCopyFile_RetainsCreatedDirectoriesWhenTempCreateFails(t *testing.T) {
 	fs := setupManagedPathHelperFileSystem(t)
 	srcDir := filepath.Join(fs.workspace.Root(), "src-dir")
 	if err := os.MkdirAll(srcDir, 0755); err != nil {
@@ -9292,11 +9296,11 @@ func TestCopyFile_CleansCreatedDirectoriesWhenTempCreateFails(t *testing.T) {
 	if _, statErr := os.Stat(dst); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("expected no destination file to be created, got %v", statErr)
 	}
-	if _, statErr := os.Stat(dstDir); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("expected created destination directory to be removed, got %v", statErr)
+	if info, statErr := os.Stat(dstDir); statErr != nil || !info.IsDir() {
+		t.Fatalf("expected created destination directory to be retained, got %v, %v", info, statErr)
 	}
-	if _, statErr := os.Stat(filepath.Join(fs.workspace.Root(), "deep")); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("expected created parent destination directory to be removed, got %v", statErr)
+	if info, statErr := os.Stat(filepath.Join(fs.workspace.Root(), "deep")); statErr != nil || !info.IsDir() {
+		t.Fatalf("expected created parent destination directory to be retained, got %v, %v", info, statErr)
 	}
 
 	createStorageCopyTempFile = originalCreateStorageCopyTempFile
@@ -9346,7 +9350,7 @@ func TestCopyDir_ReturnsErrorWhenDirectorySyncFails(t *testing.T) {
 	}
 }
 
-func TestCopyDir_CleansDestinationWhenSourceTreeContainsSymlink(t *testing.T) {
+func TestCopyDir_RetainsDestinationWhenSourceTreeContainsSymlink(t *testing.T) {
 	fs := setupManagedPathHelperFileSystem(t)
 	src := filepath.Join(fs.workspace.Root(), "src")
 	dst := filepath.Join(fs.workspace.Root(), "dst")
@@ -9365,8 +9369,8 @@ func TestCopyDir_CleansDestinationWhenSourceTreeContainsSymlink(t *testing.T) {
 	if !errors.Is(err, errStoragePathSymlink) {
 		t.Fatalf("copyDir() error = %v, want errStoragePathSymlink", err)
 	}
-	if _, statErr := os.Stat(dst); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("expected failed copy destination to be removed, got %v", statErr)
+	if info, statErr := os.Stat(dst); statErr != nil || !info.IsDir() {
+		t.Fatalf("expected failed copy destination to be retained, got %v, %v", info, statErr)
 	}
 	if _, statErr := os.Lstat(filepath.Join(src, "linked.txt")); statErr != nil {
 		t.Fatalf("expected source symlink to remain for operator recovery, got %v", statErr)
@@ -9400,8 +9404,8 @@ func TestCopyDirRejectsUnsafeSourceEntryNames(t *testing.T) {
 			if !errors.Is(err, ErrNotFound) {
 				t.Fatalf("copyDir() error = %v, want ErrNotFound", err)
 			}
-			if _, statErr := os.Stat(dst); !errors.Is(statErr, os.ErrNotExist) {
-				t.Fatalf("expected failed copy destination to be removed, got %v", statErr)
+			if info, statErr := os.Stat(dst); statErr != nil || !info.IsDir() {
+				t.Fatalf("expected failed copy destination to be retained, got %v, %v", info, statErr)
 			}
 		})
 	}

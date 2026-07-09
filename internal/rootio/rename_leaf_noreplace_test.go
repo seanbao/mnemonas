@@ -4,12 +4,24 @@ package rootio
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
+
+type failingRootIOCloser struct {
+	err    error
+	closed bool
+}
+
+func (c *failingRootIOCloser) Close() error {
+	c.closed = true
+	return c.err
+}
 
 func TestRenameLeafNoReplaceMovesFile(t *testing.T) {
 	rootPath := t.TempDir()
@@ -414,6 +426,350 @@ func TestRemoveAllFromDirNoFollowCheckedVerifiesBeforeMutation(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(treePath, "child.txt"))
 	if err != nil || string(data) != "child" {
 		t.Fatalf("child after rejected removal = %q, %v", data, err)
+	}
+}
+
+func TestRemoveAllFromDirNoFollowCheckedRejectsInitiallyMissingEntry(t *testing.T) {
+	rootPath := t.TempDir()
+	rootDir, err := os.Open(rootPath)
+	if err != nil {
+		t.Fatalf("Open(root) error: %v", err)
+	}
+	defer rootDir.Close()
+
+	verifyCalled := false
+	err = RemoveAllFromDirNoFollowChecked(rootDir, "missing.txt", func(string, os.FileInfo) error {
+		verifyCalled = true
+		return nil
+	})
+	if !errors.Is(err, ErrEntryChanged) {
+		t.Fatalf("RemoveAllFromDirNoFollowChecked() error = %v, want ErrEntryChanged", err)
+	}
+	if verifyCalled {
+		t.Fatal("verify called for an initially missing entry")
+	}
+}
+
+func TestRemoveAllFromDirNoFollowCheckedRejectsEntryRemovedAfterFinalReopen(t *testing.T) {
+	rootPath := t.TempDir()
+	targetPath := filepath.Join(rootPath, "target.txt")
+	if err := os.WriteFile(targetPath, []byte("target"), 0o600); err != nil {
+		t.Fatalf("WriteFile(target) error: %v", err)
+	}
+	rootDir, err := os.Open(rootPath)
+	if err != nil {
+		t.Fatalf("Open(root) error: %v", err)
+	}
+	defer rootDir.Close()
+
+	verifyCalls := 0
+	err = RemoveAllFromDirNoFollowChecked(rootDir, "target.txt", func(string, os.FileInfo) error {
+		verifyCalls++
+		if verifyCalls == 2 {
+			return os.Remove(targetPath)
+		}
+		return nil
+	})
+	if !errors.Is(err, ErrEntryChanged) {
+		t.Fatalf("RemoveAllFromDirNoFollowChecked() error = %v, want ErrEntryChanged", err)
+	}
+	if verifyCalls != 2 {
+		t.Fatalf("verify calls = %d, want 2", verifyCalls)
+	}
+}
+
+func TestRemoveAllFromDirNoFollowCheckedRejectsReplacementAfterFinalVerifier(t *testing.T) {
+	rootPath := t.TempDir()
+	targetPath := filepath.Join(rootPath, "target.txt")
+	originalPath := filepath.Join(rootPath, "original.txt")
+	replacementPath := filepath.Join(rootPath, "replacement.txt")
+	if err := os.WriteFile(targetPath, []byte("target"), 0o600); err != nil {
+		t.Fatalf("WriteFile(target) error: %v", err)
+	}
+	if err := os.WriteFile(replacementPath, []byte("replacement"), 0o600); err != nil {
+		t.Fatalf("WriteFile(replacement) error: %v", err)
+	}
+	rootDir, err := os.Open(rootPath)
+	if err != nil {
+		t.Fatalf("Open(root) error: %v", err)
+	}
+	defer rootDir.Close()
+
+	verifyCalls := 0
+	err = RemoveAllFromDirNoFollowChecked(rootDir, "target.txt", func(string, os.FileInfo) error {
+		verifyCalls++
+		if verifyCalls != 2 {
+			return nil
+		}
+		if err := os.Rename(targetPath, originalPath); err != nil {
+			return err
+		}
+		return os.Rename(replacementPath, targetPath)
+	})
+	if !errors.Is(err, ErrEntryChanged) {
+		t.Fatalf("RemoveAllFromDirNoFollowChecked() error = %v, want ErrEntryChanged", err)
+	}
+	if verifyCalls != 2 {
+		t.Fatalf("verify calls = %d, want 2", verifyCalls)
+	}
+	for name, want := range map[string]string{"original.txt": "target", "target.txt": "replacement"} {
+		data, readErr := os.ReadFile(filepath.Join(rootPath, name))
+		if readErr != nil || string(data) != want {
+			t.Fatalf("%s content = %q, %v; want %q", name, data, readErr, want)
+		}
+	}
+}
+
+func TestRemoveAllFromDirNoFollowCheckedRestoresReplacementCapturedDuringIsolation(t *testing.T) {
+	rootPath := t.TempDir()
+	targetPath := filepath.Join(rootPath, "target.txt")
+	originalPath := filepath.Join(rootPath, "original.txt")
+	replacementPath := filepath.Join(rootPath, "replacement.txt")
+	if err := os.WriteFile(targetPath, []byte("target"), 0o600); err != nil {
+		t.Fatalf("WriteFile(target) error: %v", err)
+	}
+	if err := os.WriteFile(replacementPath, []byte("replacement"), 0o600); err != nil {
+		t.Fatalf("WriteFile(replacement) error: %v", err)
+	}
+	rootDir, err := os.Open(rootPath)
+	if err != nil {
+		t.Fatalf("Open(root) error: %v", err)
+	}
+	defer rootDir.Close()
+
+	originalHook := beforeCheckedRemovalIsolation
+	beforeCheckedRemovalIsolation = func(name string) error {
+		if name != "target.txt" {
+			return nil
+		}
+		if err := os.Rename(targetPath, originalPath); err != nil {
+			return err
+		}
+		return os.Rename(replacementPath, targetPath)
+	}
+	t.Cleanup(func() { beforeCheckedRemovalIsolation = originalHook })
+
+	err = RemoveAllFromDirNoFollowChecked(rootDir, "target.txt", func(string, os.FileInfo) error { return nil })
+	if !errors.Is(err, ErrEntryChanged) {
+		t.Fatalf("RemoveAllFromDirNoFollowChecked() error = %v, want ErrEntryChanged", err)
+	}
+	for name, want := range map[string]string{"original.txt": "target", "target.txt": "replacement"} {
+		data, readErr := os.ReadFile(filepath.Join(rootPath, name))
+		if readErr != nil || string(data) != want {
+			t.Fatalf("%s content = %q, %v; want %q", name, data, readErr, want)
+		}
+	}
+}
+
+func TestRemoveAllFromDirNoFollowCheckedRestoresDirectoryReplacementCapturedDuringIsolation(t *testing.T) {
+	rootPath := t.TempDir()
+	targetPath := filepath.Join(rootPath, "tree")
+	originalPath := filepath.Join(rootPath, "original")
+	replacementPath := filepath.Join(rootPath, "replacement")
+	if err := os.Mkdir(targetPath, 0o700); err != nil {
+		t.Fatalf("Mkdir(target) error: %v", err)
+	}
+	if err := os.Mkdir(replacementPath, 0o700); err != nil {
+		t.Fatalf("Mkdir(replacement) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(replacementPath, "unknown.txt"), []byte("replacement"), 0o600); err != nil {
+		t.Fatalf("WriteFile(replacement) error: %v", err)
+	}
+	rootDir, err := os.Open(rootPath)
+	if err != nil {
+		t.Fatalf("Open(root) error: %v", err)
+	}
+	defer rootDir.Close()
+
+	originalHook := beforeCheckedRemovalIsolation
+	beforeCheckedRemovalIsolation = func(name string) error {
+		if name != "tree" {
+			return nil
+		}
+		if err := os.Rename(targetPath, originalPath); err != nil {
+			return err
+		}
+		return os.Rename(replacementPath, targetPath)
+	}
+	t.Cleanup(func() { beforeCheckedRemovalIsolation = originalHook })
+
+	err = RemoveAllFromDirNoFollowChecked(rootDir, "tree", func(string, os.FileInfo) error { return nil })
+	if !errors.Is(err, ErrEntryChanged) {
+		t.Fatalf("RemoveAllFromDirNoFollowChecked() error = %v, want ErrEntryChanged", err)
+	}
+	if _, statErr := os.Stat(originalPath); statErr != nil {
+		t.Fatalf("Stat(original) error: %v", statErr)
+	}
+	data, readErr := os.ReadFile(filepath.Join(targetPath, "unknown.txt"))
+	if readErr != nil || string(data) != "replacement" {
+		t.Fatalf("replacement content = %q, %v; want replacement", data, readErr)
+	}
+}
+
+func TestRemoveAllFromDirNoFollowCheckedReverifiesSameInodeMetadata(t *testing.T) {
+	rootPath := t.TempDir()
+	targetPath := filepath.Join(rootPath, "target.txt")
+	if err := os.WriteFile(targetPath, []byte("target"), 0o600); err != nil {
+		t.Fatalf("WriteFile(target) error: %v", err)
+	}
+	rootDir, err := os.Open(rootPath)
+	if err != nil {
+		t.Fatalf("Open(root) error: %v", err)
+	}
+	defer rootDir.Close()
+
+	wantErr := errors.New("same inode metadata changed")
+	verifyCalls := 0
+	var initialSystemInfo string
+	err = RemoveAllFromDirNoFollowChecked(rootDir, "target.txt", func(_ string, info os.FileInfo) error {
+		verifyCalls++
+		currentSystemInfo := fmt.Sprintf("%#v", info.Sys())
+		if verifyCalls > 1 {
+			if currentSystemInfo == initialSystemInfo {
+				return errors.New("final verification did not observe metadata drift")
+			}
+			return wantErr
+		}
+
+		initialSystemInfo = currentSystemInfo
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			if err := os.Chmod(targetPath, 0o400); err != nil {
+				return err
+			}
+			if err := os.Chmod(targetPath, info.Mode().Perm()); err != nil {
+				return err
+			}
+			changed, err := os.Stat(targetPath)
+			if err != nil {
+				return err
+			}
+			if changed.Mode() != info.Mode() || changed.Size() != info.Size() || !changed.ModTime().Equal(info.ModTime()) {
+				return errors.New("test mutation changed visible file metadata")
+			}
+			if fmt.Sprintf("%#v", changed.Sys()) != initialSystemInfo {
+				return nil
+			}
+			if time.Now().After(deadline) {
+				return errors.New("failed to advance file status-change identity")
+			}
+			time.Sleep(time.Millisecond)
+		}
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("RemoveAllFromDirNoFollowChecked() error = %v, want same-inode metadata error", err)
+	}
+	if verifyCalls != 2 {
+		t.Fatalf("verify calls = %d, want 2", verifyCalls)
+	}
+	if _, statErr := os.Stat(targetPath); statErr != nil {
+		t.Fatalf("Stat(target) after rejected removal error: %v", statErr)
+	}
+}
+
+func TestFinishRemoveAllFileUnlinkIgnoresCloseErrorAfterSuccessfulUnlink(t *testing.T) {
+	wantErr := errors.New("close failed")
+	closer := &failingRootIOCloser{err: wantErr}
+	if err := finishRemoveAllFileUnlink(closer, "target.txt", true, nil); err != nil {
+		t.Fatalf("finishRemoveAllFileUnlink() error = %v, want nil", err)
+	}
+	if !closer.closed {
+		t.Fatal("finishRemoveAllFileUnlink() did not close verification handle")
+	}
+}
+
+func TestCheckedRemovalLookupErrorClassifiesOnlyEntryDrift(t *testing.T) {
+	for _, err := range []error{unix.ENOENT, unix.ENOTDIR, unix.ELOOP, unix.ENXIO, unix.ENODEV, unix.ESTALE} {
+		if mapped := checkedRemovalLookupError(err); !errors.Is(mapped, ErrEntryChanged) || !errors.Is(mapped, err) {
+			t.Fatalf("checkedRemovalLookupError(%v) = %v, want entry change retaining cause", err, mapped)
+		}
+	}
+	for _, err := range []error{unix.EIO, unix.EMFILE, unix.EROFS, unix.ENOTSUP} {
+		if mapped := checkedRemovalLookupError(err); errors.Is(mapped, ErrEntryChanged) || !errors.Is(mapped, err) {
+			t.Fatalf("checkedRemovalLookupError(%v) = %v, want operational error", err, mapped)
+		}
+	}
+	for _, err := range []error{unix.EISDIR, unix.ENOTEMPTY, unix.EEXIST} {
+		if mapped := checkedRemovalMutationError(err); !errors.Is(mapped, ErrEntryChanged) || !errors.Is(mapped, err) {
+			t.Fatalf("checkedRemovalMutationError(%v) = %v, want entry change retaining cause", err, mapped)
+		}
+	}
+}
+
+func TestRemoveAllFromDirNoFollowCheckedRejectsFileReplacementAfterVerification(t *testing.T) {
+	rootPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(rootPath, "target.txt"), []byte("intended"), 0o600); err != nil {
+		t.Fatalf("WriteFile(target) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rootPath, "replacement.txt"), []byte("replacement"), 0o600); err != nil {
+		t.Fatalf("WriteFile(replacement) error: %v", err)
+	}
+	rootDir, err := os.Open(rootPath)
+	if err != nil {
+		t.Fatalf("Open(root) error: %v", err)
+	}
+	defer rootDir.Close()
+
+	err = RemoveAllFromDirNoFollowChecked(rootDir, "target.txt", func(name string, _ os.FileInfo) error {
+		if name != "target.txt" {
+			t.Fatalf("verified entry = %q, want target.txt", name)
+		}
+		if err := os.Rename(filepath.Join(rootPath, "target.txt"), filepath.Join(rootPath, "original.txt")); err != nil {
+			return err
+		}
+		return os.Rename(filepath.Join(rootPath, "replacement.txt"), filepath.Join(rootPath, "target.txt"))
+	})
+	if !errors.Is(err, ErrEntryChanged) {
+		t.Fatalf("RemoveAllFromDirNoFollowChecked() error = %v, want ErrEntryChanged", err)
+	}
+	for name, want := range map[string]string{"original.txt": "intended", "target.txt": "replacement"} {
+		data, readErr := os.ReadFile(filepath.Join(rootPath, name))
+		if readErr != nil || string(data) != want {
+			t.Fatalf("%s content = %q, %v; want %q", name, data, readErr, want)
+		}
+	}
+}
+
+func TestRemoveAllFromDirNoFollowCheckedRejectsDirectoryReplacementAfterVerification(t *testing.T) {
+	rootPath := t.TempDir()
+	if err := os.Mkdir(filepath.Join(rootPath, "tree"), 0o700); err != nil {
+		t.Fatalf("Mkdir(tree) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rootPath, "tree", "intended.txt"), []byte("intended"), 0o600); err != nil {
+		t.Fatalf("WriteFile(intended) error: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(rootPath, "replacement"), 0o700); err != nil {
+		t.Fatalf("Mkdir(replacement) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rootPath, "replacement", "unknown.txt"), []byte("unknown"), 0o600); err != nil {
+		t.Fatalf("WriteFile(unknown) error: %v", err)
+	}
+	rootDir, err := os.Open(rootPath)
+	if err != nil {
+		t.Fatalf("Open(root) error: %v", err)
+	}
+	defer rootDir.Close()
+
+	err = RemoveAllFromDirNoFollowChecked(rootDir, "tree", func(name string, _ os.FileInfo) error {
+		if name != "tree" {
+			t.Fatalf("verified entry = %q, want tree", name)
+		}
+		if err := os.Rename(filepath.Join(rootPath, "tree"), filepath.Join(rootPath, "original")); err != nil {
+			return err
+		}
+		return os.Rename(filepath.Join(rootPath, "replacement"), filepath.Join(rootPath, "tree"))
+	})
+	if !errors.Is(err, ErrEntryChanged) {
+		t.Fatalf("RemoveAllFromDirNoFollowChecked() error = %v, want ErrEntryChanged", err)
+	}
+	for name, want := range map[string]string{
+		filepath.Join("original", "intended.txt"): "intended",
+		filepath.Join("tree", "unknown.txt"):      "unknown",
+	} {
+		data, readErr := os.ReadFile(filepath.Join(rootPath, name))
+		if readErr != nil || string(data) != want {
+			t.Fatalf("%s content = %q, %v; want %q", name, data, readErr, want)
+		}
 	}
 }
 

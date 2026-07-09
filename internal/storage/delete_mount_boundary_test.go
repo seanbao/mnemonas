@@ -650,8 +650,8 @@ func TestFileSystem_CopyFilePreservesCreatedDirsWhenCleanupBoundaryChanges(t *te
 	})
 
 	err := fs.copyFile(sourcePath, destinationPath)
-	if !errors.Is(err, tempErr) || !errors.Is(err, ErrNotRegular) {
-		t.Fatalf("copyFile(created-dir cleanup mount) error = %v, want temp error and ErrNotRegular", err)
+	if !errors.Is(err, tempErr) || errors.Is(err, ErrNotRegular) || !strings.Contains(err.Error(), "created directories retained") {
+		t.Fatalf("copyFile(created-dir retention) error = %v, want temp error and retained-directory detail", err)
 	}
 	if info, statErr := os.Stat(filepath.Dir(destinationPath)); statErr != nil || !info.IsDir() {
 		t.Fatalf("created destination directory after unsafe cleanup rejection = %v, %v", info, statErr)

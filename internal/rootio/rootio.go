@@ -11,7 +11,10 @@ import (
 var (
 	// ErrSymlink reports that a Root-relative path resolved through a symlink.
 	ErrSymlink = errors.New("root path resolves through a symlink")
-	errEscape  = errors.New("root path escapes root")
+	// ErrEntryChanged reports that a checked directory entry no longer names
+	// the object opened for verification.
+	ErrEntryChanged = errors.New("root path entry changed")
+	errEscape       = errors.New("root path escapes root")
 )
 
 // IsSymlinkError reports whether err was returned because a no-follow root

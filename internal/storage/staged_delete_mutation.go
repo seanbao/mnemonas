@@ -403,7 +403,7 @@ func (fs *FileSystem) captureStagedDeleteRemovalManifestLocked(target *stagedDel
 	return manifest, nil
 }
 
-func (fs *FileSystem) removeStagedDeleteTargetLocked(ctx context.Context, target *stagedDeleteTarget, useWorkspaceDelete bool) error {
+func (fs *FileSystem) removeStagedDeleteTargetLocked(ctx context.Context, target *stagedDeleteTarget, useWorkspaceDelete bool, retainedCopy *stagedTrashContent) error {
 	if target.stageRel == "" {
 		return nil
 	}
@@ -448,6 +448,11 @@ func (fs *FileSystem) removeStagedDeleteTargetLocked(ctx context.Context, target
 	}
 	if err := fs.captureDeleteMountBoundary(fs.workspace.Root()).checkHostTree(target.stageAbs); err != nil {
 		return target.residual(err)
+	}
+	if retainedCopy != nil {
+		if err := fs.verifyStagedTrashContentLocked(ctx, retainedCopy); err != nil {
+			return target.residual(fmt.Errorf("trash copy changed before staged source removal: %w", err))
+		}
 	}
 
 	verifiedIdentities := make(map[string]struct{}, len(manifest))
@@ -540,10 +545,21 @@ func (fs *FileSystem) removeDeleteQuarantineLocked(quarantine *stagedDeleteQuara
 	if err := quarantine.close(); err != nil {
 		return err
 	}
-	if err := fs.filesRootHandle.Remove(quarantine.rel); err != nil {
+	parentRel := filepath.Dir(quarantine.rel)
+	parent, err := rootio.OpenDirNoFollow(fs.filesRootHandle, parentRel)
+	if err != nil {
 		return mapStorageRootPathError(err)
 	}
-	parentRel := filepath.Dir(quarantine.rel)
+	defer parent.Close()
+	base := filepath.Base(quarantine.rel)
+	if err := rootio.RemoveAllFromDirNoFollowChecked(parent, base, func(entryPath string, info os.FileInfo) error {
+		if entryPath != base || info == nil || !info.IsDir() || !os.SameFile(quarantine.info, info) {
+			return rootio.ErrEntryChanged
+		}
+		return nil
+	}); err != nil {
+		return mapStorageRootPathError(err)
+	}
 	if err := syncManagedStorageDir(fs.filesRootHandle, parentRel, storageAbsolutePath(&storagePathRoot{absRoot: fs.workspace.Root(), handle: fs.filesRootHandle}, parentRel)); err != nil {
 		return workspace.WrapVisibleMutationWarning(fmt.Errorf("failed to sync staged delete cleanup: %w", err))
 	}
@@ -913,9 +929,8 @@ func (fs *FileSystem) rollbackStagedTrashDeleteLocked(ctx context.Context, targe
 	} else {
 		trashFinalizeErr = fs.discardStagedTrashRollbackContentLocked(ctx, stagedTrash)
 	}
-	if metadataErr == nil && trashStageErr == nil && trashFinalizeErr == nil {
-		fs.cleanupTrashItemDir(path.Join(fs.trashRoot, id))
-	}
+	// This rollback path does not retain an identity-bearing handle for the
+	// item directory. Leave an empty directory instead of deleting by path.
 	var restoreIndexErr error
 	if restoreIndex && trashStageErr == nil && metadataErr == nil && trashFinalizeErr == nil {
 		restoreIndexErr = fs.restoreDeletedIndexEntries(ctx, target.logicalName, info)
@@ -993,7 +1008,7 @@ func (fs *FileSystem) commitStagedTrashDeleteLocked(ctx context.Context, target 
 		}
 	}
 
-	if err := fs.removeStagedDeleteTargetLocked(context.WithoutCancel(ctx), target, false); err != nil {
+	if err := fs.removeStagedDeleteTargetLocked(context.WithoutCancel(ctx), target, false, copied); err != nil {
 		var residual *DeleteStageResidualError
 		persistenceErr := stagedDeletePersistenceWarnings(err)
 		if errors.As(err, &residual) {
@@ -1065,7 +1080,7 @@ func (fs *FileSystem) commitStagedPermanentDeleteLocked(ctx context.Context, tar
 		}
 	}
 
-	if err := fs.removeStagedDeleteTargetLocked(context.WithoutCancel(ctx), target, true); err != nil {
+	if err := fs.removeStagedDeleteTargetLocked(context.WithoutCancel(ctx), target, true, nil); err != nil {
 		var residual *DeleteStageResidualError
 		persistenceErr := stagedDeletePersistenceWarnings(err)
 		if errors.As(err, &residual) {

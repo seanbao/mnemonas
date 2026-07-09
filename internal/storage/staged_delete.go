@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -26,21 +27,31 @@ var (
 	afterTrashRollbackCapture    = func(string, string) error { return nil }
 	beforeDeleteStageRemoval     = func(string, string) error { return nil }
 	afterDeleteQuarantineCapture = func(string, string) error { return nil }
+	syncDeleteWitnessRecoveryDir = func(root *os.Root, relName, absPath string) error {
+		return syncManagedStorageDir(root, relName, absPath)
+	}
 )
 
 // DeleteStageResidualError reports that an exact staged object could not be
 // restored without replacing a newer object at the original path.
 type DeleteStageResidualError struct {
-	Path      string
-	StagePath string
-	err       error
+	Path            string
+	StagePath       string
+	InspectionPaths []string
+	err             error
 }
 
 func (e *DeleteStageResidualError) Error() string {
+	message := ""
 	if e.StagePath != "" {
-		return fmt.Sprintf("delete target retained in internal staging: %s (%s)", e.Path, e.StagePath)
+		message = fmt.Sprintf("delete target retained in internal staging: %s (%s)", e.Path, e.StagePath)
+	} else {
+		message = fmt.Sprintf("delete target recovery requires manual inspection: %s", e.Path)
 	}
-	return fmt.Sprintf("delete target retained in internal staging: %s", e.Path)
+	if len(e.InspectionPaths) > 0 {
+		message += "; inspect: " + strings.Join(e.InspectionPaths, ", ")
+	}
+	return message
 }
 
 func (e *DeleteStageResidualError) Unwrap() error {
@@ -100,6 +111,14 @@ func newDeleteStageRelativeName(originalRel string) (string, error) {
 		return name, nil
 	}
 	return filepath.Join(parent, name), nil
+}
+
+func newDeleteRecoveryRelativeName(originalRel string) (string, error) {
+	rel, err := newDeleteStageRelativeName(originalRel)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(rel, ".stage") + ".recovery", nil
 }
 
 func deleteStageIdentity(info os.FileInfo) string {
@@ -200,6 +219,9 @@ func (fs *FileSystem) stageDeleteTargetLocked(ctx context.Context, name string, 
 		_ = target.close()
 		return nil, cause
 	}
+	if err := fs.captureDeleteWitnessContentHashLocked(ctx, target); err != nil {
+		return abort(err)
+	}
 	if err := afterDeleteWitnessOpen(name); err != nil {
 		return abort(err)
 	}
@@ -225,20 +247,37 @@ func (fs *FileSystem) stageDeleteTargetLocked(ctx context.Context, name string, 
 		}
 		stageInfo, moved, err := renameDeleteLeafNoReplace(fs.filesRootHandle, target.originalRel, stageRel, witnessInfo, witnessIdentity)
 		if err != nil {
-			if errors.Is(err, os.ErrExist) {
-				continue
-			}
 			if moved {
 				target.stageRel = stageRel
 				target.stageName = storageWorkspaceName(stageRel)
 				target.stageAbs = stageAbs
 				target.stageInfo = stageInfo
 				target.stageIdentity = deleteStageIdentity(stageInfo)
+				var recoveryPath string
+				var recoveryErr error
+				if target.witnessInfo.Mode().IsRegular() {
+					recoveryPath, recoveryErr = fs.preserveDeleteWitnessRecoveryLocked(target)
+				} else {
+					recoveryErr = errors.New("post-rename directory witness has no verified recovery path")
+				}
+				inspectionPaths := []string{stageAbs}
+				var recoveryFailure *deleteWitnessRecoveryError
+				if errors.As(recoveryErr, &recoveryFailure) {
+					inspectionPaths = append(inspectionPaths, recoveryFailure.paths...)
+				}
 				closeErr := target.close()
 				return nil, errors.Join(
 					&DeleteTargetChangedError{Path: name},
-					&DeleteStageResidualError{Path: name, StagePath: stageAbs, err: errors.Join(err, closeErr)},
+					&DeleteStageResidualError{Path: name, StagePath: recoveryPath, InspectionPaths: inspectionPaths, err: errors.Join(
+						err,
+						recoveryErr,
+						closeErr,
+						fmt.Errorf("unknown post-rename entry retained at %s", stageAbs),
+					)},
 				)
+			}
+			if errors.Is(err, os.ErrExist) {
+				continue
 			}
 			if errors.Is(err, ErrDeleteTargetChanged) {
 				if current, statErr := fs.filesRootHandle.Lstat(target.originalRel); statErr == nil && !current.IsDir() && !current.Mode().IsRegular() {
@@ -285,6 +324,137 @@ func (fs *FileSystem) stageDeleteTargetLocked(ctx context.Context, name string, 
 		return rollbackCapture(err)
 	}
 	return target, nil
+}
+
+func (fs *FileSystem) captureDeleteWitnessContentHashLocked(ctx context.Context, target *stagedDeleteTarget) error {
+	if target == nil || target.witness == nil || target.witnessInfo == nil || !target.witnessInfo.Mode().IsRegular() || target.expected.Root.ContentHash != "" {
+		return nil
+	}
+	before, err := target.witness.Stat()
+	if err != nil || !sameStorageCopySource(target.witnessInfo, before) {
+		return errors.Join(ErrDeleteTargetChanged, err)
+	}
+	current, err := fs.filesRootHandle.Lstat(target.originalRel)
+	if err != nil || !sameStorageCopySource(before, current) {
+		return errors.Join(ErrDeleteTargetChanged, mapStorageRootPathError(err))
+	}
+	hash, err := hashOpenWorkspaceFileContext(ctx, target.witness)
+	if err != nil {
+		return err
+	}
+	after, statErr := target.witness.Stat()
+	current, pathErr := fs.filesRootHandle.Lstat(target.originalRel)
+	if statErr != nil || pathErr != nil || !sameStorageCopySource(before, after) || !sameStorageCopySource(after, current) {
+		return errors.Join(ErrDeleteTargetChanged, statErr, mapStorageRootPathError(pathErr))
+	}
+	target.expected.Root.ContentHash = hash
+	rootUpdated := false
+	for i := range target.expected.Entries {
+		if target.expected.Entries[i].Path == target.logicalName {
+			target.expected.Entries[i].ContentHash = hash
+			rootUpdated = true
+			break
+		}
+	}
+	if !rootUpdated {
+		return ErrDeleteTargetChanged
+	}
+	return nil
+}
+
+type deleteWitnessRecoveryError struct {
+	paths []string
+	err   error
+}
+
+func (e *deleteWitnessRecoveryError) Error() string {
+	return "delete witness recovery requires inspection"
+}
+
+func (e *deleteWitnessRecoveryError) Unwrap() error {
+	return e.err
+}
+
+func (fs *FileSystem) preserveDeleteWitnessRecoveryLocked(target *stagedDeleteTarget) (string, error) {
+	if target == nil || target.witness == nil || target.witnessInfo == nil || !target.witnessInfo.Mode().IsRegular() {
+		return "", ErrDeleteTargetChanged
+	}
+	if target.expected.Root.ContentHash == "" {
+		return "", errors.New("delete witness recovery requires a captured content hash")
+	}
+	root := &storagePathRoot{absRoot: fs.workspace.Root(), handle: fs.filesRootHandle}
+	for range 32 {
+		recoveryRel, err := newDeleteRecoveryRelativeName(target.originalRel)
+		if err != nil {
+			return "", err
+		}
+		recoveryAbs := storageAbsolutePath(root, recoveryRel)
+		recovery, err := rootio.OpenFileNoFollow(fs.filesRootHandle, recoveryRel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			if errors.Is(err, os.ErrExist) {
+				continue
+			}
+			return "", mapStorageRootPathError(err)
+		}
+		failRecovery := func(cause error) (string, error) {
+			closeErr := recovery.Close()
+			return "", &deleteWitnessRecoveryError{paths: []string{recoveryAbs}, err: errors.Join(cause, closeErr)}
+		}
+		before, err := target.witness.Stat()
+		if err != nil || !os.SameFile(target.witnessInfo, before) || target.witnessInfo.Mode() != before.Mode() || target.witnessInfo.Size() != before.Size() || !target.witnessInfo.ModTime().Equal(before.ModTime()) {
+			return failRecovery(errors.Join(ErrDeleteTargetChanged, err))
+		}
+		if _, err := target.witness.Seek(0, io.SeekStart); err != nil {
+			return failRecovery(err)
+		}
+		if err := recovery.Chmod(storagePreservedMode(before.Mode())); err != nil {
+			return failRecovery(err)
+		}
+		copied, copyErr := io.Copy(recovery, target.witness)
+		syncErr := recovery.Sync()
+		after, statErr := target.witness.Stat()
+		recoveryInfo, recoveryStatErr := recovery.Stat()
+		if copyErr != nil || syncErr != nil || statErr != nil || recoveryStatErr != nil || copied != before.Size() || !sameStorageCopySource(before, after) || recoveryInfo.Size() != copied {
+			return failRecovery(errors.Join(ErrDeleteTargetChanged, copyErr, syncErr, statErr, recoveryStatErr))
+		}
+		if closeErr := recovery.Close(); closeErr != nil {
+			return "", &deleteWitnessRecoveryError{paths: []string{recoveryAbs}, err: closeErr}
+		}
+		current, err := fs.filesRootHandle.Lstat(recoveryRel)
+		if err != nil || !sameStorageCopySource(recoveryInfo, current) {
+			return "", &deleteWitnessRecoveryError{paths: []string{recoveryAbs}, err: errors.Join(ErrDeleteTargetChanged, mapStorageRootPathError(err))}
+		}
+		verification, err := rootio.OpenRegularFileNoFollow(fs.filesRootHandle, recoveryRel)
+		if err != nil {
+			return "", &deleteWitnessRecoveryError{paths: []string{recoveryAbs}, err: errors.Join(ErrDeleteTargetChanged, mapStorageRootPathError(err))}
+		}
+		openedInfo, statErr := verification.Stat()
+		hashRecoveryFile := fs.hashDeleteWitnessRecoveryFile
+		if hashRecoveryFile == nil {
+			hashRecoveryFile = hashOpenWorkspaceFile
+		}
+		hash, hashErr := hashRecoveryFile(verification)
+		afterHashInfo, afterHashStatErr := verification.Stat()
+		closeErr := verification.Close()
+		current, currentErr := fs.filesRootHandle.Lstat(recoveryRel)
+		if statErr != nil || hashErr != nil || afterHashStatErr != nil || closeErr != nil || currentErr != nil ||
+			!sameStorageCopySource(recoveryInfo, openedInfo) || !sameStorageCopySource(openedInfo, afterHashInfo) ||
+			!sameStorageCopySource(afterHashInfo, current) || hash != target.expected.Root.ContentHash {
+			return "", &deleteWitnessRecoveryError{paths: []string{recoveryAbs}, err: errors.Join(ErrDeleteTargetChanged, statErr, hashErr, afterHashStatErr, closeErr, mapStorageRootPathError(currentErr))}
+		}
+		if err := syncDeleteWitnessRecoveryDir(fs.filesRootHandle, filepath.Dir(recoveryRel), storageAbsolutePath(root, filepath.Dir(recoveryRel))); err != nil {
+			return "", &deleteWitnessRecoveryError{
+				paths: []string{recoveryAbs},
+				err:   fmt.Errorf("failed to sync delete witness recovery file: %w", err),
+			}
+		}
+		current, err = fs.filesRootHandle.Lstat(recoveryRel)
+		if err != nil || !sameStorageCopySource(recoveryInfo, current) {
+			return "", &deleteWitnessRecoveryError{paths: []string{recoveryAbs}, err: errors.Join(ErrDeleteTargetChanged, mapStorageRootPathError(err))}
+		}
+		return recoveryAbs, nil
+	}
+	return "", errors.New("failed to allocate delete witness recovery path")
 }
 
 func (fs *FileSystem) rollbackStagedDeleteLocked(target *stagedDeleteTarget, cause error) error {
