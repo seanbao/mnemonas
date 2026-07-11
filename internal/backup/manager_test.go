@@ -1055,9 +1055,10 @@ func TestReadManifestRejectsUnsafeEntries(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			manifestPath := filepath.Join(secureBackupTestTempDir(t), "manifest.json")
 			manifest := Manifest{
-				Version:    manifestVersion,
-				FileCount:  1,
-				TotalBytes: 1,
+				Version:     manifestVersion,
+				FileCount:   1,
+				TotalBytes:  1,
+				Directories: testManifestDirectories(),
 				Entries: []ManifestEntry{
 					tt.entry,
 				},
@@ -1078,9 +1079,10 @@ func TestReadManifestRejectsDuplicateArchivePaths(t *testing.T) {
 	validDigest := strings.Repeat("a", 64)
 	manifestPath := filepath.Join(secureBackupTestTempDir(t), "manifest.json")
 	manifest := Manifest{
-		Version:    manifestVersion,
-		FileCount:  2,
-		TotalBytes: 2,
+		Version:     manifestVersion,
+		FileCount:   2,
+		TotalBytes:  2,
+		Directories: testManifestDirectories(),
 		Entries: []ManifestEntry{
 			{
 				ArchivePath: "data/note.txt",
@@ -1127,16 +1129,17 @@ func TestReadManifestRejectsInconsistentSummary(t *testing.T) {
 
 	baseEntries := []ManifestEntry{
 		{
-			ArchivePath: "data/note.txt",
-			Size:        2,
-			SHA256:      validDigest,
-		},
-		{
 			ArchivePath: "config/config.toml",
 			Size:        3,
 			SHA256:      validDigest,
 		},
+		{
+			ArchivePath: "data/note.txt",
+			Size:        2,
+			SHA256:      validDigest,
+		},
 	}
+	baseDirectories := testManifestDirectories()
 	tests := []struct {
 		name     string
 		manifest Manifest
@@ -1144,45 +1147,50 @@ func TestReadManifestRejectsInconsistentSummary(t *testing.T) {
 		{
 			name: "negative file count",
 			manifest: Manifest{
-				Version:    manifestVersion,
-				FileCount:  -1,
-				TotalBytes: 5,
-				Entries:    baseEntries,
+				Version:     manifestVersion,
+				FileCount:   -1,
+				TotalBytes:  5,
+				Entries:     baseEntries,
+				Directories: baseDirectories,
 			},
 		},
 		{
 			name: "negative total bytes",
 			manifest: Manifest{
-				Version:    manifestVersion,
-				FileCount:  2,
-				TotalBytes: -1,
-				Entries:    baseEntries,
+				Version:     manifestVersion,
+				FileCount:   2,
+				TotalBytes:  -1,
+				Entries:     baseEntries,
+				Directories: baseDirectories,
 			},
 		},
 		{
 			name: "file count mismatch",
 			manifest: Manifest{
-				Version:    manifestVersion,
-				FileCount:  1,
-				TotalBytes: 5,
-				Entries:    baseEntries,
+				Version:     manifestVersion,
+				FileCount:   1,
+				TotalBytes:  5,
+				Entries:     baseEntries,
+				Directories: baseDirectories,
 			},
 		},
 		{
 			name: "total bytes mismatch",
 			manifest: Manifest{
-				Version:    manifestVersion,
-				FileCount:  2,
-				TotalBytes: 4,
-				Entries:    baseEntries,
+				Version:     manifestVersion,
+				FileCount:   2,
+				TotalBytes:  4,
+				Entries:     baseEntries,
+				Directories: baseDirectories,
 			},
 		},
 		{
 			name: "total bytes overflow",
 			manifest: Manifest{
-				Version:    manifestVersion,
-				FileCount:  2,
-				TotalBytes: maxInt64,
+				Version:     manifestVersion,
+				FileCount:   2,
+				TotalBytes:  maxInt64,
+				Directories: baseDirectories,
 				Entries: []ManifestEntry{
 					{
 						ArchivePath: "data/a.bin",
@@ -1228,9 +1236,10 @@ func TestReadManifestRejectsInvalidSHA256(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			manifestPath := filepath.Join(secureBackupTestTempDir(t), "manifest.json")
 			manifest := Manifest{
-				Version:    manifestVersion,
-				FileCount:  1,
-				TotalBytes: 1,
+				Version:     manifestVersion,
+				FileCount:   1,
+				TotalBytes:  1,
+				Directories: testManifestDirectories(),
 				Entries: []ManifestEntry{
 					{
 						ArchivePath: "data/note.txt",
@@ -1254,9 +1263,10 @@ func TestReadManifestRejectsInvalidSHA256(t *testing.T) {
 func TestReadManifestRejectsInvalidMode(t *testing.T) {
 	manifestPath := filepath.Join(secureBackupTestTempDir(t), "manifest.json")
 	manifest := Manifest{
-		Version:    manifestVersion,
-		FileCount:  1,
-		TotalBytes: 1,
+		Version:     manifestVersion,
+		FileCount:   1,
+		TotalBytes:  1,
+		Directories: testManifestDirectories(),
 		Entries: []ManifestEntry{
 			{
 				ArchivePath: "data/note.txt",
@@ -1298,9 +1308,10 @@ func TestVerifyManifestFilesRejectsInconsistentSummary(t *testing.T) {
 		t.Fatalf("hashFile() error: %v", err)
 	}
 	manifest := Manifest{
-		Version:    manifestVersion,
-		FileCount:  0,
-		TotalBytes: size,
+		Version:     manifestVersion,
+		FileCount:   0,
+		TotalBytes:  size,
+		Directories: testManifestDirectories(),
 		Entries: []ManifestEntry{
 			{
 				ArchivePath: "data/note.txt",
@@ -1323,16 +1334,16 @@ func TestVerifyManifestFilesRejectsUnmanifestedFiles(t *testing.T) {
 	filePath := filepath.Join(root, "data", "note.txt")
 	mustWriteFile(t, filePath, "verified")
 	mustWriteFile(t, filepath.Join(root, "data", "extra.txt"), "unexpected")
-	mustWriteFile(t, filepath.Join(root, manifestFileName), "{}")
 
 	size, digest, mode, err := hashFile(context.Background(), filePath)
 	if err != nil {
 		t.Fatalf("hashFile() error: %v", err)
 	}
 	manifest := Manifest{
-		Version:    manifestVersion,
-		FileCount:  1,
-		TotalBytes: size,
+		Version:     manifestVersion,
+		FileCount:   1,
+		TotalBytes:  size,
+		Directories: testManifestDirectories(),
 		Entries: []ManifestEntry{
 			{
 				ArchivePath: "data/note.txt",
@@ -1342,6 +1353,9 @@ func TestVerifyManifestFilesRejectsUnmanifestedFiles(t *testing.T) {
 				SHA256:      digest,
 			},
 		},
+	}
+	if err := writeJSONFile(filepath.Join(root, manifestFileName), manifest, 0o600); err != nil {
+		t.Fatalf("writeJSONFile(manifest) error: %v", err)
 	}
 
 	_, _, err = verifyManifestFiles(context.Background(), root, manifest)
@@ -1363,9 +1377,10 @@ func TestVerifyManifestFilesRejectsUnexpectedTopLevelDirectory(t *testing.T) {
 		t.Fatalf("hashFile() error: %v", err)
 	}
 	manifest := Manifest{
-		Version:    manifestVersion,
-		FileCount:  1,
-		TotalBytes: size,
+		Version:     manifestVersion,
+		FileCount:   1,
+		TotalBytes:  size,
+		Directories: testManifestDirectories(),
 		Entries: []ManifestEntry{
 			{
 				ArchivePath: "data/note.txt",
@@ -1376,6 +1391,9 @@ func TestVerifyManifestFilesRejectsUnexpectedTopLevelDirectory(t *testing.T) {
 			},
 		},
 	}
+	if err := writeJSONFile(filepath.Join(root, manifestFileName), manifest, 0o600); err != nil {
+		t.Fatalf("writeJSONFile(manifest) error: %v", err)
+	}
 
 	_, _, err = verifyManifestFiles(context.Background(), root, manifest)
 	if !errors.Is(err, ErrUnsafePath) {
@@ -1385,11 +1403,14 @@ func TestVerifyManifestFilesRejectsUnexpectedTopLevelDirectory(t *testing.T) {
 
 func TestVerifyManifestFilesRejectsMissingDataDirectory(t *testing.T) {
 	root := secureBackupTestTempDir(t)
-	mustWriteFile(t, filepath.Join(root, manifestFileName), "{}")
 	manifest := Manifest{
-		Version:    manifestVersion,
-		FileCount:  0,
-		TotalBytes: 0,
+		Version:     manifestVersion,
+		FileCount:   0,
+		TotalBytes:  0,
+		Directories: testManifestDirectories(),
+	}
+	if err := writeJSONFile(filepath.Join(root, manifestFileName), manifest, 0o600); err != nil {
+		t.Fatalf("writeJSONFile(manifest) error: %v", err)
 	}
 
 	_, _, err := verifyManifestFiles(context.Background(), root, manifest)
@@ -1789,6 +1810,9 @@ func TestManager_RunJobAndRestoreDrill(t *testing.T) {
 	if restore.TargetPath != restoreTarget || restore.FileCount != result.FileCount || !restore.ConfigRestored {
 		t.Fatalf("unexpected RunRestore result: %+v", restore)
 	}
+	if restore.ConfigPath != filepath.Join(restoreTarget, ".mnemonas-restore", "config.toml") {
+		t.Fatalf("RunRestore config path = %q, want installed target config path", restore.ConfigPath)
+	}
 	t.Cleanup(func() {
 		_ = os.Chmod(filepath.Join(restoreTarget, "locked"), 0700)
 	})
@@ -1820,7 +1844,8 @@ func TestManager_RunJobAndRestoreDrill(t *testing.T) {
 	}
 	assertWarningsNotContain(t, verify.Warnings, "恢复目标根目录权限不匹配")
 	if result.JobConfigBinding != "" || result.ManifestSize != 0 || result.ManifestDigest != "" ||
-		drill.JobConfigBinding != "" || restore.JobConfigBinding != "" || verify.JobConfigBinding != "" {
+		drill.JobConfigBinding != "" || restore.JobConfigBinding != "" || restore.ManifestSize != 0 || restore.ManifestDigest != "" ||
+		verify.JobConfigBinding != "" {
 		t.Fatalf("public backup results exposed internal readiness evidence")
 	}
 	expectedBinding, err := jobConfigEvidenceBinding(manager.jobs["home"], manager.storageRoot, manager.configPath)
@@ -1839,12 +1864,20 @@ func TestManager_RunJobAndRestoreDrill(t *testing.T) {
 	}
 	persistedManifestSize := manager.state.Jobs["home"].LastRun.ManifestSize
 	persistedManifestDigest := manager.state.Jobs["home"].LastRun.ManifestDigest
+	persistedRestoreManifestSize := manager.state.Jobs["home"].LastRestore.ManifestSize
+	persistedRestoreManifestDigest := manager.state.Jobs["home"].LastRestore.ManifestDigest
 	manager.mu.Unlock()
 	if persistedManifestSize <= 0 {
 		t.Fatal("persisted backup run omitted manifest size")
 	}
 	if persistedManifestDigest == "" {
 		t.Fatal("persisted backup run omitted manifest digest")
+	}
+	if persistedRestoreManifestSize <= 0 {
+		t.Fatal("persisted restore omitted manifest size")
+	}
+	if persistedRestoreManifestDigest == "" {
+		t.Fatal("persisted restore omitted manifest digest")
 	}
 	for _, evidence := range persistedEvidence {
 		if evidence.binding != expectedBinding {
@@ -1885,6 +1918,9 @@ func TestManager_RunJobAndRestoreDrill(t *testing.T) {
 	}
 	if jobs[0].LastRestore.TargetPath != restoreTarget || jobs[0].LastRestore.Status != StatusCompleted {
 		t.Fatalf("reloaded last restore = %+v, want completed restore to %s", jobs[0].LastRestore, restoreTarget)
+	}
+	if jobs[0].LastRestore.ManifestSize != 0 || jobs[0].LastRestore.ManifestDigest != "" {
+		t.Fatalf("reloaded public restore exposed manifest evidence: %+v", jobs[0].LastRestore)
 	}
 	if len(jobs[0].RestoreHistory) != 1 || jobs[0].RestoreHistory[0].ID != restore.ID {
 		t.Fatalf("reloaded restore history = %+v, want restore %s", jobs[0].RestoreHistory, restore.ID)
@@ -2803,6 +2839,15 @@ func TestManager_RunRestoreVerifyUsesRestoreSnapshotWhenNewerBackupExists(t *tes
 	}
 	if restore.SnapshotPath != firstRun.SnapshotPath {
 		t.Fatalf("restore snapshot = %q, want first run snapshot %q", restore.SnapshotPath, firstRun.SnapshotPath)
+	}
+	if restore.ManifestSize != 0 || restore.ManifestDigest != "" {
+		t.Fatalf("public restore exposed manifest evidence: %+v", restore)
+	}
+	manager.mu.Lock()
+	recordedRestore := cloneRestoreResultRaw(manager.state.Jobs["home"].LastRestore)
+	manager.mu.Unlock()
+	if recordedRestore == nil || recordedRestore.ManifestPath != firstRun.ManifestPath || recordedRestore.ManifestSize <= 0 || recordedRestore.ManifestDigest == "" {
+		t.Fatalf("persisted restore lacks trusted first-run manifest evidence: %+v", recordedRestore)
 	}
 
 	now = now.Add(time.Minute)
@@ -3928,6 +3973,10 @@ func TestInstallRestoreTargetRejectsSwappedSymlinkParentBeforeRemovingTarget(t *
 	if err := os.Mkdir(partial, 0700); err != nil {
 		t.Fatal(err)
 	}
+	partialIdentity, err := os.Lstat(partial)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Rename(parent, originalParent); err != nil {
 		t.Fatal(err)
 	}
@@ -3940,7 +3989,7 @@ func TestInstallRestoreTargetRejectsSwappedSymlinkParentBeforeRemovingTarget(t *
 	}
 
 	target := filepath.Join(parent, "restore-target")
-	err := installRestoreTarget(partial, target)
+	err = installRestoreTarget(restoreStagingTarget{Path: partial, Identity: partialIdentity}, target)
 	if !errors.Is(err, ErrUnsafePath) {
 		t.Fatalf("installRestoreTarget() error = %v, want ErrUnsafePath", err)
 	}
@@ -5030,7 +5079,7 @@ func TestCopySourceTreeRejectsDestinationSymlink(t *testing.T) {
 		t.Skipf("symlink unavailable: %v", err)
 	}
 
-	_, _, err := copySourceTree(context.Background(), source, destinationLink, nil)
+	_, _, _, err := copySourceTree(context.Background(), source, destinationLink, nil)
 	if !errors.Is(err, ErrUnsafePath) {
 		t.Fatalf("copySourceTree() error = %v, want %v", err, ErrUnsafePath)
 	}
@@ -5061,7 +5110,7 @@ func TestCopySourceTreeRejectsUnsafeSourceEntryNames(t *testing.T) {
 				t.Skipf("platform does not support unsafe filename %q: %v", tt.entryName, err)
 			}
 
-			_, _, err := copySourceTree(context.Background(), source, destination, nil)
+			_, _, _, err := copySourceTree(context.Background(), source, destination, nil)
 			if !errors.Is(err, ErrUnsafePath) {
 				t.Fatalf("copySourceTree() error = %v, want ErrUnsafePath", err)
 			}
@@ -6143,11 +6192,12 @@ func TestManager_RunRetentionCheckLocalRejectsInvalidSnapshotRunID(t *testing.T)
 		t.Fatalf("MkdirAll(bad snapshot) error: %v", err)
 	}
 	manifest := Manifest{
-		Version:    manifestVersion,
-		JobID:      "home",
-		RunID:      "bad-run",
-		FileCount:  0,
-		TotalBytes: 0,
+		Version:     manifestVersion,
+		JobID:       "home",
+		RunID:       "bad-run",
+		FileCount:   0,
+		TotalBytes:  0,
+		Directories: testManifestDirectories(),
 	}
 	if err := writeJSONFile(filepath.Join(snapshotPath, manifestFileName), manifest, 0600); err != nil {
 		t.Fatalf("writeJSONFile(manifest) error: %v", err)
@@ -7620,17 +7670,13 @@ func TestAppendRestoreDirectoryComparisonWarningsRejectsUnsafeTargetEntryName(t 
 	if os.PathSeparator == '\\' {
 		t.Skip("backslash is a path separator on this platform")
 	}
-	root := secureBackupTestTempDir(t)
-	snapshotPath := filepath.Join(root, "snapshot")
-	targetPath := filepath.Join(root, "target")
-	if err := os.MkdirAll(filepath.Join(snapshotPath, "data"), 0700); err != nil {
-		t.Fatalf("MkdirAll(snapshot data) error: %v", err)
-	}
+	targetPath := filepath.Join(secureBackupTestTempDir(t), "target")
 	if err := os.MkdirAll(filepath.Join(targetPath, `docs\secret`), 0700); err != nil {
 		t.Fatalf("MkdirAll(target unsafe dir) error: %v", err)
 	}
 
-	_, err := appendRestoreDirectoryComparisonWarnings(context.Background(), snapshotPath, targetPath, nil)
+	manifest := Manifest{Directories: testManifestDirectories()}
+	_, err := appendRestoreDirectoryComparisonWarnings(context.Background(), targetPath, manifest, true, nil)
 	if !errors.Is(err, ErrUnsafePath) {
 		t.Fatalf("appendRestoreDirectoryComparisonWarnings() error = %v, want ErrUnsafePath", err)
 	}
@@ -7643,7 +7689,8 @@ func TestAppendRestoreFileComparisonWarningsRejectsUnsafeTargetEntryName(t *test
 	targetPath := secureBackupTestTempDir(t)
 	mustWriteFile(t, filepath.Join(targetPath, `docs\secret.txt`), "restored")
 
-	_, err := appendRestoreFileComparisonWarnings(context.Background(), targetPath, Manifest{}, nil)
+	manifest := Manifest{Directories: testManifestDirectories()}
+	_, err := appendRestoreFileComparisonWarnings(context.Background(), targetPath, manifest, true, true, nil)
 	if !errors.Is(err, ErrUnsafePath) {
 		t.Fatalf("appendRestoreFileComparisonWarnings() error = %v, want ErrUnsafePath", err)
 	}

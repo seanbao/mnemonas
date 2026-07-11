@@ -19,9 +19,11 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode"
 
@@ -63,7 +65,7 @@ const (
 
 	stateFileName                   = "status.json"
 	manifestFileName                = "manifest.json"
-	manifestVersion                 = 1
+	manifestVersion                 = 2
 	jobConfigEvidenceBindingVersion = 2
 	runIDTimeLayout                 = "20060102T150405.000000000Z"
 	restoreHistoryLimit             = 20
@@ -87,6 +89,7 @@ const (
 	restoreStateWarning          = "恢复结果已生成，但状态目录同步失败"
 	retentionCheckStateWarning   = "保留策略检查结果已生成，但状态目录同步失败"
 	stateNamespaceChangedWarning = "备份状态目录身份发生变化；当前结果已生成，但备份服务已停止后续操作。请检查状态目录并重启服务"
+	specialPermissionBits        = os.ModeSetuid | os.ModeSetgid | os.ModeSticky
 
 	redactedBackupSecretValue        = "<redacted>"
 	backupSensitiveNamePartPattern   = `(?:[A-Za-z0-9_.-]|%[0-9A-Fa-f]{2})*`
@@ -574,15 +577,18 @@ type RestoreVerifyResult struct {
 
 // RestoreResult records one explicit snapshot restore.
 type RestoreResult struct {
-	ID                string                  `json:"id"`
-	JobID             string                  `json:"job_id"`
-	JobConfigBinding  string                  `json:"job_config_binding,omitempty"`
-	Status            string                  `json:"status"`
-	StartedAt         time.Time               `json:"started_at"`
-	FinishedAt        *time.Time              `json:"finished_at,omitempty"`
-	DurationMs        int64                   `json:"duration_ms"`
-	SnapshotPath      string                  `json:"snapshot_path,omitempty"`
-	ManifestPath      string                  `json:"manifest_path,omitempty"`
+	ID               string     `json:"id"`
+	JobID            string     `json:"job_id"`
+	JobConfigBinding string     `json:"job_config_binding,omitempty"`
+	Status           string     `json:"status"`
+	StartedAt        time.Time  `json:"started_at"`
+	FinishedAt       *time.Time `json:"finished_at,omitempty"`
+	DurationMs       int64      `json:"duration_ms"`
+	SnapshotPath     string     `json:"snapshot_path,omitempty"`
+	ManifestPath     string     `json:"manifest_path,omitempty"`
+	// ManifestSize and ManifestDigest are persisted evidence and are removed from public clones.
+	ManifestSize      int64                   `json:"manifest_size,omitempty"`
+	ManifestDigest    string                  `json:"manifest_digest,omitempty"`
 	TargetPath        string                  `json:"target_path"`
 	ConfigRestored    bool                    `json:"config_restored"`
 	ConfigPath        string                  `json:"config_path,omitempty"`
@@ -597,16 +603,17 @@ type RestoreResult struct {
 
 // Manifest describes a completed local snapshot.
 type Manifest struct {
-	Version     int             `json:"version"`
-	JobID       string          `json:"job_id"`
-	RunID       string          `json:"run_id"`
-	Source      string          `json:"source"`
-	CreatedAt   time.Time       `json:"created_at"`
-	FileCount   int64           `json:"file_count"`
-	TotalBytes  int64           `json:"total_bytes"`
-	Entries     []ManifestEntry `json:"entries"`
-	ConfigPath  string          `json:"config_path,omitempty"`
-	Description string          `json:"description,omitempty"`
+	Version     int                 `json:"version"`
+	JobID       string              `json:"job_id"`
+	RunID       string              `json:"run_id"`
+	Source      string              `json:"source"`
+	CreatedAt   time.Time           `json:"created_at"`
+	FileCount   int64               `json:"file_count"`
+	TotalBytes  int64               `json:"total_bytes"`
+	Entries     []ManifestEntry     `json:"entries"`
+	Directories []ManifestDirectory `json:"directories"`
+	ConfigPath  string              `json:"config_path,omitempty"`
+	Description string              `json:"description,omitempty"`
 }
 
 // ManifestEntry is one file stored in a local snapshot.
@@ -616,6 +623,12 @@ type ManifestEntry struct {
 	Size        int64  `json:"size"`
 	Mode        uint32 `json:"mode"`
 	SHA256      string `json:"sha256"`
+}
+
+// ManifestDirectory is one directory in the restorable data tree.
+type ManifestDirectory struct {
+	ArchivePath string `json:"archive_path"`
+	Mode        uint32 `json:"mode"`
 }
 
 // NewManager initializes a backup manager and loads persisted state.
@@ -1872,6 +1885,9 @@ func (m *Manager) ensureJobConfigEvidenceUnchanged(ctx context.Context, job conf
 }
 
 func (m *Manager) runLocalBackup(ctx context.Context, job config.BackupJobConfig, result *RunResult) (runErr error) {
+	if err := requireLocalManifestModeSemantics(); err != nil {
+		return err
+	}
 	source := effectiveSource(job, m.storageRoot)
 	if err := validateSourceDirectory(source); err != nil {
 		return err
@@ -1926,7 +1942,7 @@ func (m *Manager) runLocalBackup(ctx context.Context, job config.BackupJobConfig
 	}()
 
 	dataPath := filepath.Join(partialPath, "data")
-	entries, totalBytes, err := copySourceTree(ctx, source, dataPath, job.Exclude)
+	entries, directories, totalBytes, err := copySourceTree(ctx, source, dataPath, job.Exclude)
 	if err != nil {
 		return err
 	}
@@ -1946,6 +1962,9 @@ func (m *Manager) runLocalBackup(ctx context.Context, job config.BackupJobConfig
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].ArchivePath < entries[j].ArchivePath
 	})
+	sort.Slice(directories, func(i, j int) bool {
+		return directories[i].ArchivePath < directories[j].ArchivePath
+	})
 
 	manifest := Manifest{
 		Version:     manifestVersion,
@@ -1956,6 +1975,7 @@ func (m *Manager) runLocalBackup(ctx context.Context, job config.BackupJobConfig
 		FileCount:   int64(len(entries)),
 		TotalBytes:  totalBytes,
 		Entries:     entries,
+		Directories: directories,
 		ConfigPath:  includedConfigPath(job.IncludeConfig, m.configPath),
 		Description: "MnemoNAS local directory snapshot",
 	}
@@ -1974,6 +1994,9 @@ func (m *Manager) runLocalBackup(ctx context.Context, job config.BackupJobConfig
 	partialManifestPath := filepath.Join(partialPath, manifestFileName)
 	if err := writeJSONData(partialManifestPath, manifestData, 0600); err != nil {
 		return fmt.Errorf("write backup manifest: %w", err)
+	}
+	if err := verifyManifestTreeContents(ctx, partialPath, manifest); err != nil {
+		return fmt.Errorf("verify backup snapshot structure: %w", err)
 	}
 	if job.VerifyAfterBackup {
 		if _, _, err := verifyManifestFiles(ctx, partialPath, manifest); err != nil {
@@ -2128,7 +2151,7 @@ func (m *Manager) runRestoreDrill(ctx context.Context, job config.BackupJobConfi
 	if err := validateDestination(source, job.Destination, m.storageRoot); err != nil {
 		return err
 	}
-	snapshotPath, manifestPath, manifest, err := m.latestManifest(ctx, job)
+	snapshotPath, manifestPath, manifest, _, _, err := m.latestManifest(ctx, job)
 	if err != nil {
 		return err
 	}
@@ -2149,7 +2172,7 @@ func (m *Manager) runRestoreDrill(ctx context.Context, job config.BackupJobConfi
 		}
 	}()
 
-	directoryModes, err := restoreSnapshotDirectories(ctx, snapshotPath, "data", filepath.Join(restoredPath, "data"))
+	directoryModes, err := restoreManifestDirectories(ctx, filepath.Join(restoredPath, "data"), manifest.Directories)
 	if err != nil {
 		return err
 	}
@@ -2177,7 +2200,7 @@ func (m *Manager) runRestoreDrill(ctx context.Context, job config.BackupJobConfi
 		return err
 	}
 
-	fileCount, verifiedBytes, err := verifyManifestFiles(ctx, restoredPath, manifest)
+	fileCount, verifiedBytes, err := verifyRestoredManifestFiles(ctx, restoredPath, manifest)
 	if err != nil {
 		return fmt.Errorf("verify restored snapshot: %w", err)
 	}
@@ -2224,7 +2247,7 @@ func (m *Manager) runLocalRestorePreview(ctx context.Context, job config.BackupJ
 	if err != nil {
 		return err
 	}
-	snapshotPath, manifestPath, manifest, err := m.latestManifest(ctx, job)
+	snapshotPath, manifestPath, manifest, _, _, err := m.latestManifest(ctx, job)
 	if err != nil {
 		return err
 	}
@@ -2330,6 +2353,11 @@ func (m *Manager) runResticRestorePreview(ctx context.Context, job config.Backup
 }
 
 func (m *Manager) runRestoreVerify(ctx context.Context, job config.BackupJobConfig, opts RestoreVerifyOptions, result *RestoreVerifyResult) error {
+	if job.Type == JobTypeLocal {
+		if err := requireLocalManifestModeSemantics(); err != nil {
+			return err
+		}
+	}
 	targetPath, err := validateRestoreVerificationTarget(effectiveSource(job, m.storageRoot), backupTarget(job), m.storageRoot, opts.TargetPath)
 	if err != nil {
 		return err
@@ -2340,10 +2368,20 @@ func (m *Manager) runRestoreVerify(ctx context.Context, job config.BackupJobConf
 		return err
 	}
 
+	var matchingLocalRestore *RestoreResult
+	if job.Type == JobTypeLocal {
+		matchingLocalRestore = m.latestCompletedRestoreForTarget(job.ID, targetPath)
+		if matchingLocalRestore != nil {
+			result.TargetPath = strings.TrimSpace(matchingLocalRestore.TargetPath)
+		}
+	}
 	configPath := filepath.Join(targetPath, ".mnemonas-restore", "config.toml")
-	configFound, err := regularFileExistsStrictNoFollow(configPath)
-	if err != nil {
-		warnings = appendRestoreVerificationWarning(warnings, fmt.Sprintf("检查配置文件失败: %v", err))
+	configFound := false
+	if matchingLocalRestore == nil || matchingLocalRestore.ConfigRestored {
+		configFound, err = regularFileExistsStrictNoFollow(configPath)
+		if err != nil {
+			warnings = appendRestoreVerificationWarning(warnings, fmt.Sprintf("检查配置文件失败: %v", err))
+		}
 	}
 	filesDirFound, err := dirExistsNoFollow(filepath.Join(targetPath, "files"))
 	if err != nil {
@@ -2364,7 +2402,7 @@ func (m *Manager) runRestoreVerify(ctx context.Context, job config.BackupJobConf
 
 	if job.Type == JobTypeLocal {
 		var compareErr error
-		warnings, compareErr = m.appendLocalRestoreSnapshotWarnings(ctx, job, targetPath, result, warnings)
+		warnings, compareErr = m.appendLocalRestoreSnapshotWarnings(ctx, job, targetPath, matchingLocalRestore, result, warnings)
 		if compareErr != nil {
 			return compareErr
 		}
@@ -2383,11 +2421,13 @@ func (m *Manager) runRestoreVerify(ctx context.Context, job config.BackupJobConf
 		warnings = appendRestoreVerificationWarning(warnings, "未同时检测到 files/ 和 .mnemonas/，仅在恢复的是子目录时才适合直接切换 storage.root")
 	}
 
-	result.TargetPath = targetPath
+	if matchingLocalRestore == nil {
+		result.TargetPath = targetPath
+	}
 	result.FileCount = fileCount
 	result.VerifiedBytes = verifiedBytes
 	if configFound {
-		result.ConfigPath = configPath
+		result.ConfigPath = filepath.Join(result.TargetPath, ".mnemonas-restore", "config.toml")
 	}
 	result.ConfigFound = configFound
 	result.FilesDirFound = filesDirFound
@@ -2429,32 +2469,38 @@ func (m *Manager) runLocalRestore(ctx context.Context, job config.BackupJobConfi
 	if err != nil {
 		return err
 	}
-	snapshotPath, manifestPath, manifest, err := m.latestManifest(ctx, job)
+	snapshotPath, manifestPath, manifest, trustedRun, manifestDigest, err := m.latestManifest(ctx, job)
 	if err != nil {
 		return err
 	}
-	partialPath, err := createPartialRestoreTarget(targetPath, result.ID)
+	partial, err := createPartialRestoreTarget(targetPath, result.ID)
 	if err != nil {
 		return err
 	}
 	cleanupPartial := true
 	defer func() {
 		if cleanupPartial {
-			_ = removeAllBackupPath(partialPath, "restore staging target")
+			_ = removeRestoreStagingTarget(partial, "restore staging target")
 		}
 	}()
 
-	fileCount, verifiedBytes, configRestored, configPath, err := restoreManifestToTarget(ctx, snapshotPath, partialPath, manifest, opts.IncludeConfig)
+	fileCount, verifiedBytes, configRestored, configPath, err := restoreManifestToTarget(ctx, snapshotPath, partial.Path, manifest, opts.IncludeConfig)
 	if err != nil {
 		return err
 	}
-	if err := installRestoreTarget(partialPath, targetPath); err != nil {
+	rootMode := manifestDirectoryMode(manifest.Directories[0])
+	if err := installRestoreTargetWithFinalMode(partial, targetPath, &rootMode); err != nil {
 		return err
 	}
 	cleanupPartial = false
+	if configRestored {
+		configPath = filepath.Join(targetPath, ".mnemonas-restore", "config.toml")
+	}
 
 	result.SnapshotPath = snapshotPath
 	result.ManifestPath = manifestPath
+	result.ManifestSize = trustedRun.ManifestSize
+	result.ManifestDigest = manifestDigest
 	result.TargetPath = targetPath
 	result.ConfigRestored = configRestored
 	result.ConfigPath = configPath
@@ -2472,18 +2518,18 @@ func (m *Manager) runRcloneRestore(ctx context.Context, job config.BackupJobConf
 	if err != nil {
 		return err
 	}
-	partialPath, err := createPartialRestoreTarget(targetPath, result.ID)
+	partial, err := createPartialRestoreTarget(targetPath, result.ID)
 	if err != nil {
 		return err
 	}
 	cleanupPartial := true
 	defer func() {
 		if cleanupPartial {
-			_ = removeAllBackupPath(partialPath, "restore staging target")
+			_ = removeRestoreStagingTarget(partial, "restore staging target")
 		}
 	}()
 
-	args := append(rcloneBaseArgs(job), "copy", job.Remote, partialPath, "--create-empty-src-dirs")
+	args := append(rcloneBaseArgs(job), "copy", job.Remote, partial.Path, "--create-empty-src-dirs")
 	for _, pattern := range job.Exclude {
 		args = append(args, "--exclude", pattern)
 	}
@@ -2491,7 +2537,7 @@ func (m *Manager) runRcloneRestore(ctx context.Context, job config.BackupJobConf
 		return fmt.Errorf("restore rclone remote: %w", err)
 	}
 
-	args = append(rcloneBaseArgs(job), "check", job.Remote, partialPath, "--one-way")
+	args = append(rcloneBaseArgs(job), "check", job.Remote, partial.Path, "--one-way")
 	for _, pattern := range job.Exclude {
 		args = append(args, "--exclude", pattern)
 	}
@@ -2499,11 +2545,14 @@ func (m *Manager) runRcloneRestore(ctx context.Context, job config.BackupJobConf
 		return fmt.Errorf("verify restored rclone remote: %w", err)
 	}
 
-	fileCount, restoredBytes, err := summarizeRestoredTree(ctx, partialPath)
+	if err := verifyRestoreStagingIdentity(partial); err != nil {
+		return err
+	}
+	fileCount, restoredBytes, err := summarizeRestoredTree(ctx, partial.Path)
 	if err != nil {
 		return err
 	}
-	if err := installRestoreTarget(partialPath, targetPath); err != nil {
+	if err := installRestoreTarget(partial, targetPath); err != nil {
 		return err
 	}
 	cleanupPartial = false
@@ -2527,23 +2576,23 @@ func (m *Manager) runResticRestore(ctx context.Context, job config.BackupJobConf
 	if err != nil {
 		return err
 	}
-	partialPath, err := createPartialRestoreTarget(targetPath, result.ID)
+	partial, err := createPartialRestoreTarget(targetPath, result.ID)
 	if err != nil {
 		return err
 	}
-	rawPath, err := createNamedRestoreTarget(targetPath, ".restic-"+result.ID)
+	raw, err := createNamedRestoreTarget(targetPath, ".restic-"+result.ID)
 	if err != nil {
-		_ = removeAllBackupPath(partialPath, "restore staging target")
+		_ = removeRestoreStagingTarget(partial, "restore staging target")
 		return err
 	}
 	cleanupPartial := true
 	cleanupRaw := true
 	defer func() {
 		if cleanupRaw {
-			_ = removeAllBackupPath(rawPath, "restic restore staging target")
+			_ = removeRestoreStagingTarget(raw, "restic restore staging target")
 		}
 		if cleanupPartial {
-			_ = removeAllBackupPath(partialPath, "restore staging target")
+			_ = removeRestoreStagingTarget(partial, "restore staging target")
 		}
 	}()
 
@@ -2551,7 +2600,7 @@ func (m *Manager) runResticRestore(ctx context.Context, job config.BackupJobConf
 		"-r", job.Repository,
 		"--password-file", job.PasswordFile,
 		"restore", "latest",
-		"--target", rawPath,
+		"--target", raw.Path,
 		"--tag", "mnemonas",
 		"--tag", "job:" + job.ID,
 		"--path", source,
@@ -2563,16 +2612,19 @@ func (m *Manager) runResticRestore(ctx context.Context, job config.BackupJobConf
 		return fmt.Errorf("restore restic repository: %w", err)
 	}
 
-	fileCount, restoredBytes, err := moveResticRestoredSource(ctx, rawPath, partialPath, source)
+	if err := verifyRestoreStagingIdentity(raw); err != nil {
+		return err
+	}
+	fileCount, restoredBytes, err := moveResticRestoredSource(ctx, raw.Path, partial.Path, source)
 	if err != nil {
 		return err
 	}
-	if err := removeAllBackupPath(rawPath, "restic restore staging target"); err != nil {
+	if err := removeRestoreStagingTarget(raw, "restic restore staging target"); err != nil {
 		return fmt.Errorf("cleanup restic restore staging: %w", err)
 	}
 	cleanupRaw = false
 
-	if err := installRestoreTarget(partialPath, targetPath); err != nil {
+	if err := installRestoreTarget(partial, targetPath); err != nil {
 		return err
 	}
 	cleanupPartial = false
@@ -2751,6 +2803,9 @@ func (m *Manager) runRetentionCheck(ctx context.Context, job config.BackupJobCon
 }
 
 func (m *Manager) runLocalRetentionCheck(ctx context.Context, job config.BackupJobConfig, result *RetentionCheckResult) error {
+	if err := requireLocalManifestModeSemantics(); err != nil {
+		return err
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -2761,16 +2816,21 @@ func (m *Manager) runLocalRetentionCheck(ctx context.Context, job config.BackupJ
 	if err != nil {
 		return err
 	}
-	fillRetentionSnapshotRange(result, snapshotTimes(snapshots))
+	currentSnapshots := currentManifestSnapshots(snapshots)
+	legacyCount := legacyManifestSnapshotCount(snapshots)
+	fillRetentionSnapshotRange(result, snapshotTimes(currentSnapshots))
 	result.SnapshotCount = len(snapshots)
 	if len(snapshots) == 0 {
 		result.Warnings = append(result.Warnings, "尚无本地快照，无法确认保留策略是否有效")
 	}
+	if legacyCount > 0 {
+		result.Warnings = append(result.Warnings, fmt.Sprintf("检测到 %d 个 v1 本地快照；这些快照不会用于恢复或自动清理，需要人工确认后处置", legacyCount))
+	}
 	if job.MaxSnapshots <= 0 && job.MaxAge <= 0 {
 		result.Warnings = append(result.Warnings, "本地快照未配置 max_snapshots 或 max_age，旧快照不会自动清理")
 	}
-	if job.MaxSnapshots > 0 && len(snapshots) > job.MaxSnapshots {
-		result.Warnings = append(result.Warnings, fmt.Sprintf("本地快照数量 %d 已超过 max_snapshots=%d", len(snapshots), job.MaxSnapshots))
+	if job.MaxSnapshots > 0 && len(currentSnapshots) > job.MaxSnapshots {
+		result.Warnings = append(result.Warnings, fmt.Sprintf("v2 本地快照数量 %d 已超过 max_snapshots=%d", len(currentSnapshots), job.MaxSnapshots))
 	}
 	if job.MaxAge > 0 && result.OldestSnapshotAt != nil {
 		cutoff := m.now().UTC().Add(-job.MaxAge)
@@ -2851,9 +2911,12 @@ func (m *Manager) runRcloneRetentionCheck(ctx context.Context, job config.Backup
 	return nil
 }
 
-func (m *Manager) latestManifest(ctx context.Context, job config.BackupJobConfig) (string, string, Manifest, error) {
+func (m *Manager) latestManifest(ctx context.Context, job config.BackupJobConfig) (string, string, Manifest, *RunResult, string, error) {
+	if err := requireLocalManifestModeSemantics(); err != nil {
+		return "", "", Manifest{}, nil, "", err
+	}
 	if err := validateDestination(effectiveSource(job, m.storageRoot), job.Destination, m.storageRoot); err != nil {
-		return "", "", Manifest{}, err
+		return "", "", Manifest{}, nil, "", err
 	}
 
 	m.mu.Lock()
@@ -2861,16 +2924,16 @@ func (m *Manager) latestManifest(ctx context.Context, job config.BackupJobConfig
 	lastRun := cloneRunResultRaw(state.LastSuccessfulRun)
 	m.mu.Unlock()
 	if lastRun == nil || lastRun.Status != StatusCompleted || lastRun.ManifestPath == "" {
-		return "", "", Manifest{}, ErrNoSnapshots
+		return "", "", Manifest{}, nil, "", ErrNoSnapshots
 	}
 	if err := validateSnapshotManifestLocation(job, lastRun.ID, lastRun.SnapshotPath, lastRun.ManifestPath); err != nil {
-		return "", "", Manifest{}, err
+		return "", "", Manifest{}, nil, "", err
 	}
-	manifest, err := readTrustedRunManifest(ctx, job, lastRun)
+	manifest, restoreDigest, err := readTrustedRunManifest(ctx, job, lastRun)
 	if err != nil {
-		return "", "", Manifest{}, err
+		return "", "", Manifest{}, nil, "", err
 	}
-	return lastRun.SnapshotPath, lastRun.ManifestPath, manifest, nil
+	return lastRun.SnapshotPath, lastRun.ManifestPath, manifest, lastRun, restoreDigest, nil
 }
 
 func localSnapshotDirectoryNames(entries []fs.DirEntry) ([]string, error) {
@@ -3092,6 +3155,7 @@ func (m *Manager) applyRetention(ctx context.Context, job config.BackupJobConfig
 	if err != nil {
 		return 0, []string{fmt.Sprintf("apply retention: %v", err)}
 	}
+	snapshots = currentManifestSnapshots(snapshots)
 	if len(snapshots) <= 1 {
 		return 0, nil
 	}
@@ -3102,11 +3166,15 @@ func (m *Manager) applyRetention(ctx context.Context, job config.BackupJobConfig
 
 	currentClean := filepath.Clean(currentSnapshotPath)
 	latestSnapshot := filepath.Clean(snapshots[0].Path)
+	restoreReferences := m.restoreReferencedSnapshotPaths(job)
 	cutoff := m.now().UTC().Add(-job.MaxAge)
 	deleteSet := make([]snapshotInfo, 0)
 	for index, snapshot := range snapshots {
 		snapshotPath := filepath.Clean(snapshot.Path)
 		if snapshotPath == currentClean || snapshotPath == latestSnapshot {
+			continue
+		}
+		if _, referenced := restoreReferences[snapshotPath]; referenced {
 			continue
 		}
 		deleteForCount := job.MaxSnapshots > 0 && index >= job.MaxSnapshots
@@ -3152,11 +3220,54 @@ func (m *Manager) applyRetention(ctx context.Context, job config.BackupJobConfig
 	return removed, warnings
 }
 
+func currentManifestSnapshots(snapshots []snapshotInfo) []snapshotInfo {
+	current := make([]snapshotInfo, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		if !snapshot.LegacyV1 {
+			current = append(current, snapshot)
+		}
+	}
+	return current
+}
+
+func legacyManifestSnapshotCount(snapshots []snapshotInfo) int {
+	count := 0
+	for _, snapshot := range snapshots {
+		if snapshot.LegacyV1 {
+			count++
+		}
+	}
+	return count
+}
+
+func (m *Manager) restoreReferencedSnapshotPaths(job config.BackupJobConfig) map[string]struct{} {
+	m.mu.Lock()
+	state := m.state.Jobs[job.ID]
+	restores := append(cloneRestoreResultsRaw(state.RestoreHistory), cloneRestoreResultRaw(state.LastRestore))
+	m.mu.Unlock()
+
+	references := make(map[string]struct{}, len(restores))
+	for _, restore := range restores {
+		if restore == nil || restore.Status != StatusCompleted || strings.TrimSpace(restore.SnapshotPath) == "" {
+			continue
+		}
+		snapshotPath := filepath.Clean(restore.SnapshotPath)
+		snapshotName := filepath.Base(snapshotPath)
+		if err := validateSnapshotManifestLocation(job, snapshotName, snapshotPath, filepath.Join(snapshotPath, manifestFileName)); err != nil {
+			continue
+		}
+		expectedSnapshotPath := filepath.Clean(filepath.Join(job.Destination, job.ID, "snapshots", snapshotName))
+		references[expectedSnapshotPath] = struct{}{}
+	}
+	return references
+}
+
 type snapshotInfo struct {
 	Name      string
 	Path      string
 	CreatedAt time.Time
 	Identity  os.FileInfo
+	LegacyV1  bool
 }
 
 func listLocalSnapshots(ctx context.Context, job config.BackupJobConfig) ([]snapshotInfo, error) {
@@ -3216,15 +3327,18 @@ func listLocalSnapshotsFromRoot(
 		}
 		snapshotPath := filepath.Join(snapshotRoot, name)
 		createdAt := parseSnapshotTime(name)
-		manifest, err := readManifest(filepath.Join(snapshotPath, manifestFileName))
+		_, manifest, err := readManifestDataWithExpectedSizeMode(ctx, filepath.Join(snapshotPath, manifestFileName), 0, true)
 		if err != nil {
 			return nil, fmt.Errorf("read snapshot manifest %s: %w", name, err)
 		}
 		if err := validateSnapshotManifestIdentity(job.ID, name, manifest); err != nil {
 			return nil, fmt.Errorf("read snapshot manifest %s: %w", name, err)
 		}
-		if err := verifyManifestTreeContents(ctx, snapshotPath, manifest); err != nil {
-			return nil, fmt.Errorf("read snapshot manifest %s: %w", name, err)
+		legacyV1 := manifest.Version == 1
+		if !legacyV1 {
+			if err := verifyManifestTreeContents(ctx, snapshotPath, manifest); err != nil {
+				return nil, fmt.Errorf("read snapshot manifest %s: %w", name, err)
+			}
 		}
 		if err := verifyLocalSnapshotRootIdentity(snapshotRoot, snapshotRootInfo); err != nil {
 			return nil, err
@@ -3240,6 +3354,7 @@ func listLocalSnapshotsFromRoot(
 			Path:      snapshotPath,
 			CreatedAt: createdAt.UTC(),
 			Identity:  snapshotIdentity,
+			LegacyV1:  legacyV1,
 		})
 	}
 	return snapshots, nil
@@ -3282,10 +3397,10 @@ func parseSnapshotTime(name string) time.Time {
 	return parsed
 }
 
-func copySourceTree(ctx context.Context, source, destination string, excludes []string) ([]ManifestEntry, int64, error) {
+func copySourceTree(ctx context.Context, source, destination string, excludes []string) ([]ManifestEntry, []ManifestDirectory, int64, error) {
 	root, err := os.OpenRoot(source)
 	if err != nil {
-		return nil, 0, fmt.Errorf("open backup source: %w", err)
+		return nil, nil, 0, fmt.Errorf("open backup source: %w", err)
 	}
 	defer root.Close()
 
@@ -3293,12 +3408,23 @@ func copySourceTree(ctx context.Context, source, destination string, excludes []
 	var totalBytes int64
 	var directoryModes []directoryMode
 	if err := copySourceTreeEntry(ctx, root, ".", destination, excludes, &entries, &totalBytes, &directoryModes); err != nil {
-		return nil, 0, err
+		return nil, nil, 0, err
 	}
 	if err := applyDirectoryModesNoFollow(destination, directoryModes, "destination"); err != nil {
-		return nil, 0, err
+		return nil, nil, 0, err
 	}
-	return entries, totalBytes, nil
+	directories := make([]ManifestDirectory, 0, len(directoryModes))
+	for _, directory := range directoryModes {
+		archivePath := "data"
+		if directory.RelPath != "." {
+			archivePath = path.Join(archivePath, filepath.ToSlash(directory.RelPath))
+		}
+		directories = append(directories, ManifestDirectory{
+			ArchivePath: archivePath,
+			Mode:        uint32(directory.Mode.Perm()),
+		})
+	}
+	return entries, directories, totalBytes, nil
 }
 
 func validateSourceTreeNoSymlinks(ctx context.Context, source string) error {
@@ -3375,23 +3501,35 @@ func copySourceTreeEntry(ctx context.Context, root *os.Root, relPath, destinatio
 	}
 
 	if info.IsDir() {
-		if relPath != "." {
-			destinationPath := filepath.Join(destination, relPath)
-			if err := rootio.MkdirAllPathNoFollow(destinationPath, writableDirectoryMode(info.Mode().Perm())); err != nil {
-				return fmt.Errorf("create backup directory %s: %w", relPath, mapBackupNoFollowError(err, "destination"))
-			}
-			*directoryModes = append(*directoryModes, directoryMode{RelPath: relPath, Mode: info.Mode().Perm()})
-		} else {
-			if err := rootio.MkdirAllPathNoFollow(destination, writableDirectoryMode(info.Mode().Perm())); err != nil {
-				return fmt.Errorf("create backup data directory: %w", mapBackupNoFollowError(err, "destination"))
-			}
-			*directoryModes = append(*directoryModes, directoryMode{RelPath: relPath, Mode: info.Mode().Perm()})
-		}
-
 		dir, err := rootio.OpenDirNoFollow(root, relPath)
 		if err != nil {
 			return mapSourceRootError(err)
 		}
+		openedInfo, statErr := dir.Stat()
+		if statErr != nil || !openedInfo.IsDir() || openedInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, openedInfo) {
+			_ = dir.Close()
+			return errors.Join(ErrUnsafePath, statErr, errors.New("backup source directory changed while opening"))
+		}
+		if err := validateSourceDirectoryMode(relPath, openedInfo.Mode()); err != nil {
+			_ = dir.Close()
+			return err
+		}
+		mode := openedInfo.Mode().Perm()
+		if relPath != "." {
+			destinationPath := filepath.Join(destination, relPath)
+			if err := rootio.MkdirAllPathNoFollow(destinationPath, writableDirectoryMode(mode)); err != nil {
+				_ = dir.Close()
+				return fmt.Errorf("create backup directory %s: %w", relPath, mapBackupNoFollowError(err, "destination"))
+			}
+			*directoryModes = append(*directoryModes, directoryMode{RelPath: relPath, Mode: mode})
+		} else {
+			if err := rootio.MkdirAllPathNoFollow(destination, writableDirectoryMode(mode)); err != nil {
+				_ = dir.Close()
+				return fmt.Errorf("create backup data directory: %w", mapBackupNoFollowError(err, "destination"))
+			}
+			*directoryModes = append(*directoryModes, directoryMode{RelPath: relPath, Mode: mode})
+		}
+
 		children, readErr := dir.ReadDir(-1)
 		closeErr := dir.Close()
 		if readErr != nil {
@@ -3412,6 +3550,10 @@ func copySourceTreeEntry(ctx context.Context, root *os.Root, relPath, destinatio
 				return err
 			}
 		}
+		afterInfo, err := root.Lstat(relPath)
+		if err != nil || !afterInfo.IsDir() || !os.SameFile(openedInfo, afterInfo) || afterInfo.Mode()&specialPermissionBits != 0 || afterInfo.Mode().Perm() != mode {
+			return errors.Join(ErrUnsafePath, err, errors.New("backup source directory changed while copying"))
+		}
 		return nil
 	}
 
@@ -3424,9 +3566,13 @@ func copySourceTreeEntry(ctx context.Context, root *os.Root, relPath, destinatio
 		return mapSourceRootError(err)
 	}
 	defer sourceFile.Close()
+	openedInfo, err := sourceFile.Stat()
+	if err != nil || !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
+		return errors.Join(ErrUnsafePath, err, errors.New("backup source file changed while opening"))
+	}
 
 	archivePath := path.Join("data", filepath.ToSlash(relPath))
-	entry, err := copyOpenFileWithHash(ctx, sourceFile, info, filepath.Join(destination, relPath), archivePath, filepath.ToSlash(relPath))
+	entry, err := copyOpenFileWithHash(ctx, sourceFile, openedInfo, filepath.Join(destination, relPath), archivePath, filepath.ToSlash(relPath))
 	if err != nil {
 		return err
 	}
@@ -3491,6 +3637,9 @@ func copyOpenFileWithHash(ctx context.Context, source *os.File, sourceInfo os.Fi
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if sourceInfo.Mode()&specialPermissionBits != 0 {
+		return nil, fmt.Errorf("%w: backup source file has unsupported special permission bits: %s", ErrUnsafePath, cleanPreviewSamplePath(sourceLabel))
+	}
 	if err := rootio.MkdirAllPathNoFollow(filepath.Dir(destinationPath), 0700); err != nil {
 		return nil, fmt.Errorf("create destination directory: %w", mapBackupNoFollowError(err, "destination"))
 	}
@@ -3520,6 +3669,13 @@ func copyOpenFileWithHash(ctx context.Context, source *os.File, sourceInfo os.Fi
 	}
 	if err := ensureOpenFileStillAtPath(destination, destinationPath, archivePath); err != nil {
 		return nil, err
+	}
+	destinationInfo, err := destination.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat backup file after setting mode %s: %w", archivePath, err)
+	}
+	if destinationInfo.Mode()&specialPermissionBits != 0 || destinationInfo.Mode().Perm() != sourceInfo.Mode().Perm() {
+		return nil, fmt.Errorf("%w: backup file mode could not be preserved: %s", ErrUnsafePath, cleanPreviewSamplePath(archivePath))
 	}
 	if err := destination.Sync(); err != nil {
 		return nil, fmt.Errorf("sync backup file %s: %w", archivePath, err)
@@ -3566,11 +3722,26 @@ func mapBackupNoFollowError(err error, label string) error {
 	return err
 }
 
+func mapBackupRegularFileNoFollowError(err error, label string) error {
+	if errors.Is(err, fs.ErrInvalid) || errors.Is(err, syscall.EINVAL) {
+		return fmt.Errorf("%w: %s must be a regular file", ErrUnsafePath, label)
+	}
+	return mapBackupNoFollowError(err, label)
+}
+
 func verifyManifestFiles(ctx context.Context, root string, manifest Manifest) (int64, int64, error) {
+	return verifyManifestFilesWithLayout(ctx, root, manifest, true)
+}
+
+func verifyRestoredManifestFiles(ctx context.Context, root string, manifest Manifest) (int64, int64, error) {
+	return verifyManifestFilesWithLayout(ctx, root, manifest, false)
+}
+
+func verifyManifestFilesWithLayout(ctx context.Context, root string, manifest Manifest, includeManifestFile bool) (int64, int64, error) {
 	if err := validateManifestEntries(manifest); err != nil {
 		return 0, 0, err
 	}
-	if err := verifyManifestTreeContents(ctx, root, manifest); err != nil {
+	if err := verifyManifestTreeContentsWithLayout(ctx, root, manifest, includeManifestFile); err != nil {
 		return 0, 0, err
 	}
 
@@ -3612,39 +3783,128 @@ func verifyManifestFiles(ctx context.Context, root string, manifest Manifest) (i
 }
 
 func verifyManifestTreeContents(ctx context.Context, root string, manifest Manifest) error {
-	state := manifestTreeVerification{
-		expectedFiles: make(map[string]struct{}, len(manifest.Entries)+1),
-		seenFiles:     make(map[string]struct{}, len(manifest.Entries)),
+	return verifyManifestTreeContentsWithLayout(ctx, root, manifest, true)
+}
+
+func verifyManifestTreeContentsWithLayout(ctx context.Context, root string, manifest Manifest, includeManifestFile bool) error {
+	if err := validateManifestEntries(manifest); err != nil {
+		return err
 	}
-	state.expectedFiles[manifestFileName] = struct{}{}
+	if includeManifestFile {
+		observedManifest, err := readManifest(filepath.Join(root, manifestFileName))
+		if err != nil {
+			return errors.Join(ErrUnsafePath, fmt.Errorf("verify backup snapshot manifest: %w", err))
+		}
+		expectedDigest, err := manifestSemanticDigest(manifest)
+		if err != nil {
+			return err
+		}
+		observedDigest, err := manifestSemanticDigest(observedManifest)
+		if err != nil {
+			return err
+		}
+		if observedDigest != expectedDigest {
+			return fmt.Errorf("%w: backup snapshot manifest content changed", ErrUnsafePath)
+		}
+	}
+	state := manifestTreeVerification{
+		expectedFiles:       make(map[string]struct{}, len(manifest.Entries)+1),
+		seenFiles:           make(map[string]struct{}, len(manifest.Entries)+1),
+		expectedDirectories: make(map[string]os.FileMode, len(manifest.Directories)+1),
+		seenDirectories:     make(map[string]struct{}, len(manifest.Directories)+1),
+	}
+	if includeManifestFile {
+		state.expectedFiles[manifestFileName] = struct{}{}
+	}
+	for _, directory := range manifest.Directories {
+		state.expectedDirectories[directory.ArchivePath] = manifestDirectoryMode(directory)
+	}
 	for _, entry := range manifest.Entries {
-		archivePath := filepath.ToSlash(entry.ArchivePath)
+		archivePath := entry.ArchivePath
 		state.expectedFiles[archivePath] = struct{}{}
-		if strings.HasPrefix(archivePath, "config/") {
-			state.allowConfigDir = true
+		if archivePath == "config/config.toml" {
+			state.expectedDirectories["config"] = 0700
 		}
 	}
 
 	if err := verifyManifestTreeEntry(ctx, root, ".", &state); err != nil {
 		return fmt.Errorf("verify backup snapshot tree: %w", err)
 	}
-	if !state.seenDataRoot {
-		return fmt.Errorf("%w: backup snapshot is missing data directory", ErrUnsafePath)
+	for expected := range state.expectedFiles {
+		if _, ok := state.seenFiles[expected]; !ok {
+			return fmt.Errorf("%w: backup snapshot is missing manifest file %q", ErrUnsafePath, cleanPreviewSamplePath(expected))
+		}
+	}
+	for expected := range state.expectedDirectories {
+		if _, ok := state.seenDirectories[expected]; !ok {
+			return fmt.Errorf("%w: backup snapshot is missing manifest directory %q", ErrUnsafePath, cleanPreviewSamplePath(expected))
+		}
+	}
+	return nil
+}
+
+func verifyExplicitRestoreTreeContents(ctx context.Context, root string, manifest Manifest, includeConfig bool) error {
+	if len(manifest.Directories) == 0 {
+		return fmt.Errorf("%w: backup manifest has no data root directory", ErrUnsafePath)
+	}
+	return verifyExplicitRestoreTreeContentsWithRootMode(ctx, root, manifest, includeConfig, manifestDirectoryMode(manifest.Directories[0]))
+}
+
+func verifyExplicitRestoreTreeContentsWithRootMode(ctx context.Context, root string, manifest Manifest, includeConfig bool, rootMode os.FileMode) error {
+	if err := validateManifestEntries(manifest); err != nil {
+		return err
+	}
+	if err := validateExplicitConfigRestoreNamespace(manifest, includeConfig); err != nil {
+		return err
+	}
+	state := manifestTreeVerification{
+		expectedFiles:       make(map[string]struct{}, len(manifest.Entries)),
+		seenFiles:           make(map[string]struct{}, len(manifest.Entries)),
+		expectedDirectories: make(map[string]os.FileMode, len(manifest.Directories)),
+		seenDirectories:     make(map[string]struct{}, len(manifest.Directories)),
+		expectedRootMode:    &rootMode,
+	}
+	for _, directory := range manifest.Directories {
+		mode := manifestDirectoryMode(directory)
+		if directory.ArchivePath == "data" {
+			continue
+		}
+		relPath := strings.TrimPrefix(directory.ArchivePath, "data/")
+		state.expectedDirectories[relPath] = mode
 	}
 	for _, entry := range manifest.Entries {
-		archivePath := filepath.ToSlash(entry.ArchivePath)
-		if _, ok := state.seenFiles[archivePath]; !ok {
-			return fmt.Errorf("%w: backup snapshot is missing manifest file %q", ErrUnsafePath, cleanPreviewSamplePath(archivePath))
+		if relPath, ok := strings.CutPrefix(entry.ArchivePath, "data/"); ok {
+			state.expectedFiles[relPath] = struct{}{}
+			continue
+		}
+		if includeConfig && entry.ArchivePath == "config/config.toml" {
+			state.expectedDirectories[".mnemonas-restore"] = 0700
+			state.expectedFiles[".mnemonas-restore/config.toml"] = struct{}{}
+		}
+	}
+
+	if err := verifyManifestTreeEntry(ctx, root, ".", &state); err != nil {
+		return fmt.Errorf("verify explicit restore tree: %w", err)
+	}
+	for expected := range state.expectedFiles {
+		if _, ok := state.seenFiles[expected]; !ok {
+			return fmt.Errorf("%w: explicit restore is missing file %q", ErrUnsafePath, cleanPreviewSamplePath(expected))
+		}
+	}
+	for expected := range state.expectedDirectories {
+		if _, ok := state.seenDirectories[expected]; !ok {
+			return fmt.Errorf("%w: explicit restore is missing directory %q", ErrUnsafePath, cleanPreviewSamplePath(expected))
 		}
 	}
 	return nil
 }
 
 type manifestTreeVerification struct {
-	expectedFiles  map[string]struct{}
-	seenFiles      map[string]struct{}
-	allowConfigDir bool
-	seenDataRoot   bool
+	expectedFiles       map[string]struct{}
+	seenFiles           map[string]struct{}
+	expectedDirectories map[string]os.FileMode
+	seenDirectories     map[string]struct{}
+	expectedRootMode    *os.FileMode
 }
 
 func verifyManifestTreeEntry(ctx context.Context, root string, relPath string, state *manifestTreeVerification) error {
@@ -3665,17 +3925,40 @@ func verifyManifestTreeEntry(ctx context.Context, root string, relPath string, s
 		return fmt.Errorf("%w: backup snapshot contains a symlink: %s", ErrUnsafePath, relSlash)
 	}
 	if info.IsDir() {
-		if relPath != "." {
-			if relSlash == "data" {
-				state.seenDataRoot = true
+		if relPath == "." && state.expectedRootMode != nil {
+			if info.Mode()&specialPermissionBits != 0 || info.Mode().Perm() != *state.expectedRootMode {
+				return fmt.Errorf("%w: manifest tree root mode mismatch: got %04o, want %04o", ErrUnsafePath, info.Mode().Perm(), *state.expectedRootMode)
 			}
-			if !isAllowedManifestSnapshotDirectory(relSlash, state.allowConfigDir) {
+		} else if relPath != "." {
+			expectedMode, ok := state.expectedDirectories[relSlash]
+			if !ok {
 				return fmt.Errorf("%w: backup snapshot contains unmanifested directory %q", ErrUnsafePath, cleanPreviewSamplePath(relSlash))
 			}
+			if info.Mode()&specialPermissionBits != 0 || info.Mode().Perm() != expectedMode {
+				return fmt.Errorf("%w: backup snapshot directory mode mismatch for %q: got %04o, want %04o", ErrUnsafePath, cleanPreviewSamplePath(relSlash), info.Mode().Perm(), expectedMode)
+			}
+			state.seenDirectories[relSlash] = struct{}{}
 		}
 		dir, err := rootio.OpenDirPathNoFollow(entryPath)
 		if err != nil {
 			return fmt.Errorf("open backup snapshot directory %s: %w", relSlash, mapBackupNoFollowError(err, "backup snapshot"))
+		}
+		openedInfo, statErr := dir.Stat()
+		if statErr != nil || !openedInfo.IsDir() || openedInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, openedInfo) {
+			_ = dir.Close()
+			return errors.Join(ErrUnsafePath, statErr, fmt.Errorf("backup snapshot directory changed while opening: %s", relSlash))
+		}
+		if relPath == "." && state.expectedRootMode != nil {
+			if openedInfo.Mode()&specialPermissionBits != 0 || openedInfo.Mode().Perm() != *state.expectedRootMode {
+				_ = dir.Close()
+				return fmt.Errorf("%w: manifest tree root mode changed while opening", ErrUnsafePath)
+			}
+		} else if relPath != "." {
+			expectedMode := state.expectedDirectories[relSlash]
+			if openedInfo.Mode()&specialPermissionBits != 0 || openedInfo.Mode().Perm() != expectedMode {
+				_ = dir.Close()
+				return fmt.Errorf("%w: backup snapshot directory mode changed while opening for %q", ErrUnsafePath, cleanPreviewSamplePath(relSlash))
+			}
 		}
 		children, readErr := dir.ReadDir(-1)
 		closeErr := dir.Close()
@@ -3708,14 +3991,8 @@ func verifyManifestTreeEntry(ctx context.Context, root string, relPath string, s
 	if _, ok := state.expectedFiles[relSlash]; !ok {
 		return fmt.Errorf("%w: backup snapshot contains unmanifested file %q", ErrUnsafePath, cleanPreviewSamplePath(relSlash))
 	}
-	if relSlash != manifestFileName {
-		state.seenFiles[relSlash] = struct{}{}
-	}
+	state.seenFiles[relSlash] = struct{}{}
 	return nil
-}
-
-func isAllowedManifestSnapshotDirectory(relPath string, allowConfigDir bool) bool {
-	return relPath == "data" || strings.HasPrefix(relPath, "data/") || (allowConfigDir && relPath == "config")
 }
 
 func hashFile(ctx context.Context, filePath string) (int64, string, os.FileMode, error) {
@@ -3724,6 +4001,9 @@ func hashFile(ctx context.Context, filePath string) (int64, string, os.FileMode,
 		return 0, "", 0, err
 	}
 	defer file.Close()
+	if info.Mode()&specialPermissionBits != 0 {
+		return 0, "", 0, fmt.Errorf("%w: backup file has unsupported special permission bits: %s", ErrUnsafePath, cleanPreviewSamplePath(filePath))
+	}
 
 	hasher := sha256.New()
 	size, err := io.Copy(hasher, contextReader{ctx: ctx, reader: file})
@@ -4367,7 +4647,7 @@ func manifestEvidenceDigest(ctx context.Context, filePath string, expectedSize i
 		filePath,
 		expectedSize,
 		0,
-		[]byte("mnemonas-manifest-evidence-v1\x00"),
+		[]byte("mnemonas-manifest-evidence-v2\x00"),
 		summary,
 		"backup manifest",
 	)
@@ -4379,7 +4659,7 @@ func manifestEvidenceDigestBytes(data []byte, result *RunResult) (string, error)
 		return "", err
 	}
 	hasher := sha256.New()
-	_, _ = hasher.Write([]byte("mnemonas-manifest-evidence-v1\x00"))
+	_, _ = hasher.Write([]byte("mnemonas-manifest-evidence-v2\x00"))
 	_, _ = hasher.Write(data)
 	_, _ = hasher.Write([]byte{0})
 	_, _ = hasher.Write(summary)
@@ -4407,6 +4687,24 @@ func manifestEvidenceSummaryData(result *RunResult) ([]byte, error) {
 	return summary, nil
 }
 
+func manifestSemanticDigest(manifest Manifest) (string, error) {
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		return "", fmt.Errorf("marshal restore manifest evidence: %w", err)
+	}
+	hasher := sha256.New()
+	_, _ = hasher.Write([]byte("mnemonas-manifest-semantic-v1\x00"))
+	_, _ = hasher.Write(data)
+	return "sha256:" + hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+func restoreManifestEvidenceDigestBytes(data []byte) string {
+	hasher := sha256.New()
+	_, _ = hasher.Write([]byte("mnemonas-restore-manifest-evidence-v2\x00"))
+	_, _ = hasher.Write(data)
+	return "sha256:" + hex.EncodeToString(hasher.Sum(nil))
+}
+
 func hashRegularFileEvidence(ctx context.Context, filePath string, expectedSize, maxSize int64, prefix, suffix []byte, label string) (string, regularFileEvidenceObservation, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -4416,7 +4714,7 @@ func hashRegularFileEvidence(ctx context.Context, filePath string, expectedSize,
 	}
 	file, err := rootio.OpenRegularFilePathNoFollow(filePath)
 	if err != nil {
-		return "", regularFileEvidenceObservation{}, fmt.Errorf("open %s: %w", label, mapBackupNoFollowError(err, label))
+		return "", regularFileEvidenceObservation{}, fmt.Errorf("open %s: %w", label, mapBackupRegularFileNoFollowError(err, label))
 	}
 	closeWithError := func(current error) error {
 		if closeErr := file.Close(); closeErr != nil && current == nil {
@@ -4482,132 +4780,111 @@ func hashRegularFileEvidence(ctx context.Context, filePath string, expectedSize,
 }
 
 func readManifestWithExpectedSize(filePath string, expectedSize int64) (Manifest, error) {
-	exists, err := backupManifestFileExistsNoFollow(filePath)
-	if err != nil {
-		return Manifest{}, err
-	}
-	if !exists {
-		return Manifest{}, fmt.Errorf("read backup manifest: %w", os.ErrNotExist)
-	}
-
-	file, err := rootio.OpenRegularFilePathNoFollow(filePath)
-	if err != nil {
-		return Manifest{}, fmt.Errorf("read backup manifest: %w", mapBackupNoFollowError(err, "backup manifest"))
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return Manifest{}, fmt.Errorf("stat backup manifest: %w", err)
-	}
-	if !info.Mode().IsRegular() {
-		return Manifest{}, fmt.Errorf("%w: backup manifest must be a regular file", ErrUnsafePath)
-	}
-	if expectedSize > 0 && info.Size() != expectedSize {
-		return Manifest{}, fmt.Errorf("%w: backup manifest size mismatch: got %d, want %d", ErrUnsafePath, info.Size(), expectedSize)
-	}
-	reader := io.Reader(file)
-	if expectedSize > 0 {
-		if expectedSize == int64(^uint64(0)>>1) {
-			return Manifest{}, fmt.Errorf("%w: backup manifest is too large", ErrUnsafePath)
-		}
-		reader = io.LimitReader(file, expectedSize+1)
-	}
-	data, err := io.ReadAll(reader)
-	if err != nil {
-		return Manifest{}, fmt.Errorf("read backup manifest: %w", err)
-	}
-	if expectedSize > 0 && int64(len(data)) != expectedSize {
-		return Manifest{}, fmt.Errorf("%w: backup manifest size changed while reading", ErrUnsafePath)
-	}
-	var manifest Manifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		return Manifest{}, fmt.Errorf("parse backup manifest: %w", err)
-	}
-	if manifest.Version != manifestVersion {
-		return Manifest{}, fmt.Errorf("unsupported backup manifest version: %d", manifest.Version)
-	}
-	if err := validateManifestEntries(manifest); err != nil {
-		return Manifest{}, err
-	}
-	return manifest, nil
+	_, manifest, err := readManifestDataWithExpectedSize(context.Background(), filePath, expectedSize)
+	return manifest, err
 }
 
-func readTrustedRunManifest(ctx context.Context, job config.BackupJobConfig, result *RunResult) (Manifest, error) {
+func readManifestDataWithExpectedSize(ctx context.Context, filePath string, expectedSize int64) ([]byte, Manifest, error) {
+	return readManifestDataWithExpectedSizeMode(ctx, filePath, expectedSize, false)
+}
+
+func readManifestDataWithExpectedSizeMode(ctx context.Context, filePath string, expectedSize int64, allowLegacyV1 bool) ([]byte, Manifest, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if result == nil || result.ManifestSize <= 0 || result.ManifestDigest == "" {
-		return Manifest{}, fmt.Errorf("%w: backup run is missing trusted manifest evidence", ErrUnsafePath)
-	}
-	file, err := rootio.OpenRegularFilePathNoFollow(result.ManifestPath)
+	file, err := rootio.OpenRegularFilePathNoFollow(filePath)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return Manifest{}, fmt.Errorf("%w: trusted backup manifest is missing", ErrUnsafePath)
-		}
-		return Manifest{}, fmt.Errorf("open trusted backup manifest: %w", mapBackupNoFollowError(err, "backup manifest"))
+		return nil, Manifest{}, fmt.Errorf("read backup manifest: %w", mapBackupRegularFileNoFollowError(err, "backup manifest"))
 	}
 	closeWithError := func(current error) error {
 		if closeErr := file.Close(); closeErr != nil && current == nil {
-			return fmt.Errorf("close trusted backup manifest: %w", closeErr)
+			return fmt.Errorf("close backup manifest: %w", closeErr)
 		}
 		return current
 	}
 	info, err := file.Stat()
 	if err != nil {
-		return Manifest{}, closeWithError(fmt.Errorf("stat trusted backup manifest: %w", err))
+		return nil, Manifest{}, closeWithError(fmt.Errorf("stat backup manifest: %w", err))
 	}
-	if !info.Mode().IsRegular() || info.Size() != result.ManifestSize {
-		return Manifest{}, closeWithError(fmt.Errorf("%w: trusted backup manifest size mismatch", ErrUnsafePath))
+	if !info.Mode().IsRegular() {
+		return nil, Manifest{}, closeWithError(fmt.Errorf("%w: backup manifest must be a regular file", ErrUnsafePath))
+	}
+	if expectedSize > 0 && info.Size() != expectedSize {
+		return nil, Manifest{}, closeWithError(fmt.Errorf("%w: backup manifest size mismatch: got %d, want %d", ErrUnsafePath, info.Size(), expectedSize))
 	}
 	changeToken, cacheable := readinessFileChangeToken(info)
-	if result.ManifestSize == int64(^uint64(0)>>1) {
-		return Manifest{}, closeWithError(fmt.Errorf("%w: trusted backup manifest is too large", ErrUnsafePath))
+	reader := io.Reader(file)
+	if expectedSize > 0 {
+		if expectedSize == int64(^uint64(0)>>1) {
+			return nil, Manifest{}, closeWithError(fmt.Errorf("%w: backup manifest is too large", ErrUnsafePath))
+		}
+		reader = io.LimitReader(file, expectedSize+1)
 	}
-	data, err := io.ReadAll(io.LimitReader(contextReader{ctx: ctx, reader: file}, result.ManifestSize+1))
+	data, err := io.ReadAll(contextReader{ctx: ctx, reader: reader})
 	if err != nil {
-		return Manifest{}, closeWithError(fmt.Errorf("read trusted backup manifest: %w", err))
+		return nil, Manifest{}, closeWithError(fmt.Errorf("read backup manifest: %w", err))
 	}
-	if int64(len(data)) != result.ManifestSize {
-		return Manifest{}, closeWithError(fmt.Errorf("%w: trusted backup manifest size changed while reading", ErrUnsafePath))
+	if int64(len(data)) != info.Size() || expectedSize > 0 && int64(len(data)) != expectedSize {
+		return nil, Manifest{}, closeWithError(fmt.Errorf("%w: backup manifest size changed while reading", ErrUnsafePath))
 	}
 	after, err := file.Stat()
 	if err != nil {
-		return Manifest{}, closeWithError(fmt.Errorf("stat trusted backup manifest after reading: %w", err))
+		return nil, Manifest{}, closeWithError(fmt.Errorf("stat backup manifest after reading: %w", err))
 	}
 	afterToken, afterCacheable := readinessFileChangeToken(after)
 	if after.Size() != info.Size() || after.Mode() != info.Mode() || !after.ModTime().Equal(info.ModTime()) ||
 		cacheable != afterCacheable || cacheable && changeToken != afterToken {
-		return Manifest{}, closeWithError(fmt.Errorf("%w: trusted backup manifest changed while reading", ErrUnsafePath))
+		return nil, Manifest{}, closeWithError(fmt.Errorf("%w: backup manifest changed while reading", ErrUnsafePath))
 	}
 	if err := closeWithError(nil); err != nil {
-		return Manifest{}, err
-	}
-	digest, err := manifestEvidenceDigestBytes(data, result)
-	if err != nil {
-		return Manifest{}, err
-	}
-	if digest != result.ManifestDigest {
-		return Manifest{}, fmt.Errorf("%w: trusted backup manifest digest mismatch", ErrUnsafePath)
+		return nil, Manifest{}, err
 	}
 	var manifest Manifest
 	if err := json.Unmarshal(data, &manifest); err != nil {
-		return Manifest{}, fmt.Errorf("parse trusted backup manifest: %w", err)
+		return nil, Manifest{}, fmt.Errorf("parse backup manifest: %w", err)
+	}
+	if manifest.Version == 1 && allowLegacyV1 {
+		return data, manifest, nil
 	}
 	if manifest.Version != manifestVersion {
-		return Manifest{}, fmt.Errorf("unsupported backup manifest version: %d", manifest.Version)
+		return nil, Manifest{}, fmt.Errorf("unsupported backup manifest version: %d", manifest.Version)
 	}
 	if err := validateManifestEntries(manifest); err != nil {
-		return Manifest{}, err
+		return nil, Manifest{}, err
+	}
+	return data, manifest, nil
+}
+
+func readTrustedRunManifest(ctx context.Context, job config.BackupJobConfig, result *RunResult) (Manifest, string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if result == nil || result.ManifestSize <= 0 || result.ManifestDigest == "" {
+		return Manifest{}, "", fmt.Errorf("%w: backup run is missing trusted manifest evidence", ErrUnsafePath)
+	}
+	data, manifest, err := readManifestDataWithExpectedSize(ctx, result.ManifestPath, result.ManifestSize)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return Manifest{}, "", fmt.Errorf("%w: trusted backup manifest is missing", ErrUnsafePath)
+		}
+		return Manifest{}, "", err
+	}
+	digest, err := manifestEvidenceDigestBytes(data, result)
+	if err != nil {
+		return Manifest{}, "", err
+	}
+	if digest != result.ManifestDigest {
+		return Manifest{}, "", fmt.Errorf("%w: trusted backup manifest digest mismatch", ErrUnsafePath)
 	}
 	if err := validateSnapshotManifestIdentity(job.ID, result.ID, manifest); err != nil {
-		return Manifest{}, err
+		return Manifest{}, "", err
 	}
 	if filepath.Clean(manifest.Source) != filepath.Clean(result.Source) ||
 		manifest.FileCount != result.FileCount || manifest.TotalBytes != result.TotalBytes ||
 		(strings.TrimSpace(manifest.ConfigPath) != "") != result.ConfigIncluded {
-		return Manifest{}, fmt.Errorf("%w: trusted backup manifest summary mismatch", ErrUnsafePath)
+		return Manifest{}, "", fmt.Errorf("%w: trusted backup manifest summary mismatch", ErrUnsafePath)
 	}
-	return manifest, nil
+	return manifest, restoreManifestEvidenceDigestBytes(data), nil
 }
 
 func validateSnapshotManifestIdentity(jobID string, snapshotName string, manifest Manifest) error {
@@ -4632,14 +4909,48 @@ func validateSnapshotManifestLocation(job config.BackupJobConfig, snapshotName s
 		return fmt.Errorf("%w: backup snapshot run id is invalid: %q", ErrUnsafePath, snapshotName)
 	}
 	expectedSnapshotPath := filepath.Join(job.Destination, job.ID, "snapshots", snapshotName)
-	if filepath.Clean(snapshotPath) != filepath.Clean(expectedSnapshotPath) {
+	if !backupPathMatchesExpectedLocation(snapshotPath, expectedSnapshotPath) {
 		return fmt.Errorf("%w: backup state snapshot path does not match configured destination", ErrUnsafePath)
 	}
 	expectedManifestPath := filepath.Join(expectedSnapshotPath, manifestFileName)
-	if filepath.Clean(manifestPath) != filepath.Clean(expectedManifestPath) {
+	if !backupPathMatchesExpectedLocation(manifestPath, expectedManifestPath) {
 		return fmt.Errorf("%w: backup state manifest path does not match configured destination", ErrUnsafePath)
 	}
 	return nil
+}
+
+func backupPathMatchesExpectedLocation(actualPath string, expectedPath string) bool {
+	actualPath = strings.TrimSpace(actualPath)
+	expectedPath = strings.TrimSpace(expectedPath)
+	if actualPath == "" || expectedPath == "" {
+		return false
+	}
+	if actualPath == expectedPath {
+		return true
+	}
+	return sameExistingBackupPath(actualPath, expectedPath)
+}
+
+func sameExistingBackupPath(leftPath string, rightPath string) bool {
+	if !isCanonicalAbsoluteBackupPath(leftPath) || !isCanonicalAbsoluteBackupPath(rightPath) {
+		return false
+	}
+	if err := validatePathComponentsNoSymlink(leftPath, "recorded backup path"); err != nil {
+		return false
+	}
+	if err := validatePathComponentsNoSymlink(rightPath, "current backup path"); err != nil {
+		return false
+	}
+	leftInfo, leftErr := os.Lstat(leftPath)
+	rightInfo, rightErr := os.Lstat(rightPath)
+	if leftErr != nil || rightErr != nil || leftInfo.Mode()&os.ModeSymlink != 0 || rightInfo.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+	return os.SameFile(leftInfo, rightInfo)
+}
+
+func isCanonicalAbsoluteBackupPath(candidate string) bool {
+	return filepath.IsAbs(candidate) && filepath.Clean(candidate) == candidate && !restoreTargetHasDotSegment(candidate)
 }
 
 func validateManifestEntries(manifest Manifest) error {
@@ -4649,10 +4960,35 @@ func validateManifestEntries(manifest Manifest) error {
 	if manifest.TotalBytes < 0 {
 		return fmt.Errorf("%w: backup manifest has negative total bytes", ErrUnsafePath)
 	}
+	if len(manifest.Directories) == 0 || manifest.Directories[0].ArchivePath != "data" {
+		return fmt.Errorf("%w: backup manifest must start its directory list with data", ErrUnsafePath)
+	}
+	directoryPaths := make(map[string]struct{}, len(manifest.Directories))
+	previousDirectory := ""
+	for _, directory := range manifest.Directories {
+		archivePath := directory.ArchivePath
+		if err := validateRestoreManifestDirectoryEntry(archivePath, directory.Mode); err != nil {
+			return err
+		}
+		if previousDirectory != "" && previousDirectory >= archivePath {
+			return fmt.Errorf("%w: backup manifest directories are not strictly sorted at %q", ErrUnsafePath, cleanPreviewSamplePath(archivePath))
+		}
+		if archivePath != "data" {
+			parent := path.Dir(archivePath)
+			if _, ok := directoryPaths[parent]; !ok {
+				return fmt.Errorf("%w: backup manifest directory %q is missing parent %q", ErrUnsafePath, cleanPreviewSamplePath(archivePath), cleanPreviewSamplePath(parent))
+			}
+		}
+		directoryPaths[archivePath] = struct{}{}
+		previousDirectory = archivePath
+	}
+
 	seenArchivePaths := make(map[string]struct{}, len(manifest.Entries))
+	previousEntry := ""
+	hasConfigEntry := false
 	var totalBytes int64
 	for _, entry := range manifest.Entries {
-		archivePath := filepath.ToSlash(entry.ArchivePath)
+		archivePath := entry.ArchivePath
 		if err := validateRestoreManifestFileEntry(archivePath, entry.Size); err != nil {
 			return err
 		}
@@ -4662,10 +4998,23 @@ func validateManifestEntries(manifest Manifest) error {
 		if err := validateRestoreManifestDigest(archivePath, entry.SHA256); err != nil {
 			return err
 		}
-		if _, ok := seenArchivePaths[archivePath]; ok {
-			return fmt.Errorf("%w: backup manifest has duplicate archive path %q", ErrUnsafePath, cleanPreviewSamplePath(archivePath))
+		if previousEntry != "" && previousEntry >= archivePath {
+			return fmt.Errorf("%w: backup manifest entries are not strictly sorted at %q", ErrUnsafePath, cleanPreviewSamplePath(archivePath))
+		}
+		if _, ok := directoryPaths[archivePath]; ok {
+			return fmt.Errorf("%w: backup manifest path is both a file and directory: %q", ErrUnsafePath, cleanPreviewSamplePath(archivePath))
+		}
+		if strings.HasPrefix(archivePath, "data/") {
+			parent := path.Dir(archivePath)
+			if _, ok := directoryPaths[parent]; !ok {
+				return fmt.Errorf("%w: backup manifest file %q is missing directory %q", ErrUnsafePath, cleanPreviewSamplePath(archivePath), cleanPreviewSamplePath(parent))
+			}
+		}
+		if archivePath == "config/config.toml" {
+			hasConfigEntry = true
 		}
 		seenArchivePaths[archivePath] = struct{}{}
+		previousEntry = archivePath
 		nextTotalBytes, err := addManifestEntrySize(totalBytes, entry.Size)
 		if err != nil {
 			return err
@@ -4679,6 +5028,9 @@ func validateManifestEntries(manifest Manifest) error {
 	if manifest.TotalBytes != totalBytes {
 		return fmt.Errorf("%w: backup manifest total bytes mismatch: got %d, want %d", ErrUnsafePath, manifest.TotalBytes, totalBytes)
 	}
+	if (strings.TrimSpace(manifest.ConfigPath) != "") != hasConfigEntry {
+		return fmt.Errorf("%w: backup manifest config path and config entry disagree", ErrUnsafePath)
+	}
 	return nil
 }
 
@@ -4691,6 +5043,10 @@ func addManifestEntrySize(total int64, size int64) (int64, error) {
 
 func manifestEntryMode(entry ManifestEntry) os.FileMode {
 	return os.FileMode(entry.Mode) & os.ModePerm
+}
+
+func manifestDirectoryMode(directory ManifestDirectory) os.FileMode {
+	return os.FileMode(directory.Mode) & os.ModePerm
 }
 
 func validateRestoreManifestMode(archivePath string, mode uint32) error {
@@ -4708,9 +5064,33 @@ func validateRestoreManifestDigest(archivePath string, digest string) error {
 		switch {
 		case r >= '0' && r <= '9':
 		case r >= 'a' && r <= 'f':
-		case r >= 'A' && r <= 'F':
 		default:
 			return fmt.Errorf("%w: backup manifest has invalid sha256 for %q", ErrUnsafePath, cleanPreviewSamplePath(archivePath))
+		}
+	}
+	return nil
+}
+
+func validateRestoreManifestDirectoryEntry(archivePath string, mode uint32) error {
+	if err := validatePortableManifestPath(archivePath); err != nil {
+		return err
+	}
+	if archivePath != "data" && !strings.HasPrefix(archivePath, "data/") {
+		return fmt.Errorf("%w: backup manifest has unsupported directory path %q", ErrUnsafePath, cleanPreviewSamplePath(archivePath))
+	}
+	if err := validateRestoreManifestMode(archivePath, mode); err != nil {
+		return fmt.Errorf("%w: backup manifest has invalid directory mode for %q", ErrUnsafePath, cleanPreviewSamplePath(archivePath))
+	}
+	return nil
+}
+
+func validatePortableManifestPath(archivePath string) error {
+	if archivePath == "" || strings.ContainsRune(archivePath, '\\') || strings.IndexFunc(archivePath, unicode.IsControl) >= 0 || path.IsAbs(archivePath) || path.Clean(archivePath) != archivePath {
+		return fmt.Errorf("%w: backup manifest has unsafe archive path %q", ErrUnsafePath, cleanPreviewSamplePath(archivePath))
+	}
+	for _, segment := range strings.Split(archivePath, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return fmt.Errorf("%w: backup manifest has unsafe archive path %q", ErrUnsafePath, cleanPreviewSamplePath(archivePath))
 		}
 	}
 	return nil
@@ -4954,7 +5334,7 @@ func readCredentialFileData(ctx context.Context, path string) ([]byte, error) {
 	}
 	file, err := rootio.OpenRegularFilePathNoFollow(path)
 	if err != nil {
-		return nil, fmt.Errorf("open credential file: %w", mapBackupNoFollowError(err, "credential file"))
+		return nil, fmt.Errorf("open credential file: %w", mapBackupRegularFileNoFollowError(err, "credential file"))
 	}
 	closeWithError := func(current error) error {
 		if closeErr := file.Close(); closeErr != nil && current == nil {
@@ -5263,7 +5643,7 @@ func copyCredentialSnapshot(ctx context.Context, sourcePath, snapshotPath string
 	}
 	source, err := rootio.OpenRegularFilePathNoFollow(sourcePath)
 	if err != nil {
-		return "", fmt.Errorf("open credential file for snapshot: %w", mapBackupNoFollowError(err, "credential file"))
+		return "", fmt.Errorf("open credential file for snapshot: %w", mapBackupRegularFileNoFollowError(err, "credential file"))
 	}
 	defer source.Close()
 	info, err := source.Stat()
@@ -5613,6 +5993,8 @@ func cloneRestoreResultWithMode(result *RestoreResult, sanitize bool) *RestoreRe
 	}
 	if sanitize {
 		clone.JobConfigBinding = ""
+		clone.ManifestSize = 0
+		clone.ManifestDigest = ""
 		clone.TargetPath = sanitizeBackupTargetForAPI(clone.TargetPath)
 		clone.SnapshotPath = sanitizeBackupTargetForAPI(clone.SnapshotPath)
 		clone.ManifestPath = sanitizeBackupTargetForAPI(clone.ManifestPath)
@@ -6008,6 +6390,9 @@ func summarizeManifestRestorePreview(ctx context.Context, manifest Manifest, inc
 	if err := validateManifestEntries(manifest); err != nil {
 		return 0, 0, false, false, nil, err
 	}
+	if err := validateExplicitConfigRestoreNamespace(manifest, includeConfig); err != nil {
+		return 0, 0, false, false, nil, err
+	}
 
 	var fileCount int64
 	var totalBytes int64
@@ -6069,7 +6454,45 @@ func validateRestoreManifestPath(archivePath string) error {
 	return err
 }
 
+func validateExplicitConfigRestoreNamespace(manifest Manifest, includeConfig bool) error {
+	if !includeConfig {
+		return nil
+	}
+	hasConfig := false
+	for _, entry := range manifest.Entries {
+		if entry.ArchivePath == "config/config.toml" {
+			hasConfig = true
+			break
+		}
+	}
+	if !hasConfig {
+		return nil
+	}
+	const reservedArchivePath = "data/.mnemonas-restore"
+	for _, directory := range manifest.Directories {
+		if manifestPathWithinFold(directory.ArchivePath, reservedArchivePath) {
+			return fmt.Errorf("%w: restored data conflicts with the reserved config restore directory", ErrUnsafePath)
+		}
+	}
+	for _, entry := range manifest.Entries {
+		if manifestPathWithinFold(entry.ArchivePath, reservedArchivePath) {
+			return fmt.Errorf("%w: restored data conflicts with the reserved config restore directory", ErrUnsafePath)
+		}
+	}
+	return nil
+}
+
+func manifestPathWithinFold(candidate string, root string) bool {
+	if len(candidate) < len(root) || !strings.EqualFold(candidate[:len(root)], root) {
+		return false
+	}
+	return len(candidate) == len(root) || candidate[len(root)] == '/'
+}
+
 func validateRestoreManifestFileEntry(archivePath string, size int64) error {
+	if err := validatePortableManifestPath(archivePath); err != nil {
+		return err
+	}
 	if err := validateRestoreManifestPath(archivePath); err != nil {
 		return err
 	}
@@ -6420,6 +6843,13 @@ func validateSourceDirectory(source string) error {
 	return nil
 }
 
+func requireLocalManifestModeSemantics() error {
+	if runtime.GOOS == "windows" {
+		return fmt.Errorf("%w: local backup manifest v2 requires POSIX rwx permission semantics", ErrUnsafePath)
+	}
+	return nil
+}
+
 func validateDestination(source, destination string, storageRoot string) error {
 	if strings.TrimSpace(destination) == "" {
 		return fmt.Errorf("%w: destination is empty", ErrUnsafePath)
@@ -6700,19 +7130,64 @@ func restoreTargetHasDotSegment(targetPath string) bool {
 	return false
 }
 
-func createPartialRestoreTarget(targetPath, runID string) (string, error) {
+type restoreStagingTarget struct {
+	Path     string
+	Identity os.FileInfo
+}
+
+func createPartialRestoreTarget(targetPath, runID string) (restoreStagingTarget, error) {
 	return createNamedRestoreTarget(targetPath, ".partial-"+runID)
 }
 
-func createNamedRestoreTarget(targetPath, suffix string) (string, error) {
+func createNamedRestoreTarget(targetPath, suffix string) (restoreStagingTarget, error) {
 	namedPath := targetPath + suffix
 	if err := rootio.MkdirPathNoFollow(namedPath, 0700); err != nil {
 		if errors.Is(err, os.ErrExist) {
-			return "", ErrRestoreTargetExists
+			return restoreStagingTarget{}, ErrRestoreTargetExists
 		}
-		return "", fmt.Errorf("create restore staging target: %w", mapRestorePathError(err, "restore staging target path must not contain symlink"))
+		return restoreStagingTarget{}, fmt.Errorf("create restore staging target: %w", mapRestorePathError(err, "restore staging target path must not contain symlink"))
 	}
-	return namedPath, nil
+	root, err := os.OpenRoot(namedPath)
+	if err != nil {
+		return restoreStagingTarget{}, fmt.Errorf("open restore staging target: %w", mapRestorePathError(err, "restore staging target changed after creation"))
+	}
+	identity, statErr := root.Stat(".")
+	securityErr := validateBackupTargetLockDirectorySecurity(root, namedPath)
+	if securityErr != nil {
+		securityErr = errors.Join(ErrUnsafePath, securityErr)
+	}
+	closeErr := root.Close()
+	stage := restoreStagingTarget{Path: namedPath, Identity: identity}
+	if err := errors.Join(statErr, securityErr, closeErr); err != nil {
+		cleanupErr := removeRestoreStagingTarget(stage, "restore staging target")
+		return restoreStagingTarget{}, errors.Join(fmt.Errorf("validate restore staging target: %w", err), cleanupErr)
+	}
+	if err := verifyRestoreStagingIdentity(stage); err != nil {
+		cleanupErr := removeRestoreStagingTarget(stage, "restore staging target")
+		return restoreStagingTarget{}, errors.Join(err, cleanupErr)
+	}
+	return stage, nil
+}
+
+func verifyRestoreStagingIdentity(stage restoreStagingTarget) error {
+	if strings.TrimSpace(stage.Path) == "" || stage.Identity == nil {
+		return fmt.Errorf("%w: restore staging target identity is unavailable", ErrUnsafePath)
+	}
+	info, err := os.Lstat(stage.Path)
+	if err != nil {
+		return errors.Join(ErrUnsafePath, fmt.Errorf("verify restore staging target identity: %w", err))
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || !os.SameFile(stage.Identity, info) {
+		return fmt.Errorf("%w: restore staging target identity changed", ErrUnsafePath)
+	}
+	return nil
+}
+
+func removeRestoreStagingTarget(stage restoreStagingTarget, label string) error {
+	if err := verifyRestoreStagingIdentity(stage); err != nil {
+		return err
+	}
+	return removeAllBackupPath(stage.Path, label)
 }
 
 func moveResticRestoredSource(ctx context.Context, rawPath, partialPath, source string) (int64, int64, error) {
@@ -6876,8 +7351,8 @@ func summarizeRestoreVerificationTree(ctx context.Context, root string) (int64, 
 	return fileCount, totalBytes, warnings, nil
 }
 
-func (m *Manager) appendLocalRestoreSnapshotWarnings(ctx context.Context, job config.BackupJobConfig, targetPath string, result *RestoreVerifyResult, warnings []string) ([]string, error) {
-	if restore := m.latestCompletedRestoreForTarget(job.ID, targetPath); restore != nil {
+func (m *Manager) appendLocalRestoreSnapshotWarnings(ctx context.Context, job config.BackupJobConfig, targetPath string, restore *RestoreResult, result *RestoreVerifyResult, warnings []string) ([]string, error) {
+	if restore != nil {
 		snapshotPath, manifestPath, manifest, err := localRestoreSnapshotManifest(job, restore)
 		if err != nil {
 			return appendRestoreVerificationWarning(warnings, fmt.Sprintf("无法对照恢复时使用的本地备份快照: %v", err)), nil
@@ -6886,10 +7361,10 @@ func (m *Manager) appendLocalRestoreSnapshotWarnings(ctx context.Context, job co
 			return appendRestoreVerificationWarning(warnings, fmt.Sprintf("无法校验恢复时使用的本地备份快照: %v", err)), nil
 		}
 		setRestoreVerifySnapshotReference(result, snapshotPath, manifestPath)
-		return appendLocalRestoreSnapshotComparisonWarnings(ctx, snapshotPath, targetPath, manifest, warnings)
+		return appendLocalRestoreSnapshotComparisonWarnings(ctx, targetPath, manifest, restore.ConfigRestored, restore.ConfigRestored, warnings)
 	}
 
-	snapshotPath, manifestPath, manifest, err := m.latestManifest(ctx, job)
+	snapshotPath, manifestPath, manifest, _, _, err := m.latestManifest(ctx, job)
 	if err != nil {
 		return appendRestoreVerificationWarning(warnings, fmt.Sprintf("无法对照最新本地备份 manifest: %v", err)), nil
 	}
@@ -6897,7 +7372,7 @@ func (m *Manager) appendLocalRestoreSnapshotWarnings(ctx context.Context, job co
 		return appendRestoreVerificationWarning(warnings, fmt.Sprintf("无法校验最新本地备份快照: %v", err)), nil
 	}
 	setRestoreVerifySnapshotReference(result, snapshotPath, manifestPath)
-	return appendLocalRestoreSnapshotComparisonWarnings(ctx, snapshotPath, targetPath, manifest, warnings)
+	return appendLocalRestoreSnapshotComparisonWarnings(ctx, targetPath, manifest, true, false, warnings)
 }
 
 func setRestoreVerifySnapshotReference(result *RestoreVerifyResult, snapshotPath string, manifestPath string) {
@@ -6908,28 +7383,26 @@ func setRestoreVerifySnapshotReference(result *RestoreVerifyResult, snapshotPath
 	result.ManifestPath = manifestPath
 }
 
-func appendLocalRestoreSnapshotComparisonWarnings(ctx context.Context, snapshotPath string, targetPath string, manifest Manifest, warnings []string) ([]string, error) {
+func appendLocalRestoreSnapshotComparisonWarnings(ctx context.Context, targetPath string, manifest Manifest, compareConfig bool, requireConfig bool, warnings []string) ([]string, error) {
 	var compareErr error
-	warnings, compareErr = appendRestoreDirectoryComparisonWarnings(ctx, snapshotPath, targetPath, warnings)
+	warnings, compareErr = appendRestoreDirectoryComparisonWarnings(ctx, targetPath, manifest, compareConfig, warnings)
 	if compareErr != nil {
 		return warnings, compareErr
 	}
-	return appendRestoreFileComparisonWarnings(ctx, targetPath, manifest, warnings)
+	return appendRestoreFileComparisonWarnings(ctx, targetPath, manifest, compareConfig, requireConfig, warnings)
 }
 
 func (m *Manager) latestCompletedRestoreForTarget(jobID string, targetPath string) *RestoreResult {
 	targetPath = strings.TrimSpace(targetPath)
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	state := m.state.Jobs[jobID]
-	for _, restore := range state.RestoreHistory {
+	restores := append(cloneRestoreResultsRaw(state.RestoreHistory), cloneRestoreResultRaw(state.LastRestore))
+	m.mu.Unlock()
+
+	for _, restore := range restores {
 		if restoreMatchesTargetSnapshot(restore, targetPath) {
-			return cloneRestoreResultRaw(restore)
+			return restore
 		}
-	}
-	if restoreMatchesTargetSnapshot(state.LastRestore, targetPath) {
-		return cloneRestoreResultRaw(state.LastRestore)
 	}
 	return nil
 }
@@ -6941,16 +7414,37 @@ func restoreMatchesTargetSnapshot(restore *RestoreResult, targetPath string) boo
 	if strings.TrimSpace(restore.SnapshotPath) == "" {
 		return false
 	}
-	return strings.TrimSpace(restore.TargetPath) == targetPath
+	return restoreTargetPathsMatch(restore.TargetPath, targetPath)
+}
+
+func restoreTargetPathsMatch(leftPath string, rightPath string) bool {
+	leftPath = strings.TrimSpace(leftPath)
+	rightPath = strings.TrimSpace(rightPath)
+	if leftPath == "" || rightPath == "" {
+		return false
+	}
+	if !isCanonicalAbsoluteBackupPath(leftPath) || !isCanonicalAbsoluteBackupPath(rightPath) {
+		return false
+	}
+	if leftPath == rightPath {
+		return true
+	}
+	return sameExistingBackupPath(leftPath, rightPath)
 }
 
 func localRestoreSnapshotManifest(job config.BackupJobConfig, restore *RestoreResult) (string, string, Manifest, error) {
+	if restore == nil || restore.ManifestSize <= 0 || strings.TrimSpace(restore.ManifestDigest) == "" {
+		return "", "", Manifest{}, fmt.Errorf("%w: restore record is missing trusted manifest evidence", ErrUnsafePath)
+	}
 	snapshotPath := filepath.Clean(strings.TrimSpace(restore.SnapshotPath))
 	if snapshotPath == "." || snapshotPath == "" {
 		return "", "", Manifest{}, fmt.Errorf("%w: restore record is missing snapshot path", ErrUnsafePath)
 	}
 	snapshotName := filepath.Base(snapshotPath)
 	manifestPath := filepath.Join(snapshotPath, manifestFileName)
+	if filepath.Clean(strings.TrimSpace(restore.ManifestPath)) != filepath.Clean(manifestPath) {
+		return "", "", Manifest{}, fmt.Errorf("%w: restore record manifest path does not match its snapshot", ErrUnsafePath)
+	}
 	if err := validateSnapshotManifestLocation(job, snapshotName, snapshotPath, manifestPath); err != nil {
 		return "", "", Manifest{}, err
 	}
@@ -6961,9 +7455,13 @@ func localRestoreSnapshotManifest(job config.BackupJobConfig, restore *RestoreRe
 	if !exists {
 		return "", "", Manifest{}, fmt.Errorf("%w: restored backup snapshot %q is missing manifest", ErrUnsafePath, cleanPreviewSamplePath(snapshotName))
 	}
-	manifest, err := readManifest(manifestPath)
+	data, manifest, err := readManifestDataWithExpectedSize(context.Background(), manifestPath, restore.ManifestSize)
 	if err != nil {
 		return "", "", Manifest{}, err
+	}
+	digest := restoreManifestEvidenceDigestBytes(data)
+	if digest != restore.ManifestDigest {
+		return "", "", Manifest{}, fmt.Errorf("%w: restored backup manifest digest mismatch", ErrUnsafePath)
 	}
 	if err := validateSnapshotManifestIdentity(job.ID, snapshotName, manifest); err != nil {
 		return "", "", Manifest{}, err
@@ -6971,75 +7469,70 @@ func localRestoreSnapshotManifest(job config.BackupJobConfig, restore *RestoreRe
 	return snapshotPath, manifestPath, manifest, nil
 }
 
-func appendRestoreDirectoryComparisonWarnings(ctx context.Context, snapshotPath string, targetPath string, warnings []string) ([]string, error) {
-	sourceRootPath, err := safeJoin(snapshotPath, "data")
-	if err != nil {
+func appendRestoreDirectoryComparisonWarnings(ctx context.Context, targetPath string, manifest Manifest, compareConfig bool, warnings []string) ([]string, error) {
+	if err := validateManifestEntries(manifest); err != nil {
 		return warnings, err
 	}
-	sourceRootInfo, err := os.Lstat(sourceRootPath)
-	if err != nil {
-		return warnings, fmt.Errorf("stat backup snapshot data root: %w", err)
-	}
-	if sourceRootInfo.Mode()&os.ModeSymlink != 0 || !sourceRootInfo.IsDir() {
-		return warnings, fmt.Errorf("%w: backup snapshot data root must be a directory", ErrUnsafePath)
-	}
-	targetRootInfo, err := os.Lstat(targetPath)
-	if err != nil {
-		return warnings, fmt.Errorf("stat restore target root: %w", err)
-	}
-	if targetRootInfo.Mode()&os.ModeSymlink != 0 || !targetRootInfo.IsDir() {
-		warnings = appendRestoreVerificationWarning(warnings, "恢复目标根目录类型不匹配")
-	} else if targetRootInfo.Mode().Perm() != sourceRootInfo.Mode().Perm() {
-		warnings = appendRestoreVerificationWarning(warnings, "恢复目标根目录权限不匹配")
-	}
-	expectedDirs := make(map[string]struct{})
-	err = filepath.WalkDir(sourceRootPath, func(sourcePath string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
+	expectedDirs := make(map[string]os.FileMode, len(manifest.Directories))
+	if compareConfig {
+		configDirPath := filepath.Join(targetPath, ".mnemonas-restore")
+		if info, err := os.Lstat(configDirPath); err == nil {
+			if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+				warnings = appendRestoreVerificationWarning(warnings, "恢复目标配置目录类型不匹配: .mnemonas-restore")
+			} else if info.Mode()&specialPermissionBits != 0 || info.Mode().Perm() != 0700 {
+				warnings = appendRestoreVerificationWarning(warnings, "恢复目标配置目录权限不匹配: .mnemonas-restore")
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return warnings, fmt.Errorf("stat restore config directory: %w", err)
 		}
+	}
+	for _, directory := range manifest.Directories {
 		if err := ctx.Err(); err != nil {
-			return err
+			return warnings, err
 		}
-		if sourcePath == sourceRootPath || !entry.IsDir() {
-			return nil
+		relPath := "."
+		if directory.ArchivePath != "data" {
+			relPath = strings.TrimPrefix(directory.ArchivePath, "data/")
 		}
-		info, err := os.Lstat(sourcePath)
-		if err != nil {
-			return fmt.Errorf("stat backup snapshot directory: %w", err)
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return nil
-		}
-		relPath, err := restoreWalkRelativePath(sourceRootPath, sourcePath, "backup snapshot data tree")
-		if err != nil {
-			return err
-		}
-		expectedDirs[relPath] = struct{}{}
-		targetDirPath, err := safeJoin(targetPath, relPath)
-		if err != nil {
-			return err
+		expectedMode := manifestDirectoryMode(directory)
+		expectedDirs[relPath] = expectedMode
+		targetDirPath := targetPath
+		if relPath != "." {
+			var err error
+			targetDirPath, err = safeJoin(targetPath, relPath)
+			if err != nil {
+				return warnings, err
+			}
 		}
 		targetInfo, err := os.Lstat(targetDirPath)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
-				warnings = appendRestoreVerificationWarning(warnings, "恢复目标缺少对照备份目录: "+relPath)
-				return nil
+				if relPath == "." {
+					warnings = appendRestoreVerificationWarning(warnings, "恢复目标根目录缺失")
+				} else {
+					warnings = appendRestoreVerificationWarning(warnings, "恢复目标缺少对照备份目录: "+relPath)
+				}
+				continue
 			}
-			return fmt.Errorf("stat restore target directory: %w", err)
+			return warnings, fmt.Errorf("stat restore target directory: %w", err)
 		}
 		if targetInfo.Mode()&os.ModeSymlink != 0 || !targetInfo.IsDir() {
-			warnings = appendRestoreVerificationWarning(warnings, "恢复目标目录类型不匹配: "+relPath)
-			return nil
+			if relPath == "." {
+				warnings = appendRestoreVerificationWarning(warnings, "恢复目标根目录类型不匹配")
+			} else {
+				warnings = appendRestoreVerificationWarning(warnings, "恢复目标目录类型不匹配: "+relPath)
+			}
+			continue
 		}
-		if targetInfo.Mode().Perm() != info.Mode().Perm() {
-			warnings = appendRestoreVerificationWarning(warnings, fmt.Sprintf("恢复目标目录权限不匹配: %s", relPath))
+		if targetInfo.Mode()&specialPermissionBits != 0 || targetInfo.Mode().Perm() != expectedMode {
+			if relPath == "." {
+				warnings = appendRestoreVerificationWarning(warnings, "恢复目标根目录权限不匹配")
+			} else {
+				warnings = appendRestoreVerificationWarning(warnings, "恢复目标目录权限不匹配: "+relPath)
+			}
 		}
-		return nil
-	})
-	if err != nil {
-		return warnings, fmt.Errorf("compare restored directories: %w", err)
 	}
-	err = filepath.WalkDir(targetPath, func(targetDirPath string, entry fs.DirEntry, walkErr error) error {
+	err := filepath.WalkDir(targetPath, func(targetDirPath string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -7053,8 +7546,12 @@ func appendRestoreDirectoryComparisonWarnings(ctx context.Context, snapshotPath 
 		if err != nil {
 			return err
 		}
-		if relPath == ".mnemonas-restore" || strings.HasPrefix(relPath, ".mnemonas-restore/") {
-			return filepath.SkipDir
+		if relPath == ".mnemonas-restore" {
+			if _, restoredDataDirectory := expectedDirs[relPath]; !restoredDataDirectory {
+				if compareConfig {
+					return filepath.SkipDir
+				}
+			}
 		}
 		if _, ok := expectedDirs[relPath]; !ok {
 			warnings = appendRestoreVerificationWarning(warnings, "恢复目标包含对照备份未登记的目录: "+relPath)
@@ -7068,7 +7565,7 @@ func appendRestoreDirectoryComparisonWarnings(ctx context.Context, snapshotPath 
 	return warnings, nil
 }
 
-func appendRestoreFileComparisonWarnings(ctx context.Context, targetPath string, manifest Manifest, warnings []string) ([]string, error) {
+func appendRestoreFileComparisonWarnings(ctx context.Context, targetPath string, manifest Manifest, compareConfig bool, requireConfig bool, warnings []string) ([]string, error) {
 	expectedFiles := make(map[string]ManifestEntry, len(manifest.Entries))
 	var configEntry *ManifestEntry
 	for _, entry := range manifest.Entries {
@@ -7081,6 +7578,9 @@ func appendRestoreFileComparisonWarnings(ctx context.Context, targetPath string,
 			entryCopy := entry
 			configEntry = &entryCopy
 		}
+	}
+	if compareConfig {
+		warnings = appendRestoreConfigComparisonWarnings(ctx, targetPath, configEntry, requireConfig, warnings)
 	}
 	for relPath, entry := range expectedFiles {
 		if err := ctx.Err(); err != nil {
@@ -7103,8 +7603,6 @@ func appendRestoreFileComparisonWarnings(ctx context.Context, targetPath string,
 			warnings = appendRestoreVerificationWarning(warnings, fmt.Sprintf("恢复目标文件校验失败: %s", relPath))
 		}
 	}
-	warnings = appendRestoreConfigComparisonWarnings(ctx, targetPath, configEntry, warnings)
-
 	err := filepath.WalkDir(targetPath, func(filePath string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -7123,7 +7621,7 @@ func appendRestoreFileComparisonWarnings(ctx context.Context, targetPath string,
 		if err != nil {
 			return err
 		}
-		if relPath == ".mnemonas-restore/config.toml" {
+		if compareConfig && relPath == ".mnemonas-restore/config.toml" {
 			return nil
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
@@ -7145,13 +7643,16 @@ func appendRestoreFileComparisonWarnings(ctx context.Context, targetPath string,
 	return warnings, nil
 }
 
-func appendRestoreConfigComparisonWarnings(ctx context.Context, targetPath string, configEntry *ManifestEntry, warnings []string) []string {
+func appendRestoreConfigComparisonWarnings(ctx context.Context, targetPath string, configEntry *ManifestEntry, required bool, warnings []string) []string {
 	configPath := filepath.Join(targetPath, ".mnemonas-restore", "config.toml")
 	exists, err := regularFileExistsNoFollow(configPath)
 	if err != nil {
 		return appendRestoreVerificationWarning(warnings, fmt.Sprintf("恢复目标配置文件校验失败: %v", err))
 	}
 	if !exists {
+		if required {
+			return appendRestoreVerificationWarning(warnings, "恢复目标缺少对照备份配置文件: .mnemonas-restore/config.toml")
+		}
 		return warnings
 	}
 	if configEntry == nil {
@@ -7231,11 +7732,18 @@ func dirExistsNoFollow(path string) (bool, error) {
 	return info.IsDir(), nil
 }
 
-func installRestoreTarget(partialPath, targetPath string) error {
+func installRestoreTarget(stage restoreStagingTarget, targetPath string) error {
+	return installRestoreTargetWithFinalMode(stage, targetPath, nil)
+}
+
+func installRestoreTargetWithFinalMode(stage restoreStagingTarget, targetPath string, finalMode *os.FileMode) error {
+	if err := verifyRestoreStagingIdentity(stage); err != nil {
+		return err
+	}
 	if err := validatePathComponentsNoSymlink(targetPath, "restore target"); err != nil {
 		return err
 	}
-	if err := validatePathComponentsNoSymlink(partialPath, "restore staging target"); err != nil {
+	if err := validatePathComponentsNoSymlink(stage.Path, "restore staging target"); err != nil {
 		return err
 	}
 	if info, err := os.Lstat(targetPath); err == nil {
@@ -7252,11 +7760,48 @@ func installRestoreTarget(partialPath, targetPath string) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("stat restore target before install: %w", err)
 	}
-	if err := rootio.ReplaceEmptyDirPathNoFollow(partialPath, targetPath); err != nil {
+	if err := verifyRestoreStagingIdentity(stage); err != nil {
+		return err
+	}
+	var stageDir *os.File
+	if finalMode != nil {
+		var err error
+		stageDir, err = rootio.OpenDirPathNoFollow(stage.Path)
+		if err != nil {
+			return fmt.Errorf("open restore staging target before install: %w", mapRestorePathError(err, "restore staging target changed before install"))
+		}
+		stageInfo, statErr := stageDir.Stat()
+		if statErr != nil || !stageInfo.IsDir() || !os.SameFile(stage.Identity, stageInfo) || stageInfo.Mode()&specialPermissionBits != 0 || stageInfo.Mode().Perm() != 0o700 {
+			_ = stageDir.Close()
+			return errors.Join(ErrUnsafePath, statErr, fmt.Errorf("restore staging target identity or private mode changed before install"))
+		}
+	}
+	if err := rootio.ReplaceEmptyDirPathNoFollow(stage.Path, targetPath); err != nil {
+		if stageDir != nil {
+			_ = stageDir.Close()
+		}
 		if errors.Is(err, os.ErrExist) {
 			return ErrRestoreTargetExists
 		}
 		return fmt.Errorf("install restore target: %w", mapRestorePathError(err, "restore target changed before install"))
+	}
+	if stageDir != nil {
+		if err := stageDir.Chmod(finalMode.Perm()); err != nil {
+			_ = stageDir.Close()
+			return fmt.Errorf("set installed restore target mode: %w", err)
+		}
+		installedInfo, statErr := stageDir.Stat()
+		pathInfo, pathErr := os.Lstat(targetPath)
+		closeErr := stageDir.Close()
+		if statErr != nil || pathErr != nil || !installedInfo.IsDir() || !pathInfo.IsDir() ||
+			!os.SameFile(stage.Identity, installedInfo) || !os.SameFile(stage.Identity, pathInfo) ||
+			installedInfo.Mode()&specialPermissionBits != 0 || installedInfo.Mode().Perm() != finalMode.Perm() ||
+			pathInfo.Mode()&specialPermissionBits != 0 || pathInfo.Mode().Perm() != finalMode.Perm() {
+			return errors.Join(ErrUnsafePath, statErr, pathErr, closeErr, fmt.Errorf("installed restore target identity or mode mismatch"))
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close installed restore target: %w", closeErr)
+		}
 	}
 	return nil
 }
@@ -7285,12 +7830,15 @@ func restoreManifestToTarget(ctx context.Context, snapshotPath, targetPath strin
 	if _, _, err := verifyManifestFiles(ctx, snapshotPath, manifest); err != nil {
 		return 0, 0, false, "", fmt.Errorf("verify backup snapshot: %w", err)
 	}
+	if err := validateExplicitConfigRestoreNamespace(manifest, includeConfig); err != nil {
+		return 0, 0, false, "", err
+	}
 
 	var fileCount int64
 	var verifiedBytes int64
 	var configRestored bool
 	var configPath string
-	directoryModes, err := restoreSnapshotDirectories(ctx, snapshotPath, "data", targetPath)
+	directoryModes, err := restoreManifestDirectories(ctx, targetPath, manifest.Directories)
 	if err != nil {
 		return fileCount, verifiedBytes, configRestored, configPath, err
 	}
@@ -7345,101 +7893,36 @@ func restoreManifestToTarget(ctx context.Context, snapshotPath, targetPath strin
 			configPath = destinationPath
 		}
 	}
-	if err := applyDirectoryModesNoFollow(targetPath, directoryModes, "restore target"); err != nil {
+	if err := applyNestedDirectoryModesNoFollow(targetPath, directoryModes, "restore target"); err != nil {
+		return fileCount, verifiedBytes, configRestored, configPath, err
+	}
+	if err := verifyExplicitRestoreTreeContentsWithRootMode(ctx, targetPath, manifest, includeConfig, 0o700); err != nil {
 		return fileCount, verifiedBytes, configRestored, configPath, err
 	}
 	return fileCount, verifiedBytes, configRestored, configPath, nil
 }
 
-func restoreSnapshotDirectories(ctx context.Context, snapshotPath string, archiveRoot string, targetRoot string) ([]directoryMode, error) {
-	sourceRootPath, err := safeJoin(snapshotPath, archiveRoot)
-	if err != nil {
-		return nil, err
-	}
-	sourceRootInfo, err := os.Lstat(sourceRootPath)
-	if err != nil {
-		return nil, fmt.Errorf("stat backup snapshot directory root: %w", mapBackupNoFollowError(err, "backup snapshot"))
-	}
-	if sourceRootInfo.Mode()&os.ModeSymlink != 0 {
-		return nil, fmt.Errorf("%w: snapshot directory root changed to a symlink: %s", ErrUnsafePath, archiveRoot)
-	}
-	if !sourceRootInfo.IsDir() {
-		return nil, fmt.Errorf("%w: snapshot directory root is not a directory: %s", ErrUnsafePath, archiveRoot)
-	}
-	if err := rootio.MkdirAllPathNoFollow(targetRoot, writableDirectoryMode(sourceRootInfo.Mode().Perm())); err != nil {
-		return nil, fmt.Errorf("create restore directory root: %w", mapRestorePathError(err, "restore target path must not contain symlink"))
-	}
-	directoryModes := []directoryMode{{RelPath: ".", Mode: sourceRootInfo.Mode().Perm()}}
-	if err := restoreSnapshotDirectoryEntry(ctx, sourceRootPath, ".", targetRoot, &directoryModes); err != nil {
-		return nil, err
+func restoreManifestDirectories(ctx context.Context, targetRoot string, directories []ManifestDirectory) ([]directoryMode, error) {
+	directoryModes := make([]directoryMode, 0, len(directories))
+	for _, directory := range directories {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if err := validateRestoreManifestDirectoryEntry(directory.ArchivePath, directory.Mode); err != nil {
+			return nil, err
+		}
+		relPath := "."
+		if directory.ArchivePath != "data" {
+			relPath = filepath.FromSlash(strings.TrimPrefix(directory.ArchivePath, "data/"))
+		}
+		destinationPath := filepath.Join(targetRoot, relPath)
+		mode := manifestDirectoryMode(directory)
+		if err := rootio.MkdirAllPathNoFollow(destinationPath, writableDirectoryMode(mode)); err != nil {
+			return nil, fmt.Errorf("create restored directory %s: %w", relPath, mapRestorePathError(err, "restore target path must not contain symlink"))
+		}
+		directoryModes = append(directoryModes, directoryMode{RelPath: relPath, Mode: mode})
 	}
 	return directoryModes, nil
-}
-
-func restoreSnapshotDirectoryEntry(ctx context.Context, sourceRootPath string, relPath string, targetRoot string, directoryModes *[]directoryMode) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	sourcePath := sourceRootPath
-	if relPath != "." {
-		sourcePath = filepath.Join(sourceRootPath, relPath)
-	}
-	info, err := os.Lstat(sourcePath)
-	if err != nil {
-		return fmt.Errorf("stat backup snapshot directory %s: %w", relPath, mapBackupNoFollowError(err, "backup snapshot"))
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("%w: snapshot directory changed to a symlink: %s", ErrUnsafePath, relPath)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("%w: snapshot directory root is not a directory: %s", ErrUnsafePath, relPath)
-	}
-
-	dir, err := rootio.OpenDirPathNoFollow(sourcePath)
-	if err != nil {
-		return fmt.Errorf("open backup snapshot directory %s: %w", relPath, mapBackupNoFollowError(err, "backup snapshot"))
-	}
-	children, readErr := dir.ReadDir(-1)
-	closeErr := dir.Close()
-	if readErr != nil {
-		return fmt.Errorf("read backup snapshot directory %s: %w", relPath, readErr)
-	}
-	if closeErr != nil {
-		return fmt.Errorf("close backup snapshot directory %s: %w", relPath, closeErr)
-	}
-	sort.Slice(children, func(i, j int) bool {
-		return children[i].Name() < children[j].Name()
-	})
-	for _, child := range children {
-		childPath, err := childRelPath(relPath, child.Name())
-		if err != nil {
-			return fmt.Errorf("%w: backup snapshot contains unsafe entry name %q", err, cleanPreviewSamplePath(child.Name()))
-		}
-		childSourcePath := filepath.Join(sourceRootPath, childPath)
-		childInfo, err := os.Lstat(childSourcePath)
-		if err != nil {
-			return fmt.Errorf("stat backup snapshot entry %s: %w", childPath, mapBackupNoFollowError(err, "backup snapshot"))
-		}
-		if childInfo.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("%w: snapshot directory entry changed to a symlink: %s", ErrUnsafePath, childPath)
-		}
-		if childInfo.IsDir() {
-			destinationPath := filepath.Join(targetRoot, childPath)
-			if err := rootio.MkdirAllPathNoFollow(destinationPath, writableDirectoryMode(childInfo.Mode().Perm())); err != nil {
-				return fmt.Errorf("create restored directory %s: %w", childPath, mapRestorePathError(err, "restore target path must not contain symlink"))
-			}
-			*directoryModes = append(*directoryModes, directoryMode{RelPath: childPath, Mode: childInfo.Mode().Perm()})
-			if err := restoreSnapshotDirectoryEntry(ctx, sourceRootPath, childPath, targetRoot, directoryModes); err != nil {
-				return err
-			}
-			continue
-		}
-		if childInfo.Mode().IsRegular() {
-			continue
-		}
-		return fmt.Errorf("%w: snapshot directory entry has unsupported file type: %s", ErrUnsupportedFileType, childPath)
-	}
-	return nil
 }
 
 type directoryMode struct {
@@ -7449,6 +7932,13 @@ type directoryMode struct {
 
 func writableDirectoryMode(mode os.FileMode) os.FileMode {
 	return mode.Perm() | 0700
+}
+
+func validateSourceDirectoryMode(relPath string, mode os.FileMode) error {
+	if mode&specialPermissionBits != 0 {
+		return fmt.Errorf("%w: backup source directory has unsupported special permission bits: %s", ErrUnsafePath, cleanPreviewSamplePath(filepath.ToSlash(relPath)))
+	}
+	return nil
 }
 
 func applyDirectoryModesNoFollow(root string, directoryModes []directoryMode, label string) error {
@@ -7464,6 +7954,16 @@ func applyDirectoryModesNoFollow(root string, directoryModes []directoryMode, la
 		}
 	}
 	return nil
+}
+
+func applyNestedDirectoryModesNoFollow(root string, directoryModes []directoryMode, label string) error {
+	nestedModes := make([]directoryMode, 0, len(directoryModes))
+	for _, mode := range directoryModes {
+		if filepath.Clean(mode.RelPath) != "." {
+			nestedModes = append(nestedModes, mode)
+		}
+	}
+	return applyDirectoryModesNoFollow(root, nestedModes, label)
 }
 
 func directoryModeDepth(relPath string) int {
@@ -7482,6 +7982,15 @@ func chmodDirectoryPathNoFollow(dirPath string, mode os.FileMode, label string) 
 	if err := dir.Chmod(mode.Perm()); err != nil {
 		_ = dir.Close()
 		return err
+	}
+	info, err := dir.Stat()
+	if err != nil {
+		_ = dir.Close()
+		return err
+	}
+	if !info.IsDir() || info.Mode()&specialPermissionBits != 0 || info.Mode().Perm() != mode.Perm() {
+		_ = dir.Close()
+		return fmt.Errorf("%w: %s directory mode could not be preserved", ErrUnsafePath, label)
 	}
 	return dir.Close()
 }

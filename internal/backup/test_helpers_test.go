@@ -2,6 +2,9 @@ package backup
 
 import (
 	"os"
+	"path"
+	"sort"
+	"strings"
 	"testing"
 )
 
@@ -25,4 +28,28 @@ func newBackupTestManager(t testing.TB, cfg ManagerConfig) (*Manager, error) {
 		})
 	}
 	return manager, err
+}
+
+func testManifestDirectories(archivePaths ...string) []ManifestDirectory {
+	directories := map[string]struct{}{"data": {}}
+	for _, archivePath := range archivePaths {
+		for current := strings.TrimSpace(archivePath); strings.HasPrefix(current, "data/"); current = path.Dir(current) {
+			directories[current] = struct{}{}
+			if current == "data" {
+				break
+			}
+		}
+	}
+
+	paths := make([]string, 0, len(directories))
+	for archivePath := range directories {
+		paths = append(paths, archivePath)
+	}
+	sort.Strings(paths)
+
+	result := make([]ManifestDirectory, 0, len(paths))
+	for _, archivePath := range paths {
+		result = append(result, ManifestDirectory{ArchivePath: archivePath, Mode: 0o700})
+	}
+	return result
 }

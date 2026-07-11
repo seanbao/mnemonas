@@ -221,6 +221,198 @@ func TestManifestDigestPersistsButIsOmittedFromPublicRunResults(t *testing.T) {
 	}
 }
 
+func TestLocalRestoreSnapshotManifestRejectsSameSizeSemanticTampering(t *testing.T) {
+	_, job, restore := newRestoreManifestEvidenceFixture(t)
+	if _, _, _, err := localRestoreSnapshotManifest(job, restore); err != nil {
+		t.Fatalf("localRestoreSnapshotManifest() baseline error: %v", err)
+	}
+
+	manifestData, err := os.ReadFile(restore.ManifestPath)
+	if err != nil {
+		t.Fatalf("ReadFile(manifest) error: %v", err)
+	}
+	tamperedData := append([]byte(nil), manifestData...)
+	marker := []byte("MnemoNAS local directory snapshot")
+	markerIndex := bytes.Index(tamperedData, marker)
+	if markerIndex < 0 {
+		t.Fatal("manifest description marker not found")
+	}
+	tamperedData[markerIndex] = 'm'
+	if len(tamperedData) != len(manifestData) {
+		t.Fatalf("tampered manifest size = %d, want unchanged size %d", len(tamperedData), len(manifestData))
+	}
+	if err := os.WriteFile(restore.ManifestPath, tamperedData, 0o600); err != nil {
+		t.Fatalf("WriteFile(tampered manifest) error: %v", err)
+	}
+
+	if _, _, _, err := localRestoreSnapshotManifest(job, restore); !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("localRestoreSnapshotManifest() error = %v, want ErrUnsafePath", err)
+	}
+}
+
+func TestLocalRestoreSnapshotManifestRejectsSameSemanticByteTampering(t *testing.T) {
+	_, job, restore := newRestoreManifestEvidenceFixture(t)
+	manifestData, err := os.ReadFile(restore.ManifestPath)
+	if err != nil {
+		t.Fatalf("ReadFile(manifest) error: %v", err)
+	}
+	tamperedData := append([]byte(nil), manifestData...)
+	indent := []byte("\n  \"version\"")
+	indentIndex := bytes.Index(tamperedData, indent)
+	if indentIndex < 0 {
+		t.Fatal("manifest indentation marker not found")
+	}
+	tamperedData[indentIndex+1] = '\t'
+	if len(tamperedData) != len(manifestData) {
+		t.Fatalf("tampered manifest size = %d, want unchanged size %d", len(tamperedData), len(manifestData))
+	}
+	var before Manifest
+	var after Manifest
+	if err := json.Unmarshal(manifestData, &before); err != nil {
+		t.Fatalf("Unmarshal(original manifest) error: %v", err)
+	}
+	if err := json.Unmarshal(tamperedData, &after); err != nil {
+		t.Fatalf("Unmarshal(tampered manifest) error: %v", err)
+	}
+	beforeDigest, err := manifestSemanticDigest(before)
+	if err != nil {
+		t.Fatalf("manifestSemanticDigest(original) error: %v", err)
+	}
+	afterDigest, err := manifestSemanticDigest(after)
+	if err != nil {
+		t.Fatalf("manifestSemanticDigest(tampered) error: %v", err)
+	}
+	if beforeDigest != afterDigest {
+		t.Fatalf("semantic digest changed: %q != %q", beforeDigest, afterDigest)
+	}
+	if err := os.WriteFile(restore.ManifestPath, tamperedData, 0o600); err != nil {
+		t.Fatalf("WriteFile(tampered manifest) error: %v", err)
+	}
+
+	if _, _, _, err := localRestoreSnapshotManifest(job, restore); !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("localRestoreSnapshotManifest() error = %v, want ErrUnsafePath", err)
+	}
+}
+
+func TestLocalRestoreSnapshotManifestRejectsMismatchedRecordedManifestPath(t *testing.T) {
+	_, job, restore := newRestoreManifestEvidenceFixture(t)
+	restore.ManifestPath = filepath.Join(restore.SnapshotPath, "other-manifest.json")
+
+	if _, _, _, err := localRestoreSnapshotManifest(job, restore); !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("localRestoreSnapshotManifest() error = %v, want ErrUnsafePath", err)
+	}
+}
+
+func TestRestoreManifestDigestPersistsButIsOmittedFromPublicRestoreResults(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("b", 64)
+	restore := &RestoreResult{ManifestSize: 2345, ManifestDigest: digest}
+	persistedPayload, err := json.Marshal(persistedState{Jobs: map[string]JobState{
+		"home": {LastRestore: restore},
+	}})
+	if err != nil {
+		t.Fatalf("Marshal(persisted state) error: %v", err)
+	}
+	if !bytes.Contains(persistedPayload, []byte(`"manifest_size":2345`)) || !bytes.Contains(persistedPayload, []byte(`"manifest_digest":"`+digest+`"`)) {
+		t.Fatalf("persisted payload omitted restore manifest evidence: %s", persistedPayload)
+	}
+
+	rawRestore := cloneRestoreResultRaw(restore)
+	if rawRestore.ManifestSize != restore.ManifestSize || rawRestore.ManifestDigest != restore.ManifestDigest {
+		t.Fatalf("raw restore clone lost manifest evidence: %+v", rawRestore)
+	}
+	publicRestore := cloneRestoreResult(restore)
+	if publicRestore.ManifestSize != 0 || publicRestore.ManifestDigest != "" {
+		t.Fatalf("public restore exposed manifest evidence: %+v", publicRestore)
+	}
+	publicPayload, err := json.Marshal(publicRestore)
+	if err != nil {
+		t.Fatalf("Marshal(public restore) error: %v", err)
+	}
+	if bytes.Contains(publicPayload, []byte("manifest_size")) || bytes.Contains(publicPayload, []byte("manifest_digest")) || bytes.Contains(publicPayload, []byte(digest)) {
+		t.Fatalf("public payload exposed restore manifest evidence: %s", publicPayload)
+	}
+}
+
+func TestRestoreManifestRawEvidenceSurvivesManagerReload(t *testing.T) {
+	manager, job, restore := newRestoreManifestEvidenceFixture(t)
+	stateRoot := manager.root
+	storageRoot := manager.storageRoot
+	if err := manager.Close(); err != nil {
+		t.Fatalf("Close(manager) error: %v", err)
+	}
+
+	reloaded, err := newBackupTestManager(t, ManagerConfig{
+		Root:        stateRoot,
+		StorageRoot: storageRoot,
+		Jobs:        []config.BackupJobConfig{job},
+	})
+	if err != nil {
+		t.Fatalf("NewManager(reload) error: %v", err)
+	}
+	verify, err := reloaded.RunRestoreVerify(context.Background(), job.ID, RestoreVerifyOptions{TargetPath: restore.TargetPath})
+	if err != nil {
+		t.Fatalf("RunRestoreVerify(reloaded baseline) error: %v", err)
+	}
+	assertWarningsNotContain(t, verify.Warnings, "无法对照恢复时使用的本地备份快照")
+
+	manifestData, err := os.ReadFile(restore.ManifestPath)
+	if err != nil {
+		t.Fatalf("ReadFile(manifest) error: %v", err)
+	}
+	tamperedData := append([]byte(nil), manifestData...)
+	indent := []byte("\n  \"version\"")
+	indentIndex := bytes.Index(tamperedData, indent)
+	if indentIndex < 0 {
+		t.Fatal("manifest indentation marker not found")
+	}
+	tamperedData[indentIndex+1] = '\t'
+	if err := os.WriteFile(restore.ManifestPath, tamperedData, 0o600); err != nil {
+		t.Fatalf("WriteFile(tampered manifest) error: %v", err)
+	}
+	verify, err = reloaded.RunRestoreVerify(context.Background(), job.ID, RestoreVerifyOptions{TargetPath: restore.TargetPath})
+	if err != nil {
+		t.Fatalf("RunRestoreVerify(reloaded tamper) error: %v", err)
+	}
+	assertWarningContains(t, verify.Warnings, "无法对照恢复时使用的本地备份快照")
+}
+
+func newRestoreManifestEvidenceFixture(t *testing.T) (*Manager, config.BackupJobConfig, *RestoreResult) {
+	t.Helper()
+	tmpDir := secureBackupTestTempDir(t)
+	source := filepath.Join(tmpDir, "source")
+	destination := filepath.Join(tmpDir, "backups")
+	writeManifestEvidenceTestFile(t, filepath.Join(source, "note.txt"), []byte("restore manifest evidence"))
+	job := config.BackupJobConfig{
+		ID:          "home",
+		Name:        "Home backup",
+		Type:        JobTypeLocal,
+		Source:      source,
+		Destination: destination,
+	}
+	manager, err := newBackupTestManager(t, ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Jobs:        []config.BackupJobConfig{job},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+	if _, err := manager.RunJob(context.Background(), job.ID); err != nil {
+		t.Fatalf("RunJob() error: %v", err)
+	}
+	if _, err := manager.RunRestore(context.Background(), job.ID, RestoreOptions{TargetPath: filepath.Join(tmpDir, "restore-target")}); err != nil {
+		t.Fatalf("RunRestore() error: %v", err)
+	}
+
+	manager.mu.Lock()
+	restore := cloneRestoreResultRaw(manager.state.Jobs[job.ID].LastRestore)
+	manager.mu.Unlock()
+	if restore == nil || restore.ManifestSize <= 0 || restore.ManifestDigest == "" || restore.ManifestPath == "" {
+		t.Fatalf("persisted restore lacks trusted manifest evidence: %+v", restore)
+	}
+	return manager, job, restore
+}
+
 func writeManifestEvidenceTestFile(t *testing.T, filePath string, data []byte) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(filePath), 0700); err != nil {

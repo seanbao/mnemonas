@@ -278,12 +278,13 @@ func TestManagerReadinessSnapshotRejectsStaleBackupBindingAndMissingManifest(t *
 					t.Fatalf("parseRunID() error: %v", err)
 				}
 				manifest := Manifest{
-					Version:   manifestVersion,
-					JobID:     "other-job",
-					RunID:     run.ID,
-					Source:    run.Source,
-					CreatedAt: createdAt,
-					Entries:   []ManifestEntry{},
+					Version:     manifestVersion,
+					JobID:       "other-job",
+					RunID:       run.ID,
+					Source:      run.Source,
+					CreatedAt:   createdAt,
+					Entries:     []ManifestEntry{},
+					Directories: testManifestDirectories(),
 				}
 				if err := writeJSONFile(run.ManifestPath, manifest, 0o600); err != nil {
 					t.Fatalf("writeJSONFile(identity mismatch) error: %v", err)
@@ -1124,14 +1125,15 @@ func setReadinessJobState(t *testing.T, manager *Manager, jobID string, state Jo
 			t.Fatalf("parseRunID(%q) error: %v", result.ID, err)
 		}
 		manifest := Manifest{
-			Version:    manifestVersion,
-			JobID:      job.ID,
-			RunID:      result.ID,
-			Source:     result.Source,
-			CreatedAt:  createdAt,
-			FileCount:  result.FileCount,
-			TotalBytes: result.TotalBytes,
-			Entries:    []ManifestEntry{},
+			Version:     manifestVersion,
+			JobID:       job.ID,
+			RunID:       result.ID,
+			Source:      result.Source,
+			CreatedAt:   createdAt,
+			FileCount:   result.FileCount,
+			TotalBytes:  result.TotalBytes,
+			Entries:     []ManifestEntry{},
+			Directories: testManifestDirectories(),
 		}
 		if result.ConfigIncluded {
 			manifest.ConfigPath = "/config.toml"

@@ -2335,7 +2335,7 @@ WebDAV 凭据响应：
 备份任务类型和命令执行：
 
 - 备份端点操作 `[[backup.jobs]]` 下配置的任务。支持任务类型为 `local`、`restic` 和 `rclone`。
-- 本地任务复制到 `destination/<job-id>/snapshots/<run-id>/`，并可按 `max_snapshots` 和 `max_age` 清理旧快照。
+- 本地任务复制到 `destination/<job-id>/snapshots/<run-id>/`，并可按 `max_snapshots` 和 `max_age` 清理旧快照。v2 `manifest.json` 分别登记普通文件和 `data/` 目录，精确绑定目录拓扑、空目录和 POSIX `rwx` 权限位；setuid、setgid、sticky bit 等特殊权限位会被拒绝。它不记录 ACL、扩展属性或所有者身份。`config/` 是固定结构目录，不进入目录清单，恢复时使用 `0700`。
 - Restic 任务调用 `restic -r <repository> --password-file <password_file> backup <source>`，并可选调用 `restic check`。
   rclone 任务调用 `rclone sync <source> <remote>`，并可选调用 `rclone check --one-way`。
 - 外部命令不经 shell 执行。`command` 必须是裸可执行文件名或绝对路径，`extra_args` 会作为 argv 追加到备份命令，但不能覆盖任务身份；rclone 当前只接受 `--fast-list`，恢复命令不复用备份专用 extra args。
@@ -2363,12 +2363,14 @@ WebDAV 凭据响应：
 - 任务视图包含备份 `health_status`（`ok`、`manual`、`running`、`due`、`stale`、`failed` 或 `disabled`）、`retention_status` 和 `restore_drill_status`，以及可选消息。
 - 成功备份会自动运行保留检查，`POST /retention-check` 可手动运行。
   Local 检查统计本地快照范围，restic 检查运行 `restic snapshots --json --tag mnemonas --tag job:<id>`，rclone 检查运行 `rclone lsjson <remote> --recursive --files-only`。
+- Local 自动清理始终保留当前快照和已完成恢复历史仍引用的快照，只对 manifest 身份与快照树布局校验通过的 v2 快照应用 `max_snapshots` 与 `max_age`。v1 快照会固定保留、排除在 v2 数量和时间计算之外，并在保留检测结果中产生人工处置提醒。
 - 保留检查结果持久化为 `last_retention_check`，并驱动 `retention_status`/`retention_message`。
   `retention_policy` 将 restic/rclone 远程保留标记为外部确认；否则远程任务报告保留 warning。
 - 备份管理器在 `<storage.root>/.mnemonas/backup/backup-state.lock` 上持有生命周期锁，同一状态根目录同时只允许一个写入者。Unix 上的状态根目录必须由当前服务账号或 `root` 拥有、不得允许 group/other 写入，其祖先目录也不得允许其他本地账号替换状态根目录。管理器无法取得该锁时，备份端点返回 `503`。
 - 管理器保留已锁定状态根目录的文件系统身份，并在 API 可用性检查以及状态写入前后验证原路径。状态根目录被移动、删除或替换时，管理器会立即隔离，不会跟随新路径或向替换目录写入。已原子提交的 `completed` 结果保持完成，`warnings[]` 包含 `备份状态目录身份发生变化；当前结果已生成，但备份服务已停止后续操作。请检查状态目录并重启服务`；后续备份 API 返回 `503`。未完成原子提交的普通硬持久化失败返回 `500`。
 - `local` 任务的备份、恢复预览、恢复演练、恢复、恢复后只读校验和保留检测使用 `<destination>/<job-id>/.mnemonas-target.lock`。本地目标已被其他进程占用时，操作返回 `409`。目标锁释放结果无法确认时返回 `500`；即使同一结果还包含“无快照”等业务冲突，也不会降级为 `409`。Unix 上的任务目录必须由当前服务账号或 `root` 拥有，且不得允许 group/other 写入；祖先目录必须由可信账号拥有，可写祖先只有在设置 sticky bit 且能防止替换可信子目录时才会被接受。不安全目标会拒绝操作并返回 `500`。
 - FAT、exFAT 等不持久保存 Unix 所有者和 mode 的外置盘需用安全的 `uid`、`gid`、`dmask` 和 `fmask` 挂载。例如，可按实际服务 UID/GID 设置 `uid=<mnemonas-uid>,gid=<mnemonas-gid>,dmask=0077,fmask=0177`。无可靠 Unix mode 或等价挂载约束时，`local` 操作会拒绝继续。
+- v2 本地 manifest 要求来源、快照和恢复目标提供稳定的 POSIX `rwx` 权限语义。原生 Windows 无法保真保存这些权限位，因此 MnemoNAS 会拒绝在原生 Windows 上执行 v2 本地备份、恢复预览、恢复、恢复演练、恢复校验和保留检测。
 - 远端任务不创建本地目标锁；restic 任务依赖原生仓库锁，rclone 不提供适用于所有 remote 的通用分布式互斥机制。多个任务或实例共用同一 rclone 路径时，必须用外部调度串行化备份、恢复和校验操作。
 
 恢复演练和恢复报告：
@@ -2400,11 +2402,11 @@ WebDAV 凭据响应：
   状态目录身份在当前结果原子提交后发生变化时，该次运行也按上述 warning 成功语义返回，但管理器已隔离，后续请求返回 `503`。普通硬持久化失败不使用该 warning 语义，而是返回 `500`。
 - `POST /retention-check` 接受空 body 或 `{}`，并返回 `snapshot_count`、`file_count`、`total_bytes`、snapshot 时间范围、`warning` 和 `warnings`；失败返回 `500`，并在 `details` 中包含失败检查。
 - `POST /restore-drill` 接受可选 `{"keep_artifact": true}`。
-  local 任务临时恢复并校验最近快照，restic 任务运行 `restic check`，rclone 任务运行 `rclone check --one-way`。
+  local 任务按受信 v2 manifest 核对并重建完整目录集合，再校验目录拓扑、空目录、POSIX `rwx` 权限位和文件证据；它不从快照当前目录树推断目录基线。restic 任务运行 `restic check`，rclone 任务运行 `rclone check --one-way`。
   local 任务在默认不保留演练产物时，如果快照校验完成但临时恢复目录清理失败，响应会保持 `status="completed"`，同时设置 `warning=true`、填充 `warnings[]`，并将 `artifact_kept=true` 与 `restored_path` 返回给维护页；warning 文本不包含原始路径或底层错误文本。
 - `POST /restore-preview` 使用与 restore 相同的目标规则，但不创建目标数据或写入恢复历史。
   它返回目标隔离、目标状态、备份内容、目标文件系统容量和配置处理对应的 `preflight_checks`、`warnings`、`cutover_checklist` 和 `rollback_checklist`。
-- Local 任务只汇总 `status.json.last_successful_run` 绑定的 manifest，不扫描快照目录推断最近快照。manifest 的路径、大小、摘要、任务 ID、运行 ID 和统计字段都必须与成功运行时保存的证据一致；缺少证据时，需要先完成新的本地备份。restic 任务运行 `restic ls latest --json --tag mnemonas --tag job:<id> --path <source>`，rclone 任务运行 `rclone lsjson <remote> --recursive --files-only`。
+- Local 任务只汇总 `status.json.last_successful_run` 绑定的 v2 manifest，不扫描快照目录推断最近快照。manifest 的路径、大小、摘要、任务 ID、运行 ID 和统计字段都必须与成功运行时保存的证据一致；v1 manifest 或缺少证据时，需要先完成新的本地备份。restic 任务运行 `restic ls latest --json --tag mnemonas --tag job:<id> --path <source>`，rclone 任务运行 `rclone lsjson <remote> --recursive --files-only`。
 
 批量恢复：
 
@@ -2424,16 +2426,20 @@ WebDAV 凭据响应：
   目标还必须位于 `storage.root`、备份来源以及任何本地备份目标或仓库之外。
 - Windows 和 UNC 路径不是合法服务端恢复目标。目标父目录必须存在，目标本身必须不存在或为空。
 - 服务端会在写入前重新运行相同恢复预检；失败预检会拒绝恢复，并和失败恢复结果一起持久化。
-- Local 恢复将快照 `data/` 内容复制到目标根目录，校验大小和 SHA-256，并在请求时把配置恢复到 `.mnemonas-restore/config.toml`。
+- Local 恢复以受信 manifest 为目录真值，在目标根目录重建 `data/` 的精确拓扑、空目录和 POSIX `rwx` 权限位，再复制并校验文件大小、权限位和 SHA-256。它不会读取快照目录的当前权限来决定恢复结果；安装前还会按显式目标布局复核完整目录树，拒绝额外或缺失条目、权限漂移及大小写折叠冲突。请求恢复配置时，配置写入 `.mnemonas-restore/config.toml`，结构目录 `.mnemonas-restore/` 固定为 `0700`。
+- 同一 manifest 同时包含可恢复配置，且 `data/` 树占用 `.mnemonas-restore` 文件或目录命名空间（含仅大小写不同的等价名称）时，`include_config=true` 的 `restore-preview` 和 `restore` 会以命名空间冲突失败；只恢复数据不受该保留命名空间约束。
+- 显式恢复使用与目标同级的私有暂存目录，并在安装和清理边界复核该目录的文件系统身份。Unix 上暂存目录及其祖先还必须满足可信所有者和不可替换约束；路径身份变化时操作以不安全路径失败。
 - Restic 恢复运行 `restic restore latest --target <临时目录> --tag mnemonas --tag job:<id> --path <source>`。
   服务端拒绝恢复出的 symlink 和特殊文件后，将恢复出的 source 目录内容安装到目标根。
 - Rclone 恢复运行 `rclone copy <remote> <临时目录>`，再运行 `rclone check <remote> <临时目录> --one-way`。
   安装到 `target_path` 前同样拒绝恢复出的 symlink 和特殊文件，再把临时目录安装到 `target_path`。
 - `include_config` 对 restic 或 rclone 任务没有特殊处理。恢复开始和完成会持久化，失败恢复尝试也会记录，便于后续排查。
+- v2 manifest 的目录拓扑和权限语义仅适用于 local 任务。Restic 与 rclone 继续采用各自后端的快照、复制和校验语义。
 - `POST /restore-verify` 要求目标目录已存在，应用相同服务端 POSIX 路径规则、受保护路径边界以及控制字符或点段拒绝规则，不修改数据。
   该端点持久化最近一次校验报告为 `last_restore_verify`，并报告文件/字节数量和关键目录或文件是否存在。
 - 校验字段包括 `.mnemonas-restore/config.toml`、`files/`、`.mnemonas/`、`.mnemonas/index.db` 和 `.mnemonas/objects`；warning 会指出 symlink、特殊文件或看起来不像完整 `storage.root` 的目标。
-- Local 任务会优先和同一目标最近一次成功恢复快照比较，否则和最近 local 快照比较，并返回比较用的 `snapshot_path` 和 `manifest_path`。
+- Local 任务会优先使用同一目标最近一次成功恢复所绑定的受信 v2 manifest，否则使用最近一次成功 local 备份绑定的 manifest，并返回比较用的 `snapshot_path` 和 `manifest_path`。文件与目录比较都以 manifest 为真值；目录缺失、额外目录或 POSIX `rwx` 权限漂移会产生 warning。
+- 恢复记录内部保存 manifest 大小和原始字节摘要证据，供 `restore-verify` 绑定同一次恢复的可信基线；仅改变 JSON 空白或字段排列也会使绑定失效。这些证据不属于公共 `RestoreResult` 响应字段，客户端不得依赖或提交。旧恢复记录缺少内部证据时，可先使用当前受信 v2 备份重新恢复；当前备份也是 v1 或缺少受信运行证据时，才需要先完成新的本地备份。匹配恢复要求恢复配置时，缺失或不匹配的 `.mnemonas-restore/config.toml` 以及结构目录不是精确 `0700` 均会产生校验 warning。
 
 错误和边界条件：
 
