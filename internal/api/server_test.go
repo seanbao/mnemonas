@@ -769,7 +769,7 @@ func TestServer_PathChangeHooks_CallAdditionalListeners(t *testing.T) {
 	}
 }
 
-func TestServer_PathChangeHooks_RollBackAdditionalDeleteListenerOnMetadataFailure(t *testing.T) {
+func TestServer_PathChangeHooks_RejectUnsupportedCommittedDeleteRestoreMetadata(t *testing.T) {
 	client := setupDataplaneClient(t)
 	if client == nil {
 		t.Skip("dataplane not available, skipping test")
@@ -810,10 +810,6 @@ func TestServer_PathChangeHooks_RollBackAdditionalDeleteListenerOnMetadataFailur
 		t.Fatalf("NewServer() error: %v", err)
 	}
 
-	setStorageHook(t, fs, "updateTrashRestoreData", func(context.Context, string, []byte) error {
-		return errors.New("persist delete hook metadata")
-	})
-
 	ctx := context.Background()
 	if err := fs.Mkdir(ctx, "/docs"); err != nil {
 		t.Fatalf("Mkdir(/docs) error: %v", err)
@@ -823,14 +819,18 @@ func TestServer_PathChangeHooks_RollBackAdditionalDeleteListenerOnMetadataFailur
 	}
 
 	err = fs.Delete(ctx, "/docs/file.txt")
-	if err == nil {
-		t.Fatal("expected delete to fail when trash restore metadata persistence fails")
+	if !errors.Is(err, storage.ErrTrashRecoveryRequired) || !strings.Contains(err.Error(), "unsupported restore metadata") {
+		t.Fatalf("Delete() error = %v, want unsupported committed listener recovery gate", err)
 	}
-	if !strings.Contains(err.Error(), "failed to persist trash restore metadata") {
-		t.Fatalf("expected trash restore metadata failure, got %v", err)
+	if rollbackCalls != 0 {
+		t.Fatalf("additional delete rollback calls = %d, want 0 after commit", rollbackCalls)
 	}
-	if rollbackCalls != 1 {
-		t.Fatalf("additional delete rollback calls = %d, want 1", rollbackCalls)
+	if _, statErr := fs.Stat(ctx, "/docs/file.txt"); !errors.Is(statErr, storage.ErrNotFound) {
+		t.Fatalf("Stat(committed deleted path) error = %v, want ErrNotFound", statErr)
+	}
+	items, listErr := fs.ListTrash(ctx)
+	if listErr != nil || len(items) != 1 {
+		t.Fatalf("ListTrash() = %+v, %v, want one committed item", items, listErr)
 	}
 }
 
@@ -965,8 +965,32 @@ func TestNewServer_InitializesFavoritesWhenEnabled(t *testing.T) {
 }
 
 func setupFavoritesServerWithOptions(t *testing.T, enabled bool) *Server {
+	t.Helper()
+	client := setupDataplaneClient(t)
+	if client == nil {
+		t.Skip("dataplane not available, skipping test")
+	}
+
 	logger := zerolog.Nop()
 	tmpDir := t.TempDir()
+	filesRoot := path.Join(tmpDir, "files")
+	internalRoot := path.Join(tmpDir, ".mnemonas")
+	fs, err := storage.New(&storage.Config{
+		FilesRoot:          filesRoot,
+		InternalRoot:       internalRoot,
+		TrashRoot:          path.Join(internalRoot, "trash"),
+		TrashRetentionDays: 30,
+		Dataplane:          client,
+	})
+	if err != nil {
+		t.Skipf("storage.New() error: %v", err)
+	}
+	if err := fs.Mkdir(context.Background(), "/docs"); err != nil {
+		t.Fatalf("Mkdir(/docs) error: %v", err)
+	}
+	if err := fs.WriteFile(context.Background(), "/docs/a.txt", bytes.NewReader([]byte("a"))); err != nil {
+		t.Fatalf("WriteFile(/docs/a.txt) error: %v", err)
+	}
 	storeFile := filepath.Join(tmpDir, "favorites.json")
 	settings := config.Default()
 	settings.Favorites.Enabled = enabled
@@ -976,6 +1000,7 @@ func setupFavoritesServerWithOptions(t *testing.T, enabled bool) *Server {
 	}
 
 	server, err := NewServer(logger, &ServerConfig{
+		FileSystem:         fs,
 		Config:             settings,
 		ConfigPath:         configPath,
 		FavoritesEnabled:   enabled,
@@ -4228,7 +4253,7 @@ func TestServer_DeleteFile_DisablesSharesForDeletedPath(t *testing.T) {
 	}
 }
 
-func TestServer_DeleteFile_ReturnsWarningWhenShareDisableSyncFailsAfterVisibleDelete(t *testing.T) {
+func TestServer_DeleteFile_BlocksUntilShareDisableRetryIsDurable(t *testing.T) {
 	server, shareID := setupShareServer(t)
 	ctx := context.Background()
 
@@ -4251,28 +4276,44 @@ func TestServer_DeleteFile_ReturnsWarningWhenShareDisableSyncFailsAfterVisibleDe
 
 	server.Router().ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("delete shared file warning status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("delete shared file status = %d, want %d: %s", w.Code, http.StatusInternalServerError, w.Body.String())
 	}
-	if got := w.Header().Get("Warning"); got != workspaceMutationWarningHeader {
-		t.Fatalf("warning header = %q, want %q", got, workspaceMutationWarningHeader)
+	if got := w.Header().Get("Warning"); got != "" {
+		t.Fatalf("warning header = %q, want no warning on a blocked transfer", got)
 	}
 	if _, err := server.fs.Stat(ctx, "/docs/a.txt"); !errors.Is(err, storage.ErrNotFound) {
-		t.Fatalf("expected deleted file to stay gone after warning, got %v", err)
+		t.Fatalf("expected captured file to be absent from its logical path, got %v", err)
 	}
 	disabledShare, err := server.shareStore.Get(fileShare.ID)
 	if err != nil {
 		t.Fatalf("Get(fileShare) error: %v", err)
 	}
 	if disabledShare.Enabled {
-		t.Fatal("expected deleted file share to remain disabled after warning")
+		t.Fatal("expected captured file share to be disabled while recovery is blocked")
+	}
+
+	restoreSync()
+	recovery, recoveryErr := server.RecoverTrashTransfers(ctx)
+	if recoveryErr != nil {
+		t.Fatalf("RecoverTrashTransfers() error: %v", recoveryErr)
+	}
+	if recovery.RolledForward != 1 || len(recovery.Blocked) != 0 {
+		t.Fatalf("RecoverTrashTransfers() report = %+v, want one roll-forward", recovery)
+	}
+	items, err := server.fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 || items[0].OriginalPath != "/docs/a.txt" {
+		t.Fatalf("trash items after recovery = %+v, want captured file", items)
 	}
 	folderShare, err := server.shareStore.Get(shareID)
 	if err != nil {
 		t.Fatalf("Get(folder share) error: %v", err)
 	}
 	if !folderShare.Enabled {
-		t.Fatal("expected unrelated folder share to remain enabled after warning")
+		t.Fatal("expected unrelated folder share to remain enabled")
 	}
 }
 
@@ -4619,7 +4660,7 @@ func TestServer_HandlePathDeleted_RollbackIgnoresSharePersistenceWarning(t *test
 	}
 }
 
-func TestServer_DeleteDirectory_RollbackRestoresChildIndexesWhenDeleteHookFails(t *testing.T) {
+func TestServer_DeleteDirectory_RollbackRestoresChildIndexesWhenParticipantFails(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
 
@@ -4636,8 +4677,19 @@ func TestServer_DeleteDirectory_RollbackRestoresChildIndexesWhenDeleteHookFails(
 		t.Fatalf("WriteFile(report) error: %v", err)
 	}
 
-	fs.SetPathChangeHooks(nil, func(context.Context, string) (*storage.PathDeleteHookResult, error) {
-		return nil, errors.New("favorite cleanup failed")
+	participantErr := errors.New("favorite cleanup failed")
+	fs.SetTrashParticipantHooks(storage.TrashParticipantHooks{
+		PrepareDelete: func(context.Context, string, string) ([]byte, error) {
+			return []byte(`{"participant":"directory-index-rollback"}`), nil
+		},
+		ApplyDelete: func(_ context.Context, _ string, _ string, _ []byte, committed bool) error {
+			if !committed {
+				return participantErr
+			}
+			return nil
+		},
+		RollbackDelete: func(context.Context, string, string, []byte) error { return nil },
+		CompleteDelete: func(context.Context, string, string, []byte) error { return nil },
 	})
 
 	req := httptest.NewRequest(http.MethodDelete, deleteFileRequestURL(t, fs, "/api/v1/files/docs"), nil)
@@ -7400,9 +7452,18 @@ func TestServer_UpdateShareEnableState_LogsShareActivity(t *testing.T) {
 }
 
 func TestServer_AddFavorite_LogsFavoriteActivity(t *testing.T) {
-	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
+	server, fs, _, username, password := setupAuthServerWithFeatures(t, false, true)
 	if server.activity == nil {
 		t.Fatal("expected activity store to be initialized")
+	}
+	if err := fs.Mkdir(context.Background(), "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.Mkdir(context.Background(), "/tester/docs"); err != nil {
+		t.Fatalf("Mkdir(/tester/docs) error: %v", err)
+	}
+	if err := fs.WriteFile(context.Background(), "/tester/docs/a.txt", bytes.NewReader([]byte("a"))); err != nil {
+		t.Fatalf("WriteFile(/tester/docs/a.txt) error: %v", err)
 	}
 
 	token := loginAndGetAccessToken(t, server, username, password)
@@ -15693,7 +15754,7 @@ func TestServer_Trash_Restore_RestoresLinkedSharesAndFavorites(t *testing.T) {
 	}
 }
 
-func TestServer_Trash_Restore_ReturnsWarningWhenShareRestoreSyncFailsAfterVisibleRestore(t *testing.T) {
+func TestServer_Trash_Restore_BlocksUntilShareRestoreRetryIsDurable(t *testing.T) {
 	server, fs, tmpDir := setupTestServer(t)
 	ctx := context.Background()
 
@@ -15749,19 +15810,11 @@ func TestServer_Trash_Restore_ReturnsWarningWhenShareRestoreSyncFailsAfterVisibl
 	restoreReq := httptest.NewRequest(http.MethodPost, "/api/v1/trash/"+items[0].ID+"/restore", nil)
 	restoreRec := httptest.NewRecorder()
 	server.Router().ServeHTTP(restoreRec, restoreReq)
-	if restoreRec.Code != http.StatusOK {
-		t.Fatalf("RestoreFromTrash status = %d, want %d, body: %s", restoreRec.Code, http.StatusOK, restoreRec.Body.String())
+	if restoreRec.Code != http.StatusInternalServerError {
+		t.Fatalf("RestoreFromTrash status = %d, want %d, body: %s", restoreRec.Code, http.StatusInternalServerError, restoreRec.Body.String())
 	}
-
-	warningValues := restoreRec.Header().Values("Warning")
-	if len(warningValues) == 0 || warningValues[0] != trashRestoreMetadataWarningHeader {
-		t.Fatalf("warning headers = %v, want first value %q", warningValues, trashRestoreMetadataWarningHeader)
-	}
-	if body := restoreRec.Body.String(); !strings.Contains(body, `"warning":true`) {
-		t.Fatalf("expected restore warning body, got %s", body)
-	}
-	if body := restoreRec.Body.String(); !strings.Contains(body, `"message":"file restored with metadata warning"`) {
-		t.Fatalf("expected restore warning message, got %s", body)
+	if got := restoreRec.Header().Get("Warning"); got != "" {
+		t.Fatalf("warning header = %q, want no warning on a blocked transfer", got)
 	}
 
 	if _, err := fs.Stat(ctx, "/trash-restore-warning/report.txt"); err != nil {
@@ -15778,7 +15831,23 @@ func TestServer_Trash_Restore_ReturnsWarningWhenShareRestoreSyncFailsAfterVisibl
 		t.Fatalf("expected restored share path %q, got %q", "/trash-restore-warning/report.txt", restoredShare.Path)
 	}
 	if !favoritesStore.IsFavorite("tester", "/trash-restore-warning/report.txt") {
-		t.Fatal("expected favorite to be restored even when share restore warns")
+		t.Fatal("expected favorite state to be visible while share durability is unresolved")
+	}
+
+	restoreSync()
+	recovery, recoveryErr := server.RecoverTrashTransfers(ctx)
+	if recoveryErr != nil {
+		t.Fatalf("RecoverTrashTransfers() error: %v", recoveryErr)
+	}
+	if recovery.RolledForward != 1 || len(recovery.Blocked) != 0 {
+		t.Fatalf("RecoverTrashTransfers() report = %+v, want one roll-forward", recovery)
+	}
+	remaining, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash(after recovery) error: %v", err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("trash items after recovery = %+v, want empty", remaining)
 	}
 }
 
@@ -15840,7 +15909,7 @@ func TestServer_Trash_Restore_PreservesRecreatedFavorite(t *testing.T) {
 	}
 }
 
-func TestServer_Trash_Restore_PreservesUpdatedShareMetadata(t *testing.T) {
+func TestServer_Trash_Restore_PreservesUpdatedShareIntent(t *testing.T) {
 	server, fs, tmpDir := setupTestServer(t)
 	ctx := context.Background()
 
@@ -15899,8 +15968,8 @@ func TestServer_Trash_Restore_PreservesUpdatedShareMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get(restored share) error: %v", err)
 	}
-	if !restoredShare.Enabled {
-		t.Fatal("expected share to be re-enabled after restore")
+	if restoredShare.Enabled {
+		t.Fatal("explicitly updated share was re-enabled after restore")
 	}
 	if restoredShare.Description != "newer" {
 		t.Fatalf("expected restore to preserve newer share description, got %q", restoredShare.Description)
@@ -16195,7 +16264,7 @@ func TestServer_RollbackDeletedPathShareRestoreState_IgnoresSharePersistenceWarn
 	}
 }
 
-func TestServer_Trash_Restore_RollsBackLinkedSharesWhenFavoriteRestoreFails(t *testing.T) {
+func TestServer_Trash_Restore_RecoversLinkedStateWhenFavoriteRestoreFails(t *testing.T) {
 	if os.PathSeparator == '\\' {
 		t.Skip("permission-backed save failure test requires unix-like directory permission semantics")
 	}
@@ -16264,40 +16333,46 @@ func TestServer_Trash_Restore_RollsBackLinkedSharesWhenFavoriteRestoreFails(t *t
 	restoreReq := httptest.NewRequest(http.MethodPost, "/api/v1/trash/"+items[0].ID+"/restore", nil)
 	restoreRec := httptest.NewRecorder()
 	server.Router().ServeHTTP(restoreRec, restoreReq)
-	if restoreRec.Code != http.StatusOK {
-		t.Fatalf("RestoreFromTrash status = %d, want %d, body: %s", restoreRec.Code, http.StatusOK, restoreRec.Body.String())
+	if restoreRec.Code != http.StatusInternalServerError {
+		t.Fatalf("RestoreFromTrash status = %d, want %d, body: %s", restoreRec.Code, http.StatusInternalServerError, restoreRec.Body.String())
 	}
-
-	warningValues := restoreRec.Header().Values("Warning")
-	if len(warningValues) == 0 || warningValues[0] != trashRestoreMetadataWarningHeader {
-		t.Fatalf("warning headers = %v, want first value %q", warningValues, trashRestoreMetadataWarningHeader)
-	}
-	if body := restoreRec.Body.String(); !strings.Contains(body, `"warning":true`) {
-		t.Fatalf("expected restore warning body, got %s", body)
-	}
-	if body := restoreRec.Body.String(); !strings.Contains(body, `"message":"file restored with metadata warning"`) {
-		t.Fatalf("expected restore warning message, got %s", body)
-	}
-
 	if _, err := fs.Stat(ctx, "/trash-restore-rollback/report.txt"); err != nil {
-		t.Fatalf("Stat(restored file) error: %v", err)
+		t.Fatalf("Stat(committed restored file) error: %v", err)
 	}
 
-	rolledBackShare, err := shareStore.Get(createdShare.ID)
+	restoredShare, err := shareStore.Get(createdShare.ID)
 	if err != nil {
-		t.Fatalf("Get(rolled back share) error: %v", err)
+		t.Fatalf("Get(restored share) error: %v", err)
 	}
-	if rolledBackShare.Enabled {
-		t.Fatal("expected share to remain disabled when favorite restore fails")
+	if !restoredShare.Enabled {
+		t.Fatal("expected committed share restore to remain applied while favorite delivery is pending")
 	}
-	if rolledBackShare.Path != "/trash-restore-rollback/report.txt" {
-		t.Fatalf("expected rolled back share path %q, got %q", "/trash-restore-rollback/report.txt", rolledBackShare.Path)
+	if restoredShare.Path != "/trash-restore-rollback/report.txt" {
+		t.Fatalf("expected restored share path %q, got %q", "/trash-restore-rollback/report.txt", restoredShare.Path)
 	}
 	if favoritesStore.IsFavorite("tester", "/trash-restore-rollback/report.txt") {
-		t.Fatal("expected favorite to remain absent when restore metadata reconciliation fails")
+		t.Fatal("expected favorite to remain absent before participant recovery")
 	}
-	if body := restoreRec.Body.String(); !strings.Contains(body, `"restored":true`) {
-		t.Fatalf("expected restore success body, got %s", body)
+
+	if err := os.Chmod(favoritesDir, 0o755); err != nil {
+		t.Fatalf("Chmod(favoritesDir recovery) error: %v", err)
+	}
+	report, recoveryErr := server.RecoverTrashTransfers(ctx)
+	if recoveryErr != nil {
+		t.Fatalf("RecoverTrashTransfers() error: %v", recoveryErr)
+	}
+	if report.RolledForward != 1 || len(report.Blocked) != 0 {
+		t.Fatalf("RecoverTrashTransfers() report = %+v, want one roll-forward", report)
+	}
+	if !favoritesStore.IsFavorite("tester", "/trash-restore-rollback/report.txt") {
+		t.Fatal("expected favorite to be restored by participant recovery")
+	}
+	remaining, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash(after recovery) error: %v", err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("ListTrash(after recovery) = %+v, want empty", remaining)
 	}
 }
 
@@ -20067,7 +20142,13 @@ func TestServer_CreateShare_TraversalPathReturnsBadRequest(t *testing.T) {
 }
 
 func TestServer_CheckFavorite_RejectsPathOutsideHomeForNonAdmin(t *testing.T) {
-	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
+	server, fs, _, username, password := setupAuthServerWithFeatures(t, false, true)
+	if err := fs.Mkdir(context.Background(), "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.WriteFile(context.Background(), "/tester/own.txt", bytes.NewReader([]byte("own"))); err != nil {
+		t.Fatalf("WriteFile(/tester/own.txt) error: %v", err)
+	}
 
 	token := loginAndGetAccessToken(t, server, username, password)
 
@@ -20141,7 +20222,13 @@ func TestServer_AddFavorite_RejectsUnknownFieldsBeforeHomeScopeCheck(t *testing.
 }
 
 func TestServer_CheckFavorites_RejectsPathOutsideHomeForNonAdmin(t *testing.T) {
-	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
+	server, fs, _, username, password := setupAuthServerWithFeatures(t, false, true)
+	if err := fs.Mkdir(context.Background(), "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.WriteFile(context.Background(), "/tester/own.txt", bytes.NewReader([]byte("own"))); err != nil {
+		t.Fatalf("WriteFile(/tester/own.txt) error: %v", err)
+	}
 
 	token := loginAndGetAccessToken(t, server, username, password)
 
@@ -20418,7 +20505,13 @@ func TestServer_Favorites_RejectNestedSharedAncestorForNonAdmin(t *testing.T) {
 }
 
 func TestServer_LegacyUsernameFavorite_RemainsAccessibleToOwner(t *testing.T) {
-	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
+	server, fs, _, username, password := setupAuthServerWithFeatures(t, false, true)
+	if err := fs.Mkdir(context.Background(), "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.WriteFile(context.Background(), "/tester/own.txt", bytes.NewReader([]byte("own"))); err != nil {
+		t.Fatalf("WriteFile(/tester/own.txt) error: %v", err)
+	}
 
 	if _, err := server.favoritesStore.Add(username, "/tester/own.txt", "legacy"); err != nil {
 		t.Fatalf("Add legacy username favorite error: %v", err)

@@ -46,6 +46,7 @@ var (
 	ErrInvalidDeleteIntent       = errors.New("invalid delete intent")
 	ErrInvalidTrashSelection     = errors.New("invalid trash selection")
 	ErrDeleteIdentityUnavailable = errors.New("delete identity verification unavailable")
+	ErrMutationLeaseReleased     = errors.New("storage mutation lease is released")
 	errStoragePathSymlink        = errors.New("storage path contains symlink")
 	errEmptyDeleteTargetToken    = errors.New("delete target token is empty")
 )
@@ -395,6 +396,22 @@ type PathDeleteHookResult struct {
 	RestoreData []byte
 }
 
+// TrashParticipantHooks coordinates durable external state with live Trash
+// transfers and permanent Trash purges. PrepareDelete and ValidatePurge must be
+// read-only. Apply, rollback, and completion callbacks must be idempotent
+// because recovery delivers them at least once.
+type TrashParticipantHooks struct {
+	PrepareDelete         func(ctx context.Context, operationID, path string) ([]byte, error)
+	ApplyDelete           func(ctx context.Context, operationID, path string, payload []byte, committed bool) error
+	RollbackDelete        func(ctx context.Context, operationID, path string, payload []byte) error
+	CompleteDelete        func(ctx context.Context, operationID, path string, payload []byte) error
+	ApplyRestore          func(ctx context.Context, operationID, originalPath, restoredPath string, payload []byte) error
+	CompleteRestore       func(ctx context.Context, operationID, originalPath, restoredPath string, payload []byte) error
+	ValidatePurge         func(ctx context.Context, operationID, originalPath string, payload []byte) error
+	CompletePurge         func(ctx context.Context, operationID, originalPath string, payload []byte) error
+	RecoveryStateReliable func() error
+}
+
 // SearchResult represents a search result
 type SearchResult struct {
 	Path        string    `json:"path"`
@@ -458,6 +475,7 @@ type FileSystem struct {
 	config                    *Config
 	onPathRenamed             func(ctx context.Context, oldPath, newPath string) error
 	onPathDeleted             func(ctx context.Context, path string) (*PathDeleteHookResult, error)
+	trashParticipantHooks     TrashParticipantHooks
 	listReferencedHashes      func(ctx context.Context) ([]string, error)
 	listVersionPaths          func(ctx context.Context) ([]string, error)
 	getVersions               func(ctx context.Context, path string) ([]versionstore.Version, error)
@@ -475,6 +493,8 @@ type FileSystem struct {
 	addTrashMetadata          func(ctx context.Context, item *versionstore.TrashItem) error
 	updateTrashRestoreData    func(ctx context.Context, id string, restoreData []byte) error
 	removeTrashMetadata       func(ctx context.Context, id string) error
+	commitTrashDelete         func(ctx context.Context, item *versionstore.TrashItem, operation *versionstore.TrashOperation) error
+	commitTrashRestore        func(ctx context.Context, item *versionstore.TrashItem, destinationPath string, fileIndex []versionstore.FileIndexEntry, renameHistory bool, operation *versionstore.TrashOperation) error
 	writeWorkspacePath        func(ctx context.Context, name string, data []byte) error
 	mkdirWorkspacePath        func(ctx context.Context, name string) error
 	copyWorkspacePath         func(ctx context.Context, oldName, newName string) error
@@ -488,11 +508,13 @@ type FileSystem struct {
 	gcMu                      sync.RWMutex
 	mu                        sync.RWMutex
 	mutationEpoch             uint64 // guarded by mu
+	hashStatWorkspaceFile     func(ctx context.Context, name string) (string, error)
 
 	hashStagedDeleteSourceFile    func(ctx context.Context, file *os.File) (string, error)
 	hashStagedTrashContentFile    func(ctx context.Context, file *os.File) (string, error)
 	hashStorageCopiedFile         func(file *os.File) (string, error)
 	hashDeleteWitnessRecoveryFile func(file *os.File) (string, error)
+	hashTrashTransferFile         func(ctx context.Context, root *storagePathRoot, rel string, file *os.File) (string, error)
 }
 
 // UpdateTrashSettings applies trash settings to the running filesystem.
@@ -603,7 +625,10 @@ func (fs *FileSystem) UpdateVersioningSettings(extensions, filenames []string, m
 func (fs *FileSystem) currentVersioningPolicy() *versionstore.VersioningPolicy {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
+	return fs.currentVersioningPolicyLocked()
+}
 
+func (fs *FileSystem) currentVersioningPolicyLocked() *versionstore.VersioningPolicy {
 	if fs.policy == nil {
 		return nil
 	}
@@ -612,6 +637,47 @@ func (fs *FileSystem) currentVersioningPolicy() *versionstore.VersioningPolicy {
 	policy.AutoVersionedExtensions = append([]string(nil), fs.policy.AutoVersionedExtensions...)
 	policy.AutoVersionedFilenames = append([]string(nil), fs.policy.AutoVersionedFilenames...)
 	return &policy
+}
+
+// MutationLease holds the filesystem mutation gate for a caller-owned
+// metadata decision.
+type MutationLease struct {
+	fs       *FileSystem
+	release  func()
+	once     sync.Once
+	mu       sync.RWMutex
+	released bool
+}
+
+// Stat returns file information while the mutation lease is held.
+func (lease *MutationLease) Stat(ctx context.Context, name string) (*FileInfo, error) {
+	if lease == nil {
+		return nil, errors.New("storage mutation lease is unavailable")
+	}
+	lease.mu.RLock()
+	defer lease.mu.RUnlock()
+	if lease.released || lease.fs == nil {
+		return nil, ErrMutationLeaseReleased
+	}
+	return lease.fs.statForMutationLease(ctx, name)
+}
+
+// Release releases the filesystem mutation gate. Repeated calls are safe.
+func (lease *MutationLease) Release() {
+	if lease == nil {
+		return
+	}
+	lease.once.Do(func() {
+		lease.mu.Lock()
+		lease.released = true
+		release := lease.release
+		lease.release = nil
+		lease.fs = nil
+		lease.mu.Unlock()
+		if release != nil {
+			release()
+		}
+	})
 }
 
 // SetDataplaneClient swaps the dataplane client used by version storage operations.
@@ -635,9 +701,20 @@ func (fs *FileSystem) SetPathChangeHooks(onRename func(ctx context.Context, oldP
 	fs.onPathDeleted = onDelete
 }
 
+// SetTrashParticipantHooks registers the durable Trash participant callbacks.
+// Registration itself does not replay pending outbox entries.
+func (fs *FileSystem) SetTrashParticipantHooks(hooks TrashParticipantHooks) {
+	fs.hookMu.Lock()
+	defer fs.hookMu.Unlock()
+	fs.trashParticipantHooks = hooks
+}
+
 // RunRetentionSweep applies version and trash retention rules.
 func (fs *FileSystem) RunRetentionSweep(ctx context.Context) error {
-	release := fs.beginMutation()
+	release, err := fs.beginMutation(ctx)
+	if err != nil {
+		return err
+	}
 	defer release()
 
 	versionErr := fs.runRetentionSweepLocked(ctx)
@@ -754,6 +831,8 @@ func New(cfg *Config) (*FileSystem, error) {
 		addTrashMetadata:          vs.AddToTrash,
 		updateTrashRestoreData:    vs.UpdateTrashRestoreData,
 		removeTrashMetadata:       vs.RemoveFromTrash,
+		commitTrashDelete:         vs.CommitTrashDelete,
+		commitTrashRestore:        vs.CommitTrashRestore,
 		writeWorkspacePath:        nil,
 		mkdirWorkspacePath:        ws.Mkdir,
 		copyWorkspacePath:         ws.Copy,
@@ -762,6 +841,7 @@ func New(cfg *Config) (*FileSystem, error) {
 		renameMetadataPath:        vs.RenamePath,
 		renameHistoryMetadataPath: vs.RenamePathHistory,
 	}
+	fs.hashStatWorkspaceFile = fs.hashWorkspaceFile
 	fs.removeTrashPath = fs.removeCommittedTrashPurgeStage
 	return fs, nil
 }
@@ -792,6 +872,10 @@ func (fs *FileSystem) Close() error {
 
 // Stat returns file info
 func (fs *FileSystem) Stat(ctx context.Context, name string) (*FileInfo, error) {
+	return fs.stat(ctx, name)
+}
+
+func (fs *FileSystem) stat(ctx context.Context, name string) (*FileInfo, error) {
 	var err error
 	name, err = normalizeStorageWorkspacePath(name)
 	if err != nil {
@@ -834,12 +918,62 @@ func (fs *FileSystem) Stat(ctx context.Context, name string) (*FileInfo, error) 
 	// Check if file has versioning
 	if !info.IsDir && policy != nil {
 		fileInfo.Versioned = policy.ShouldVersion(ctx, name, info.Size)
-		if contentHash, err := fs.hashWorkspaceFile(ctx, name); err == nil {
+		hashWorkspaceFile := fs.hashStatWorkspaceFile
+		if hashWorkspaceFile == nil {
+			hashWorkspaceFile = fs.hashWorkspaceFile
+		}
+		if contentHash, err := hashWorkspaceFile(ctx, name); err == nil {
 			fileInfo.ContentHash = contentHash
 		}
 	}
 
 	return fileInfo, nil
+}
+
+// statForMutationLease returns only metadata needed to validate a share target.
+// Workspace.Stat uses an Lstat-style, no-follow lookup; version policy and
+// content hashing are intentionally excluded while the global mutation gate is held.
+func (fs *FileSystem) statForMutationLease(ctx context.Context, name string) (*FileInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var err error
+	name, err = normalizeStorageWorkspacePath(name)
+	if err != nil {
+		return nil, err
+	}
+	if name == "/" {
+		return &FileInfo{
+			Path:    "/",
+			Name:    "/",
+			IsDir:   true,
+			Mode:    os.ModeDir,
+			ModTime: time.Now(),
+		}, nil
+	}
+
+	info, err := fs.workspace.Stat(ctx, name)
+	if err != nil {
+		if errors.Is(err, workspace.ErrNotFound) {
+			return nil, ErrNotFound
+		}
+		if errors.Is(err, workspace.ErrNotDir) {
+			return nil, ErrNotDir
+		}
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return &FileInfo{
+		Path:                info.Path,
+		Name:                info.Name,
+		IsDir:               info.IsDir,
+		Mode:                info.Mode,
+		Size:                info.Size,
+		ModTime:             info.ModTime,
+		DeleteIdentityToken: info.DeleteIdentityToken,
+	}, nil
 }
 
 // ReadDir reads directory contents
@@ -995,10 +1129,12 @@ func (fs *FileSystem) snapshotFileInfo(ctx context.Context, name string, file *o
 
 // WriteFile writes a file, creating versions if needed
 func (fs *FileSystem) WriteFile(ctx context.Context, name string, r io.Reader) error {
-	release := fs.beginMutation()
+	release, err := fs.beginMutation(ctx)
+	if err != nil {
+		return err
+	}
 	defer release()
 
-	var err error
 	name, err = normalizeStorageWorkspacePath(name)
 	if err != nil {
 		return err
@@ -1115,10 +1251,12 @@ func (fs *FileSystem) WriteFile(ctx context.Context, name string, r io.Reader) e
 
 // Mkdir creates a directory
 func (fs *FileSystem) Mkdir(ctx context.Context, name string) error {
-	release := fs.beginMutation()
+	release, err := fs.beginMutation(ctx)
+	if err != nil {
+		return err
+	}
 	defer release()
 
-	var err error
 	name, err = normalizeStorageWorkspacePath(name)
 	if err != nil {
 		return err
@@ -1303,10 +1441,12 @@ func (fs *FileSystem) prepareDeleteIntentTargets(ctx context.Context, targets []
 // DeleteWithExpectedPolicyAndTarget deletes a path only when both the complete
 // runtime policy and complete live target tree still match the caller's intent.
 func (fs *FileSystem) DeleteWithExpectedPolicyAndTarget(ctx context.Context, name string, expectedPolicy DeletePolicyExpectation, expectedTargetToken string, authorize DeletePathAuthorizer) error {
-	release := fs.beginMutation()
+	release, err := fs.beginMutation(ctx)
+	if err != nil {
+		return err
+	}
 	defer release()
 
-	var err error
 	name, err = normalizeStorageWorkspacePath(name)
 	if err != nil {
 		return err
@@ -1352,10 +1492,12 @@ func (fs *FileSystem) DeleteWithExpectedPolicyAndTarget(ctx context.Context, nam
 }
 
 func (fs *FileSystem) delete(ctx context.Context, name string, expected *DeletePolicyExpectation, snapshotOptions DeleteTargetSnapshotOptions, validate DeleteTargetValidator, authorize DeletePathAuthorizer) error {
-	release := fs.beginMutation()
+	release, err := fs.beginMutation(ctx)
+	if err != nil {
+		return err
+	}
 	defer release()
 
-	var err error
 	name, err = normalizeStorageWorkspacePath(name)
 	if err != nil {
 		return err
@@ -1610,10 +1752,12 @@ func (fs *FileSystem) ensureTrashCapacityLocked(ctx context.Context, incomingSiz
 
 // PermanentDelete permanently deletes a file (bypasses trash)
 func (fs *FileSystem) PermanentDelete(ctx context.Context, name string) error {
-	release := fs.beginMutation()
+	release, err := fs.beginMutation(ctx)
+	if err != nil {
+		return err
+	}
 	defer release()
 
-	var err error
 	name, err = normalizeStorageWorkspacePath(name)
 	if err != nil {
 		return err
@@ -1633,10 +1777,12 @@ func (fs *FileSystem) PermanentDelete(ctx context.Context, name string) error {
 
 // Rename renames/moves a file or directory
 func (fs *FileSystem) Rename(ctx context.Context, oldName, newName string) error {
-	release := fs.beginMutation()
+	release, err := fs.beginMutation(ctx)
+	if err != nil {
+		return err
+	}
 	defer release()
 
-	var err error
 	oldName, err = normalizeStorageWorkspacePath(oldName)
 	if err != nil {
 		return err
@@ -1734,10 +1880,12 @@ func (fs *FileSystem) Rename(ctx context.Context, oldName, newName string) error
 
 // Copy copies a file without overwriting an existing destination.
 func (fs *FileSystem) Copy(ctx context.Context, srcName, dstName string) error {
-	release := fs.beginMutation()
+	release, err := fs.beginMutation(ctx)
+	if err != nil {
+		return err
+	}
 	defer release()
 
-	var err error
 	srcName, err = normalizeStorageWorkspacePath(srcName)
 	if err != nil {
 		return err
@@ -2040,10 +2188,12 @@ func (r contextCheckingReader) Read(buffer []byte) (int, error) {
 
 // RestoreVersion restores a file to a specific version
 func (fs *FileSystem) RestoreVersion(ctx context.Context, name, hash string) error {
-	release := fs.beginMutation()
+	release, err := fs.beginMutation(ctx)
+	if err != nil {
+		return err
+	}
 	defer release()
 
-	var err error
 	name, err = normalizeStorageWorkspacePath(name)
 	if err != nil {
 		return err
@@ -2170,10 +2320,12 @@ func (fs *FileSystem) RestoreVersion(ctx context.Context, name, hash string) err
 
 // SetVersioning sets the versioning override for a file
 func (fs *FileSystem) SetVersioning(ctx context.Context, name string, enabled bool) error {
-	release := fs.beginMutation()
+	release, err := fs.beginMutation(ctx)
+	if err != nil {
+		return err
+	}
 	defer release()
 
-	var err error
 	name, err = normalizeStorageWorkspacePath(name)
 	if err != nil {
 		return err
@@ -2395,12 +2547,11 @@ func (fs *FileSystem) walkTrashContentRestorePaths(ctx context.Context, mountBou
 
 // RestoreFromTrash restores a file from trash
 func (fs *FileSystem) RestoreFromTrash(ctx context.Context, id string) error {
-	release := fs.beginMutation()
-	defer release()
-	if err := fs.checkTrashMutationAllowedLocked(); err != nil {
+	release, err := fs.beginMutation(ctx)
+	if err != nil {
 		return err
 	}
-
+	defer release()
 	item, err := fs.versions.GetTrashItem(ctx, id)
 	if err != nil {
 		if errors.Is(err, versionstore.ErrNotFound) {
@@ -2408,81 +2559,24 @@ func (fs *FileSystem) RestoreFromTrash(ctx context.Context, id string) error {
 		}
 		return err
 	}
-
-	// Check if original path already exists
-	if _, err := fs.workspace.Stat(ctx, item.OriginalPath); err == nil {
-		return ErrAlreadyExists
+	err = fs.restoreTrashTransferLocked(ctx, id, item.OriginalPath)
+	if isPathNotDirError(err) {
+		return ErrNotDir
 	}
-
-	// Move back from trash
-	trashContentPath := path.Join(fs.trashRoot, id, "content")
-	destPath := fs.workspace.FullPath(item.OriginalPath)
-	trashItemInfo, err := fs.trashRootHandle.Lstat(filepath.FromSlash(id))
-	if err != nil || !trashItemInfo.IsDir() {
-		return fmt.Errorf("failed to identify trash item directory: %w", errors.Join(mapStorageRootPathError(err), ErrDeleteTargetChanged))
-	}
-
-	var restoreWarning error
-	if err := fs.movePath(trashContentPath, destPath); err != nil {
-		if isVisibleMutationWarning(err) {
-			restoreWarning = errors.Join(restoreWarning, fmt.Errorf("restore trash content: %w", err))
-		} else {
-			if isPathNotDirError(err) {
-				return ErrNotDir
-			}
-			return fmt.Errorf("failed to restore from trash: %w", err)
-		}
-	}
-
-	// Remove from trash database
-	if err := fs.versions.RemoveFromTrash(ctx, id); err != nil {
-		if rollbackErr := fs.movePath(destPath, trashContentPath); rollbackErr != nil {
-			errs := []error{fmt.Errorf("failed to remove trash metadata: %w", err)}
-			if restoreWarning != nil {
-				errs = append(errs, fmt.Errorf("restore warning: %w", restoreWarning))
-			}
-			errs = append(errs, fmt.Errorf("failed to rollback restored content: %w", rollbackErr))
-			return errors.Join(errs...)
-		}
-		return fmt.Errorf("failed to remove trash metadata: %w", err)
-	}
-	fs.cleanupTrashItemDir(path.Join(fs.trashRoot, id), trashItemInfo)
-	if err := fs.syncRestoredIndexEntries(ctx, item.OriginalPath, item.IsDir); err != nil {
-		rollbackErr := fs.movePath(destPath, trashContentPath)
-		metadataErr := fs.versions.AddToTrash(ctx, item)
-		indexRollbackErr := fs.deleteFileIndexPrefix(ctx, item.OriginalPath)
-		var errs []error
-		errs = append(errs, fmt.Errorf("failed to update file index: %w", err))
-		if restoreWarning != nil && (rollbackErr != nil || metadataErr != nil || indexRollbackErr != nil) {
-			errs = append(errs, fmt.Errorf("restore warning: %w", restoreWarning))
-		}
-		if rollbackErr != nil {
-			errs = append(errs, fmt.Errorf("failed to rollback restored content: %w", rollbackErr))
-		}
-		if metadataErr != nil {
-			errs = append(errs, fmt.Errorf("failed to restore trash metadata: %w", metadataErr))
-		}
-		if indexRollbackErr != nil {
-			errs = append(errs, fmt.Errorf("failed to rollback restored file index: %w", indexRollbackErr))
-		}
-		return errors.Join(errs...)
-	}
-	if restoreWarning != nil {
-		return wrapVisibleMutationWarning(restoreWarning)
-	}
-
-	return nil
+	return err
 }
 
 // RestoreFromTrashTo restores a file from trash to a custom location
 func (fs *FileSystem) RestoreFromTrashTo(ctx context.Context, id, newPath string) error {
-	release := fs.beginMutation()
+	release, err := fs.beginMutation(ctx)
+	if err != nil {
+		return err
+	}
 	defer release()
 	if err := fs.checkTrashMutationAllowedLocked(); err != nil {
 		return err
 	}
 
-	var err error
 	newPath, err = normalizeStorageWorkspacePath(newPath)
 	if err != nil {
 		return err
@@ -2490,135 +2584,11 @@ func (fs *FileSystem) RestoreFromTrashTo(ctx context.Context, id, newPath string
 	if err := rejectStorageRootMutation(newPath); err != nil {
 		return err
 	}
-
-	// Verify trash item exists
-	item, err := fs.versions.GetTrashItem(ctx, id)
-	if err != nil {
-		if errors.Is(err, versionstore.ErrNotFound) {
-			return ErrNotFound
-		}
-		return err
+	err = fs.restoreTrashTransferLocked(ctx, id, newPath)
+	if isPathNotDirError(err) {
+		return ErrNotDir
 	}
-	if item.HadVersions && newPath != item.OriginalPath {
-		originalExists, err := fs.workspacePathExists(ctx, item.OriginalPath)
-		if err != nil {
-			return err
-		}
-		if originalExists {
-			return fmt.Errorf("cannot restore %s to a custom path while its original path still has version metadata: %w", item.OriginalPath, ErrAlreadyExists)
-		}
-		sharedMetadata, err := fs.hasOtherTrashItemReferencingRestoredMetadata(ctx, item.OriginalPath, item.IsDir, id)
-		if err != nil {
-			return err
-		}
-		if sharedMetadata {
-			return fmt.Errorf("cannot restore %s to a custom path while another trash item still references its version metadata: %w", item.OriginalPath, ErrAlreadyExists)
-		}
-		targetMetadata, err := fs.hasOtherTrashItemReferencingRestoredMetadata(ctx, newPath, item.IsDir, id)
-		if err != nil {
-			return err
-		}
-		if targetMetadata {
-			return fmt.Errorf("cannot restore %s to custom path %s while the target path still has version metadata: %w", item.OriginalPath, newPath, ErrAlreadyExists)
-		}
-		targetVersionMetadata, err := fs.versionMetadataPathExists(ctx, newPath, item.IsDir)
-		if err != nil {
-			return err
-		}
-		if targetVersionMetadata {
-			return fmt.Errorf("cannot restore %s to custom path %s while the target path has version metadata: %w", item.OriginalPath, newPath, ErrAlreadyExists)
-		}
-	}
-
-	// Check if target path already exists
-	if _, err := fs.workspace.Stat(ctx, newPath); err == nil {
-		return ErrAlreadyExists
-	}
-
-	// Move from trash
-	trashContentPath := path.Join(fs.trashRoot, id, "content")
-	destPath := fs.workspace.FullPath(newPath)
-	trashItemInfo, err := fs.trashRootHandle.Lstat(filepath.FromSlash(id))
-	if err != nil || !trashItemInfo.IsDir() {
-		return fmt.Errorf("failed to identify trash item directory: %w", errors.Join(mapStorageRootPathError(err), ErrDeleteTargetChanged))
-	}
-
-	var restoreWarning error
-	if err := fs.movePath(trashContentPath, destPath); err != nil {
-		if isVisibleMutationWarning(err) {
-			restoreWarning = errors.Join(restoreWarning, fmt.Errorf("restore trash content: %w", err))
-		} else {
-			if isPathNotDirError(err) {
-				return ErrNotDir
-			}
-			return fmt.Errorf("failed to restore from trash: %w", err)
-		}
-	}
-
-	if err := fs.removeTrashMetadata(ctx, id); err != nil {
-		var rollbackErrs []error
-		if rollbackErr := fs.movePath(destPath, trashContentPath); rollbackErr != nil {
-			rollbackErrs = append(rollbackErrs, fmt.Errorf("failed to rollback restored content: %w", rollbackErr))
-		}
-		if len(rollbackErrs) > 0 {
-			errs := []error{fmt.Errorf("failed to remove trash metadata: %w", err)}
-			if restoreWarning != nil {
-				errs = append(errs, fmt.Errorf("restore warning: %w", restoreWarning))
-			}
-			return errors.Join(append(errs, rollbackErrs...)...)
-		}
-		return fmt.Errorf("failed to remove trash metadata: %w", err)
-	}
-
-	fs.cleanupTrashItemDir(path.Join(fs.trashRoot, id), trashItemInfo)
-	if err := fs.syncRestoredIndexEntries(ctx, newPath, item.IsDir); err != nil {
-		var rollbackErrs []error
-		if rollbackErr := fs.movePath(destPath, trashContentPath); rollbackErr != nil {
-			rollbackErrs = append(rollbackErrs, fmt.Errorf("failed to rollback restored content: %w", rollbackErr))
-		}
-		if metadataErr := fs.addTrashMetadata(ctx, item); metadataErr != nil {
-			rollbackErrs = append(rollbackErrs, fmt.Errorf("failed to restore trash metadata: %w", metadataErr))
-		}
-		if cleanupErr := fs.deleteFileIndexPrefix(ctx, newPath); cleanupErr != nil {
-			rollbackErrs = append(rollbackErrs, fmt.Errorf("failed to rollback restored file index: %w", cleanupErr))
-		}
-		if len(rollbackErrs) > 0 {
-			errs := []error{fmt.Errorf("failed to update file index: %w", err)}
-			if restoreWarning != nil {
-				errs = append(errs, fmt.Errorf("restore warning: %w", restoreWarning))
-			}
-			return errors.Join(append(errs, rollbackErrs...)...)
-		}
-		return fmt.Errorf("failed to update file index: %w", err)
-	}
-
-	if item.HadVersions && newPath != item.OriginalPath {
-		if err := fs.renameHistoryMetadataPath(ctx, item.OriginalPath, newPath); err != nil {
-			var rollbackErrs []error
-			if rollbackErr := fs.movePath(destPath, trashContentPath); rollbackErr != nil {
-				rollbackErrs = append(rollbackErrs, fmt.Errorf("failed to rollback restored content: %w", rollbackErr))
-			}
-			if metadataErr := fs.addTrashMetadata(ctx, item); metadataErr != nil {
-				rollbackErrs = append(rollbackErrs, fmt.Errorf("failed to restore trash metadata: %w", metadataErr))
-			}
-			if cleanupErr := fs.deleteFileIndexPrefix(ctx, newPath); cleanupErr != nil {
-				rollbackErrs = append(rollbackErrs, fmt.Errorf("failed to rollback restored file index: %w", cleanupErr))
-			}
-			if len(rollbackErrs) > 0 {
-				errs := []error{fmt.Errorf("failed to update version metadata: %w", err)}
-				if restoreWarning != nil {
-					errs = append(errs, fmt.Errorf("restore warning: %w", restoreWarning))
-				}
-				return errors.Join(append(errs, rollbackErrs...)...)
-			}
-			return fmt.Errorf("failed to update version metadata: %w", err)
-		}
-	}
-	if restoreWarning != nil {
-		return wrapVisibleMutationWarning(restoreWarning)
-	}
-
-	return nil
+	return err
 }
 
 func (fs *FileSystem) hasOtherTrashItemWithOriginalPath(ctx context.Context, originalPath, excludedID string) (bool, error) {
@@ -2730,7 +2700,10 @@ func (fs *FileSystem) workspacePathExists(ctx context.Context, targetPath string
 
 // DeleteFromTrash permanently deletes an item from trash
 func (fs *FileSystem) DeleteFromTrash(ctx context.Context, id string) error {
-	release := fs.beginMutation()
+	release, err := fs.beginMutation(ctx)
+	if err != nil {
+		return err
+	}
 	defer release()
 	if err := fs.checkTrashMutationAllowedLocked(); err != nil {
 		return err
@@ -2753,7 +2726,10 @@ func (fs *FileSystem) DeleteFromTrash(ctx context.Context, id string) error {
 
 // EmptyTrashSelection permanently deletes exactly the requested trash items.
 func (fs *FileSystem) EmptyTrashSelection(ctx context.Context, ids []string, authorize DeletePathAuthorizer) (TrashSelectionResult, error) {
-	release := fs.beginMutation()
+	release, err := fs.beginMutation(ctx)
+	if err != nil {
+		return TrashSelectionResult{}, err
+	}
 	defer release()
 
 	var result TrashSelectionResult
@@ -2882,7 +2858,10 @@ func validTrashSelectionID(id string) bool {
 
 // CleanupExpiredTrash removes expired trash items
 func (fs *FileSystem) CleanupExpiredTrash(ctx context.Context) (int, error) {
-	release := fs.beginMutation()
+	release, err := fs.beginMutation(ctx)
+	if err != nil {
+		return 0, err
+	}
 	defer release()
 
 	return fs.cleanupExpiredTrashLocked(ctx)
@@ -3475,16 +3454,89 @@ func (fs *FileSystem) search(ctx context.Context, root, query string, limit int,
 
 // CleanupStaging removes incomplete staging files
 func (fs *FileSystem) CleanupStaging(ctx context.Context) (files int, bytes int64, err error) {
-	release := fs.beginMutation()
+	release, err := fs.beginMutation(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
 	defer release()
 
 	return fs.workspace.CleanupStaging(ctx)
 }
 
-func (fs *FileSystem) beginMutation() func() {
+// AcquireMutationLease serializes a caller-owned metadata decision with
+// filesystem mutations.
+func (fs *FileSystem) AcquireMutationLease(ctx context.Context) (*MutationLease, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	release, err := fs.beginMutation(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		release()
+		return nil, err
+	}
+
+	return &MutationLease{fs: fs, release: release}, nil
+}
+
+func (fs *FileSystem) beginMutation(ctx context.Context) (func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := acquireContextLock(ctx, fs.gcMu.TryRLock); err != nil {
+		return nil, err
+	}
+	if err := acquireContextLock(ctx, fs.mu.TryLock); err != nil {
+		fs.gcMu.RUnlock()
+		return nil, err
+	}
+	fs.mutationEpoch++
+	if err := ctx.Err(); err != nil {
+		fs.mu.Unlock()
+		fs.gcMu.RUnlock()
+		return nil, err
+	}
+	if fs.trashMutationBlocked != nil {
+		err := fs.trashMutationBlocked
+		fs.mu.Unlock()
+		fs.gcMu.RUnlock()
+		return nil, err
+	}
+
+	return func() {
+		fs.mu.Unlock()
+		fs.gcMu.RUnlock()
+	}, nil
+}
+
+const mutationAdmissionRetryInterval = time.Millisecond
+
+func acquireContextLock(ctx context.Context, tryLock func() bool) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if tryLock() {
+			return nil
+		}
+		timer := time.NewTimer(mutationAdmissionRetryInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func (fs *FileSystem) beginRecoveryMutation() func() {
 	fs.gcMu.RLock()
 	fs.lockMutation()
-
 	return func() {
 		fs.mu.Unlock()
 		fs.gcMu.RUnlock()

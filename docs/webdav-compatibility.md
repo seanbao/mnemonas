@@ -8,7 +8,7 @@
 
 REST API 资源复制接口位于 `/api/v1/files-copy`；WebDAV `Overwrite: T/F` 行为仅适用于 WebDAV `COPY` 方法。
 
-部分写请求可能在可见变更已经提交后，因后续持久化或清理步骤失败而返回成功状态码。此时 MnemoNAS 会发送 HTTP `Warning` 响应头，而不会把已经提交的变更改写为整体失败。当前覆盖的 warning 值包括 `199 MnemoNAS "workspace mutation persistence incomplete"`、`199 MnemoNAS "delete cleanup incomplete"` 和 `199 MnemoNAS "trash delete cleanup incomplete"`。
+部分写请求可能在可见变更已经提交后，因后续持久化或清理步骤失败而返回成功状态码。此时 MnemoNAS 会发送 HTTP `Warning` 响应头，而不会把已经提交的变更改写为整体失败。当前覆盖的 warning 值包括 `199 MnemoNAS "workspace mutation persistence incomplete"`、`199 MnemoNAS "delete cleanup incomplete"` 和 `199 MnemoNAS "trash delete cleanup incomplete"`。对于 `DELETE`，`delete cleanup incomplete` 仅表示永久删除模式的隔离区清理未完成，`trash delete cleanup incomplete` 表示实时回收站转移完成后的容量清理未完成。若实时回收站转移的可见变更已经完成，但终态日志清理的持久化状态无法确认，响应仍使用 `workspace mutation persistence incomplete`，同时启用恢复门禁；在恢复成功前，后续写请求可能失败。实时转移的日志、参与者、回执、发件箱、源端或目标端发生其他硬失败时返回 `500 Internal Server Error`，同样会保留恢复证据并阻止后续存储变更。
 
 同源 URI 处理：
 
@@ -46,7 +46,7 @@ REST API 资源复制接口位于 `/api/v1/files-copy`；WebDAV `Overwrite: T/F`
 | `GET` | 支持 | 支持 Range、ETag 和条件请求 |
 | `HEAD` | 支持 | 返回文件元数据 |
 | `PUT` | 支持 | 完整覆盖写入；支持条件 `If-Match` 和 `If-Unmodified-Since`；partial `Content-Range` PUT 返回 `400` |
-| `DELETE` | 支持 | 软删除到回收站；集合资源要求或隐含 `Depth: infinity` |
+| `DELETE` | 支持 | 遵循当前删除策略，可移入回收站或永久删除；集合资源要求或隐含 `Depth: infinity` |
 | `MKCOL` | 支持 | 创建目录；直接父目录不存在时返回 `409 Conflict`，目标已存在时返回带 `Allow` 的 `405 Method Not Allowed`，且不会创建中间目录 |
 | `MOVE` | 支持 | 移动/重命名，支持 `Overwrite: T/F`；集合资源要求或隐含 `Depth: infinity`；覆盖提交后若 backup cleanup 失败，返回 `204` 并附带 `Warning` |
 | `COPY` | 支持 | 复制文件和目录；支持 `Overwrite: T/F`；集合资源支持 `Depth: 0` 和 `Depth: infinity`；递归目录复制在仅 post-create 持久化失败时返回成功并附带 `Warning` |

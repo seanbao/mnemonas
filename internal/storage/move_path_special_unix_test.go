@@ -54,9 +54,10 @@ func TestFileSystem_DeleteRejectsFileReplacedByFIFOBeforeTrashCopy(t *testing.T)
 	}()
 	select {
 	case err := <-deleteDone:
-		if !errors.Is(err, ErrNotRegular) {
-			t.Fatalf("Delete(FIFO replacement) error = %v, want ErrNotRegular", err)
+		if !errors.Is(err, ErrNotRegular) || !errors.Is(err, ErrTrashRecoveryRequired) {
+			t.Fatalf("Delete(FIFO replacement) error = %v, want ErrNotRegular and recovery gate", err)
 		}
+		requireJournaledTrashRecovery(t, fs, err)
 	case <-time.After(time.Second):
 		if fd, err := unix.Open(hostPath, unix.O_WRONLY|unix.O_NONBLOCK, 0); err == nil {
 			_ = unix.Close(fd)
@@ -75,8 +76,8 @@ func TestFileSystem_DeleteRejectsFileReplacedByFIFOBeforeTrashCopy(t *testing.T)
 	if items, err := fs.ListTrash(ctx); err != nil || len(items) != 0 {
 		t.Fatalf("trash metadata after rejected FIFO replacement = %+v, %v; want empty", items, err)
 	}
-	if entries, err := os.ReadDir(fs.trashRoot); err != nil || len(entries) != 0 {
-		t.Fatalf("trash content after rejected FIFO replacement = %+v, %v; want empty", entries, err)
+	if entries, err := os.ReadDir(fs.trashRoot); err != nil || len(entries) != 1 || entries[0].Name() != trashTransferJournalDir || !entries[0].IsDir() {
+		t.Fatalf("trash content after rejected FIFO replacement = %+v, %v; want only transaction evidence", entries, err)
 	}
 
 	writeDone := make(chan error, 1)
@@ -85,8 +86,8 @@ func TestFileSystem_DeleteRejectsFileReplacedByFIFOBeforeTrashCopy(t *testing.T)
 	}()
 	select {
 	case err := <-writeDone:
-		if err != nil {
-			t.Fatalf("WriteFile() after rejected FIFO replacement error: %v", err)
+		if !errors.Is(err, ErrTrashRecoveryRequired) {
+			t.Fatalf("WriteFile() after rejected FIFO replacement error = %v, want recovery gate", err)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("filesystem mutation lock remained blocked after rejected FIFO replacement")

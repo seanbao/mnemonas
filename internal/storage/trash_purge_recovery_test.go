@@ -60,6 +60,11 @@ func (fixture *trashPurgeRecoveryTestFixture) open(t *testing.T) {
 		t.Fatalf("New() error: %v", err)
 	}
 	fixture.fs = fs
+	fixture.fs.SetTrashParticipantHooks(TrashParticipantHooks{
+		ValidatePurge:         func(context.Context, string, string, []byte) error { return nil },
+		CompletePurge:         func(context.Context, string, string, []byte) error { return nil },
+		RecoveryStateReliable: func() error { return nil },
+	})
 }
 
 func (fixture *trashPurgeRecoveryTestFixture) close(fatal bool) {

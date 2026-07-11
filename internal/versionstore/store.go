@@ -77,10 +77,11 @@ type Version struct {
 
 // Store is the SQLite-based version store
 type Store struct {
-	db          *sql.DB
-	objects     *ObjectStore
-	dbDirHandle *os.File
-	fileLocksMu sync.Mutex
+	db                      *sql.DB
+	objects                 *ObjectStore
+	dbDirHandle             *os.File
+	fileLocksMu             sync.Mutex
+	recoveredFromCorruption bool
 
 	getChunkRefSizeFn func(ctx context.Context, hash string) (int64, error)
 	deleteObjectFn    func(ctx context.Context, hash string) error
@@ -126,6 +127,7 @@ func New(cfg Config) (*Store, error) {
 	}
 
 	// Create tables
+	recoveredFromCorruption := false
 	if err := createTables(db); err != nil {
 		_ = db.Close()
 		_ = dirHandle.Close()
@@ -150,12 +152,14 @@ func New(cfg Config) (*Store, error) {
 			_ = dirHandle.Close()
 			return nil, err
 		}
+		recoveredFromCorruption = true
 	}
 
 	store := &Store{
-		db:          db,
-		objects:     NewObjectStore(cfg.Dataplane),
-		dbDirHandle: dirHandle,
+		db:                      db,
+		objects:                 NewObjectStore(cfg.Dataplane),
+		dbDirHandle:             dirHandle,
+		recoveredFromCorruption: recoveredFromCorruption,
 	}
 	store.getChunkRefSizeFn = func(ctx context.Context, hash string) (int64, error) {
 		var size int64
@@ -172,6 +176,12 @@ func New(cfg Config) (*Store, error) {
 	}
 
 	return store, nil
+}
+
+// RecoveredFromCorruption reports whether this store instance replaced a
+// corrupt database during construction.
+func (s *Store) RecoveredFromCorruption() bool {
+	return s != nil && s.recoveredFromCorruption
 }
 
 func recoverCorruptVersionStoreDatabase(dbPath string, initErr error) error {
@@ -515,6 +525,17 @@ func createTables(db *sql.DB) error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_trash_expires ON trash(expires_at);
 
+	-- Durable outbox for trash transaction participants
+	CREATE TABLE IF NOT EXISTS trash_operations (
+		operation_id TEXT PRIMARY KEY
+			CHECK(length(operation_id) = 32 AND operation_id NOT GLOB '*[^0-9A-Fa-f]*'),
+		kind TEXT NOT NULL
+			CHECK(kind IN ('delete_to_trash', 'restore_from_trash')),
+		trash_id TEXT NOT NULL UNIQUE,
+		journal_hash TEXT NOT NULL
+			CHECK(length(journal_hash) = 64 AND journal_hash NOT GLOB '*[^0-9A-Fa-f]*'),
+		participant_payload BLOB NOT NULL
+	);
 	-- File locks
 	CREATE TABLE IF NOT EXISTS file_locks (
 		path TEXT PRIMARY KEY,
@@ -1409,6 +1430,52 @@ func (s *Store) GetFileIndex(ctx context.Context, path string) (size int64, modT
 	}
 	modTime = time.Unix(modTimeUnix, 0)
 	return
+}
+
+// FileIndexTreeExists reports whether any file index row exists at or below path.
+func (s *Store) FileIndexTreeExists(ctx context.Context, filePath string) (bool, error) {
+	filePath, err := normalizeVersionStorePath(filePath)
+	if err != nil {
+		return false, err
+	}
+	condition, args := pathTreeSQLCondition(filePath)
+	var exists bool
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM files WHERE `+condition+` LIMIT 1)`, args...).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
+// ListFileIndexTree returns every file index row at or below path in path order.
+func (s *Store) ListFileIndexTree(ctx context.Context, filePath string) ([]FileIndexEntry, error) {
+	filePath, err := normalizeVersionStorePath(filePath)
+	if err != nil {
+		return nil, err
+	}
+	condition, args := pathTreeSQLCondition(filePath)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT path, size, mod_time, content_hash FROM files WHERE `+condition+` ORDER BY path ASC`,
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	entries := make([]FileIndexEntry, 0)
+	for rows.Next() {
+		var entry FileIndexEntry
+		var modTimeUnix int64
+		if err := rows.Scan(&entry.Path, &entry.Size, &modTimeUnix, &entry.ContentHash); err != nil {
+			return nil, err
+		}
+		entry.ModTime = time.Unix(modTimeUnix, 0)
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return entries, nil
 }
 
 // DeleteFileIndex removes a file from the index

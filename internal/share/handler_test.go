@@ -811,6 +811,20 @@ func (f *fakeShareFS) OpenFile(ctx context.Context, filePath string) (FileReader
 	return nil, nil
 }
 
+type fakeShareMutationLease struct {
+	fs *fakeShareFS
+}
+
+func (lease *fakeShareMutationLease) Stat(ctx context.Context, filePath string) (*storage.FileInfo, error) {
+	return lease.fs.Stat(ctx, filePath)
+}
+
+func (*fakeShareMutationLease) Release() {}
+
+func (f *fakeShareFS) AcquireMutationLease(context.Context) (MutationLease, error) {
+	return &fakeShareMutationLease{fs: f}, nil
+}
+
 func (f *fakeShareSnapshotFS) OpenFileSnapshot(ctx context.Context, filePath string) (*os.File, *storage.FileInfo, error) {
 	if f.snapshotByPath == nil {
 		return nil, nil, storage.ErrNotFound
@@ -2005,6 +2019,38 @@ func TestCreateShare_ReadWritePermissionReturnsBadRequest(t *testing.T) {
 	}
 	if errorPayload["code"] != "INVALID_PERMISSION" {
 		t.Fatalf("expected INVALID_PERMISSION code, got %v", errorPayload["code"])
+	}
+}
+
+func TestCreateShare_ContextCanceledAfterStatDoesNotCommit(t *testing.T) {
+	store, err := NewShareStore(filepath.Join(t.TempDir(), "shares.json"))
+	if err != nil {
+		t.Fatalf("NewShareStore() error: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	fs := &fakeShareFS{
+		statInfo: &storage.FileInfo{Path: "/docs/report.pdf", Name: "report.pdf"},
+		beforeStat: func(string) error {
+			cancel()
+			return nil
+		},
+	}
+	handler := NewHandler(store, fs)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/shares",
+		strings.NewReader(`{"path":"/docs/report.pdf","type":"file"}`),
+	).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+
+	handler.CreateShare(recorder, req)
+
+	if recorder.Code == http.StatusCreated {
+		t.Fatalf("CreateShare() status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	if shares := store.ListAll(); len(shares) != 0 {
+		t.Fatalf("shares committed after cancellation: %+v", shares)
 	}
 }
 

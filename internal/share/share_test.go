@@ -1,6 +1,7 @@
 package share
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -15,13 +16,38 @@ import (
 func writeShareFixture(t *testing.T, path string, shares []*Share) {
 	t.Helper()
 
-	data, err := json.Marshal(shares)
-	if err != nil {
-		t.Fatalf("failed to marshal share fixture: %v", err)
-	}
+	data := marshalShareFixture(t, shares)
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatalf("failed to write share fixture: %v", err)
 	}
+}
+
+func marshalShareFixture(t *testing.T, shares []*Share) []byte {
+	t.Helper()
+
+	data, err := json.Marshal(shareStoreFile{
+		Version:                shareStoreFormatVersion,
+		Shares:                 shares,
+		TrashDeleteOperations:  map[string]*shareTrashDeleteOperation{},
+		TrashRestoreOperations: map[string]*shareTrashRestoreOperation{},
+	})
+	if err != nil {
+		t.Fatalf("failed to marshal share fixture: %v", err)
+	}
+	return data
+}
+
+func decodePersistedShareFixture(t *testing.T, data []byte) []*Share {
+	t.Helper()
+
+	var stored shareStoreFile
+	if err := json.Unmarshal(data, &stored); err != nil {
+		t.Fatalf("failed to unmarshal persisted shares: %v", err)
+	}
+	if stored.Version != shareStoreFormatVersion {
+		t.Fatalf("persisted share store version = %d, want %d", stored.Version, shareStoreFormatVersion)
+	}
+	return stored.Shares
 }
 
 func TestWriteShareStoreFile_ReturnsDirectorySyncError(t *testing.T) {
@@ -243,6 +269,16 @@ func TestNewShareStore_RecoversFromCorruptSharesFile(t *testing.T) {
 	if len(store.ListAll()) != 0 {
 		t.Fatalf("expected recovered share store to start empty, got %d shares", len(store.ListAll()))
 	}
+	if len(store.trashDeleteOperations) != 0 || len(store.trashRestoreOperations) != 0 {
+		t.Fatalf(
+			"expected recovered operation maps to start empty, got delete=%d restore=%d",
+			len(store.trashDeleteOperations),
+			len(store.trashRestoreOperations),
+		)
+	}
+	if !store.RecoveredFromCorruption() {
+		t.Fatal("expected recovered store to report corruption recovery")
+	}
 
 	entries, readErr := os.ReadDir(tmpDir)
 	if readErr != nil {
@@ -258,6 +294,9 @@ func TestNewShareStore_RecoversFromCorruptSharesFile(t *testing.T) {
 	if !foundBackup {
 		t.Fatal("expected corrupt shares backup to be created")
 	}
+	if _, statErr := os.Stat(shareStoreRecoveryMarkerPath(storePath)); statErr != nil {
+		t.Fatalf("expected durable recovery marker, got %v", statErr)
+	}
 
 	share, createErr := store.Create(CreateShareOptions{Path: "/docs/file.txt", Type: ShareTypeFile, CreatedBy: "user1"})
 	if createErr != nil {
@@ -269,6 +308,61 @@ func TestNewShareStore_RecoversFromCorruptSharesFile(t *testing.T) {
 	}
 	if _, getErr := reloaded.Get(share.ID); getErr != nil {
 		t.Fatalf("expected recovered share store to persist new shares, got %v", getErr)
+	}
+	if !reloaded.RecoveredFromCorruption() {
+		t.Fatal("reload lost durable corruption recovery state")
+	}
+	if err := os.Remove(shareStoreRecoveryMarkerPath(storePath)); err != nil {
+		t.Fatalf("Remove(recovery marker) error: %v", err)
+	}
+	cleared, clearErr := NewShareStore(storePath)
+	if clearErr != nil {
+		t.Fatalf("NewShareStore() after marker removal error: %v", clearErr)
+	}
+	if cleared.RecoveredFromCorruption() {
+		t.Fatal("store remained recovery-blocked after explicit marker removal")
+	}
+}
+
+func TestNewShareStore_RecoversFromTruncatedJSONWithDurableMarker(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "shares.json")
+	truncated := []byte(`{"version":`)
+	if err := os.WriteFile(storePath, truncated, 0600); err != nil {
+		t.Fatalf("WriteFile(shares.json) error: %v", err)
+	}
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("NewShareStore() error: %v", err)
+	}
+	if !store.RecoveredFromCorruption() {
+		t.Fatal("truncated store did not report corruption recovery")
+	}
+	if _, err := os.Stat(shareStoreRecoveryMarkerPath(storePath)); err != nil {
+		t.Fatalf("durable recovery marker missing: %v", err)
+	}
+
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatalf("ReadDir() error: %v", err)
+	}
+	foundBackup := false
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), "shares.json.corrupt.") {
+			continue
+		}
+		foundBackup = true
+		backup, err := os.ReadFile(filepath.Join(tmpDir, entry.Name()))
+		if err != nil {
+			t.Fatalf("ReadFile(corrupt backup) error: %v", err)
+		}
+		if !bytes.Equal(backup, truncated) {
+			t.Fatalf("corrupt backup = %q, want %q", backup, truncated)
+		}
+	}
+	if !foundBackup {
+		t.Fatal("truncated shares file was not backed up")
 	}
 }
 
@@ -295,9 +389,9 @@ func TestNewShareStore_ReturnsErrorWhenCorruptSharesBackupSyncFails(t *testing.T
 	}()
 
 	if _, err := NewShareStore(storePath); err == nil {
-		t.Fatal("expected NewShareStore() to fail when corrupt shares backup sync fails")
-	} else if !strings.Contains(err.Error(), "sync corrupt shares directory") {
-		t.Fatalf("expected corrupt shares sync failure in error, got %v", err)
+		t.Fatal("expected NewShareStore() to fail when recovery marker sync fails")
+	} else if !strings.Contains(err.Error(), "persist share store recovery marker") {
+		t.Fatalf("expected recovery marker sync failure in error, got %v", err)
 	}
 
 	if _, statErr := os.Stat(storePath); statErr != nil {
@@ -358,10 +452,7 @@ func TestShareStore_SaveShareState_PersistsCanonicalOrder(t *testing.T) {
 			t.Fatalf("ReadFile(shares.json) error: %v", err)
 		}
 
-		var persisted []Share
-		if err := json.Unmarshal(data, &persisted); err != nil {
-			t.Fatalf("Unmarshal(persisted shares) error: %v", err)
-		}
+		persisted := decodePersistedShareFixture(t, data)
 		if len(persisted) != len(expected) {
 			t.Fatalf("persisted share count = %d, want %d", len(persisted), len(expected))
 		}
@@ -601,6 +692,37 @@ func TestShareStore_CreateWithExpiration(t *testing.T) {
 	}
 }
 
+func TestShareStore_PrepareCreateStartsLifetimeAtCommit(t *testing.T) {
+	store, err := NewShareStore(filepath.Join(t.TempDir(), "shares.json"))
+	if err != nil {
+		t.Fatalf("NewShareStore() error: %v", err)
+	}
+	duration := 24 * time.Hour
+	prepared, err := store.PrepareCreate(CreateShareOptions{
+		Path:      "/test/prepared.txt",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+		ExpiresIn: &duration,
+	})
+	if err != nil {
+		t.Fatalf("PrepareCreate() error: %v", err)
+	}
+	if !prepared.share.CreatedAt.IsZero() || prepared.share.ExpiresAt != nil {
+		t.Fatalf("prepared share consumed its lifetime before commit: %+v", prepared.share)
+	}
+
+	share, err := store.CommitPreparedCreate(prepared)
+	if err != nil {
+		t.Fatalf("CommitPreparedCreate() error: %v", err)
+	}
+	if share.CreatedAt.IsZero() || share.ExpiresAt == nil {
+		t.Fatalf("committed share lifetime is incomplete: %+v", share)
+	}
+	if got := share.ExpiresAt.Sub(share.CreatedAt); got != duration {
+		t.Fatalf("committed expiration interval = %s, want %s", got, duration)
+	}
+}
+
 func TestNewShareStore_LoadNormalizesValidSharesAndDropsInvalidEntries(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
@@ -680,10 +802,7 @@ func TestNewShareStore_LoadNormalizesValidSharesAndDropsInvalidEntries(t *testin
 			Enabled:    true,
 		},
 	}
-	data, err := json.Marshal(legacy)
-	if err != nil {
-		t.Fatalf("Marshal(legacy shares) error: %v", err)
-	}
+	data := marshalShareFixture(t, legacy)
 	if err := os.WriteFile(storePath, data, 0600); err != nil {
 		t.Fatalf("WriteFile(shares.json) error: %v", err)
 	}
@@ -740,10 +859,7 @@ func TestNewShareStore_LoadNormalizesValidSharesAndDropsInvalidEntries(t *testin
 	if err != nil {
 		t.Fatalf("ReadFile(shares.json) error: %v", err)
 	}
-	var persisted []*Share
-	if err := json.Unmarshal(data, &persisted); err != nil {
-		t.Fatalf("Unmarshal(persisted shares) error: %v", err)
-	}
+	persisted := decodePersistedShareFixture(t, data)
 	if len(persisted) != 2 {
 		t.Fatalf("expected normalized shares file to contain two entries, got %d", len(persisted))
 	}
@@ -849,10 +965,7 @@ func TestNewShareStore_LoadRebuildsPathIndexAfterDuplicateIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(shares.json) error: %v", err)
 	}
-	var persisted []*Share
-	if err := json.Unmarshal(data, &persisted); err != nil {
-		t.Fatalf("Unmarshal(persisted shares) error: %v", err)
-	}
+	persisted := decodePersistedShareFixture(t, data)
 	if len(persisted) != 2 {
 		t.Fatalf("expected normalized shares file to contain two unique shares, got %d", len(persisted))
 	}
@@ -871,10 +984,7 @@ func TestNewShareStore_LoadNormalizationIgnoresPersistenceWarning(t *testing.T) 
 		Permission: PermissionReadWrite,
 		Enabled:    true,
 	}}
-	data, err := json.Marshal(legacy)
-	if err != nil {
-		t.Fatalf("Marshal(legacy shares) error: %v", err)
-	}
+	data := marshalShareFixture(t, legacy)
 	if err := os.WriteFile(storePath, data, 0600); err != nil {
 		t.Fatalf("WriteFile(shares.json) error: %v", err)
 	}
@@ -907,10 +1017,7 @@ func TestNewShareStore_LoadNormalizationIgnoresPersistenceWarning(t *testing.T) 
 	if err != nil {
 		t.Fatalf("ReadFile(shares.json) error: %v", err)
 	}
-	var persisted []*Share
-	if err := json.Unmarshal(persistedData, &persisted); err != nil {
-		t.Fatalf("Unmarshal(persisted shares) error: %v", err)
-	}
+	persisted := decodePersistedShareFixture(t, persistedData)
 	if len(persisted) != 1 {
 		t.Fatalf("expected normalized shares file to contain one entry after warning, got %d", len(persisted))
 	}
@@ -925,7 +1032,7 @@ func TestNewShareStore_LoadNormalizationIgnoresPersistenceWarning(t *testing.T) 
 func TestNewShareStore_RejectsNullShareEntry(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
-	if err := os.WriteFile(storePath, []byte("[null]"), 0600); err != nil {
+	if err := os.WriteFile(storePath, []byte(`{"version":1,"shares":[null],"trash_delete_operations":{},"trash_restore_operations":{}}`), 0600); err != nil {
 		t.Fatalf("WriteFile(shares.json) error: %v", err)
 	}
 
@@ -949,10 +1056,7 @@ func TestShareStore_Load_NormalizesUnsupportedPermissionToRead(t *testing.T) {
 		Permission: PermissionReadWrite,
 		Enabled:    true,
 	}}
-	data, err := json.Marshal(legacy)
-	if err != nil {
-		t.Fatalf("Marshal(legacy shares) error: %v", err)
-	}
+	data := marshalShareFixture(t, legacy)
 	if err := os.WriteFile(storePath, data, 0600); err != nil {
 		t.Fatalf("WriteFile(shares.json) error: %v", err)
 	}

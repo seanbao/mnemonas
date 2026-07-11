@@ -1972,11 +1972,7 @@ func TestFileSystem_DeleteWithExpectedPolicyRejectsPolicyTokenDriftWithoutMutati
 				t.Fatalf("WriteFile() error: %v", err)
 			}
 
-			hookCalls := 0
-			fs.SetPathChangeHooks(nil, func(context.Context, string) (*PathDeleteHookResult, error) {
-				hookCalls++
-				return nil, nil
-			})
+			participant := installTrashDeleteParticipantForTest(t, fs, []byte(`{"test":"policy-token-drift"}`), nil, nil)
 			fs.UpdateRuntimePolicySettings(tt.updated)
 			actualPolicy := fs.CurrentDeletePolicy()
 			if actualPolicy.Mode != DeleteModeTrash {
@@ -2000,8 +1996,9 @@ func TestFileSystem_DeleteWithExpectedPolicyRejectsPolicyTokenDriftWithoutMutati
 			if changedErr.Actual.Token != actualPolicy.Token {
 				t.Fatalf("actual token in error = %q, want %q", changedErr.Actual.Token, actualPolicy.Token)
 			}
-			if hookCalls != 0 {
-				t.Fatalf("delete hook calls = %d, want 0", hookCalls)
+			if participant.prepareCalls != 0 || len(participant.applyCalls) != 0 || len(participant.rollbackCalls) != 0 {
+				t.Fatalf("Trash participant calls after policy drift: prepare=%d apply=%+v rollback=%+v, want none",
+					participant.prepareCalls, participant.applyCalls, participant.rollbackCalls)
 			}
 			if _, err := fs.Stat(ctx, "/policy-token-drift.txt"); err != nil {
 				t.Fatalf("file changed after policy token drift: %v", err)
@@ -2282,11 +2279,7 @@ func TestFileSystem_DeleteWithExpectedPolicyAuthorizationRejectionHasNoSideEffec
 	}
 	policy := fs.CurrentDeletePolicy()
 
-	hookCalls := 0
-	fs.SetPathChangeHooks(nil, func(context.Context, string) (*PathDeleteHookResult, error) {
-		hookCalls++
-		return nil, nil
-	})
+	participant := installTrashDeleteParticipantForTest(t, fs, []byte(`{"test":"authorization-rejection"}`), nil, nil)
 	errDenied := errors.New("delete path denied")
 	err := fs.DeleteWithExpectedPolicy(ctx, "/rejected-delete", DeletePolicyExpectation{Mode: policy.Mode, Token: policy.Token}, func(targetPath string) error {
 		if targetPath == "/rejected-delete/existing.txt" {
@@ -2297,8 +2290,9 @@ func TestFileSystem_DeleteWithExpectedPolicyAuthorizationRejectionHasNoSideEffec
 	if !errors.Is(err, errDenied) {
 		t.Fatalf("DeleteWithExpectedPolicy() error = %v, want %v", err, errDenied)
 	}
-	if hookCalls != 0 {
-		t.Fatalf("delete hook calls = %d, want 0", hookCalls)
+	if participant.prepareCalls != 0 || len(participant.applyCalls) != 0 || len(participant.rollbackCalls) != 0 {
+		t.Fatalf("Trash participant calls after authorization rejection: prepare=%d apply=%+v rollback=%+v, want none",
+			participant.prepareCalls, participant.applyCalls, participant.rollbackCalls)
 	}
 	for _, targetPath := range []string{"/rejected-delete", "/rejected-delete/existing.txt"} {
 		if _, err := fs.Stat(ctx, targetPath); err != nil {
@@ -2827,16 +2821,11 @@ func TestFileSystem_DeleteWithExpectedPolicyAndTargetRejectsTargetDriftWithoutSi
 		t.Fatalf("WriteFile(after) error: %v", err)
 	}
 
-	hookCalls := 0
-	fs.SetPathChangeHooks(nil, func(context.Context, string) (*PathDeleteHookResult, error) {
-		hookCalls++
-		return nil, nil
-	})
-	indexCalls := 0
-	originalDeleteIndex := fs.deleteFileIndex
-	fs.deleteFileIndex = func(ctx context.Context, targetPath string) error {
-		indexCalls++
-		return originalDeleteIndex(ctx, targetPath)
+	participant := installTrashDeleteParticipantForTest(t, fs, []byte(`{"test":"target-drift"}`), nil, nil)
+	commitCalls := 0
+	fs.commitTrashDelete = func(context.Context, *versionstore.TrashItem, *versionstore.TrashOperation) error {
+		commitCalls++
+		return errors.New("unexpected Trash delete commit")
 	}
 
 	err = fs.DeleteWithExpectedPolicyAndTarget(ctx, "/target-drift.bin", DeletePolicyExpectation{Mode: intent.Policy.Mode, Token: intent.Policy.Token}, intent.Targets[0].Token, nil)
@@ -2847,8 +2836,9 @@ func TestFileSystem_DeleteWithExpectedPolicyAndTargetRejectsTargetDriftWithoutSi
 	if !errors.As(err, &changedErr) || changedErr.Path != "/target-drift.bin" || changedErr.ExpectedToken != intent.Targets[0].Token || changedErr.ActualToken == changedErr.ExpectedToken {
 		t.Fatalf("target changed error = %+v", changedErr)
 	}
-	if hookCalls != 0 || indexCalls != 0 {
-		t.Fatalf("target drift side effects: hook=%d index=%d", hookCalls, indexCalls)
+	if participant.prepareCalls != 0 || len(participant.applyCalls) != 0 || len(participant.rollbackCalls) != 0 || commitCalls != 0 {
+		t.Fatalf("target drift side effects: participant prepare=%d apply=%+v rollback=%+v commit=%d",
+			participant.prepareCalls, participant.applyCalls, participant.rollbackCalls, commitCalls)
 	}
 	data, err := fs.workspace.ReadFile(ctx, "/target-drift.bin")
 	if err != nil || string(data) != "after" {
@@ -3172,7 +3162,113 @@ func TestFileSystem_DeleteDirectoryWithSymlinkChildDoesNotLeaveTrashContent(t *t
 	}
 }
 
-func TestFileSystem_Delete_ReturnsEntropyFailureBeforeMovingToTrash(t *testing.T) {
+type trashDeleteParticipantTestCall struct {
+	operationID string
+	path        string
+	payload     []byte
+	committed   bool
+}
+
+type trashDeleteParticipantTestRecorder struct {
+	payload          []byte
+	precommitErr     error
+	committedErr     error
+	prepareCalls     int
+	prepareOperation string
+	preparePath      string
+	applyCalls       []trashDeleteParticipantTestCall
+	rollbackCalls    []trashDeleteParticipantTestCall
+}
+
+func installTrashDeleteParticipantForTest(
+	t *testing.T,
+	fs *FileSystem,
+	payload []byte,
+	precommitErr error,
+	committedErr error,
+) *trashDeleteParticipantTestRecorder {
+	t.Helper()
+	recorder := &trashDeleteParticipantTestRecorder{
+		payload:      append([]byte(nil), payload...),
+		precommitErr: precommitErr,
+		committedErr: committedErr,
+	}
+	fs.SetTrashParticipantHooks(TrashParticipantHooks{
+		PrepareDelete: func(_ context.Context, operationID, path string) ([]byte, error) {
+			recorder.prepareCalls++
+			recorder.prepareOperation = operationID
+			recorder.preparePath = path
+			return append([]byte(nil), recorder.payload...), nil
+		},
+		ApplyDelete: func(_ context.Context, operationID, path string, payload []byte, committed bool) error {
+			recorder.applyCalls = append(recorder.applyCalls, trashDeleteParticipantTestCall{
+				operationID: operationID,
+				path:        path,
+				payload:     append([]byte(nil), payload...),
+				committed:   committed,
+			})
+			if committed {
+				return recorder.committedErr
+			}
+			return recorder.precommitErr
+		},
+		RollbackDelete: func(_ context.Context, operationID, path string, payload []byte) error {
+			recorder.rollbackCalls = append(recorder.rollbackCalls, trashDeleteParticipantTestCall{
+				operationID: operationID,
+				path:        path,
+				payload:     append([]byte(nil), payload...),
+			})
+			return nil
+		},
+		CompleteDelete:        completeDeleteParticipantForTest,
+		RecoveryStateReliable: func() error { return nil },
+	})
+	return recorder
+}
+
+func requireTrashDeleteParticipantSequence(
+	t *testing.T,
+	recorder *trashDeleteParticipantTestRecorder,
+	path string,
+	committedCalls []bool,
+	rollbackCalls int,
+) string {
+	t.Helper()
+	if recorder == nil {
+		t.Fatal("Trash participant recorder is nil")
+	}
+	if recorder.prepareCalls != 1 {
+		t.Fatalf("PrepareDelete calls = %d, want 1", recorder.prepareCalls)
+	}
+	if !validTrashPurgeOperationID(recorder.prepareOperation) {
+		t.Fatalf("PrepareDelete operation ID = %q, want 32 hexadecimal characters", recorder.prepareOperation)
+	}
+	if recorder.preparePath != path {
+		t.Fatalf("PrepareDelete path = %q, want %q", recorder.preparePath, path)
+	}
+	if len(recorder.applyCalls) != len(committedCalls) {
+		t.Fatalf("ApplyDelete calls = %+v, want committed sequence %v", recorder.applyCalls, committedCalls)
+	}
+	for index, call := range recorder.applyCalls {
+		if call.operationID != recorder.prepareOperation || call.path != path ||
+			!bytes.Equal(call.payload, recorder.payload) || call.committed != committedCalls[index] {
+			t.Fatalf("ApplyDelete call %d = %+v, want operation %q path %q payload %q committed %t",
+				index, call, recorder.prepareOperation, path, recorder.payload, committedCalls[index])
+		}
+	}
+	if len(recorder.rollbackCalls) != rollbackCalls {
+		t.Fatalf("RollbackDelete calls = %+v, want %d", recorder.rollbackCalls, rollbackCalls)
+	}
+	for index, call := range recorder.rollbackCalls {
+		if call.operationID != recorder.prepareOperation || call.path != path || !bytes.Equal(call.payload, recorder.payload) {
+			t.Fatalf("RollbackDelete call %d = %+v, want operation %q path %q payload %q",
+				index, call, recorder.prepareOperation, path, recorder.payload)
+		}
+	}
+	return recorder.prepareOperation
+}
+
+func TestFileSystem_Delete_ReturnsEntropyFailureBeforePublishingTrashTransfer(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 
@@ -3180,9 +3276,10 @@ func TestFileSystem_Delete_ReturnsEntropyFailureBeforeMovingToTrash(t *testing.T
 		t.Fatalf("WriteFile() error: %v", err)
 	}
 
+	entropyErr := errors.New("entropy unavailable")
 	originalRandomRead := storageRandomRead
 	storageRandomRead = func([]byte) (int, error) {
-		return 0, errors.New("entropy unavailable")
+		return 0, entropyErr
 	}
 	defer func() {
 		storageRandomRead = originalRandomRead
@@ -3192,8 +3289,8 @@ func TestFileSystem_Delete_ReturnsEntropyFailureBeforeMovingToTrash(t *testing.T
 	if err == nil {
 		t.Fatal("expected Delete() to fail when trash ID generation fails")
 	}
-	if !strings.Contains(err.Error(), "generate trash ID") {
-		t.Fatalf("expected trash ID generation error, got %v", err)
+	if !errors.Is(err, entropyErr) || !strings.Contains(err.Error(), "generate delete-to-Trash operation ID") {
+		t.Fatalf("expected contextual operation ID generation error, got %v", err)
 	}
 	if _, err := fs.Stat(ctx, "/delete-entropy.txt"); err != nil {
 		t.Fatalf("expected file to remain after failed delete, got %v", err)
@@ -3205,6 +3302,13 @@ func TestFileSystem_Delete_ReturnsEntropyFailureBeforeMovingToTrash(t *testing.T
 	}
 	if len(items) != 0 {
 		t.Fatalf("expected no trash items after failed delete, got %d", len(items))
+	}
+	operations, err := fs.versions.ListTrashOperations(ctx)
+	if err != nil {
+		t.Fatalf("ListTrashOperations() error: %v", err)
+	}
+	if len(operations) != 0 {
+		t.Fatalf("expected no Trash outbox operations after entropy failure, got %+v", operations)
 	}
 }
 
@@ -3426,17 +3530,17 @@ func TestFileSystem_Delete_DoesNotEvictExistingTrashWhenLaterDeleteStepFails(t *
 	}
 	oldItem := itemsBefore[0]
 
-	fs.SetPathChangeHooks(nil, func(context.Context, string) (*PathDeleteHookResult, error) {
-		return nil, errors.New("delete hook failed")
-	})
+	participantErr := errors.New("delete participant failed")
+	recorder := installTrashDeleteParticipantForTest(t, fs, []byte(`{"scope":"new-evict"}`), participantErr, nil)
 
 	if err := fs.WriteFile(ctx, "/new-evict.txt", bytes.NewReader([]byte("1234567"))); err != nil {
 		t.Fatalf("WriteFile(new) error: %v", err)
 	}
 	err = fs.Delete(ctx, "/new-evict.txt")
-	if err == nil {
-		t.Fatal("expected Delete() to fail when a later delete step fails")
+	if !errors.Is(err, participantErr) {
+		t.Fatalf("Delete() error = %v, want participant failure", err)
 	}
+	requireTrashDeleteParticipantSequence(t, recorder, "/new-evict.txt", []bool{false}, 1)
 
 	itemsAfter, listErr := fs.ListTrash(ctx)
 	if listErr != nil {
@@ -3520,7 +3624,7 @@ func TestFileSystem_Delete_ReturnsWarningWhenTrashCapacityCleanupFailsAfterVisib
 	}
 }
 
-func TestFileSystem_Delete_ReturnsWarningWhenSourceDirectorySyncFailsAfterMoveToTrash(t *testing.T) {
+func TestFileSystem_Delete_RequiresRecoveryWhenSourceDirectorySyncFailsAfterCommit(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 
@@ -3540,11 +3644,14 @@ func TestFileSystem_Delete_ReturnsWarningWhenSourceDirectorySyncFailsAfterMoveTo
 	})
 
 	err := fs.Delete(ctx, "/delete-source-sync.txt")
-	if !isVisibleMutationWarning(err) {
-		t.Fatalf("Delete() error = %v, want visible mutation warning", err)
+	if !errors.Is(err, ErrTrashRecoveryRequired) {
+		t.Fatalf("Delete() error = %v, want ErrTrashRecoveryRequired", err)
+	}
+	if isVisibleMutationWarning(err) {
+		t.Fatalf("post-commit source sync failure was incorrectly downgraded to a visible mutation warning: %v", err)
 	}
 	if _, statErr := fs.Stat(ctx, "/delete-source-sync.txt"); statErr != ErrNotFound {
-		t.Fatalf("expected deleted file to remain absent after warning, got %v", statErr)
+		t.Fatalf("expected deleted file to remain absent after committed delete, got %v", statErr)
 	}
 	items, listErr := fs.ListTrash(ctx)
 	if listErr != nil {
@@ -3554,7 +3661,35 @@ func TestFileSystem_Delete_ReturnsWarningWhenSourceDirectorySyncFailsAfterMoveTo
 		t.Fatalf("expected one trash item after warned delete, got %d", len(items))
 	}
 	if _, _, _, indexErr := fs.versions.GetFileIndex(ctx, "/delete-source-sync.txt"); !errors.Is(indexErr, versionstore.ErrNotFound) {
-		t.Fatalf("expected deleted file index to be absent after warning, got %v", indexErr)
+		t.Fatalf("expected deleted file index to be absent after committed delete, got %v", indexErr)
+	}
+	operations, operationErr := fs.versions.ListTrashOperations(ctx)
+	if operationErr != nil {
+		t.Fatalf("ListTrashOperations() error: %v", operationErr)
+	}
+	if len(operations) != 1 || operations[0].Kind != versionstore.TrashOperationKindDeleteToTrash {
+		t.Fatalf("pending Trash operations = %+v, want one committed delete", operations)
+	}
+	if mutationErr := fs.Mkdir(ctx, "/blocked-until-recovery"); !errors.Is(mutationErr, ErrTrashRecoveryRequired) {
+		t.Fatalf("Mkdir() while recovery is required error = %v, want ErrTrashRecoveryRequired", mutationErr)
+	}
+
+	// The source entry was removed before its parent-directory fsync failed, so
+	// recovery can safely roll the committed transaction forward.
+	syncManagedStorageDir = originalSyncManagedStorageDir
+	report, recoveryErr := fs.RecoverTrashTransfers(ctx)
+	if recoveryErr != nil {
+		t.Fatalf("RecoverTrashTransfers() error: %v", recoveryErr)
+	}
+	if report.RolledForward != 1 || report.RolledBack != 0 || report.Completed != 0 || len(report.Blocked) != 0 {
+		t.Fatalf("RecoverTrashTransfers() report = %+v, want one roll-forward", report)
+	}
+	operations, operationErr = fs.versions.ListTrashOperations(ctx)
+	if operationErr != nil || len(operations) != 0 {
+		t.Fatalf("ListTrashOperations() after recovery = %+v, %v, want none", operations, operationErr)
+	}
+	if mutationErr := fs.Mkdir(ctx, "/after-trash-recovery"); mutationErr != nil {
+		t.Fatalf("Mkdir() after recovery error: %v", mutationErr)
 	}
 }
 
@@ -3682,47 +3817,87 @@ func TestFileSystem_DeleteAndRestore_NonEmptyDirectory(t *testing.T) {
 	}
 }
 
-func TestFileSystem_Delete_RollsBackFileWhenIndexDeleteFails(t *testing.T) {
-	fs := setupFileSystem(t)
-	ctx := context.Background()
+func TestFileSystem_Delete_RollsBackWhenTrashCommitFailsBeforeDecision(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		targetPath string
+		setup      func(*testing.T, *FileSystem, context.Context)
+		indexPaths []string
+	}{
+		{
+			name:       "file",
+			targetPath: "/delete-commit-file.txt",
+			setup: func(t *testing.T, fs *FileSystem, ctx context.Context) {
+				t.Helper()
+				if err := fs.WriteFile(ctx, "/delete-commit-file.txt", bytes.NewReader([]byte("keep me"))); err != nil {
+					t.Fatalf("WriteFile() error: %v", err)
+				}
+			},
+			indexPaths: []string{"/delete-commit-file.txt"},
+		},
+		{
+			name:       "directory",
+			targetPath: "/delete-commit-dir",
+			setup: func(t *testing.T, fs *FileSystem, ctx context.Context) {
+				t.Helper()
+				if err := fs.Mkdir(ctx, "/delete-commit-dir"); err != nil {
+					t.Fatalf("Mkdir() error: %v", err)
+				}
+				if err := fs.WriteFile(ctx, "/delete-commit-dir/child.txt", bytes.NewReader([]byte("keep child"))); err != nil {
+					t.Fatalf("WriteFile(child) error: %v", err)
+				}
+			},
+			indexPaths: []string{"/delete-commit-dir/child.txt"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fs := setupFileSystem(t)
+			ctx := context.Background()
+			test.setup(t, fs, ctx)
 
-	if err := fs.WriteFile(ctx, "/delete-rollback.txt", bytes.NewReader([]byte("keep me"))); err != nil {
-		t.Fatalf("WriteFile() error: %v", err)
-	}
+			participantPayload := []byte(`{"participant":"commit-failure"}`)
+			recorder := installTrashDeleteParticipantForTest(t, fs, participantPayload, nil, nil)
+			commitErr := errors.New("commit Trash delete failed before decision")
+			fs.commitTrashDelete = func(context.Context, *versionstore.TrashItem, *versionstore.TrashOperation) error {
+				return commitErr
+			}
 
-	fs.deleteFileIndex = func(ctx context.Context, path string) error {
-		return errors.New("index delete failed")
-	}
+			err := fs.Delete(ctx, test.targetPath)
+			if !errors.Is(err, commitErr) || errors.Is(err, ErrTrashRecoveryRequired) {
+				t.Fatalf("Delete() error = %v, want clean precommit failure", err)
+			}
+			operationID := requireTrashDeleteParticipantSequence(t, recorder, test.targetPath, []bool{false}, 1)
 
-	err := fs.Delete(ctx, "/delete-rollback.txt")
-	if err == nil {
-		t.Fatal("Expected Delete() to fail when file index removal fails")
-	}
-
-	f, openErr := fs.OpenFile(ctx, "/delete-rollback.txt")
-	if openErr != nil {
-		t.Fatalf("OpenFile() after rollback error: %v", openErr)
-	}
-	defer f.Close()
-
-	data, readErr := io.ReadAll(f)
-	if readErr != nil {
-		t.Fatalf("ReadAll() after rollback error: %v", readErr)
-	}
-	if string(data) != "keep me" {
-		t.Fatalf("Expected original file content after rollback, got %q", string(data))
-	}
-
-	items, listErr := fs.ListTrash(ctx)
-	if listErr != nil {
-		t.Fatalf("ListTrash() error: %v", listErr)
-	}
-	if len(items) != 0 {
-		t.Fatalf("Expected trash to remain empty after rollback, got %d items", len(items))
+			if _, statErr := fs.Stat(ctx, test.targetPath); statErr != nil {
+				t.Fatalf("Stat(%q) after rollback error: %v", test.targetPath, statErr)
+			}
+			for _, indexPath := range test.indexPaths {
+				if _, _, _, indexErr := fs.versions.GetFileIndex(ctx, indexPath); indexErr != nil {
+					t.Fatalf("GetFileIndex(%q) after rollback error: %v", indexPath, indexErr)
+				}
+			}
+			items, listErr := fs.ListTrash(ctx)
+			if listErr != nil || len(items) != 0 {
+				t.Fatalf("ListTrash() after rollback = %+v, %v, want empty", items, listErr)
+			}
+			operations, listOperationsErr := fs.versions.ListTrashOperations(ctx)
+			if listOperationsErr != nil || len(operations) != 0 {
+				t.Fatalf("ListTrashOperations() after rollback = %+v, %v, want empty", operations, listOperationsErr)
+			}
+			for _, decision := range []string{trashTransferPrepared, trashTransferCopying, trashTransferReady, trashTransferCommitted, trashTransferCompleted} {
+				rel := filepath.FromSlash(trashTransferJournalRel(operationID, decision))
+				if _, journalErr := fs.trashRootHandle.Lstat(rel); !errors.Is(journalErr, os.ErrNotExist) {
+					t.Fatalf("Lstat(%s journal) error = %v, want os.ErrNotExist", decision, journalErr)
+				}
+			}
+			if mutationErr := fs.Mkdir(ctx, "/after-clean-commit-failure"); mutationErr != nil {
+				t.Fatalf("Mkdir() after clean rollback error: %v", mutationErr)
+			}
+		})
 	}
 }
 
-func TestFileSystem_Delete_RollsBackWhenPathDeleteHookFails(t *testing.T) {
+func TestFileSystem_Delete_RollsBackWhenTrashParticipantPrecommitFails(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 
@@ -3734,17 +3909,14 @@ func TestFileSystem_Delete_RollsBackWhenPathDeleteHookFails(t *testing.T) {
 		t.Fatalf("Stat() before delete error: %v", err)
 	}
 
-	fs.SetPathChangeHooks(nil, func(context.Context, string) (*PathDeleteHookResult, error) {
-		return nil, errors.New("favorite cleanup failed")
-	})
+	participantErr := errors.New("favorite cleanup failed")
+	recorder := installTrashDeleteParticipantForTest(t, fs, []byte(`{"favorite":"delete-hook.txt"}`), participantErr, nil)
 
 	err = fs.Delete(ctx, "/delete-hook.txt")
-	if err == nil {
-		t.Fatal("Expected Delete() to fail when path delete hook fails")
+	if !errors.Is(err, participantErr) || !strings.Contains(err.Error(), "apply delete-to-Trash participant") {
+		t.Fatalf("Delete() error = %v, want precommit participant failure", err)
 	}
-	if !strings.Contains(err.Error(), "failed to sync delete hooks") {
-		t.Fatalf("expected delete hook failure in error, got %v", err)
-	}
+	requireTrashDeleteParticipantSequence(t, recorder, "/delete-hook.txt", []bool{false}, 1)
 
 	f, openErr := fs.OpenFile(ctx, "/delete-hook.txt")
 	if openErr != nil {
@@ -3776,7 +3948,7 @@ func TestFileSystem_Delete_RollsBackWhenPathDeleteHookFails(t *testing.T) {
 	}
 }
 
-func TestFileSystem_Delete_DirectoryRollbackRestoresChildIndexesWhenPathDeleteHookFails(t *testing.T) {
+func TestFileSystem_Delete_DirectoryParticipantRollbackPreservesChildIndexes(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 
@@ -3800,17 +3972,14 @@ func TestFileSystem_Delete_DirectoryRollbackRestoresChildIndexesWhenPathDeleteHo
 		t.Fatalf("GetFileIndex(report before delete) error: %v", err)
 	}
 
-	fs.SetPathChangeHooks(nil, func(context.Context, string) (*PathDeleteHookResult, error) {
-		return nil, errors.New("favorite cleanup failed")
-	})
+	participantErr := errors.New("favorite cleanup failed")
+	recorder := installTrashDeleteParticipantForTest(t, fs, []byte(`{"favorite":"docs"}`), participantErr, nil)
 
 	err := fs.Delete(ctx, "/docs")
-	if err == nil {
-		t.Fatal("Expected Delete() to fail when directory delete hook fails")
+	if !errors.Is(err, participantErr) || !strings.Contains(err.Error(), "apply delete-to-Trash participant") {
+		t.Fatalf("Delete() error = %v, want precommit participant failure", err)
 	}
-	if !strings.Contains(err.Error(), "failed to sync delete hooks") {
-		t.Fatalf("expected delete hook failure in error, got %v", err)
-	}
+	requireTrashDeleteParticipantSequence(t, recorder, "/docs", []bool{false}, 1)
 
 	if _, statErr := fs.Stat(ctx, "/docs"); statErr != nil {
 		t.Fatalf("expected directory to be restored after rollback, got %v", statErr)
@@ -3839,7 +4008,7 @@ func TestFileSystem_Delete_DirectoryRollbackRestoresChildIndexesWhenPathDeleteHo
 	}
 }
 
-func TestFileSystem_Delete_ReturnsWarningWhenDeleteHookWarns(t *testing.T) {
+func TestFileSystem_Delete_ReturnsWarningWhenTrashParticipantPrecommitWarns(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 
@@ -3848,14 +4017,14 @@ func TestFileSystem_Delete_ReturnsWarningWhenDeleteHookWarns(t *testing.T) {
 	}
 
 	restoreData := []byte(`{"favorites":[{"path":"/delete-hook-warning.txt"}]}`)
-	fs.SetPathChangeHooks(nil, func(context.Context, string) (*PathDeleteHookResult, error) {
-		return &PathDeleteHookResult{RestoreData: restoreData}, workspace.WrapVisibleMutationWarning(errors.New("favorite persistence warning"))
-	})
+	persistenceErr := errors.New("favorite persistence warning")
+	recorder := installTrashDeleteParticipantForTest(t, fs, restoreData, workspace.WrapVisibleMutationWarning(persistenceErr), nil)
 
 	err := fs.Delete(ctx, "/delete-hook-warning.txt")
-	if !isVisibleMutationWarning(err) {
+	if !isVisibleMutationWarning(err) || !errors.Is(err, persistenceErr) {
 		t.Fatalf("expected visible mutation warning, got %v", err)
 	}
+	requireTrashDeleteParticipantSequence(t, recorder, "/delete-hook-warning.txt", []bool{false, true}, 0)
 	if _, statErr := fs.Stat(ctx, "/delete-hook-warning.txt"); statErr != ErrNotFound {
 		t.Fatalf("expected deleted path to remain deleted after hook warning, got %v", statErr)
 	}
@@ -3871,63 +4040,7 @@ func TestFileSystem_Delete_ReturnsWarningWhenDeleteHookWarns(t *testing.T) {
 	}
 }
 
-func TestFileSystem_Delete_DirectoryRollbackRestoresChildIndexesWhenTrashRestoreMetadataPersistsFails(t *testing.T) {
-	fs := setupFileSystem(t)
-	ctx := context.Background()
-
-	if err := fs.Mkdir(ctx, "/docs"); err != nil {
-		t.Fatalf("Mkdir(/docs) error: %v", err)
-	}
-	if err := fs.Mkdir(ctx, "/docs/nested"); err != nil {
-		t.Fatalf("Mkdir(/docs/nested) error: %v", err)
-	}
-	if err := fs.WriteFile(ctx, "/docs/readme.md", bytes.NewReader([]byte("readme"))); err != nil {
-		t.Fatalf("WriteFile(readme) error: %v", err)
-	}
-	if err := fs.WriteFile(ctx, "/docs/nested/report.txt", bytes.NewReader([]byte("report"))); err != nil {
-		t.Fatalf("WriteFile(report) error: %v", err)
-	}
-
-	fs.SetPathChangeHooks(nil, func(context.Context, string) (*PathDeleteHookResult, error) {
-		return &PathDeleteHookResult{RestoreData: []byte(`{"favorites":[{"user_id":"tester","path":"/docs/readme.md","type":"file"}]}`)}, nil
-	})
-
-	originalUpdateTrashRestoreData := fs.updateTrashRestoreData
-	fs.updateTrashRestoreData = func(ctx context.Context, id string, restoreData []byte) error {
-		return errors.New("persist restore metadata failed")
-	}
-	t.Cleanup(func() {
-		fs.updateTrashRestoreData = originalUpdateTrashRestoreData
-	})
-
-	err := fs.Delete(ctx, "/docs")
-	if err == nil {
-		t.Fatal("Expected Delete() to fail when trash restore metadata persistence fails")
-	}
-	if !strings.Contains(err.Error(), "failed to persist trash restore metadata") {
-		t.Fatalf("expected restore metadata failure in error, got %v", err)
-	}
-
-	if _, statErr := fs.Stat(ctx, "/docs"); statErr != nil {
-		t.Fatalf("expected directory to be restored after rollback, got %v", statErr)
-	}
-	if _, _, _, err := fs.versions.GetFileIndex(ctx, "/docs/readme.md"); err != nil {
-		t.Fatalf("GetFileIndex(readme after rollback) error: %v", err)
-	}
-	if _, _, _, err := fs.versions.GetFileIndex(ctx, "/docs/nested/report.txt"); err != nil {
-		t.Fatalf("GetFileIndex(report after rollback) error: %v", err)
-	}
-
-	items, listErr := fs.ListTrash(ctx)
-	if listErr != nil {
-		t.Fatalf("ListTrash() error: %v", listErr)
-	}
-	if len(items) != 0 {
-		t.Fatalf("Expected trash to remain empty after directory rollback, got %d items", len(items))
-	}
-}
-
-func TestFileSystem_Delete_CompletesWhenDeleteHookRegistered(t *testing.T) {
+func TestFileSystem_Delete_CompletesDurableTrashParticipantSequence(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 
@@ -3935,11 +4048,8 @@ func TestFileSystem_Delete_CompletesWhenDeleteHookRegistered(t *testing.T) {
 		t.Fatalf("WriteFile() error: %v", err)
 	}
 
-	hookCalled := make(chan struct{}, 1)
-	fs.SetPathChangeHooks(nil, func(context.Context, string) (*PathDeleteHookResult, error) {
-		hookCalled <- struct{}{}
-		return nil, nil
-	})
+	restoreData := []byte(`{"participant":"delete-hook-ok"}`)
+	recorder := installTrashDeleteParticipantForTest(t, fs, restoreData, nil, nil)
 
 	done := make(chan error, 1)
 	go func() {
@@ -3955,94 +4065,74 @@ func TestFileSystem_Delete_CompletesWhenDeleteHookRegistered(t *testing.T) {
 		t.Fatal("Delete() deadlocked while invoking delete hook")
 	}
 
-	select {
-	case <-hookCalled:
-	default:
-		t.Fatal("expected delete hook to be called")
-	}
+	requireTrashDeleteParticipantSequence(t, recorder, "/delete-hook-ok.txt", []bool{false, true}, 0)
 
 	if _, err := fs.Stat(ctx, "/delete-hook-ok.txt"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected deleted file to be absent, got %v", err)
 	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 || !bytes.Equal(items[0].RestoreData, restoreData) {
+		t.Fatalf("Trash items = %+v, want one item with participant restore data %q", items, restoreData)
+	}
 }
 
-func TestFileSystem_Delete_KeepsTrashContentWhenTrashMetadataRollbackFails(t *testing.T) {
+func TestFileSystem_Delete_ResolvesErrorReturnedAfterTrashCommit(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 
-	if err := fs.WriteFile(ctx, "/delete-rollback-metadata.txt", bytes.NewReader([]byte("keep me"))); err != nil {
+	const targetPath = "/delete-commit-resolution.txt"
+	if err := fs.WriteFile(ctx, targetPath, bytes.NewReader([]byte("delete me"))); err != nil {
 		t.Fatalf("WriteFile() error: %v", err)
 	}
 
-	fs.deleteFileIndex = func(ctx context.Context, path string) error {
-		if err := fs.versions.Close(); err != nil {
-			t.Fatalf("Close() error: %v", err)
+	restoreData := []byte(`{"participant":"commit-resolution"}`)
+	recorder := installTrashDeleteParticipantForTest(t, fs, restoreData, nil, nil)
+	originalCommitTrashDelete := fs.commitTrashDelete
+	if originalCommitTrashDelete == nil {
+		t.Fatal("commitTrashDelete injection point is not initialized")
+	}
+	commitReturnedErr := errors.New("commit acknowledgement unavailable")
+	commitCalls := 0
+	fs.commitTrashDelete = func(callCtx context.Context, item *versionstore.TrashItem, operation *versionstore.TrashOperation) error {
+		commitCalls++
+		if err := originalCommitTrashDelete(callCtx, item, operation); err != nil {
+			return err
 		}
-		return errors.New("index delete failed")
+		return commitReturnedErr
 	}
 
-	err := fs.Delete(ctx, "/delete-rollback-metadata.txt")
-	if err == nil {
-		t.Fatal("Expected Delete() to fail when index removal and trash metadata rollback both fail")
+	if err := fs.Delete(ctx, targetPath); err != nil {
+		t.Fatalf("Delete() error after resolvable committed result: %v", err)
 	}
-
-	reader, openErr := fs.OpenFile(ctx, "/delete-rollback-metadata.txt")
-	if openErr != nil {
-		t.Fatalf("OpenFile() after rollback error: %v", openErr)
+	if commitCalls != 1 {
+		t.Fatalf("commitTrashDelete calls = %d, want 1", commitCalls)
 	}
-	defer reader.Close()
-
-	data, readErr := io.ReadAll(reader)
-	if readErr != nil {
-		t.Fatalf("ReadAll() after rollback error: %v", readErr)
+	operationID := requireTrashDeleteParticipantSequence(t, recorder, targetPath, []bool{false, true}, 0)
+	if _, statErr := fs.Stat(ctx, targetPath); !errors.Is(statErr, ErrNotFound) {
+		t.Fatalf("Stat() after committed delete error = %v, want ErrNotFound", statErr)
 	}
-	if string(data) != "keep me" {
-		t.Fatalf("Expected original file content after rollback, got %q", string(data))
+	if _, _, _, indexErr := fs.versions.GetFileIndex(ctx, targetPath); !errors.Is(indexErr, versionstore.ErrNotFound) {
+		t.Fatalf("GetFileIndex() after committed delete error = %v, want ErrNotFound", indexErr)
 	}
-
-	entries, dirErr := os.ReadDir(fs.trashRoot)
-	if dirErr != nil {
-		t.Fatalf("ReadDir(trashRoot) error: %v", dirErr)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("expected one retained trash staging entry after metadata rollback failure, got %d", len(entries))
-	}
-	if _, statErr := os.Stat(filepath.Join(fs.trashRoot, entries[0].Name(), "content")); statErr != nil {
-		t.Fatalf("expected trash content to remain when trash metadata rollback fails, got %v", statErr)
-	}
-}
-
-func TestFileSystem_Delete_RollsBackDirectoryWhenIndexDeleteFails(t *testing.T) {
-	fs := setupFileSystem(t)
-	ctx := context.Background()
-
-	if err := fs.Mkdir(ctx, "/delete-rollback-dir"); err != nil {
-		t.Fatalf("Mkdir() error: %v", err)
-	}
-
-	fs.deleteFileIndexPrefix = func(ctx context.Context, path string) error {
-		return errors.New("index delete failed")
-	}
-
-	err := fs.Delete(ctx, "/delete-rollback-dir")
-	if err == nil {
-		t.Fatal("Expected Delete() to fail when directory index removal fails")
-	}
-
-	info, statErr := fs.Stat(ctx, "/delete-rollback-dir")
-	if statErr != nil {
-		t.Fatalf("Stat() after directory rollback error: %v", statErr)
-	}
-	if !info.IsDir {
-		t.Fatal("Expected rolled back path to remain a directory")
-	}
-
 	items, listErr := fs.ListTrash(ctx)
-	if listErr != nil {
-		t.Fatalf("ListTrash() error: %v", listErr)
+	if listErr != nil || len(items) != 1 || items[0].OriginalPath != targetPath || !bytes.Equal(items[0].RestoreData, restoreData) {
+		t.Fatalf("ListTrash() after committed delete = %+v, %v", items, listErr)
 	}
-	if len(items) != 0 {
-		t.Fatalf("Expected trash to remain empty after rollback, got %d items", len(items))
+	operations, operationErr := fs.versions.ListTrashOperations(ctx)
+	if operationErr != nil || len(operations) != 0 {
+		t.Fatalf("ListTrashOperations() after completion = %+v, %v, want empty", operations, operationErr)
+	}
+	for _, decision := range []string{trashTransferPrepared, trashTransferCopying, trashTransferReady, trashTransferCommitted, trashTransferCompleted} {
+		rel := filepath.FromSlash(trashTransferJournalRel(operationID, decision))
+		if _, journalErr := fs.trashRootHandle.Lstat(rel); !errors.Is(journalErr, os.ErrNotExist) {
+			t.Fatalf("Lstat(%s journal) error = %v, want os.ErrNotExist", decision, journalErr)
+		}
+	}
+	if mutationErr := fs.Mkdir(ctx, "/after-resolved-commit"); mutationErr != nil {
+		t.Fatalf("Mkdir() after resolved commit error: %v", mutationErr)
 	}
 }
 
@@ -4881,6 +4971,67 @@ func TestFileSystem_Rename_CompletesWhenRenameHookRegistered(t *testing.T) {
 	}
 }
 
+type trashRestoreParticipantTestCall struct {
+	operationID     string
+	originalPath    string
+	destinationPath string
+	payload         []byte
+}
+
+type trashRestoreParticipantTestRecorder struct {
+	applyErr error
+	calls    []trashRestoreParticipantTestCall
+}
+
+func installTrashRestoreParticipantForTest(fs *FileSystem, applyErr error) *trashRestoreParticipantTestRecorder {
+	recorder := &trashRestoreParticipantTestRecorder{applyErr: applyErr}
+	fs.SetTrashParticipantHooks(TrashParticipantHooks{
+		ApplyRestore: func(_ context.Context, operationID, originalPath, destinationPath string, payload []byte) error {
+			recorder.calls = append(recorder.calls, trashRestoreParticipantTestCall{
+				operationID:     operationID,
+				originalPath:    originalPath,
+				destinationPath: destinationPath,
+				payload:         append([]byte(nil), payload...),
+			})
+			return recorder.applyErr
+		},
+		CompleteRestore:       completeRestoreParticipantForTest,
+		RecoveryStateReliable: func() error { return nil },
+	})
+	return recorder
+}
+
+func requireTrashRestoreParticipantCalls(
+	t *testing.T,
+	recorder *trashRestoreParticipantTestRecorder,
+	originalPath string,
+	destinationPath string,
+	payload []byte,
+	wantCalls int,
+) string {
+	t.Helper()
+	if recorder == nil {
+		t.Fatal("Trash restore participant recorder is nil")
+	}
+	if len(recorder.calls) != wantCalls {
+		t.Fatalf("ApplyRestore calls = %+v, want %d", recorder.calls, wantCalls)
+	}
+	operationID := ""
+	for index, call := range recorder.calls {
+		if !validTrashPurgeOperationID(call.operationID) {
+			t.Fatalf("ApplyRestore call %d operation ID = %q, want 32 hexadecimal characters", index, call.operationID)
+		}
+		if operationID == "" {
+			operationID = call.operationID
+		}
+		if call.operationID != operationID || call.originalPath != originalPath || call.destinationPath != destinationPath || !bytes.Equal(call.payload, payload) {
+			t.Fatalf("ApplyRestore call %d = %+v, want operation %q original path %q destination path %q payload %q",
+				index, call, operationID, originalPath, destinationPath, payload)
+		}
+	}
+	return operationID
+}
+
 func TestFileSystem_RestoreFromTrash(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -4959,7 +5110,7 @@ func TestFileSystem_RestoreFromTrash_RejectsSymlinkParentWithoutCreatingOutsideD
 	}
 }
 
-func TestFileSystem_RestoreFromTrashRejectsFileTargetCreatedAfterPrecheck(t *testing.T) {
+func TestFileSystem_RestoreFromTrashRequiresRecoveryWhenFileTargetAppearsBeforePublish(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 
@@ -4978,22 +5129,25 @@ func TestFileSystem_RestoreFromTrashRejectsFileTargetCreatedAfterPrecheck(t *tes
 	}
 
 	livePath := filepath.Join(fs.workspace.Root(), "restore-race.txt")
-	originalAfterValidateStoragePaths := afterValidateStoragePaths
+	originalAfterCopiedFilePublish := afterCopiedFilePublish
 	inserted := false
-	afterValidateStoragePaths = func() error {
-		if inserted {
-			return nil
+	afterCopiedFilePublish = func(_, _ string) error {
+		if !inserted {
+			inserted = true
+			return os.WriteFile(livePath, []byte("live content"), 0644)
 		}
-		inserted = true
-		return os.WriteFile(livePath, []byte("live content"), 0644)
+		return nil
 	}
 	t.Cleanup(func() {
-		afterValidateStoragePaths = originalAfterValidateStoragePaths
+		afterCopiedFilePublish = originalAfterCopiedFilePublish
 	})
 
 	err = fs.RestoreFromTrash(ctx, items[0].ID)
-	if !errors.Is(err, ErrAlreadyExists) {
-		t.Fatalf("RestoreFromTrash() error = %v, want ErrAlreadyExists", err)
+	if !errors.Is(err, ErrAlreadyExists) || !errors.Is(err, ErrTrashRecoveryRequired) {
+		t.Fatalf("RestoreFromTrash() error = %v, want ErrAlreadyExists and ErrTrashRecoveryRequired", err)
+	}
+	if !inserted {
+		t.Fatal("expected competing target to be created while copying the restore replica")
 	}
 	data, readErr := os.ReadFile(livePath)
 	if readErr != nil {
@@ -5009,9 +5163,38 @@ func TestFileSystem_RestoreFromTrashRejectsFileTargetCreatedAfterPrecheck(t *tes
 	if len(remaining) != 1 || remaining[0].ID != items[0].ID {
 		t.Fatalf("expected trash item to remain after failed restore, got %#v", remaining)
 	}
+	operations, operationErr := fs.versions.ListTrashOperations(ctx)
+	if operationErr != nil || len(operations) != 0 {
+		t.Fatalf("ListTrashOperations() after uncommitted restore = %+v, %v, want empty", operations, operationErr)
+	}
+	if mutationErr := fs.Mkdir(ctx, "/blocked-by-file-target-race"); !errors.Is(mutationErr, ErrTrashRecoveryRequired) {
+		t.Fatalf("Mkdir() while target-race recovery is required error = %v, want ErrTrashRecoveryRequired", mutationErr)
+	}
+
+	afterCopiedFilePublish = originalAfterCopiedFilePublish
+	if removeErr := os.Remove(livePath); removeErr != nil {
+		t.Fatalf("Remove(competing target) error: %v", removeErr)
+	}
+	report, recoveryErr := fs.RecoverTrashTransfers(ctx)
+	if recoveryErr != nil {
+		t.Fatalf("RecoverTrashTransfers() after removing competing target error: %v", recoveryErr)
+	}
+	if report.RolledBack != 1 || report.RolledForward != 0 || report.Completed != 0 || len(report.Blocked) != 0 {
+		t.Fatalf("RecoverTrashTransfers() report = %+v, want one rollback", report)
+	}
+	remaining, listErr = fs.ListTrash(ctx)
+	if listErr != nil || len(remaining) != 1 || remaining[0].ID != items[0].ID {
+		t.Fatalf("ListTrash() after recovery = %+v, %v, want original item", remaining, listErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(fs.trashRoot, items[0].ID, "content")); statErr != nil {
+		t.Fatalf("Trash source content after recovery error: %v", statErr)
+	}
+	if mutationErr := fs.Mkdir(ctx, "/after-file-target-race-recovery"); mutationErr != nil {
+		t.Fatalf("Mkdir() after target-race recovery error: %v", mutationErr)
+	}
 }
 
-func TestFileSystem_RestoreFromTrashRejectsDirectoryTargetCreatedAfterPrecheck(t *testing.T) {
+func TestFileSystem_RestoreFromTrashRequiresRecoveryWhenDirectoryTargetAppearsBeforePublish(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 
@@ -5034,25 +5217,30 @@ func TestFileSystem_RestoreFromTrashRejectsDirectoryTargetCreatedAfterPrecheck(t
 
 	liveDir := filepath.Join(fs.workspace.Root(), "restore-dir-race")
 	liveFile := filepath.Join(liveDir, "live.txt")
-	originalAfterValidateStoragePaths := afterValidateStoragePaths
+	originalAfterCopiedFilePublish := afterCopiedFilePublish
 	inserted := false
-	afterValidateStoragePaths = func() error {
-		if inserted {
-			return nil
+	afterCopiedFilePublish = func(_, _ string) error {
+		if !inserted {
+			inserted = true
+			if err := os.Mkdir(liveDir, 0755); err != nil {
+				return err
+			}
+			if err := os.WriteFile(liveFile, []byte("live content"), 0644); err != nil {
+				return err
+			}
 		}
-		inserted = true
-		if err := os.Mkdir(liveDir, 0755); err != nil {
-			return err
-		}
-		return os.WriteFile(liveFile, []byte("live content"), 0644)
+		return nil
 	}
 	t.Cleanup(func() {
-		afterValidateStoragePaths = originalAfterValidateStoragePaths
+		afterCopiedFilePublish = originalAfterCopiedFilePublish
 	})
 
 	err = fs.RestoreFromTrash(ctx, items[0].ID)
-	if !errors.Is(err, ErrAlreadyExists) {
-		t.Fatalf("RestoreFromTrash() error = %v, want ErrAlreadyExists", err)
+	if !errors.Is(err, ErrAlreadyExists) || !errors.Is(err, ErrTrashRecoveryRequired) {
+		t.Fatalf("RestoreFromTrash() error = %v, want ErrAlreadyExists and ErrTrashRecoveryRequired", err)
+	}
+	if !inserted {
+		t.Fatal("expected competing directory to be created while copying the restore replica")
 	}
 	data, readErr := os.ReadFile(liveFile)
 	if readErr != nil {
@@ -5070,6 +5258,35 @@ func TestFileSystem_RestoreFromTrashRejectsDirectoryTargetCreatedAfterPrecheck(t
 	}
 	if len(remaining) != 1 || remaining[0].ID != items[0].ID {
 		t.Fatalf("expected trash item to remain after failed restore, got %#v", remaining)
+	}
+	operations, operationErr := fs.versions.ListTrashOperations(ctx)
+	if operationErr != nil || len(operations) != 0 {
+		t.Fatalf("ListTrashOperations() after uncommitted directory restore = %+v, %v, want empty", operations, operationErr)
+	}
+	if mutationErr := fs.Mkdir(ctx, "/blocked-by-directory-target-race"); !errors.Is(mutationErr, ErrTrashRecoveryRequired) {
+		t.Fatalf("Mkdir() while directory target-race recovery is required error = %v, want ErrTrashRecoveryRequired", mutationErr)
+	}
+
+	afterCopiedFilePublish = originalAfterCopiedFilePublish
+	if removeErr := os.RemoveAll(liveDir); removeErr != nil {
+		t.Fatalf("RemoveAll(competing directory) error: %v", removeErr)
+	}
+	report, recoveryErr := fs.RecoverTrashTransfers(ctx)
+	if recoveryErr != nil {
+		t.Fatalf("RecoverTrashTransfers() after removing competing directory error: %v", recoveryErr)
+	}
+	if report.RolledBack != 1 || report.RolledForward != 0 || report.Completed != 0 || len(report.Blocked) != 0 {
+		t.Fatalf("RecoverTrashTransfers() report = %+v, want one rollback", report)
+	}
+	remaining, listErr = fs.ListTrash(ctx)
+	if listErr != nil || len(remaining) != 1 || remaining[0].ID != items[0].ID {
+		t.Fatalf("ListTrash() after recovery = %+v, %v, want original directory item", remaining, listErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(fs.trashRoot, items[0].ID, "content", "trash.txt")); statErr != nil {
+		t.Fatalf("Trash source directory content after recovery error: %v", statErr)
+	}
+	if mutationErr := fs.Mkdir(ctx, "/after-directory-target-race-recovery"); mutationErr != nil {
+		t.Fatalf("Mkdir() after directory target-race recovery error: %v", mutationErr)
 	}
 }
 
@@ -5295,7 +5512,7 @@ func TestFileSystem_WalkTrashItemRestorePaths_RejectsUnsafeEntryNames(t *testing
 	}
 }
 
-func TestFileSystem_RestoreFromTrash_RollsBackWhenIndexUpdateFails(t *testing.T) {
+func TestFileSystem_RestoreFromTrash_RollsBackWhenTrashCommitFailsBeforeDecision(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 
@@ -5310,17 +5527,34 @@ func TestFileSystem_RestoreFromTrash_RollsBackWhenIndexUpdateFails(t *testing.T)
 	if err != nil {
 		t.Fatalf("ListTrash() error: %v", err)
 	}
-	if len(items) == 0 {
-		t.Fatal("No items in trash")
+	if len(items) != 1 {
+		t.Fatalf("ListTrash() = %+v, want one item", items)
 	}
 
-	fs.updateFileIndex = func(ctx context.Context, path string, size int64, modTime time.Time, hash string) error {
-		return errors.New("index update failed")
+	commitErr := errors.New("commit Trash restore failed before decision")
+	operationID := ""
+	commitCalls := 0
+	fs.commitTrashRestore = func(_ context.Context, item *versionstore.TrashItem, destinationPath string, fileIndex []versionstore.FileIndexEntry, renameHistory bool, operation *versionstore.TrashOperation) error {
+		commitCalls++
+		if item.ID != items[0].ID || destinationPath != "/restore-index-fail.txt" || renameHistory {
+			t.Fatalf("commitTrashRestore item=%+v destination=%q renameHistory=%t", item, destinationPath, renameHistory)
+		}
+		if len(fileIndex) != 1 || fileIndex[0].Path != destinationPath || fileIndex[0].ContentHash != computeHash([]byte("restore me")) {
+			t.Fatalf("commitTrashRestore file index = %+v, want restored file index", fileIndex)
+		}
+		if operation == nil || operation.Kind != versionstore.TrashOperationKindRestoreFromTrash || operation.TrashID != item.ID {
+			t.Fatalf("commitTrashRestore operation = %+v", operation)
+		}
+		operationID = operation.ID
+		return commitErr
 	}
 
 	err = fs.RestoreFromTrash(ctx, items[0].ID)
-	if err == nil {
-		t.Fatal("Expected RestoreFromTrash() to fail when file index update fails")
+	if !errors.Is(err, commitErr) || errors.Is(err, ErrTrashRecoveryRequired) {
+		t.Fatalf("RestoreFromTrash() error = %v, want clean commit failure", err)
+	}
+	if commitCalls != 1 || !validTrashPurgeOperationID(operationID) {
+		t.Fatalf("commitTrashRestore calls = %d, operation ID = %q", commitCalls, operationID)
 	}
 
 	if _, statErr := fs.Stat(ctx, "/restore-index-fail.txt"); statErr != ErrNotFound {
@@ -5337,9 +5571,25 @@ func TestFileSystem_RestoreFromTrash_RollsBackWhenIndexUpdateFails(t *testing.T)
 	if _, statErr := os.Stat(filepath.Join(fs.trashRoot, items[0].ID, "content")); statErr != nil {
 		t.Fatalf("Expected trash content to remain after rollback, got %v", statErr)
 	}
+	if _, _, _, indexErr := fs.versions.GetFileIndex(ctx, "/restore-index-fail.txt"); !errors.Is(indexErr, versionstore.ErrNotFound) {
+		t.Fatalf("GetFileIndex() after rollback error = %v, want ErrNotFound", indexErr)
+	}
+	operations, operationsErr := fs.versions.ListTrashOperations(ctx)
+	if operationsErr != nil || len(operations) != 0 {
+		t.Fatalf("ListTrashOperations() after rollback = %+v, %v, want empty", operations, operationsErr)
+	}
+	for _, decision := range []string{trashTransferPrepared, trashTransferCopying, trashTransferReady, trashTransferCommitted, trashTransferCompleted} {
+		rel := filepath.FromSlash(trashTransferJournalRel(operationID, decision))
+		if _, journalErr := fs.trashRootHandle.Lstat(rel); !errors.Is(journalErr, os.ErrNotExist) {
+			t.Fatalf("Lstat(%s journal) error = %v, want os.ErrNotExist", decision, journalErr)
+		}
+	}
+	if mutationErr := fs.Mkdir(ctx, "/after-clean-restore-rollback"); mutationErr != nil {
+		t.Fatalf("Mkdir() after clean restore rollback error: %v", mutationErr)
+	}
 }
 
-func TestFileSystem_RestoreFromTrash_ReturnsWarningWhenTrashSourceDirectorySyncFailsAfterRestore(t *testing.T) {
+func TestFileSystem_RestoreFromTrash_RequiresRecoveryWhenTrashSourceDirectorySyncFailsAfterCommit(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 
@@ -5357,12 +5607,13 @@ func TestFileSystem_RestoreFromTrash_ReturnsWarningWhenTrashSourceDirectorySyncF
 	if len(items) != 1 {
 		t.Fatalf("expected one trash item, got %d", len(items))
 	}
-	trashItemDir := filepath.Join(fs.trashRoot, items[0].ID)
-
+	syncErr := errors.New("sync trash source parent failed")
 	originalSyncManagedStorageDir := syncManagedStorageDir
 	syncManagedStorageDir = func(root *os.Root, relName, absPath string) error {
-		if root == fs.trashRootHandle && relName == items[0].ID && absPath == trashItemDir {
-			return errors.New("sync trash source dir failed")
+		if root == fs.trashRootHandle && relName == "." && absPath == fs.trashRoot {
+			if _, itemErr := fs.versions.GetTrashItem(ctx, items[0].ID); errors.Is(itemErr, versionstore.ErrNotFound) {
+				return syncErr
+			}
 		}
 		return originalSyncManagedStorageDir(root, relName, absPath)
 	}
@@ -5371,23 +5622,52 @@ func TestFileSystem_RestoreFromTrash_ReturnsWarningWhenTrashSourceDirectorySyncF
 	})
 
 	err = fs.RestoreFromTrash(ctx, items[0].ID)
-	if !isVisibleMutationWarning(err) {
-		t.Fatalf("RestoreFromTrash() error = %v, want visible mutation warning", err)
+	if !errors.Is(err, ErrTrashRecoveryRequired) || !errors.Is(err, syncErr) {
+		t.Fatalf("RestoreFromTrash() error = %v, want sync failure and ErrTrashRecoveryRequired", err)
+	}
+	if isVisibleMutationWarning(err) {
+		t.Fatalf("post-commit Trash source sync failure was incorrectly downgraded to a warning: %v", err)
 	}
 	if _, statErr := fs.Stat(ctx, "/restore-source-sync.txt"); statErr != nil {
-		t.Fatalf("expected restored file to remain visible after warning, got %v", statErr)
+		t.Fatalf("expected restored file to remain visible after committed restore, got %v", statErr)
 	}
 	remaining, listErr := fs.ListTrash(ctx)
 	if listErr != nil {
-		t.Fatalf("ListTrash() after warned restore error: %v", listErr)
+		t.Fatalf("ListTrash() after committed restore error: %v", listErr)
 	}
 	if len(remaining) != 0 {
-		t.Fatalf("expected trash metadata to be removed after warned restore, got %d items", len(remaining))
+		t.Fatalf("expected trash metadata to be removed after committed restore, got %d items", len(remaining))
+	}
+	if _, statErr := os.Stat(filepath.Join(fs.trashRoot, items[0].ID)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("trash source item status after failed parent sync = %v, want removed", statErr)
 	}
 	if _, _, hash, indexErr := fs.versions.GetFileIndex(ctx, "/restore-source-sync.txt"); indexErr != nil {
 		t.Fatalf("GetFileIndex(restored) error: %v", indexErr)
 	} else if hash != computeHash([]byte("restore me")) {
 		t.Fatalf("restored index hash = %q, want restored content hash", hash)
+	}
+	operations, operationErr := fs.versions.ListTrashOperations(ctx)
+	if operationErr != nil || len(operations) != 1 || operations[0].Kind != versionstore.TrashOperationKindRestoreFromTrash {
+		t.Fatalf("pending Trash operations = %+v, %v, want one committed restore", operations, operationErr)
+	}
+	if mutationErr := fs.Mkdir(ctx, "/blocked-by-restore-recovery"); !errors.Is(mutationErr, ErrTrashRecoveryRequired) {
+		t.Fatalf("Mkdir() while restore recovery is required error = %v, want ErrTrashRecoveryRequired", mutationErr)
+	}
+
+	syncManagedStorageDir = originalSyncManagedStorageDir
+	report, recoveryErr := fs.RecoverTrashTransfers(ctx)
+	if recoveryErr != nil {
+		t.Fatalf("RecoverTrashTransfers() error: %v", recoveryErr)
+	}
+	if report.RolledForward != 1 || report.RolledBack != 0 || report.Completed != 0 || len(report.Blocked) != 0 {
+		t.Fatalf("RecoverTrashTransfers() report = %+v, want one roll-forward", report)
+	}
+	operations, operationErr = fs.versions.ListTrashOperations(ctx)
+	if operationErr != nil || len(operations) != 0 {
+		t.Fatalf("ListTrashOperations() after recovery = %+v, %v, want empty", operations, operationErr)
+	}
+	if mutationErr := fs.Mkdir(ctx, "/after-restore-recovery"); mutationErr != nil {
+		t.Fatalf("Mkdir() after restore recovery error: %v", mutationErr)
 	}
 }
 
@@ -6090,7 +6370,7 @@ func TestFileSystem_RestoreFromTrashTo_RejectsCustomPathWhenOriginalPathExistsWi
 	}
 }
 
-func TestFileSystem_RestoreFromTrashTo_RollsBackWhenIndexUpdateFails(t *testing.T) {
+func TestFileSystem_RestoreFromTrashTo_RollsBackWhenTrashCommitFailsBeforeDecision(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 
@@ -6108,18 +6388,35 @@ func TestFileSystem_RestoreFromTrashTo_RollsBackWhenIndexUpdateFails(t *testing.
 	if err != nil {
 		t.Fatalf("ListTrash() error: %v", err)
 	}
-	if len(items) == 0 {
-		t.Fatal("No items in trash")
-	}
-
-	fs.updateFileIndex = func(ctx context.Context, path string, size int64, modTime time.Time, hash string) error {
-		return errors.New("index update failed")
+	if len(items) != 1 {
+		t.Fatalf("ListTrash() = %+v, want one item", items)
 	}
 
 	newPath := "/restored/restore-to-index-fail.md"
+	commitErr := errors.New("commit custom Trash restore failed before decision")
+	operationID := ""
+	commitCalls := 0
+	fs.commitTrashRestore = func(_ context.Context, item *versionstore.TrashItem, destinationPath string, fileIndex []versionstore.FileIndexEntry, renameHistory bool, operation *versionstore.TrashOperation) error {
+		commitCalls++
+		if item.ID != items[0].ID || destinationPath != newPath || !renameHistory {
+			t.Fatalf("commitTrashRestore item=%+v destination=%q renameHistory=%t", item, destinationPath, renameHistory)
+		}
+		if len(fileIndex) != 1 || fileIndex[0].Path != newPath || fileIndex[0].ContentHash != computeHash([]byte("v2")) {
+			t.Fatalf("commitTrashRestore file index = %+v, want custom restored file index", fileIndex)
+		}
+		if operation == nil || operation.Kind != versionstore.TrashOperationKindRestoreFromTrash || operation.TrashID != item.ID {
+			t.Fatalf("commitTrashRestore operation = %+v", operation)
+		}
+		operationID = operation.ID
+		return commitErr
+	}
+
 	err = fs.RestoreFromTrashTo(ctx, items[0].ID, newPath)
-	if err == nil {
-		t.Fatal("Expected RestoreFromTrashTo() to fail when file index update fails")
+	if !errors.Is(err, commitErr) || errors.Is(err, ErrTrashRecoveryRequired) {
+		t.Fatalf("RestoreFromTrashTo() error = %v, want clean commit failure", err)
+	}
+	if commitCalls != 1 || !validTrashPurgeOperationID(operationID) {
+		t.Fatalf("commitTrashRestore calls = %d, operation ID = %q", commitCalls, operationID)
 	}
 
 	if _, statErr := fs.Stat(ctx, newPath); statErr != ErrNotFound {
@@ -6144,9 +6441,26 @@ func TestFileSystem_RestoreFromTrashTo_RollsBackWhenIndexUpdateFails(t *testing.
 	if len(versions) != 1 {
 		t.Fatalf("Expected original historical version metadata to remain after rollback, got %d versions", len(versions))
 	}
+	newVersions, versionErr := fs.versions.GetVersions(ctx, newPath)
+	if versionErr != nil || len(newVersions) != 0 {
+		t.Fatalf("GetVersions(custom path) after rollback = %+v, %v, want empty", newVersions, versionErr)
+	}
+	if _, _, _, indexErr := fs.versions.GetFileIndex(ctx, newPath); !errors.Is(indexErr, versionstore.ErrNotFound) {
+		t.Fatalf("GetFileIndex(custom path) after rollback error = %v, want ErrNotFound", indexErr)
+	}
+	operations, operationsErr := fs.versions.ListTrashOperations(ctx)
+	if operationsErr != nil || len(operations) != 0 {
+		t.Fatalf("ListTrashOperations() after rollback = %+v, %v, want empty", operations, operationsErr)
+	}
+	for _, decision := range []string{trashTransferPrepared, trashTransferCopying, trashTransferReady, trashTransferCommitted, trashTransferCompleted} {
+		rel := filepath.FromSlash(trashTransferJournalRel(operationID, decision))
+		if _, journalErr := fs.trashRootHandle.Lstat(rel); !errors.Is(journalErr, os.ErrNotExist) {
+			t.Fatalf("Lstat(%s journal) error = %v, want os.ErrNotExist", decision, journalErr)
+		}
+	}
 }
 
-func TestFileSystem_RestoreFromTrashTo_ReturnsWarningWhenTrashSourceDirectorySyncFailsAfterRestore(t *testing.T) {
+func TestFileSystem_RestoreFromTrashTo_RequiresRecoveryWhenTrashSourceDirectorySyncFailsAfterCommit(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 	newPath := "/restored/custom-source-sync.txt"
@@ -6165,12 +6479,13 @@ func TestFileSystem_RestoreFromTrashTo_ReturnsWarningWhenTrashSourceDirectorySyn
 	if len(items) != 1 {
 		t.Fatalf("expected one trash item, got %d", len(items))
 	}
-	trashItemDir := filepath.Join(fs.trashRoot, items[0].ID)
-
+	syncErr := errors.New("sync custom restore Trash source parent failed")
 	originalSyncManagedStorageDir := syncManagedStorageDir
 	syncManagedStorageDir = func(root *os.Root, relName, absPath string) error {
-		if root == fs.trashRootHandle && relName == items[0].ID && absPath == trashItemDir {
-			return errors.New("sync trash source dir failed")
+		if root == fs.trashRootHandle && relName == "." && absPath == fs.trashRoot {
+			if _, itemErr := fs.versions.GetTrashItem(ctx, items[0].ID); errors.Is(itemErr, versionstore.ErrNotFound) {
+				return syncErr
+			}
 		}
 		return originalSyncManagedStorageDir(root, relName, absPath)
 	}
@@ -6179,23 +6494,52 @@ func TestFileSystem_RestoreFromTrashTo_ReturnsWarningWhenTrashSourceDirectorySyn
 	})
 
 	err = fs.RestoreFromTrashTo(ctx, items[0].ID, newPath)
-	if !isVisibleMutationWarning(err) {
-		t.Fatalf("RestoreFromTrashTo() error = %v, want visible mutation warning", err)
+	if !errors.Is(err, ErrTrashRecoveryRequired) || !errors.Is(err, syncErr) {
+		t.Fatalf("RestoreFromTrashTo() error = %v, want sync failure and ErrTrashRecoveryRequired", err)
+	}
+	if isVisibleMutationWarning(err) {
+		t.Fatalf("post-commit Trash source sync failure was incorrectly downgraded to a warning: %v", err)
 	}
 	if _, statErr := fs.Stat(ctx, newPath); statErr != nil {
-		t.Fatalf("expected custom restored file to remain visible after warning, got %v", statErr)
+		t.Fatalf("expected custom restored file to remain visible after committed restore, got %v", statErr)
 	}
 	remaining, listErr := fs.ListTrash(ctx)
 	if listErr != nil {
-		t.Fatalf("ListTrash() after warned restore error: %v", listErr)
+		t.Fatalf("ListTrash() after committed restore error: %v", listErr)
 	}
 	if len(remaining) != 0 {
-		t.Fatalf("expected trash metadata to be removed after warned restore, got %d items", len(remaining))
+		t.Fatalf("expected trash metadata to be removed after committed restore, got %d items", len(remaining))
+	}
+	if _, statErr := os.Stat(filepath.Join(fs.trashRoot, items[0].ID)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("custom restore Trash source item status after failed parent sync = %v, want removed", statErr)
 	}
 	if _, _, hash, indexErr := fs.versions.GetFileIndex(ctx, newPath); indexErr != nil {
 		t.Fatalf("GetFileIndex(custom restored) error: %v", indexErr)
 	} else if hash != computeHash([]byte("restore custom")) {
 		t.Fatalf("custom restored index hash = %q, want restored content hash", hash)
+	}
+	operations, operationErr := fs.versions.ListTrashOperations(ctx)
+	if operationErr != nil || len(operations) != 1 || operations[0].Kind != versionstore.TrashOperationKindRestoreFromTrash {
+		t.Fatalf("pending Trash operations = %+v, %v, want one committed custom restore", operations, operationErr)
+	}
+	if mutationErr := fs.Mkdir(ctx, "/blocked-by-custom-restore-recovery"); !errors.Is(mutationErr, ErrTrashRecoveryRequired) {
+		t.Fatalf("Mkdir() while custom restore recovery is required error = %v, want ErrTrashRecoveryRequired", mutationErr)
+	}
+
+	syncManagedStorageDir = originalSyncManagedStorageDir
+	report, recoveryErr := fs.RecoverTrashTransfers(ctx)
+	if recoveryErr != nil {
+		t.Fatalf("RecoverTrashTransfers() error: %v", recoveryErr)
+	}
+	if report.RolledForward != 1 || report.RolledBack != 0 || report.Completed != 0 || len(report.Blocked) != 0 {
+		t.Fatalf("RecoverTrashTransfers() report = %+v, want one roll-forward", report)
+	}
+	operations, operationErr = fs.versions.ListTrashOperations(ctx)
+	if operationErr != nil || len(operations) != 0 {
+		t.Fatalf("ListTrashOperations() after recovery = %+v, %v, want empty", operations, operationErr)
+	}
+	if mutationErr := fs.Mkdir(ctx, "/after-custom-restore-recovery"); mutationErr != nil {
+		t.Fatalf("Mkdir() after custom restore recovery error: %v", mutationErr)
 	}
 }
 
@@ -6316,19 +6660,18 @@ func TestFileSystem_RestoreFromTrashTo_RejectsCustomPathWhenTargetHasRawVersionM
 		t.Fatalf("AddVersion(target) error: %v", err)
 	}
 
-	originalRemoveTrashMetadata := fs.removeTrashMetadata
-	metadataRemovalCalled := false
-	fs.removeTrashMetadata = func(ctx context.Context, id string) error {
-		metadataRemovalCalled = true
-		return originalRemoveTrashMetadata(ctx, id)
+	commitCalled := false
+	fs.commitTrashRestore = func(context.Context, *versionstore.TrashItem, string, []versionstore.FileIndexEntry, bool, *versionstore.TrashOperation) error {
+		commitCalled = true
+		return errors.New("unexpected Trash restore commit")
 	}
 
 	err = fs.RestoreFromTrashTo(ctx, items[0].ID, targetPath)
 	if !errors.Is(err, ErrAlreadyExists) {
 		t.Fatalf("RestoreFromTrashTo() error = %v, want %v", err, ErrAlreadyExists)
 	}
-	if metadataRemovalCalled {
-		t.Fatal("expected target metadata conflict to be rejected before trash metadata removal")
+	if commitCalled {
+		t.Fatal("expected target metadata conflict to be rejected before publishing a Trash restore transaction")
 	}
 	if _, statErr := fs.Stat(ctx, targetPath); statErr != ErrNotFound {
 		t.Fatalf("expected custom restore target to remain absent, got %v", statErr)
@@ -6347,19 +6690,25 @@ func TestFileSystem_RestoreFromTrashTo_RejectsCustomPathWhenTargetHasRawVersionM
 	if len(versionsAfter) != len(versionsBefore) {
 		t.Fatalf("expected source version metadata count to remain %d, got %d", len(versionsBefore), len(versionsAfter))
 	}
+	operations, operationsErr := fs.versions.ListTrashOperations(ctx)
+	if operationsErr != nil || len(operations) != 0 {
+		t.Fatalf("ListTrashOperations() after rejected restore = %+v, %v, want empty", operations, operationsErr)
+	}
 }
 
-func TestFileSystem_RestoreFromTrashTo_DoesNotMoveMetadataBeforeTrashMetadataRemovalSucceeds(t *testing.T) {
+func TestFileSystem_RestoreFromTrashTo_ResolvesErrorReturnedAfterTrashCommit(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 
-	if err := fs.WriteFile(ctx, "/restore-remove-fail.md", bytes.NewReader([]byte("v1"))); err != nil {
+	const originalPath = "/restore-commit-resolution.md"
+	const destinationPath = "/restored/restore-commit-resolution.md"
+	if err := fs.WriteFile(ctx, originalPath, bytes.NewReader([]byte("v1"))); err != nil {
 		t.Fatalf("WriteFile(v1) error: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "/restore-remove-fail.md", bytes.NewReader([]byte("v2"))); err != nil {
+	if err := fs.WriteFile(ctx, originalPath, bytes.NewReader([]byte("v2"))); err != nil {
 		t.Fatalf("WriteFile(v2) error: %v", err)
 	}
-	if err := fs.Delete(ctx, "/restore-remove-fail.md"); err != nil {
+	if err := fs.Delete(ctx, originalPath); err != nil {
 		t.Fatalf("Delete() error: %v", err)
 	}
 
@@ -6367,131 +6716,172 @@ func TestFileSystem_RestoreFromTrashTo_DoesNotMoveMetadataBeforeTrashMetadataRem
 	if err != nil {
 		t.Fatalf("ListTrash() error: %v", err)
 	}
-	if len(items) == 0 {
-		t.Fatal("No items in trash")
+	if len(items) != 1 {
+		t.Fatalf("ListTrash() = %+v, want one item", items)
 	}
 
-	newPath := "/restored/restore-remove-fail.md"
-	rollbackRenameCalled := false
-	fs.renameHistoryMetadataPath = func(ctx context.Context, oldName, updatedPath string) error {
-		if oldName == newPath && updatedPath == "/restore-remove-fail.md" {
-			rollbackRenameCalled = true
-			return errors.New("metadata rollback failed")
+	originalCommitTrashRestore := fs.commitTrashRestore
+	if originalCommitTrashRestore == nil {
+		t.Fatal("commitTrashRestore injection point is not initialized")
+	}
+	commitReturnedErr := errors.New("restore commit acknowledgement unavailable")
+	operationID := ""
+	commitCalls := 0
+	fs.commitTrashRestore = func(callCtx context.Context, item *versionstore.TrashItem, destination string, fileIndex []versionstore.FileIndexEntry, renameHistory bool, operation *versionstore.TrashOperation) error {
+		commitCalls++
+		if destination != destinationPath || !renameHistory || operation == nil {
+			t.Fatalf("commitTrashRestore destination=%q renameHistory=%t operation=%+v", destination, renameHistory, operation)
 		}
-		return fs.versions.RenamePathHistory(ctx, oldName, updatedPath)
-	}
-	fs.removeTrashMetadata = func(ctx context.Context, id string) error {
-		return errors.New("remove trash metadata failed")
-	}
-
-	err = fs.RestoreFromTrashTo(ctx, items[0].ID, newPath)
-	if err == nil {
-		t.Fatal("Expected RestoreFromTrashTo() to fail when trash metadata removal fails")
-	}
-	if rollbackRenameCalled {
-		t.Fatal("expected metadata rename rollback not to be needed before trash metadata removal succeeds")
+		operationID = operation.ID
+		if err := originalCommitTrashRestore(callCtx, item, destination, fileIndex, renameHistory, operation); err != nil {
+			return err
+		}
+		return commitReturnedErr
 	}
 
-	if _, statErr := fs.Stat(ctx, newPath); statErr != ErrNotFound {
-		t.Fatalf("Expected restored target path to be rolled back despite metadata rollback failure, got %v", statErr)
+	if err := fs.RestoreFromTrashTo(ctx, items[0].ID, destinationPath); err != nil {
+		t.Fatalf("RestoreFromTrashTo() error after resolvable committed result: %v", err)
 	}
-
+	if commitCalls != 1 || !validTrashPurgeOperationID(operationID) {
+		t.Fatalf("commitTrashRestore calls = %d, operation ID = %q", commitCalls, operationID)
+	}
+	if _, statErr := fs.Stat(ctx, destinationPath); statErr != nil {
+		t.Fatalf("Stat(custom restore destination) error: %v", statErr)
+	}
+	if _, _, hash, indexErr := fs.versions.GetFileIndex(ctx, destinationPath); indexErr != nil || hash != computeHash([]byte("v2")) {
+		t.Fatalf("GetFileIndex(custom restore) hash=%q error=%v", hash, indexErr)
+	}
 	trashItems, listErr := fs.ListTrash(ctx)
-	if listErr != nil {
-		t.Fatalf("ListTrash() after rollback error: %v", listErr)
+	if listErr != nil || len(trashItems) != 0 {
+		t.Fatalf("ListTrash() after committed restore = %+v, %v, want empty", trashItems, listErr)
 	}
-	if len(trashItems) != 1 {
-		t.Fatalf("Expected trash item to remain after rollback, got %d items", len(trashItems))
+	if _, statErr := os.Stat(filepath.Join(fs.trashRoot, items[0].ID)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("trash source item status after committed restore = %v, want removed", statErr)
 	}
-	if _, statErr := os.Stat(filepath.Join(fs.trashRoot, items[0].ID, "content")); statErr != nil {
-		t.Fatalf("Expected trash content to remain after rollback, got %v", statErr)
-	}
-	originalVersions, versionsErr := fs.versions.GetVersions(ctx, "/restore-remove-fail.md")
+	originalVersions, versionsErr := fs.versions.GetVersions(ctx, originalPath)
 	if versionsErr != nil {
 		t.Fatalf("GetVersions(original) error: %v", versionsErr)
 	}
-	if len(originalVersions) != 1 {
-		t.Fatalf("expected original historical version metadata to remain after rollback, got %d versions", len(originalVersions))
+	if len(originalVersions) != 0 {
+		t.Fatalf("expected original historical version metadata to move, got %+v", originalVersions)
 	}
-	newVersions, versionsErr := fs.versions.GetVersions(ctx, newPath)
+	newVersions, versionsErr := fs.versions.GetVersions(ctx, destinationPath)
 	if versionsErr != nil {
-		t.Fatalf("GetVersions(new path) error: %v", versionsErr)
+		t.Fatalf("GetVersions(destination) error: %v", versionsErr)
 	}
-	if len(newVersions) != 0 {
-		t.Fatalf("expected no version metadata under restored path after rollback, got %d versions", len(newVersions))
+	if len(newVersions) != 1 {
+		t.Fatalf("expected one historical version under restored path, got %+v", newVersions)
+	}
+	operations, operationErr := fs.versions.ListTrashOperations(ctx)
+	if operationErr != nil || len(operations) != 0 {
+		t.Fatalf("ListTrashOperations() after completion = %+v, %v, want empty", operations, operationErr)
+	}
+	for _, decision := range []string{trashTransferPrepared, trashTransferCopying, trashTransferReady, trashTransferCommitted, trashTransferCompleted} {
+		rel := filepath.FromSlash(trashTransferJournalRel(operationID, decision))
+		if _, journalErr := fs.trashRootHandle.Lstat(rel); !errors.Is(journalErr, os.ErrNotExist) {
+			t.Fatalf("Lstat(%s journal) error = %v, want os.ErrNotExist", decision, journalErr)
+		}
 	}
 }
 
-func TestFileSystem_RestoreFromTrashTo_DoesNotMoveMetadataBeforeIndexUpdateSucceeds(t *testing.T) {
+func TestFileSystem_RestoreFromTrashTo_RetriesCommittedParticipantDuringRecovery(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 
-	if err := fs.WriteFile(ctx, "/restore-index-rollback-fail.md", bytes.NewReader([]byte("v1"))); err != nil {
+	const originalPath = "/restore-participant-recovery.md"
+	const destinationPath = "/restored/restore-participant-recovery.md"
+	participantPayload := []byte(`{"favorites":[{"path":"/restore-participant-recovery.md"}]}`)
+	deleteRecorder := installTrashDeleteParticipantForTest(t, fs, participantPayload, nil, nil)
+
+	if err := fs.WriteFile(ctx, originalPath, bytes.NewReader([]byte("v1"))); err != nil {
 		t.Fatalf("WriteFile(v1) error: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "/restore-index-rollback-fail.md", bytes.NewReader([]byte("v2"))); err != nil {
+	if err := fs.WriteFile(ctx, originalPath, bytes.NewReader([]byte("v2"))); err != nil {
 		t.Fatalf("WriteFile(v2) error: %v", err)
 	}
-	if err := fs.Delete(ctx, "/restore-index-rollback-fail.md"); err != nil {
+	if err := fs.Delete(ctx, originalPath); err != nil {
 		t.Fatalf("Delete() error: %v", err)
 	}
+	requireTrashDeleteParticipantSequence(t, deleteRecorder, originalPath, []bool{false, true}, 0)
 
 	items, err := fs.ListTrash(ctx)
 	if err != nil {
 		t.Fatalf("ListTrash() error: %v", err)
 	}
-	if len(items) == 0 {
-		t.Fatal("No items in trash")
+	if len(items) != 1 || !bytes.Equal(items[0].RestoreData, participantPayload) {
+		t.Fatalf("ListTrash() = %+v, want one item with participant payload %q", items, participantPayload)
 	}
 
-	newPath := "/restored/restore-index-rollback-fail.md"
-	rollbackRenameCalled := false
-	fs.renameHistoryMetadataPath = func(ctx context.Context, oldName, updatedPath string) error {
-		if oldName == newPath && updatedPath == "/restore-index-rollback-fail.md" {
-			rollbackRenameCalled = true
-			return errors.New("metadata rollback failed")
-		}
-		return fs.versions.RenamePathHistory(ctx, oldName, updatedPath)
+	participantErr := errors.New("restore participant unavailable")
+	restoreRecorder := installTrashRestoreParticipantForTest(fs, participantErr)
+	err = fs.RestoreFromTrashTo(ctx, items[0].ID, destinationPath)
+	if !errors.Is(err, ErrTrashRecoveryRequired) || !errors.Is(err, participantErr) {
+		t.Fatalf("RestoreFromTrashTo() error = %v, want participant failure and ErrTrashRecoveryRequired", err)
 	}
-	fs.updateFileIndex = func(ctx context.Context, path string, size int64, modTime time.Time, hash string) error {
-		return errors.New("index update failed")
-	}
+	operationID := requireTrashRestoreParticipantCalls(t, restoreRecorder, originalPath, destinationPath, participantPayload, 1)
 
-	err = fs.RestoreFromTrashTo(ctx, items[0].ID, newPath)
-	if err == nil {
-		t.Fatal("Expected RestoreFromTrashTo() to fail when file index update fails")
+	if _, statErr := fs.Stat(ctx, destinationPath); statErr != nil {
+		t.Fatalf("Stat(committed restore destination) error: %v", statErr)
 	}
-	if rollbackRenameCalled {
-		t.Fatal("expected metadata rename rollback not to be needed before file index update succeeds")
+	if _, _, hash, indexErr := fs.versions.GetFileIndex(ctx, destinationPath); indexErr != nil || hash != computeHash([]byte("v2")) {
+		t.Fatalf("GetFileIndex(committed restore) hash=%q error=%v", hash, indexErr)
 	}
-
-	if _, statErr := fs.Stat(ctx, newPath); statErr != ErrNotFound {
-		t.Fatalf("Expected restored target path to be rolled back despite metadata rollback failure, got %v", statErr)
-	}
-
 	trashItems, listErr := fs.ListTrash(ctx)
-	if listErr != nil {
-		t.Fatalf("ListTrash() after rollback error: %v", listErr)
-	}
-	if len(trashItems) != 1 {
-		t.Fatalf("Expected trash item to remain after rollback, got %d items", len(trashItems))
+	if listErr != nil || len(trashItems) != 0 {
+		t.Fatalf("ListTrash() after committed restore = %+v, %v, want empty", trashItems, listErr)
 	}
 	if _, statErr := os.Stat(filepath.Join(fs.trashRoot, items[0].ID, "content")); statErr != nil {
-		t.Fatalf("Expected trash content to remain after rollback, got %v", statErr)
+		t.Fatalf("expected physical Trash source to remain until participant delivery succeeds, got %v", statErr)
 	}
-	originalVersions, versionsErr := fs.versions.GetVersions(ctx, "/restore-index-rollback-fail.md")
+	originalVersions, versionsErr := fs.versions.GetVersions(ctx, originalPath)
 	if versionsErr != nil {
 		t.Fatalf("GetVersions(original) error: %v", versionsErr)
 	}
-	if len(originalVersions) != 1 {
-		t.Fatalf("expected original historical version metadata to remain after rollback, got %d versions", len(originalVersions))
+	if len(originalVersions) != 0 {
+		t.Fatalf("expected committed restore to move original history, got %+v", originalVersions)
 	}
-	newVersions, versionsErr := fs.versions.GetVersions(ctx, newPath)
+	newVersions, versionsErr := fs.versions.GetVersions(ctx, destinationPath)
 	if versionsErr != nil {
-		t.Fatalf("GetVersions(new path) error: %v", versionsErr)
+		t.Fatalf("GetVersions(destination) error: %v", versionsErr)
 	}
-	if len(newVersions) != 0 {
-		t.Fatalf("expected no version metadata under restored path after rollback, got %d versions", len(newVersions))
+	if len(newVersions) != 1 {
+		t.Fatalf("expected committed restore history at destination, got %+v", newVersions)
+	}
+	operations, operationErr := fs.versions.ListTrashOperations(ctx)
+	if operationErr != nil || len(operations) != 1 || operations[0].ID != operationID || !bytes.Equal(operations[0].ParticipantPayload, participantPayload) {
+		t.Fatalf("pending Trash operations = %+v, %v, want committed restore %q", operations, operationErr, operationID)
+	}
+	if mutationErr := fs.Mkdir(ctx, "/blocked-by-restore-participant"); !errors.Is(mutationErr, ErrTrashRecoveryRequired) {
+		t.Fatalf("Mkdir() while participant recovery is required error = %v, want ErrTrashRecoveryRequired", mutationErr)
+	}
+
+	restoreRecorder.applyErr = nil
+	report, recoveryErr := fs.RecoverTrashTransfers(ctx)
+	if recoveryErr != nil {
+		t.Fatalf("RecoverTrashTransfers() error: %v", recoveryErr)
+	}
+	if report.RolledForward != 1 || report.RolledBack != 0 || report.Completed != 0 || len(report.Blocked) != 0 {
+		t.Fatalf("RecoverTrashTransfers() report = %+v, want one roll-forward", report)
+	}
+	recoveredOperationID := requireTrashRestoreParticipantCalls(t, restoreRecorder, originalPath, destinationPath, participantPayload, 2)
+	if recoveredOperationID != operationID {
+		t.Fatalf("recovered participant operation ID = %q, want %q", recoveredOperationID, operationID)
+	}
+	if _, statErr := os.Stat(filepath.Join(fs.trashRoot, items[0].ID)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("Trash source status after participant recovery = %v, want removed", statErr)
+	}
+	operations, operationErr = fs.versions.ListTrashOperations(ctx)
+	if operationErr != nil || len(operations) != 0 {
+		t.Fatalf("ListTrashOperations() after participant recovery = %+v, %v, want empty", operations, operationErr)
+	}
+	for _, decision := range []string{trashTransferPrepared, trashTransferCopying, trashTransferReady, trashTransferCommitted, trashTransferCompleted} {
+		rel := filepath.FromSlash(trashTransferJournalRel(operationID, decision))
+		if _, journalErr := fs.trashRootHandle.Lstat(rel); !errors.Is(journalErr, os.ErrNotExist) {
+			t.Fatalf("Lstat(%s journal) error = %v, want os.ErrNotExist", decision, journalErr)
+		}
+	}
+	if mutationErr := fs.Mkdir(ctx, "/after-restore-participant-recovery"); mutationErr != nil {
+		t.Fatalf("Mkdir() after participant recovery error: %v", mutationErr)
 	}
 }
 
@@ -10656,7 +11046,7 @@ func TestFileSystem_AcquireGCLock_BlocksMutationsUntilReleased(t *testing.T) {
 
 	locked := make(chan struct{})
 	go func() {
-		releaseMutation := fs.beginMutation()
+		releaseMutation, _ := fs.beginMutation(context.Background())
 		close(locked)
 		releaseMutation()
 	}()
@@ -10720,7 +11110,7 @@ func TestFileSystem_AcquireGCLock_ReleasesLockOnSnapshotError(t *testing.T) {
 
 	locked := make(chan struct{})
 	go func() {
-		releaseMutation := fs.beginMutation()
+		releaseMutation, _ := fs.beginMutation(context.Background())
 		close(locked)
 		releaseMutation()
 	}()

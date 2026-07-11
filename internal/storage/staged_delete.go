@@ -195,6 +195,10 @@ func (fs *FileSystem) openDeleteWitness(name string, root FileInfo) (*os.File, o
 }
 
 func (fs *FileSystem) stageDeleteTargetLocked(ctx context.Context, name string, expected DeleteTargetSnapshot, beforeCapture func() error) (*stagedDeleteTarget, error) {
+	return fs.stageDeleteTargetAtLocked(ctx, name, expected, beforeCapture, "")
+}
+
+func (fs *FileSystem) stageDeleteTargetAtLocked(ctx context.Context, name string, expected DeleteTargetSnapshot, beforeCapture func() error, plannedStageRel string) (*stagedDeleteTarget, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -236,10 +240,22 @@ func (fs *FileSystem) stageDeleteTargetLocked(ctx context.Context, name string, 
 	}
 	root := &storagePathRoot{absRoot: fs.workspace.Root(), handle: fs.filesRootHandle}
 	witnessIdentity := deleteStageIdentity(witnessInfo)
-	for range 32 {
-		stageRel, err := newDeleteStageRelativeName(target.originalRel)
-		if err != nil {
-			return abort(err)
+	attempts := 32
+	if plannedStageRel != "" {
+		plannedStageRel = filepath.Clean(plannedStageRel)
+		if filepath.IsAbs(plannedStageRel) || plannedStageRel == "." || filepath.Dir(plannedStageRel) != filepath.Dir(target.originalRel) {
+			return abort(ErrDeleteTargetChanged)
+		}
+		attempts = 1
+	}
+	for range attempts {
+		stageRel := plannedStageRel
+		if stageRel == "" {
+			var err error
+			stageRel, err = newDeleteStageRelativeName(target.originalRel)
+			if err != nil {
+				return abort(err)
+			}
 		}
 		stageAbs := storageAbsolutePath(root, stageRel)
 		if err := fs.captureDeleteMountBoundary(fs.workspace.Root()).checkHostTree(fs.workspace.FullPath(name)); err != nil {
@@ -277,6 +293,9 @@ func (fs *FileSystem) stageDeleteTargetLocked(ctx context.Context, name string, 
 				)
 			}
 			if errors.Is(err, os.ErrExist) {
+				if plannedStageRel != "" {
+					return abort(ErrAlreadyExists)
+				}
 				continue
 			}
 			if errors.Is(err, ErrDeleteTargetChanged) {

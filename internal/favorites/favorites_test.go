@@ -15,7 +15,17 @@ import (
 func writeFavoritesFixture(t *testing.T, path string, favorites []Favorite) {
 	t.Helper()
 
-	data, err := json.Marshal(favorites)
+	favoritePointers := make([]*Favorite, 0, len(favorites))
+	for index := range favorites {
+		favorite := favorites[index]
+		favoritePointers = append(favoritePointers, &favorite)
+	}
+	data, err := json.Marshal(favoritesStoreState{
+		Version:                favoritesStoreVersion,
+		Favorites:              favoritePointers,
+		TrashDeleteOperations:  map[string]*trashDeleteOperation{},
+		TrashRestoreOperations: map[string]*trashRestoreOperation{},
+	})
 	if err != nil {
 		t.Fatalf("failed to marshal favorites fixture: %v", err)
 	}
@@ -203,6 +213,9 @@ func TestNewStore_RecoversFromCorruptFavoritesFile(t *testing.T) {
 	if count := store.Count("user1"); count != 0 {
 		t.Fatalf("expected recovered store to start empty, got %d favorites", count)
 	}
+	if store.trashDeleteOperations == nil || store.trashRestoreOperations == nil {
+		t.Fatal("corrupt recovery did not initialize Trash operation maps")
+	}
 
 	entries, readErr := os.ReadDir(tmpDir)
 	if readErr != nil {
@@ -218,6 +231,12 @@ func TestNewStore_RecoversFromCorruptFavoritesFile(t *testing.T) {
 	if !foundBackup {
 		t.Fatal("expected corrupt favorites backup to be created")
 	}
+	if !store.RecoveredFromCorruption() {
+		t.Fatal("expected recovered favorites store to report corruption recovery")
+	}
+	if _, statErr := os.Stat(favoritesStoreRecoveryMarkerPath(storePath)); statErr != nil {
+		t.Fatalf("expected durable recovery marker, got %v", statErr)
+	}
 
 	if _, err := store.Add("user1", "/docs/file.txt", "restored"); err != nil {
 		t.Fatalf("Add() after recovery error: %v", err)
@@ -230,6 +249,48 @@ func TestNewStore_RecoversFromCorruptFavoritesFile(t *testing.T) {
 	if count := reloaded.Count("user1"); count != 1 {
 		t.Fatalf("expected recovered store to persist new favorites, got %d", count)
 	}
+	if !reloaded.RecoveredFromCorruption() {
+		t.Fatal("reload lost durable favorites corruption recovery state")
+	}
+	if err := os.Remove(favoritesStoreRecoveryMarkerPath(storePath)); err != nil {
+		t.Fatalf("Remove(recovery marker) error: %v", err)
+	}
+	cleared, clearErr := NewStore(storePath)
+	if clearErr != nil {
+		t.Fatalf("NewStore() after marker removal error: %v", clearErr)
+	}
+	if cleared.RecoveredFromCorruption() {
+		t.Fatal("favorites store remained recovery-blocked after explicit marker removal")
+	}
+}
+
+func TestNewStore_RecoversFromTruncatedFavoritesFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "favorites.json")
+	if err := os.WriteFile(storePath, []byte(`{"version":1,"favorites":[`), 0o600); err != nil {
+		t.Fatalf("WriteFile(favorites.json) error: %v", err)
+	}
+
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	if !store.RecoveredFromCorruption() {
+		t.Fatal("truncated favorites store did not report corruption recovery")
+	}
+	if _, err := os.Stat(favoritesStoreRecoveryMarkerPath(storePath)); err != nil {
+		t.Fatalf("expected durable recovery marker, got %v", err)
+	}
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatalf("ReadDir() error: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "favorites.json.corrupt.") {
+			return
+		}
+	}
+	t.Fatal("expected truncated favorites backup to be created")
 }
 
 func TestNewStore_LoadNormalizesAndDropsInvalidPaths(t *testing.T) {
@@ -244,7 +305,17 @@ func TestNewStore_LoadNormalizesAndDropsInvalidPaths(t *testing.T) {
 		{Path: "   ", UserID: "user1", CreatedAt: time.Now(), Note: "blank"},
 		{Path: ".", UserID: "user1", CreatedAt: time.Now(), Note: "root-like"},
 	}
-	data, err := json.Marshal(legacy)
+	legacyPointers := make([]*Favorite, 0, len(legacy))
+	for index := range legacy {
+		legacyFavorite := legacy[index]
+		legacyPointers = append(legacyPointers, &legacyFavorite)
+	}
+	data, err := json.Marshal(favoritesStoreState{
+		Version:                favoritesStoreVersion,
+		Favorites:              legacyPointers,
+		TrashDeleteOperations:  map[string]*trashDeleteOperation{},
+		TrashRestoreOperations: map[string]*trashRestoreOperation{},
+	})
 	if err != nil {
 		t.Fatalf("Marshal(legacy favorites) error: %v", err)
 	}
@@ -291,22 +362,22 @@ func TestNewStore_LoadNormalizesAndDropsInvalidPaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(favorites.json) error: %v", err)
 	}
-	var persisted []Favorite
+	var persisted favoritesStoreState
 	if err := json.Unmarshal(data, &persisted); err != nil {
 		t.Fatalf("Unmarshal(persisted favorites) error: %v", err)
 	}
-	if len(persisted) != 2 {
-		t.Fatalf("expected normalized favorites file to contain two entries, got %d", len(persisted))
+	if len(persisted.Favorites) != 2 {
+		t.Fatalf("expected normalized favorites file to contain two entries, got %d", len(persisted.Favorites))
 	}
-	persistedByPath := make(map[string]Favorite, len(persisted))
-	for _, favorite := range persisted {
-		persistedByPath[favorite.Path] = favorite
+	persistedByPath := make(map[string]Favorite, len(persisted.Favorites))
+	for _, favorite := range persisted.Favorites {
+		persistedByPath[favorite.Path] = *favorite
 	}
 	if _, ok := persistedByPath["/docs/report.pdf"]; !ok {
-		t.Fatalf("expected normalized report favorite to be persisted, got %+v", persisted)
+		t.Fatalf("expected normalized report favorite to be persisted, got %+v", persisted.Favorites)
 	}
 	if _, ok := persistedByPath["/docs/dot.pdf"]; !ok {
-		t.Fatalf("expected normalized legacy dot favorite to be persisted, got %+v", persisted)
+		t.Fatalf("expected normalized legacy dot favorite to be persisted, got %+v", persisted.Favorites)
 	}
 }
 
@@ -346,7 +417,7 @@ func TestNewStore_LoadPreservesWhitespaceInPath(t *testing.T) {
 func TestNewStore_RejectsNullFavoriteEntry(t *testing.T) {
 	tmpDir := t.TempDir()
 	storePath := filepath.Join(tmpDir, "favorites.json")
-	if err := os.WriteFile(storePath, []byte("[null]"), 0600); err != nil {
+	if err := os.WriteFile(storePath, []byte(`{"version":1,"favorites":[null],"trash_delete_operations":{},"trash_restore_operations":{}}`), 0600); err != nil {
 		t.Fatalf("WriteFile(favorites.json) error: %v", err)
 	}
 
@@ -380,7 +451,12 @@ func TestStore_SaveFavoritesState_PersistsCanonicalOrder(t *testing.T) {
 	}
 
 	for i := 0; i < 64; i++ {
-		if err := saveFavoritesState(storePath, dataByUser); err != nil {
+		if err := saveFavoritesState(
+			storePath,
+			dataByUser,
+			map[string]*trashDeleteOperation{},
+			map[string]*trashRestoreOperation{},
+		); err != nil {
 			t.Fatalf("saveFavoritesState() error: %v", err)
 		}
 
@@ -389,10 +465,11 @@ func TestStore_SaveFavoritesState_PersistsCanonicalOrder(t *testing.T) {
 			t.Fatalf("ReadFile(favorites.json) error: %v", err)
 		}
 
-		var persisted []Favorite
-		if err := json.Unmarshal(data, &persisted); err != nil {
+		var state favoritesStoreState
+		if err := json.Unmarshal(data, &state); err != nil {
 			t.Fatalf("Unmarshal(persisted favorites) error: %v", err)
 		}
+		persisted := state.Favorites
 		if len(persisted) != len(expected) {
 			t.Fatalf("persisted favorite count = %d, want %d", len(persisted), len(expected))
 		}
@@ -441,9 +518,9 @@ func TestNewStore_ReturnsErrorWhenCorruptFavoritesBackupSyncFails(t *testing.T) 
 	}()
 
 	if _, err := NewStore(storePath); err == nil {
-		t.Fatal("expected NewStore() to fail when corrupt favorites backup sync fails")
-	} else if !strings.Contains(err.Error(), "sync corrupt favorites directory") {
-		t.Fatalf("expected corrupt favorites sync failure in error, got %v", err)
+		t.Fatal("expected NewStore() to fail when recovery marker sync fails")
+	} else if !strings.Contains(err.Error(), "persist favorites store recovery marker") {
+		t.Fatalf("expected recovery marker sync failure in error, got %v", err)
 	}
 
 	if _, statErr := os.Stat(storePath); statErr != nil {
@@ -691,10 +768,7 @@ func TestStoreEmptyFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	storePath := filepath.Join(tmpDir, "favorites.json")
 
-	// Write empty JSON array
-	if err := os.WriteFile(storePath, []byte("[]"), 0644); err != nil {
-		t.Fatalf("failed to write empty file: %v", err)
-	}
+	writeFavoritesFixture(t, storePath, []Favorite{})
 
 	store, err := NewStore(storePath)
 	if err != nil {
@@ -703,6 +777,38 @@ func TestStoreEmptyFile(t *testing.T) {
 
 	if store.Count("anyuser") != 0 {
 		t.Error("expected 0 favorites for new user")
+	}
+}
+
+func TestNewStore_DoesNotLoadArrayOnlyFormat(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "favorites.json")
+	legacy := []Favorite{{
+		Path:      "/docs/legacy.txt",
+		UserID:    "user1",
+		CreatedAt: time.Unix(1, 0),
+	}}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("Marshal(array-only store) error: %v", err)
+	}
+	if err := os.WriteFile(storePath, data, 0o600); err != nil {
+		t.Fatalf("WriteFile(array-only store) error: %v", err)
+	}
+
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("NewStore(array-only store) error: %v", err)
+	}
+	if store.Count("user1") != 0 {
+		t.Fatal("array-only store was loaded as the versioned format")
+	}
+	matches, err := filepath.Glob(storePath + ".corrupt.*")
+	if err != nil {
+		t.Fatalf("Glob(array-only backup) error: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("array-only backup count = %d, want 1", len(matches))
 	}
 }
 

@@ -10,8 +10,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-
-	"github.com/seanbao/mnemonas/internal/versionstore"
 )
 
 func installStagedDeleteHashCounters(t *testing.T, fs *FileSystem) (*atomic.Int64, *atomic.Int64, *atomic.Int64) {
@@ -35,6 +33,14 @@ func installStagedDeleteHashCounters(t *testing.T, fs *FileSystem) (*atomic.Int6
 	fs.hashStorageCopiedFile = func(file *os.File) (string, error) {
 		destinationHashes.Add(1)
 		return hashOpenWorkspaceFile(file)
+	}
+	fs.hashTrashTransferFile = func(ctx context.Context, root *storagePathRoot, _ string, file *os.File) (string, error) {
+		if root != nil && root.handle == fs.filesRootHandle {
+			sourceHashes.Add(1)
+		} else {
+			destinationHashes.Add(1)
+		}
+		return hashOpenWorkspaceFileContext(ctx, file)
 	}
 
 	return &liveHashes, &sourceHashes, &destinationHashes
@@ -97,11 +103,11 @@ func TestFileSystemStagedTrashDeleteConfirmedFileHashBudget(t *testing.T) {
 	if got := sourceHashes.Load(); got != 4 {
 		t.Errorf("staged source content hash count = %d, want 4", got)
 	}
-	if got := destinationHashes.Load(); got != 3 {
-		t.Errorf("trash destination content hash count = %d, want 3", got)
+	if got := destinationHashes.Load(); got != 6 {
+		t.Errorf("trash destination content hash count = %d, want 6", got)
 	}
-	if got := liveHashes.Load() + sourceHashes.Load() + destinationHashes.Load(); got != 9 {
-		t.Errorf("total delete content hash count = %d, want 9", got)
+	if got := liveHashes.Load() + sourceHashes.Load() + destinationHashes.Load(); got != 12 {
+		t.Errorf("total delete content hash count = %d, want 12", got)
 	}
 	items, err := fs.ListTrash(ctx)
 	if err != nil || len(items) != 1 || items[0].OriginalPath != targetPath {
@@ -220,13 +226,6 @@ func TestFileSystemStagedTrashDeleteRejectsPostHashDriftBeforeBusinessCommit(t *
 			}
 			intent := prepareObservedDeleteForTest(t, fs, targetPath)
 
-			var metadataCalls atomic.Int64
-			originalAddTrashMetadata := fs.addTrashMetadata
-			fs.addTrashMetadata = func(ctx context.Context, item *versionstore.TrashItem) error {
-				metadataCalls.Add(1)
-				return originalAddTrashMetadata(ctx, item)
-			}
-
 			var sourceStagePath string
 			var trashContentPath string
 			var preservedPath string
@@ -245,46 +244,63 @@ func TestFileSystemStagedTrashDeleteRejectsPostHashDriftBeforeBusinessCommit(t *
 			t.Cleanup(func() { afterDeleteTrashContentHash = originalHook })
 
 			err := commitPreparedDeleteForTest(fs, intent)
-			if !errors.Is(err, ErrDeleteTargetChanged) {
-				t.Fatalf("DeleteWithExpectedPolicyAndTarget(%s) error = %v, want ErrDeleteTargetChanged", targetPath, err)
+			if !errors.Is(err, ErrDeleteTargetChanged) || !errors.Is(err, ErrTrashRecoveryRequired) {
+				t.Fatalf("DeleteWithExpectedPolicyAndTarget(%s) error = %v, want target drift and recovery gate", targetPath, err)
 			}
+			recovery := requireJournaledTrashRecovery(t, fs, err)
 			if sourceStagePath == "" || trashContentPath == "" || preservedPath == "" {
 				t.Fatalf("post-hash hook paths = source %q, destination %q, preserved %q", sourceStagePath, trashContentPath, preservedPath)
-			}
-			if got := metadataCalls.Load(); got != 0 {
-				t.Fatalf("trash metadata commit calls = %d, want 0", got)
 			}
 			items, listErr := fs.ListTrash(ctx)
 			if listErr != nil || len(items) != 0 {
 				t.Fatalf("ListTrash() after rejected delete = %+v, %v; want empty", items, listErr)
 			}
-
-			if testCase.sourceMutation {
-				if testCase.directory {
-					preservedPath = filepath.Join(fs.workspace.FullPath(targetPath), filepath.Base(preservedPath))
-				} else {
-					preservedPath = fs.workspace.FullPath(targetPath)
-				}
+			operations, operationErr := fs.versions.ListTrashOperations(ctx)
+			if operationErr != nil || len(operations) != 0 {
+				t.Fatalf("ListTrashOperations() after rejected delete = %+v, %v; want empty", operations, operationErr)
 			}
+			requireJournaledTrashMutationGate(t, fs)
+
 			preserved, readErr := os.ReadFile(preservedPath)
 			if readErr != nil || string(preserved) != preservedContent {
 				t.Fatalf("preserved unknown content at %s = %q, %v; want %q", preservedPath, preserved, readErr, preservedContent)
 			}
+			if got := journaledTrashWorkspaceStagePath(t, fs, recovery); got != sourceStagePath {
+				t.Fatalf("recovery workspace stage = %q, want %q", got, sourceStagePath)
+			}
 			if testCase.sourceMutation {
-				if _, statErr := fs.Stat(ctx, targetPath); statErr != nil {
-					t.Fatalf("Stat(%s) after source drift error = %v, want same-inode source restored without replacement", targetPath, statErr)
+				if _, statErr := fs.Stat(ctx, targetPath); !errors.Is(statErr, ErrNotFound) {
+					t.Fatalf("Stat(%s) after source drift error = %v, want staged source hidden", targetPath, statErr)
 				}
 				if testCase.directory {
-					baseline, readErr := os.ReadFile(fs.workspace.FullPath(baselinePath))
+					baseline, readErr := os.ReadFile(filepath.Join(sourceStagePath, "baseline.bin"))
 					if readErr != nil || string(baseline) != "original" {
-						t.Fatalf("restored baseline %s = %q, %v; want original", baselinePath, baseline, readErr)
+						t.Fatalf("staged baseline %s = %q, %v; want original", baselinePath, baseline, readErr)
 					}
 				}
 				return
 			}
-			baseline, readErr := os.ReadFile(fs.workspace.FullPath(baselinePath))
+			stagedBaseline := sourceStagePath
+			if testCase.directory {
+				stagedBaseline = filepath.Join(sourceStagePath, "baseline.bin")
+			}
+			baseline, readErr := os.ReadFile(stagedBaseline)
 			if readErr != nil || string(baseline) != "original" {
-				t.Fatalf("restored baseline %s = %q, want original", baselinePath, baseline)
+				t.Fatalf("staged baseline %s = %q, %v; want original", baselinePath, baseline, readErr)
+			}
+			if err := os.RemoveAll(filepath.Dir(trashContentPath)); err != nil {
+				t.Fatalf("RemoveAll(untrusted private replica) error: %v", err)
+			}
+			report, recoveryErr := fs.RecoverTrashTransfers(ctx)
+			if recoveryErr != nil {
+				t.Fatalf("RecoverTrashTransfers() after private replica removal error: %v", recoveryErr)
+			}
+			if report.RolledBack != 1 || len(report.Blocked) != 0 {
+				t.Fatalf("RecoverTrashTransfers() report = %+v, want one rollback", report)
+			}
+			baseline, readErr = os.ReadFile(fs.workspace.FullPath(baselinePath))
+			if readErr != nil || string(baseline) != "original" {
+				t.Fatalf("recovered baseline %s = %q, %v; want original", baselinePath, baseline, readErr)
 			}
 		})
 	}

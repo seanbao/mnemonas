@@ -129,6 +129,9 @@ type Server struct {
 	shareExpiryReminderMu            sync.Mutex
 	shareExpiryReminderSent          map[string]time.Time
 	shareExpiryReminderCancel        context.CancelFunc
+	backgroundTasksMu                sync.Mutex
+	backgroundTasksStarted           bool
+	closed                           bool
 	startTime                        time.Time
 	appVersion                       string
 	buildTime                        string
@@ -1191,7 +1194,6 @@ const (
 	auditWarningHeader                  = `199 MnemoNAS "activity log persistence failed"`
 	workspaceMutationWarningHeader      = `199 MnemoNAS "workspace mutation persistence incomplete"`
 	scrubResultPersistenceWarningHeader = `199 MnemoNAS "scrub result persistence incomplete"`
-	trashRestoreMetadataWarningHeader   = `199 MnemoNAS "trash restore metadata reconciliation failed"`
 	deleteCleanupWarningHeader          = `199 MnemoNAS "delete cleanup incomplete"`
 	trashDeleteCleanupWarningHeader     = `199 MnemoNAS "trash delete cleanup incomplete"`
 )
@@ -1422,6 +1424,9 @@ type ServerConfig struct {
 	BuildTime    string
 	ActiveWebDAV *WebDAVRuntimeConfig
 	UpdateWebDAV func(WebDAVRuntimeConfig)
+	// DeferBackgroundTasks leaves API-owned schedulers stopped until
+	// StartBackgroundTasks is called explicitly.
+	DeferBackgroundTasks bool
 }
 
 func serverBuildMetadata(cfg *ServerConfig) (string, string) {
@@ -1563,9 +1568,6 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 		} else {
 			s.backupManager = backupManager
 			logger.Info().Str("path", cfg.BackupRoot).Msg("Backup manager initialized")
-			if backupManager.StartScheduler(context.Background()) {
-				logger.Info().Msg("Backup scheduler started")
-			}
 		}
 	}
 
@@ -1581,11 +1583,6 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 		}
 	}
 	s.configureDiskHealthActivityRecorder()
-	if cfg != nil && cfg.Config != nil {
-		if s.startScrubScheduler(context.Background(), cfg.Config.Maintenance.Scrub) {
-			logger.Info().Msg("Scrub scheduler started")
-		}
-	}
 
 	// Initialize auth if enabled
 	if cfg != nil && cfg.AuthEnabled {
@@ -1662,9 +1659,6 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 		} else {
 			logger.Info().Msg("File sharing configured but currently disabled")
 		}
-		if s.startShareExpiryReminderScheduler(context.Background()) {
-			logger.Info().Msg("Share expiry reminder scheduler started")
-		}
 	}
 
 	// Initialize favorites handler whenever a store is configured so runtime
@@ -1686,11 +1680,55 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 	}
 	if s.fs != nil {
 		s.fs.SetPathChangeHooks(s.handlePathRenamed, s.handlePathDeleted)
+		s.fs.SetTrashParticipantHooks(newDurableTrashParticipantHooks(s))
 	}
 
 	s.setupRoutes()
+	if cfg == nil || !cfg.DeferBackgroundTasks {
+		s.StartBackgroundTasks(context.Background())
+	}
 	constructed = true
 	return s, nil
+}
+
+// RecoverTrashTransfers reconciles live Trash transfers after durable API
+// participants have been initialized and registered with the filesystem.
+func (s *Server) RecoverTrashTransfers(ctx context.Context) (storage.TrashTransferRecoveryReport, error) {
+	if s == nil || s.fs == nil {
+		return storage.TrashTransferRecoveryReport{}, errors.New("filesystem not initialized")
+	}
+	return s.fs.RecoverTrashTransfers(ctx)
+}
+
+// StartBackgroundTasks starts API-owned schedulers once. Startup callers may
+// defer this until storage recovery has completed.
+func (s *Server) StartBackgroundTasks(ctx context.Context) bool {
+	if s == nil {
+		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	s.backgroundTasksMu.Lock()
+	defer s.backgroundTasksMu.Unlock()
+	if s.backgroundTasksStarted || s.closed {
+		return false
+	}
+	s.backgroundTasksStarted = true
+
+	if s.backupManager != nil && s.backupManager.StartScheduler(ctx) {
+		s.logger.Info().Msg("Backup scheduler started")
+	}
+	if cfg := s.currentConfig(); cfg != nil {
+		if s.startScrubScheduler(ctx, cfg.Maintenance.Scrub) {
+			s.logger.Info().Msg("Scrub scheduler started")
+		}
+	}
+	if s.startShareExpiryReminderScheduler(ctx) {
+		s.logger.Info().Msg("Share expiry reminder scheduler started")
+	}
+	return true
 }
 
 func throttleExceptPaths(limit int, bypassPaths ...string) func(http.Handler) http.Handler {
@@ -2090,6 +2128,9 @@ func (s *Server) Close() error {
 	if s == nil {
 		return nil
 	}
+	s.backgroundTasksMu.Lock()
+	s.closed = true
+	s.backgroundTasksMu.Unlock()
 	s.scrubSchedulerMu.Lock()
 	if s.scrubSchedulerCancel != nil {
 		s.scrubSchedulerCancel()
@@ -5993,6 +6034,10 @@ func (a *fileSystemAdapter) ReadDir(ctx context.Context, filePath string) ([]*st
 	return a.fs.ReadDir(ctx, filePath)
 }
 
+func (a *fileSystemAdapter) AcquireMutationLease(ctx context.Context) (share.MutationLease, error) {
+	return a.fs.AcquireMutationLease(ctx)
+}
+
 // zerologMiddleware is a request logging middleware using zerolog
 func zerologMiddleware(logger zerolog.Logger) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
@@ -6257,21 +6302,6 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 		message = "file restored with persistence warning"
 		responseData["warning"] = true
 	}
-	if err := s.restoreDeletedPathState(item.OriginalPath, activityPath, item.RestoreData); err != nil {
-		markTrashRestoreMetadataWarningHeaders(w)
-		s.logger.Warn().Err(err).Str("path", activityPath).Msg("failed to restore trash-linked metadata")
-		if activityDetails == nil {
-			activityDetails = map[string]string{}
-		}
-		activityDetails["metadata_restore"] = "failed"
-		if restorePersistenceWarning {
-			message = "file restored with warnings"
-		} else {
-			message = "file restored with metadata warning"
-		}
-		responseData["warning"] = true
-	}
-
 	// Log activity
 	s.LogActivityWithWarning(w, r, activity.ActionTrashRestore, activityPath, activityDetails)
 
@@ -7414,19 +7444,6 @@ func markAuditFailureHeaders(w http.ResponseWriter) {
 		}
 	}
 	headers.Add("Warning", auditWarningHeader)
-}
-
-func markTrashRestoreMetadataWarningHeaders(w http.ResponseWriter) {
-	if w == nil {
-		return
-	}
-	headers := w.Header()
-	for _, warningValue := range headers.Values("Warning") {
-		if warningValue == trashRestoreMetadataWarningHeader {
-			return
-		}
-	}
-	headers.Add("Warning", trashRestoreMetadataWarningHeader)
 }
 
 func markScrubResultPersistenceWarningHeaders(w http.ResponseWriter) {
@@ -12447,10 +12464,32 @@ func (s *Server) handleAddFavorite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if favoritePath != "" {
+		if s.fs == nil {
+			writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "filesystem unavailable", "FILESYSTEM_UNAVAILABLE")
+			return
+		}
+		lease, err := s.fs.AcquireMutationLease(r.Context())
+		if err != nil {
+			s.respondInternalError(w, "acquire favorite mutation lease", err)
+			return
+		}
+		defer lease.Release()
+		if _, err := lease.Stat(r.Context(), favoritePath); err != nil {
+			if isStorageNotFound(err) || errors.Is(err, storage.ErrNotDir) {
+				writeFavoritesErrorResponse(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
+				return
+			}
+			s.respondInternalError(w, "stat favorite path", err)
+			return
+		}
 		if err := s.authorizeUserConcreteReadPath(r.Context(), favoritePath); err != nil {
 			respondPathAccessError(w, err)
 			return
 		}
+	}
+	if err := r.Context().Err(); err != nil {
+		s.respondInternalError(w, "add favorite request canceled", err)
+		return
 	}
 	rec := newBufferedResponseRecorder()
 	s.favoritesHandler.AddFavorite(rec, r)

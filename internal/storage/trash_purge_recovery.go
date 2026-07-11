@@ -287,6 +287,9 @@ func (fs *FileSystem) prepareTrashPurge(ctx context.Context, item *versionstore.
 	if err != nil {
 		return nil, fmt.Errorf("generate Trash purge operation ID: %w", err)
 	}
+	if err := fs.preflightTrashPurgeParticipant(ctx, operationID, item.OriginalPath, item.RestoreData); err != nil {
+		return nil, fmt.Errorf("preflight Trash purge participant for %s: %w", item.ID, err)
+	}
 	itemRel := filepath.FromSlash(item.ID)
 	manifest, _, err := fs.scanTrashPurgeTree(ctx, itemRel, nil, false)
 	if err != nil {
@@ -752,14 +755,46 @@ func (fs *FileSystem) finishTrashPurge(ctx context.Context, operation *trashPurg
 	if operation == nil || operation.record.Decision != trashPurgeCommitted {
 		return errors.New("committed Trash purge operation is missing")
 	}
+	recoveryCtx := context.WithoutCancel(ctx)
 	item := operation.record.Item.storeItem()
-	if err := fs.cleanupTrashPurgeVersions(ctx, item, operation.record.VersionHashes); err != nil {
-		return err
+	if err := fs.cleanupTrashPurgeVersions(recoveryCtx, item, operation.record.VersionHashes); err != nil {
+		durabilityErr := &trashDeleteDurabilityError{err: fmt.Errorf("cleanup version state after Trash purge for %s: %w", item.ID, err)}
+		recoveryErr := fs.trashRecoveryRequired(operation.record.OperationID, durabilityErr)
+		fs.blockTrashMutationsLocked(recoveryErr)
+		return recoveryErr
+	}
+	participantWarning, participantErr := deliverTrashParticipantWithDurabilityRetry(func() error {
+		return fs.completeTrashPurgeParticipant(
+			recoveryCtx,
+			operation.record.OperationID,
+			item.OriginalPath,
+			item.RestoreData,
+		)
+	})
+	if participantErr != nil {
+		recoveryErr := fs.trashRecoveryRequired(
+			operation.record.OperationID,
+			fmt.Errorf("complete Trash purge participant for %s: %w", item.ID, participantErr),
+		)
+		fs.blockTrashMutationsLocked(recoveryErr)
+		return recoveryErr
+	}
+	var completionWarning error
+	if participantWarning != nil {
+		completionWarning = fmt.Errorf("complete Trash purge participant for %s: %w", item.ID, participantWarning)
 	}
 	if err := fs.completeTrashPurgeJournal(operation.record.OperationID); err != nil {
-		return &trashDeleteDurabilityError{err: fmt.Errorf("complete Trash purge journal for %s: %w", item.ID, err)}
+		retentionErr := fs.retainCommittedTrashPurgeJournal(&operation.record)
+		durabilityErr := &trashDeleteDurabilityError{err: errors.Join(
+			completionWarning,
+			fmt.Errorf("complete Trash purge journal for %s: %w", item.ID, err),
+			retentionErr,
+		)}
+		recoveryErr := fs.trashRecoveryRequired(operation.record.OperationID, durabilityErr)
+		fs.blockTrashMutationsLocked(recoveryErr)
+		return recoveryErr
 	}
-	return nil
+	return wrapVisibleMutationWarning(completionWarning)
 }
 
 func (fs *FileSystem) cleanupTrashPurgeVersions(ctx context.Context, item *versionstore.TrashItem, versionHashes []string) error {
@@ -912,7 +947,21 @@ func (fs *FileSystem) recoverCommittedTrashPurge(ctx context.Context, record *tr
 	if err := fs.cleanupTrashPurgeVersions(ctx, record.Item.storeItem(), record.VersionHashes); err != nil {
 		return fmt.Errorf("cleanup version metadata during Trash purge recovery: %w", err)
 	}
-	return fs.completeTrashPurgeJournal(record.OperationID)
+	_, participantErr := deliverTrashParticipantWithDurabilityRetry(func() error {
+		return fs.completeTrashPurgeParticipant(
+			context.WithoutCancel(ctx),
+			record.OperationID,
+			record.Item.OriginalPath,
+			record.Item.RestoreData,
+		)
+	})
+	if participantErr != nil {
+		return fmt.Errorf("complete Trash purge participant during recovery: %w", participantErr)
+	}
+	if err := fs.completeTrashPurgeJournal(record.OperationID); err != nil {
+		return errors.Join(err, fs.retainCommittedTrashPurgeJournal(record))
+	}
+	return nil
 }
 
 func (fs *FileSystem) removeCommittedTrashPurgeStage(target string) error {
@@ -998,6 +1047,31 @@ func (fs *FileSystem) completeTrashPurgeJournal(operationID string) error {
 	return fs.removeTrashPurgeJournalFile(trashPurgeCommittedRel(operationID), true)
 }
 
+func (fs *FileSystem) retainCommittedTrashPurgeJournal(record *trashPurgeJournalRecord) error {
+	if err := validateTrashPurgeJournalRecord(record, trashPurgeCommitted); err != nil {
+		return fmt.Errorf("retain committed Trash purge journal: %w", err)
+	}
+	committedRel := trashPurgeCommittedRel(record.OperationID)
+	existing, err := fs.readTrashPurgeJournalRecord(committedRel, trashPurgeCommitted)
+	if err == nil {
+		if !sameTrashPurgeOperation(existing, record) {
+			return errors.New("retain committed Trash purge journal: existing record does not match purge operation")
+		}
+		return nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("retain committed Trash purge journal: %w", err)
+	}
+	published, publishErr := fs.publishTrashPurgeJournalRecord(record)
+	if !published {
+		return fmt.Errorf("retain committed Trash purge journal: %w", publishErr)
+	}
+	if publishErr != nil {
+		return fmt.Errorf("sync retained committed Trash purge journal: %w", publishErr)
+	}
+	return nil
+}
+
 type trashPurgeRecoveryRecords struct {
 	prepared  *trashPurgeJournalRecord
 	committed *trashPurgeJournalRecord
@@ -1008,7 +1082,7 @@ type trashPurgeRecoveryRecords struct {
 // unverifiable state is retained and returned as a blocking error.
 func (fs *FileSystem) RecoverTrashDeletions(ctx context.Context) (TrashRecoveryReport, error) {
 	var report TrashRecoveryReport
-	release := fs.beginMutation()
+	release := fs.beginRecoveryMutation()
 	defer release()
 	if err := ctx.Err(); err != nil {
 		return report, err
@@ -1147,6 +1221,15 @@ func (fs *FileSystem) RecoverTrashDeletions(ctx context.Context) (TrashRecoveryR
 		} else if operationRecords.prepared != nil {
 			preparedIDs = append(preparedIDs, operationID)
 		}
+	}
+	if err := fs.preflightTrashPurgeParticipantRecovery(ctx, records, committedIDs); err != nil {
+		report.Blocked = uniqueSortedStrings(append(report.Blocked, operationIDs...))
+		report.UntrackedPaths = uniqueSortedStrings(report.UntrackedPaths)
+		fs.trashMutationBlocked = errors.Join(
+			ErrTrashRecoveryRequired,
+			fmt.Errorf("preflight Trash purge participants: %w", err),
+		)
+		return report, fs.trashMutationBlocked
 	}
 
 	var preparedRecoveryErr error

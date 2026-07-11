@@ -309,7 +309,7 @@ func TestFileSystem_EmptyTrashSelection_HardFailureReturnsCompletePartition(t *t
 	}
 }
 
-func TestFileSystem_EmptyTrashSelection_ContinuesAfterCleanupWarning(t *testing.T) {
+func TestFileSystem_EmptyTrashSelection_StopsAfterRecoveryRequiredCleanupWarning(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 	if err := fs.WriteFile(ctx, "/versioned.md", bytes.NewReader([]byte("v1"))); err != nil {
@@ -335,13 +335,13 @@ func TestFileSystem_EmptyTrashSelection_ContinuesAfterCleanupWarning(t *testing.
 
 	result, err := fs.EmptyTrashSelection(ctx, ids, nil)
 	var warning *TrashDeleteWarningError
-	if !errors.As(err, &warning) || !errors.Is(err, cleanupFailure) {
-		t.Fatalf("EmptyTrashSelection() error = %v, want TrashDeleteWarningError", err)
+	if !errors.As(err, &warning) || !errors.Is(err, cleanupFailure) || !errors.Is(err, ErrTrashRecoveryRequired) {
+		t.Fatalf("EmptyTrashSelection() error = %v, want recovery-required TrashDeleteWarningError", err)
 	}
-	if warning.Partial() {
-		t.Fatalf("cleanup-only warning unexpectedly marked partial: %v", err)
+	if !warning.Partial() {
+		t.Fatalf("recovery-required cleanup warning was not marked partial: %v", err)
 	}
-	assertTrashSelectionResult(t, result, []string{ids[0], ids[2]}, nil, []string{"missing"})
+	assertTrashSelectionResult(t, result, []string{ids[0]}, []string{ids[2]}, []string{"missing"})
 }
 
 func TestFileSystem_EmptyTrashSelection_ContextCancellationStopsAtNextItem(t *testing.T) {

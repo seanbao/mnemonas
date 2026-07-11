@@ -693,42 +693,12 @@ func main() {
 	}
 	defer fs.Close()
 
-	trashRecovery, recoveryErr := fs.RecoverTrashDeletions(ctx)
-	if trashRecovery.RolledBack > 0 || trashRecovery.RolledForward > 0 {
-		log.Info().
-			Int("rolled_back", trashRecovery.RolledBack).
-			Int("rolled_forward", trashRecovery.RolledForward).
-			Msg("recovered interrupted Trash deletions")
-	}
-	if len(trashRecovery.UntrackedPaths) > 0 {
-		log.Warn().
-			Strs("paths", trashRecovery.UntrackedPaths).
-			Msg("untracked Trash deletion residue requires manual inspection")
-	}
-	if recoveryErr != nil {
-		log.Fatal().
-			Err(recoveryErr).
-			Strs("operations", trashRecovery.Blocked).
-			Msg("interrupted Trash deletion recovery is blocked; refusing to start writable services")
-	}
-
-	// Cleanup staging files from previous crashes
-	if cleanedFiles, cleanedBytes, cleanErr := fs.CleanupStaging(ctx); cleanErr != nil {
-		log.Warn().Err(cleanErr).Msg("failed to cleanup staging files")
-	} else if cleanedFiles > 0 {
-		log.Info().
-			Int("files", cleanedFiles).
-			Int64("bytes", cleanedBytes).
-			Msg("cleaned up staging files from previous crash")
-	}
-
 	retentionMonitor := storage.NewRetentionMonitor(fs, storage.RetentionMonitorConfig{
 		MaxVersions:   cfg.Storage.Retention.MaxVersions,
 		MaxVersionAge: cfg.Storage.Retention.MaxAge,
 		MinFreeSpace:  cfg.Storage.Retention.MinFreeSpace,
 		SweepInterval: cfg.Storage.Retention.GCInterval,
 	}, log.Logger)
-	retentionMonitor.Start(ctx)
 	defer retentionMonitor.Stop()
 
 	// Create router
@@ -760,24 +730,8 @@ func main() {
 		SMTPFrom:           cfg.Alerts.SMTPFrom,
 		SMTPTo:             cfg.Alerts.SMTPTo,
 	}, cfg.Storage.Root, log.Logger)
-	alertMonitor.Start(ctx)
-	if cfg.Alerts.Enabled {
-		log.Info().
-			Float64("threshold_pct", cfg.Alerts.ThresholdPct).
-			Float64("critical_pct", cfg.Alerts.CriticalPct).
-			Dur("interval", cfg.Alerts.CheckInterval).
-			Msg("storage alerts enabled")
-	}
-
 	diskHealthMonitor := diskhealth.NewMonitor(diskHealthRuntimeConfig(cfg.DiskHealth), alertMonitor, log.Logger)
-	diskHealthMonitor.Start(ctx)
 	defer diskHealthMonitor.Stop()
-	if cfg.DiskHealth.Enabled {
-		log.Info().
-			Int("devices", len(cfg.DiskHealth.Devices)).
-			Dur("interval", cfg.DiskHealth.CheckInterval).
-			Msg("disk health monitoring enabled")
-	}
 
 	var sharedUserStore *auth.UserStore
 	if cfg.Auth.Enabled {
@@ -855,6 +809,7 @@ func main() {
 			}
 			log.Info().Msg("WebDAV disabled at runtime")
 		},
+		DeferBackgroundTasks: true,
 	})
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to create API server")
@@ -864,6 +819,75 @@ func main() {
 			log.Warn().Err(err).Msg("failed to close API server")
 		}
 	}()
+
+	trashRecovery, recoveryErr := fs.RecoverTrashDeletions(ctx)
+	if trashRecovery.RolledBack > 0 || trashRecovery.RolledForward > 0 {
+		log.Info().
+			Int("rolled_back", trashRecovery.RolledBack).
+			Int("rolled_forward", trashRecovery.RolledForward).
+			Msg("recovered interrupted Trash deletions")
+	}
+	if len(trashRecovery.UntrackedPaths) > 0 {
+		log.Warn().
+			Strs("paths", trashRecovery.UntrackedPaths).
+			Msg("untracked Trash deletion residue requires manual inspection")
+	}
+	if recoveryErr != nil {
+		log.Fatal().
+			Err(recoveryErr).
+			Strs("operations", trashRecovery.Blocked).
+			Msg("interrupted Trash deletion recovery is blocked; refusing to start writable services")
+	}
+
+	transferRecovery, transferRecoveryErr := apiServer.RecoverTrashTransfers(ctx)
+	if transferRecovery.RolledBack > 0 || transferRecovery.RolledForward > 0 || transferRecovery.Completed > 0 {
+		log.Info().
+			Int("rolled_back", transferRecovery.RolledBack).
+			Int("rolled_forward", transferRecovery.RolledForward).
+			Int("completed", transferRecovery.Completed).
+			Msg("recovered interrupted Trash transfers")
+	}
+	if len(transferRecovery.UntrackedPaths) > 0 {
+		log.Warn().
+			Strs("paths", transferRecovery.UntrackedPaths).
+			Msg("untracked Trash transfer residue requires manual inspection")
+	}
+	if transferRecoveryErr != nil {
+		log.Fatal().
+			Err(transferRecoveryErr).
+			Strs("operations", transferRecovery.Blocked).
+			Msg("interrupted Trash transfer recovery is blocked; refusing to start writable services")
+	}
+
+	// Cleanup staging files only after transfer recovery has reconciled every
+	// path that may still be owned by an interrupted operation.
+	if cleanedFiles, cleanedBytes, cleanErr := fs.CleanupStaging(ctx); cleanErr != nil {
+		log.Warn().Err(cleanErr).Msg("failed to cleanup staging files")
+	} else if cleanedFiles > 0 {
+		log.Info().
+			Int("files", cleanedFiles).
+			Int64("bytes", cleanedBytes).
+			Msg("cleaned up staging files from previous crash")
+	}
+
+	retentionMonitor.Start(ctx)
+	alertMonitor.Start(ctx)
+	if cfg.Alerts.Enabled {
+		log.Info().
+			Float64("threshold_pct", cfg.Alerts.ThresholdPct).
+			Float64("critical_pct", cfg.Alerts.CriticalPct).
+			Dur("interval", cfg.Alerts.CheckInterval).
+			Msg("storage alerts enabled")
+	}
+	diskHealthMonitor.Start(ctx)
+	if cfg.DiskHealth.Enabled {
+		log.Info().
+			Int("devices", len(cfg.DiskHealth.Devices)).
+			Dur("interval", cfg.DiskHealth.CheckInterval).
+			Msg("disk health monitoring enabled")
+	}
+	apiServer.StartBackgroundTasks(ctx)
+
 	router.Mount("/", apiServer.Router())
 
 	frontendDir := discoverFrontendAssets()

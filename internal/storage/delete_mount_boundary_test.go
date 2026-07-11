@@ -10,6 +10,67 @@ import (
 	"testing"
 )
 
+func requireJournaledTrashRecovery(t *testing.T, fs *FileSystem, err error) *TrashTransferRecoveryRequiredError {
+	t.Helper()
+
+	if !errors.Is(err, ErrTrashRecoveryRequired) {
+		t.Fatalf("operation error = %v, want ErrTrashRecoveryRequired", err)
+	}
+	var recovery *TrashTransferRecoveryRequiredError
+	if !errors.As(err, &recovery) || recovery.OperationID == "" {
+		t.Fatalf("operation error = %v, want identified TrashTransferRecoveryRequiredError", err)
+	}
+	preparedRel := filepath.FromSlash(trashTransferJournalRel(recovery.OperationID, trashTransferPrepared))
+	if _, statErr := fs.trashRootHandle.Lstat(preparedRel); statErr != nil {
+		t.Fatalf("Lstat(prepared transfer journal) error: %v", statErr)
+	}
+	if fs.trashMutationBlocked == nil {
+		t.Fatal("journaled Trash recovery did not activate the global mutation gate")
+	}
+	return recovery
+}
+
+func journaledTrashWorkspaceStagePath(t *testing.T, fs *FileSystem, recovery *TrashTransferRecoveryRequiredError) string {
+	t.Helper()
+
+	wantBase := filepath.Base(storageWorkspaceRelativeName(trashTransferWorkspaceStagePath("/", recovery.OperationID)))
+	for _, inspectionPath := range recovery.InspectionPaths {
+		if filepath.Dir(inspectionPath) == fs.workspace.Root() && filepath.Base(inspectionPath) == wantBase {
+			return inspectionPath
+		}
+	}
+	t.Fatalf("Trash recovery inspection paths = %v, want workspace stage %q", recovery.InspectionPaths, wantBase)
+	return ""
+}
+
+func requireJournaledTrashMutationGate(t *testing.T, fs *FileSystem) {
+	t.Helper()
+
+	blockedPath := "/blocked-by-trash-transfer-recovery"
+	if err := fs.Mkdir(context.Background(), blockedPath); !errors.Is(err, ErrTrashRecoveryRequired) {
+		t.Fatalf("Mkdir() during Trash recovery error = %v, want ErrTrashRecoveryRequired", err)
+	}
+	if _, err := os.Lstat(fs.workspace.FullPath(blockedPath)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Lstat(blocked mutation target) error = %v, want os.ErrNotExist", err)
+	}
+}
+
+func repairPreparedTrashTransferAndRecover(t *testing.T, fs *FileSystem, recovery *TrashTransferRecoveryRequiredError) {
+	t.Helper()
+
+	privateStage := filepath.Join(fs.trashRoot, filepath.FromSlash(trashTransferItemStageRel(recovery.OperationID)))
+	if err := os.RemoveAll(privateStage); err != nil {
+		t.Fatalf("RemoveAll(private Trash stage) error: %v", err)
+	}
+	report, err := fs.RecoverTrashTransfers(context.Background())
+	if err != nil {
+		t.Fatalf("RecoverTrashTransfers() after private-stage repair error: %v", err)
+	}
+	if report.RolledBack != 1 || len(report.Blocked) != 0 {
+		t.Fatalf("RecoverTrashTransfers() report = %+v, want one rollback", report)
+	}
+}
+
 func TestMountPointsFromMountInfoPreservesEscapedPathsAndBindMounts(t *testing.T) {
 	mountInfo := []byte(strings.Join([]string{
 		"21 1 8:1 / / rw,relatime - ext4 /dev/root rw",
@@ -691,6 +752,7 @@ func TestFileSystem_DeleteToTrashPreservesPublishedCopyWhenCleanupBoundaryChange
 	if !errors.Is(err, syncErr) || !errors.Is(err, ErrNotRegular) {
 		t.Fatalf("Delete(published copy cleanup mount) error = %v, want sync error and ErrNotRegular", err)
 	}
+	recovery := requireJournaledTrashRecovery(t, fs, err)
 	var residual *DeleteStageResidualError
 	if !errors.As(err, &residual) {
 		t.Fatalf("Delete(published copy cleanup mount) error = %v, want copied-content residual", err)
@@ -701,14 +763,24 @@ func TestFileSystem_DeleteToTrashPreservesPublishedCopyWhenCleanupBoundaryChange
 	if residual.StagePath != filepath.Join(mountedParent, "content") {
 		t.Fatalf("copied-content residual path = %q, want %q", residual.StagePath, filepath.Join(mountedParent, "content"))
 	}
-	if data, readErr := os.ReadFile(fs.workspace.FullPath("/source.txt")); readErr != nil || string(data) != "value" {
-		t.Fatalf("source after rejected published-copy cleanup = %q, %v", data, readErr)
+	if _, statErr := os.Lstat(fs.workspace.FullPath("/source.txt")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("original source after fail-closed copy = %v, want os.ErrNotExist", statErr)
+	}
+	workspaceStage := journaledTrashWorkspaceStagePath(t, fs, recovery)
+	if data, readErr := os.ReadFile(workspaceStage); readErr != nil || string(data) != "value" {
+		t.Fatalf("staged source after rejected published-copy cleanup = %q, %v", data, readErr)
 	}
 	if data, readErr := os.ReadFile(filepath.Join(mountedParent, "content")); readErr != nil || string(data) != "value" {
 		t.Fatalf("safe published-copy residue = %q, %v", data, readErr)
 	}
 	if items, listErr := fs.ListTrash(ctx); listErr != nil || len(items) != 0 {
 		t.Fatalf("trash metadata after failed copy = %+v, %v; want empty", items, listErr)
+	}
+	requireJournaledTrashMutationGate(t, fs)
+	fs.readDeleteMountPoints = fixedDeleteMountPoints()
+	repairPreparedTrashTransferAndRecover(t, fs, recovery)
+	if data, readErr := os.ReadFile(fs.workspace.FullPath("/source.txt")); readErr != nil || string(data) != "value" {
+		t.Fatalf("source after repaired recovery = %q, %v", data, readErr)
 	}
 }
 
@@ -737,17 +809,28 @@ func TestFileSystem_StagedDeleteRetainsTrashCopyWhenMountAppearsAfterPublish(t *
 	if !errors.Is(err, ErrNotRegular) || !errors.As(err, &residual) {
 		t.Fatalf("Delete(post-publish mount) error = %v, want mount rejection and copied-content residual", err)
 	}
+	recovery := requireJournaledTrashRecovery(t, fs, err)
 	if copiedPath == "" || residual.StagePath != copiedPath {
 		t.Fatalf("copied-content residual path = %q, want %q", residual.StagePath, copiedPath)
 	}
 	if data, readErr := os.ReadFile(copiedPath); readErr != nil || string(data) != "value" {
 		t.Fatalf("retained copied content = %q, %v", data, readErr)
 	}
-	if data, readErr := os.ReadFile(fs.workspace.FullPath(targetPath)); readErr != nil || string(data) != "value" {
-		t.Fatalf("rolled back source = %q, %v", data, readErr)
+	if _, statErr := os.Lstat(fs.workspace.FullPath(targetPath)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("original source after fail-closed copy = %v, want os.ErrNotExist", statErr)
+	}
+	workspaceStage := journaledTrashWorkspaceStagePath(t, fs, recovery)
+	if data, readErr := os.ReadFile(workspaceStage); readErr != nil || string(data) != "value" {
+		t.Fatalf("staged source after post-publish mount = %q, %v", data, readErr)
 	}
 	if items, listErr := fs.ListTrash(ctx); listErr != nil || len(items) != 0 {
 		t.Fatalf("trash metadata after post-publish mount = %+v, %v; want empty", items, listErr)
+	}
+	requireJournaledTrashMutationGate(t, fs)
+	fs.readDeleteMountPoints = fixedDeleteMountPoints()
+	repairPreparedTrashTransferAndRecover(t, fs, recovery)
+	if data, readErr := os.ReadFile(fs.workspace.FullPath(targetPath)); readErr != nil || string(data) != "value" {
+		t.Fatalf("source after repaired recovery = %q, %v", data, readErr)
 	}
 }
 
@@ -838,37 +921,77 @@ func TestFileSystem_RestorePreservesPublishedCopyWhenCleanupBoundaryChanges(t *t
 	}
 }
 
-func TestFileSystem_RollbackSoftDeleteRefusesDirectCopyIntoNewMountBoundary(t *testing.T) {
+func TestFileSystem_RollbackJournaledTrashDeleteRefusesReplicaCleanupAcrossNewMountBoundary(t *testing.T) {
 	fs := setupStandaloneFileSystem(t)
 	ctx := context.Background()
 	if err := fs.WriteFile(ctx, "/rollback.txt", strings.NewReader("value")); err != nil {
 		t.Fatalf("WriteFile(rollback source) error: %v", err)
 	}
 	fs.readDeleteMountPoints = fixedDeleteMountPoints()
-	indexErr := errors.New("delete index failed")
-	metadataErr := errors.New("remove trash metadata failed")
-	fs.deleteFileIndex = func(context.Context, string) error {
-		return indexErr
-	}
-	fs.removeTrashMetadata = func(_ context.Context, id string) error {
-		fs.readDeleteMountPoints = fixedDeleteMountPoints(filepath.Join(fs.trashRoot, id, "content"))
-		return metadataErr
-	}
+	participantErr := errors.New("precommit participant failed")
+	var canonicalContent string
+	fs.SetTrashParticipantHooks(TrashParticipantHooks{
+		PrepareDelete: func(context.Context, string, string) ([]byte, error) {
+			return []byte("participant"), nil
+		},
+		ApplyDelete: func(_ context.Context, _ string, _ string, _ []byte, committed bool) error {
+			if committed {
+				return nil
+			}
+			entries, err := os.ReadDir(fs.trashRoot)
+			if err != nil {
+				return err
+			}
+			for _, entry := range entries {
+				if entry.IsDir() && entry.Name() != trashTransferJournalDir {
+					canonicalContent = filepath.Join(fs.trashRoot, entry.Name(), "content")
+					break
+				}
+			}
+			if canonicalContent == "" {
+				return errors.New("canonical Trash item was not published")
+			}
+			fs.readDeleteMountPoints = fixedDeleteMountPoints(canonicalContent)
+			return participantErr
+		},
+		RollbackDelete: func(context.Context, string, string, []byte) error { return nil },
+		CompleteDelete: completeDeleteParticipantForTest,
+		RecoveryStateReliable: func() error {
+			return nil
+		},
+	})
 
 	err := fs.Delete(ctx, "/rollback.txt")
-	if !errors.Is(err, indexErr) || !errors.Is(err, metadataErr) || !errors.Is(err, ErrNotRegular) {
-		t.Fatalf("Delete(rollback direct copy mount) error = %v, want index, metadata, and ErrNotRegular", err)
+	if !errors.Is(err, participantErr) || !errors.Is(err, ErrNotRegular) {
+		t.Fatalf("Delete(journaled rollback mount) error = %v, want participant error and ErrNotRegular", err)
 	}
-	data, readErr := os.ReadFile(fs.workspace.FullPath("/rollback.txt"))
+	recovery := requireJournaledTrashRecovery(t, fs, err)
+	workspaceStage := journaledTrashWorkspaceStagePath(t, fs, recovery)
+	data, readErr := os.ReadFile(workspaceStage)
 	if readErr != nil || string(data) != "value" {
-		t.Fatalf("workspace source after rejected rollback copy = %q, %v", data, readErr)
+		t.Fatalf("workspace stage after rejected replica cleanup = %q, %v", data, readErr)
 	}
 	items, listErr := fs.ListTrash(ctx)
-	if listErr != nil || len(items) != 1 {
-		t.Fatalf("trash metadata after rejected rollback copy = %+v, %v; want one item", items, listErr)
+	if listErr != nil || len(items) != 0 {
+		t.Fatalf("trash metadata after rejected precommit rollback = %+v, %v; want empty", items, listErr)
 	}
-	if _, statErr := os.Stat(filepath.Join(fs.trashRoot, items[0].ID, "content")); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("trash destination after rejected rollback copy exists: %v", statErr)
+	if data, readErr := os.ReadFile(canonicalContent); readErr != nil || string(data) != "value" {
+		t.Fatalf("canonical replica after rejected cleanup = %q, %v", data, readErr)
+	}
+	requireJournaledTrashMutationGate(t, fs)
+	fs.readDeleteMountPoints = fixedDeleteMountPoints()
+	report, recoveryErr := fs.RecoverTrashTransfers(ctx)
+	if recoveryErr != nil {
+		t.Fatalf("RecoverTrashTransfers() after mount repair error: %v", recoveryErr)
+	}
+	if report.RolledBack != 1 || len(report.Blocked) != 0 {
+		t.Fatalf("RecoverTrashTransfers() report = %+v, want one rollback", report)
+	}
+	if data, readErr := os.ReadFile(fs.workspace.FullPath("/rollback.txt")); readErr != nil || string(data) != "value" {
+		t.Fatalf("workspace source after repaired rollback = %q, %v", data, readErr)
+	}
+	if _, statErr := os.Stat(canonicalContent); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("canonical replica after recovered rollback exists: %v", statErr)
 	}
 }
 

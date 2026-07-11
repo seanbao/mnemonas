@@ -44,6 +44,15 @@ type FileStatProvider interface {
 	ReadDir(ctx context.Context, filePath string) ([]*storage.FileInfo, error)
 }
 
+type MutationLease interface {
+	Stat(ctx context.Context, filePath string) (*storage.FileInfo, error)
+	Release()
+}
+
+type MutationLeaseProvider interface {
+	AcquireMutationLease(ctx context.Context) (MutationLease, error)
+}
+
 type FileSnapshotOpener interface {
 	OpenFileSnapshot(ctx context.Context, filePath string) (*os.File, *storage.FileInfo, error)
 }
@@ -448,14 +457,34 @@ func (h *Handler) CreateShare(w http.ResponseWriter, r *http.Request) {
 		writeShareError(w, http.StatusBadRequest, "invalid permission", "INVALID_PERMISSION")
 		return
 	}
+	prepared, err := h.store.PrepareCreate(opts)
+	if err != nil {
+		if errors.Is(err, errSharePasswordLong) {
+			writeShareError(w, http.StatusBadRequest, "share password must be at most 72 bytes", "PASSWORD_TOO_LONG")
+			return
+		}
+		writeShareError(w, http.StatusInternalServerError, "internal server error", "CREATE_SHARE_FAILED")
+		return
+	}
 
-	statProvider, ok := h.fs.(FileStatProvider)
+	_, ok := h.fs.(FileStatProvider)
 	if !ok {
 		writeShareError(w, http.StatusServiceUnavailable, "filesystem not available", "FILESYSTEM_UNAVAILABLE")
 		return
 	}
+	leaseProvider, ok := h.fs.(MutationLeaseProvider)
+	if !ok {
+		writeShareError(w, http.StatusServiceUnavailable, "filesystem mutation lease unavailable", "FILESYSTEM_UNAVAILABLE")
+		return
+	}
+	mutationLease, err := leaseProvider.AcquireMutationLease(r.Context())
+	if err != nil {
+		writeShareError(w, http.StatusInternalServerError, "internal server error", "CREATE_SHARE_FAILED")
+		return
+	}
+	defer mutationLease.Release()
 
-	info, err := statProvider.Stat(r.Context(), cleanPath)
+	info, err := mutationLease.Stat(r.Context(), cleanPath)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
@@ -476,8 +505,12 @@ func (h *Handler) CreateShare(w http.ResponseWriter, r *http.Request) {
 		writeShareError(w, http.StatusBadRequest, "path is not a folder", "INVALID_SHARE_TYPE")
 		return
 	}
+	if err := r.Context().Err(); err != nil {
+		writeShareError(w, http.StatusInternalServerError, "internal server error", "CREATE_SHARE_FAILED")
+		return
+	}
 
-	share, err := h.store.Create(opts)
+	share, err := h.store.CommitPreparedCreate(prepared)
 	if err != nil {
 		if errors.Is(err, errSharePasswordLong) {
 			writeShareError(w, http.StatusBadRequest, "share password must be at most 72 bytes", "PASSWORD_TOO_LONG")

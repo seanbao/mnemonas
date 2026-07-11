@@ -232,17 +232,27 @@ func runBindMountDeleteHelper(t *testing.T) {
 	if !errors.Is(err, copySyncErr) || !errors.Is(err, ErrNotRegular) {
 		t.Fatalf("Delete(copy cleanup bind mount) error = %v, want sync error and ErrNotRegular", err)
 	}
+	recovery := requireJournaledTrashRecovery(t, fs, err)
 	if mountedCopyParent == "" {
 		t.Fatal("copy cleanup bind mount hook was not reached")
 	}
 	if data, readErr := os.ReadFile(externalCopyContent); readErr != nil || string(data) != "outside-copy-cleanup" {
 		t.Fatalf("external copied-destination sentinel after rejected cleanup = %q, %v", data, readErr)
 	}
-	if data, readErr := os.ReadFile(fs.workspace.FullPath("/copy-cleanup.txt")); readErr != nil || string(data) != "workspace-copy" {
-		t.Fatalf("workspace source after rejected copied-destination cleanup = %q, %v", data, readErr)
+	if _, statErr := os.Lstat(fs.workspace.FullPath("/copy-cleanup.txt")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("original source after fail-closed copied-destination cleanup = %v, want os.ErrNotExist", statErr)
 	}
+	workspaceStage := journaledTrashWorkspaceStagePath(t, fs, recovery)
+	if data, readErr := os.ReadFile(workspaceStage); readErr != nil || string(data) != "workspace-copy" {
+		t.Fatalf("workspace stage after rejected copied-destination cleanup = %q, %v", data, readErr)
+	}
+	requireJournaledTrashMutationGate(t, fs)
 	if err := unix.Unmount(mountedCopyParent, 0); err != nil {
 		t.Fatalf("Unmount(copy cleanup bind target) error: %v", err)
+	}
+	repairPreparedTrashTransferAndRecover(t, fs, recovery)
+	if data, readErr := os.ReadFile(fs.workspace.FullPath("/copy-cleanup.txt")); readErr != nil || string(data) != "workspace-copy" {
+		t.Fatalf("workspace source after repaired recovery = %q, %v", data, readErr)
 	}
 
 	if err := fs.Mkdir(ctx, "/permanent-rollback"); err != nil {

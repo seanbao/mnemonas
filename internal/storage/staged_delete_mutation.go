@@ -17,20 +17,12 @@ import (
 
 func (fs *FileSystem) deletePreparedWithPolicyLocked(ctx context.Context, name string, policy DeletePolicy, expected DeleteTargetSnapshot) error {
 	if policy.Mode == DeleteModeTrash {
-		if err := fs.checkTrashMutationAllowedLocked(); err != nil {
-			return err
-		}
+		return fs.commitJournaledTrashDeleteLocked(ctx, name, policy, expected)
 	}
 	if policy.Mode == DeleteModePermanent && expected.Root.IsDir && len(expected.Entries) > 1 {
 		return ErrDirNotEmpty
 	}
-	var beforeCapture func() error
-	if policy.Mode == DeleteModeTrash {
-		beforeCapture = func() error {
-			return afterStorageCopySourceStat(fs.workspace.FullPath(name))
-		}
-	}
-	target, err := fs.stageDeleteTargetLocked(ctx, name, expected, beforeCapture)
+	target, err := fs.stageDeleteTargetLocked(ctx, name, expected, nil)
 	if err != nil {
 		return err
 	}
@@ -41,10 +33,7 @@ func (fs *FileSystem) deletePreparedWithPolicyLocked(ctx context.Context, name s
 		return fs.rollbackStagedDeleteLocked(target, err)
 	}
 	target.expected = verified
-	if policy.Mode == DeleteModePermanent {
-		return fs.commitStagedPermanentDeleteLocked(ctx, target, verified)
-	}
-	return fs.commitStagedTrashDeleteLocked(ctx, target, verified, policy)
+	return fs.commitStagedPermanentDeleteLocked(ctx, target, verified)
 }
 
 func deleteSnapshotTargetSize(snapshot DeleteTargetSnapshot) int64 {

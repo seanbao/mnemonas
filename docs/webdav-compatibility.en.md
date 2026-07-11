@@ -8,7 +8,7 @@ This document records MnemoNAS WebDAV protocol coverage and expected client comp
 
 REST API resource copying is available at `/api/v1/files-copy`, but the WebDAV `Overwrite: T/F` behavior applies only to the WebDAV `COPY` method.
 
-Some write requests may return a successful status after the visible mutation is committed while a later persistence or cleanup step fails. In that case, MnemoNAS sends an HTTP `Warning` header rather than rewriting the committed mutation as a full failure. Covered warning values include `199 MnemoNAS "workspace mutation persistence incomplete"`, `199 MnemoNAS "delete cleanup incomplete"`, and `199 MnemoNAS "trash delete cleanup incomplete"`.
+Some write requests may return a successful status after the visible mutation is committed while a later persistence or cleanup step fails. In that case, MnemoNAS sends an HTTP `Warning` header rather than rewriting the committed mutation as a full failure. Covered warning values include `199 MnemoNAS "workspace mutation persistence incomplete"`, `199 MnemoNAS "delete cleanup incomplete"`, and `199 MnemoNAS "trash delete cleanup incomplete"`. For `DELETE`, `delete cleanup incomplete` applies to permanent-mode quarantine cleanup, while `trash delete cleanup incomplete` applies to capacity cleanup after a live Trash transfer has completed. If a live Trash transfer's visible mutation has completed but durable terminal journal cleanup cannot be confirmed, the response still uses `workspace mutation persistence incomplete` and activates the recovery gate; later writes may fail until recovery succeeds. Other hard journal, participant, receipt, outbox, source, or destination failures in a live Trash transfer return `500 Internal Server Error`, preserve recovery evidence, and likewise block later storage mutations.
 
 Same-origin URI handling:
 
@@ -46,7 +46,7 @@ Response security headers:
 | `GET` | Supported | Supports Range, ETag, and conditional requests |
 | `HEAD` | Supported | Returns file metadata |
 | `PUT` | Supported | Full overwrite writes; conditional `If-Match` and `If-Unmodified-Since`; partial `Content-Range` PUT returns `400` |
-| `DELETE` | Supported | Soft-deletes to trash; collections require or imply `Depth: infinity` |
+| `DELETE` | Supported | Uses the current deletion policy, either Trash or permanent; collections require or imply `Depth: infinity` |
 | `MKCOL` | Supported | Creates directories; returns `409 Conflict` when the direct parent directory is absent, returns `405 Method Not Allowed` with `Allow` when the target already exists, and does not create intermediate directories |
 | `MOVE` | Supported | Move/rename with `Overwrite: T/F`; collections require or imply `Depth: infinity`; after an overwrite is committed, backup cleanup failures return `204` with `Warning` |
 | `COPY` | Supported | File and directory copy; `Overwrite: T/F`; collections support `Depth: 0` and `Depth: infinity`; recursive directory copies return success with `Warning` when only post-create persistence fails |

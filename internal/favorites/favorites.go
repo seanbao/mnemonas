@@ -2,6 +2,7 @@
 package favorites
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -22,10 +23,14 @@ import (
 )
 
 var (
-	ErrFavoriteNotFound      = errors.New("favorite not found")
-	ErrAlreadyFavorited      = errors.New("already favorited")
-	errInvalidFavoritePath   = errors.New("invalid favorite path")
-	errFavoritesStoreSymlink = errors.New("favorites store path must not be a symlink")
+	ErrFavoriteNotFound              = errors.New("favorite not found")
+	ErrAlreadyFavorited              = errors.New("already favorited")
+	ErrTrashDeleteOperationConflict  = errors.New("trash delete operation conflict")
+	ErrTrashRestoreOperationConflict = errors.New("trash restore operation conflict")
+	errInvalidFavoritePath           = errors.New("invalid favorite path")
+	errInvalidTrashDeleteOperation   = errors.New("invalid trash delete operation")
+	errInvalidTrashRestoreOperation  = errors.New("invalid trash restore operation")
+	errFavoritesStoreSymlink         = errors.New("favorites store path must not be a symlink")
 )
 
 // PersistenceWarningError reports that the favorites mutation is already
@@ -71,9 +76,12 @@ type Store struct {
 	mu      sync.RWMutex
 	writeMu sync.Mutex
 	// map[userID]map[path]*Favorite
-	data     map[string]map[string]*Favorite
-	filePath string
-	version  uint64
+	data                    map[string]map[string]*Favorite
+	trashDeleteOperations   map[string]*trashDeleteOperation
+	trashRestoreOperations  map[string]*trashRestoreOperation
+	filePath                string
+	version                 uint64
+	recoveredFromCorruption bool
 }
 
 var favoritesStoreWriter = writeFavoritesStoreFile
@@ -86,10 +94,41 @@ var favoritesStoreDirRoots = map[string]*os.Root{}
 
 const favoritesStoreRootEscapeError = "path escapes from parent"
 
+const favoritesStoreVersion = 1
+
+type favoritePathIdentity struct {
+	UserID string `json:"user_id"`
+	Path   string `json:"path"`
+}
+
+type trashDeleteOperation struct {
+	Planned        []*Favorite            `json:"planned"`
+	Removed        []*Favorite            `json:"removed"`
+	RestoreBlocked []favoritePathIdentity `json:"restore_blocked"`
+	Committed      bool                   `json:"committed"`
+	Completed      bool                   `json:"completed"`
+}
+
+type trashRestoreOperation struct {
+	DeleteOperationID string      `json:"delete_operation_id"`
+	Original          []*Favorite `json:"original"`
+	Relocated         []*Favorite `json:"relocated"`
+	Restored          []*Favorite `json:"restored"`
+}
+
+type favoritesStoreState struct {
+	Version                int                               `json:"version"`
+	Favorites              []*Favorite                       `json:"favorites"`
+	TrashDeleteOperations  map[string]*trashDeleteOperation  `json:"trash_delete_operations"`
+	TrashRestoreOperations map[string]*trashRestoreOperation `json:"trash_restore_operations"`
+}
+
 type favoritesSnapshot struct {
-	data     map[string]map[string]*Favorite
-	filePath string
-	version  uint64
+	data                   map[string]map[string]*Favorite
+	trashDeleteOperations  map[string]*trashDeleteOperation
+	trashRestoreOperations map[string]*trashRestoreOperation
+	filePath               string
+	version                uint64
 }
 
 func copyFavorite(fav *Favorite) *Favorite {
@@ -145,6 +184,9 @@ func containsFavoritePathControlCharacter(filePath string) bool {
 }
 
 func normalizeRestoredFavorite(favorite *Favorite) (*Favorite, error) {
+	if favorite == nil {
+		return nil, errInvalidFavoritePath
+	}
 	normalized := copyFavorite(favorite)
 	cleanPath, err := normalizeStoredFavoritePath(normalized.Path)
 	if err != nil {
@@ -162,11 +204,21 @@ func NewStore(filePath string) (*Store, error) {
 	}
 
 	store := &Store{
-		data:     make(map[string]map[string]*Favorite),
-		filePath: normalizedPath,
+		data:                   make(map[string]map[string]*Favorite),
+		trashDeleteOperations:  make(map[string]*trashDeleteOperation),
+		trashRestoreOperations: make(map[string]*trashRestoreOperation),
+		filePath:               normalizedPath,
 	}
+	recoveryMarkerExists, err := favoritesStoreRecoveryMarkerExists(normalizedPath)
+	if err != nil {
+		return nil, err
+	}
+	store.recoveredFromCorruption = recoveryMarkerExists
 
 	if err := store.load(); err != nil && !os.IsNotExist(err) {
+		if recoveryMarkerExists {
+			return nil, fmt.Errorf("failed to load favorites while recovery marker is present: %w", err)
+		}
 		if recoverErr := store.recoverCorruptFavorites(err); recoverErr != nil {
 			return nil, errors.Join(
 				fmt.Errorf("failed to load favorites: %w", err),
@@ -178,20 +230,36 @@ func NewStore(filePath string) (*Store, error) {
 	return store, nil
 }
 
+// RecoveredFromCorruption reports whether this store instance replaced a
+// corrupt persistence file during construction.
+func (s *Store) RecoveredFromCorruption() bool {
+	return s != nil && s.recoveredFromCorruption
+}
+
 func (s *Store) load() error {
 	data, err := readRegisteredFavoritesStoreFile(s.filePath)
 	if err != nil {
 		return err
 	}
 
-	var favorites []*Favorite
-	if err := json.Unmarshal(data, &favorites); err != nil {
+	var state favoritesStoreState
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&state); err != nil {
 		return fmt.Errorf("failed to parse favorites file: %w", err)
+	}
+	if err := ensureFavoritesJSONEOF(decoder); err != nil {
+		return fmt.Errorf("failed to parse favorites file: %w", err)
+	}
+	if state.Version != favoritesStoreVersion || state.Favorites == nil || state.TrashDeleteOperations == nil || state.TrashRestoreOperations == nil {
+		return errors.New("invalid favorites store state")
 	}
 
 	s.data = make(map[string]map[string]*Favorite)
+	s.trashDeleteOperations = make(map[string]*trashDeleteOperation, len(state.TrashDeleteOperations))
+	s.trashRestoreOperations = make(map[string]*trashRestoreOperation, len(state.TrashRestoreOperations))
 	needsRewrite := false
-	for i, fav := range favorites {
+	for i, fav := range state.Favorites {
 		if fav == nil {
 			return fmt.Errorf("favorites file contains null entry at index %d", i)
 		}
@@ -214,9 +282,21 @@ func (s *Store) load() error {
 		}
 		s.data[normalized.UserID][normalized.Path] = normalized
 	}
+	for operationID, operation := range state.TrashDeleteOperations {
+		normalized, err := normalizeLoadedTrashDeleteOperation(operationID, operation)
+		if err != nil {
+			return err
+		}
+		s.trashDeleteOperations[operationID] = normalized
+	}
+	normalizedRestoreOperations, err := normalizeLoadedTrashRestoreOperations(state.TrashRestoreOperations, s.trashDeleteOperations)
+	if err != nil {
+		return err
+	}
+	s.trashRestoreOperations = normalizedRestoreOperations
 
 	if needsRewrite {
-		if err := saveFavoritesState(s.filePath, s.data); err != nil {
+		if err := saveFavoritesState(s.filePath, s.data, s.trashDeleteOperations, s.trashRestoreOperations); err != nil {
 			if !IsPersistenceWarning(err) {
 				return fmt.Errorf("persist normalized favorites: %w", err)
 			}
@@ -229,6 +309,10 @@ func (s *Store) load() error {
 func (s *Store) recoverCorruptFavorites(loadErr error) error {
 	if !isRecoverableFavoritesLoadError(loadErr) {
 		return loadErr
+	}
+
+	if err := persistFavoritesStoreRecoveryMarker(s.filePath); err != nil {
+		return err
 	}
 
 	corruptPath := fmt.Sprintf("%s.corrupt.%d", s.filePath, time.Now().UnixNano())
@@ -252,11 +336,14 @@ func (s *Store) recoverCorruptFavorites(loadErr error) error {
 	}
 
 	s.data = make(map[string]map[string]*Favorite)
+	s.trashDeleteOperations = make(map[string]*trashDeleteOperation)
+	s.trashRestoreOperations = make(map[string]*trashRestoreOperation)
+	s.recoveredFromCorruption = true
 	return nil
 }
 
 func isRecoverableFavoritesLoadError(err error) bool {
-	if errors.Is(err, io.EOF) {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
 
@@ -269,7 +356,24 @@ func isRecoverableFavoritesLoadError(err error) bool {
 	return errors.As(err, &typeErr)
 }
 
-func saveFavoritesState(filePath string, dataByUser map[string]map[string]*Favorite) error {
+func ensureFavoritesJSONEOF(decoder *json.Decoder) error {
+	var trailing any
+	err := decoder.Decode(&trailing)
+	if errors.Is(err, io.EOF) {
+		return nil
+	}
+	if err == nil {
+		return errors.New("favorites file contains trailing data")
+	}
+	return err
+}
+
+func saveFavoritesState(
+	filePath string,
+	dataByUser map[string]map[string]*Favorite,
+	deleteOperations map[string]*trashDeleteOperation,
+	restoreOperations map[string]*trashRestoreOperation,
+) error {
 	var favorites []*Favorite
 	for _, userFavs := range dataByUser {
 		for _, fav := range userFavs {
@@ -277,8 +381,23 @@ func saveFavoritesState(filePath string, dataByUser map[string]map[string]*Favor
 		}
 	}
 	sortFavoritesCanonical(favorites)
+	state := favoritesStoreState{
+		Version:                favoritesStoreVersion,
+		Favorites:              favorites,
+		TrashDeleteOperations:  cloneTrashDeleteOperations(deleteOperations),
+		TrashRestoreOperations: cloneTrashRestoreOperations(restoreOperations),
+	}
+	if state.Favorites == nil {
+		state.Favorites = []*Favorite{}
+	}
+	if state.TrashDeleteOperations == nil {
+		state.TrashDeleteOperations = map[string]*trashDeleteOperation{}
+	}
+	if state.TrashRestoreOperations == nil {
+		state.TrashRestoreOperations = map[string]*trashRestoreOperation{}
+	}
 
-	data, err := json.MarshalIndent(favorites, "", "  ")
+	data, err := json.MarshalIndent(&state, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to serialize favorites: %w", err)
 	}
@@ -301,14 +420,405 @@ func cloneFavoritesData(data map[string]map[string]*Favorite) map[string]map[str
 	return cloned
 }
 
+func cloneTrashDeleteOperation(operation *trashDeleteOperation) *trashDeleteOperation {
+	if operation == nil {
+		return nil
+	}
+	cloned := &trashDeleteOperation{
+		Planned:        cloneFavoriteSlice(operation.Planned),
+		Removed:        cloneFavoriteSlice(operation.Removed),
+		RestoreBlocked: append([]favoritePathIdentity(nil), operation.RestoreBlocked...),
+		Committed:      operation.Committed,
+		Completed:      operation.Completed,
+	}
+	if cloned.Planned == nil {
+		cloned.Planned = []*Favorite{}
+	}
+	if cloned.Removed == nil {
+		cloned.Removed = []*Favorite{}
+	}
+	if cloned.RestoreBlocked == nil {
+		cloned.RestoreBlocked = []favoritePathIdentity{}
+	}
+	return cloned
+}
+
+func cloneTrashDeleteOperations(operations map[string]*trashDeleteOperation) map[string]*trashDeleteOperation {
+	cloned := make(map[string]*trashDeleteOperation, len(operations))
+	for operationID, operation := range operations {
+		cloned[operationID] = cloneTrashDeleteOperation(operation)
+	}
+	return cloned
+}
+
+func cloneTrashRestoreOperation(operation *trashRestoreOperation) *trashRestoreOperation {
+	if operation == nil {
+		return nil
+	}
+	cloned := &trashRestoreOperation{
+		DeleteOperationID: operation.DeleteOperationID,
+		Original:          cloneFavoriteSlice(operation.Original),
+		Relocated:         cloneFavoriteSlice(operation.Relocated),
+		Restored:          cloneFavoriteSlice(operation.Restored),
+	}
+	if cloned.Original == nil {
+		cloned.Original = []*Favorite{}
+	}
+	if cloned.Relocated == nil {
+		cloned.Relocated = []*Favorite{}
+	}
+	if cloned.Restored == nil {
+		cloned.Restored = []*Favorite{}
+	}
+	return cloned
+}
+
+func cloneTrashRestoreOperations(operations map[string]*trashRestoreOperation) map[string]*trashRestoreOperation {
+	cloned := make(map[string]*trashRestoreOperation, len(operations))
+	for operationID, operation := range operations {
+		cloned[operationID] = cloneTrashRestoreOperation(operation)
+	}
+	return cloned
+}
+
+func cloneFavoriteSlice(favorites []*Favorite) []*Favorite {
+	if favorites == nil {
+		return nil
+	}
+	cloned := make([]*Favorite, 0, len(favorites))
+	for _, favorite := range favorites {
+		cloned = append(cloned, copyFavorite(favorite))
+	}
+	return cloned
+}
+
+func validTrashDeleteOperationID(operationID string) bool {
+	if len(operationID) != 32 {
+		return false
+	}
+	for index := 0; index < len(operationID); index++ {
+		character := operationID[index]
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validateTrashDeleteFavorite(favorite *Favorite) (*Favorite, error) {
+	normalized, err := normalizeRestoredFavorite(favorite)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errInvalidTrashDeleteOperation, err)
+	}
+	if normalized.UserID == "" || normalized.UserID != strings.TrimSpace(normalized.UserID) || normalized.CreatedAt.IsZero() {
+		return nil, errInvalidTrashDeleteOperation
+	}
+	return normalized, nil
+}
+
+func normalizeTrashDeleteFavorites(favorites []*Favorite) ([]*Favorite, error) {
+	normalized := make([]*Favorite, 0, len(favorites))
+	for _, favorite := range favorites {
+		entry, err := validateTrashDeleteFavorite(favorite)
+		if err != nil {
+			return nil, err
+		}
+		normalized = append(normalized, entry)
+	}
+	sortFavoritesCanonical(normalized)
+	for index := 1; index < len(normalized); index++ {
+		if normalized[index-1].UserID == normalized[index].UserID && normalized[index-1].Path == normalized[index].Path {
+			return nil, fmt.Errorf("%w: duplicate favorite path", errInvalidTrashDeleteOperation)
+		}
+	}
+	return normalized, nil
+}
+
+func favoriteFullEqual(left, right *Favorite) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return left.UserID == right.UserID &&
+		left.Path == right.Path &&
+		left.CreatedAt.Equal(right.CreatedAt) &&
+		left.Note == right.Note
+}
+
+func favoriteSlicesEqual(left, right []*Favorite) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if !favoriteFullEqual(left[index], right[index]) {
+			return false
+		}
+	}
+	return true
+}
+
+func favoriteIdentityInSlice(favorite *Favorite, favorites []*Favorite) bool {
+	for _, candidate := range favorites {
+		if favoriteDeleteIdentityEqual(favorite, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func sortFavoritePathIdentities(identities []favoritePathIdentity) {
+	sort.Slice(identities, func(i, j int) bool {
+		if identities[i].UserID != identities[j].UserID {
+			return identities[i].UserID < identities[j].UserID
+		}
+		return identities[i].Path < identities[j].Path
+	})
+}
+
+func favoritePathIdentitiesEqual(left, right []favoritePathIdentity) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func favoritePathIdentityInSlice(identity favoritePathIdentity, identities []favoritePathIdentity) bool {
+	for _, candidate := range identities {
+		if candidate == identity {
+			return true
+		}
+	}
+	return false
+}
+
+func favoritePathInRemoved(identity favoritePathIdentity, removed []*Favorite) bool {
+	for _, favorite := range removed {
+		if favorite.UserID == identity.UserID && favorite.Path == identity.Path {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeLoadedTrashDeleteOperation(operationID string, operation *trashDeleteOperation) (*trashDeleteOperation, error) {
+	if !validTrashDeleteOperationID(operationID) || operation == nil || operation.Planned == nil || operation.Removed == nil || operation.RestoreBlocked == nil {
+		return nil, fmt.Errorf("%w: malformed operation %q", errInvalidTrashDeleteOperation, operationID)
+	}
+	if operation.Completed && !operation.Committed {
+		return nil, fmt.Errorf("%w: completed operation %q is not committed", errInvalidTrashDeleteOperation, operationID)
+	}
+	planned, err := normalizeTrashDeleteFavorites(operation.Planned)
+	if err != nil || !favoriteSlicesEqual(planned, operation.Planned) {
+		return nil, fmt.Errorf("%w: invalid planned favorites for operation %q", errInvalidTrashDeleteOperation, operationID)
+	}
+	removed, err := normalizeTrashDeleteFavorites(operation.Removed)
+	if err != nil || !favoriteSlicesEqual(removed, operation.Removed) {
+		return nil, fmt.Errorf("%w: invalid removed favorites for operation %q", errInvalidTrashDeleteOperation, operationID)
+	}
+	for _, favorite := range removed {
+		if !favoriteIdentityInSlice(favorite, planned) {
+			return nil, fmt.Errorf("%w: removed favorite is outside the plan for operation %q", errInvalidTrashDeleteOperation, operationID)
+		}
+	}
+
+	blocked := append([]favoritePathIdentity(nil), operation.RestoreBlocked...)
+	for _, identity := range blocked {
+		cleanPath, pathErr := normalizeStoredFavoritePath(identity.Path)
+		if pathErr != nil || cleanPath != identity.Path || identity.UserID == "" || identity.UserID != strings.TrimSpace(identity.UserID) || !favoritePathInRemoved(identity, removed) {
+			return nil, fmt.Errorf("%w: invalid restore block for operation %q", errInvalidTrashDeleteOperation, operationID)
+		}
+	}
+	sortFavoritePathIdentities(blocked)
+	if !favoritePathIdentitiesEqual(blocked, operation.RestoreBlocked) {
+		return nil, fmt.Errorf("%w: non-canonical restore blocks for operation %q", errInvalidTrashDeleteOperation, operationID)
+	}
+	for index := 1; index < len(blocked); index++ {
+		if blocked[index-1] == blocked[index] {
+			return nil, fmt.Errorf("%w: duplicate restore block for operation %q", errInvalidTrashDeleteOperation, operationID)
+		}
+	}
+
+	return &trashDeleteOperation{
+		Planned:        planned,
+		Removed:        removed,
+		RestoreBlocked: blocked,
+		Committed:      operation.Committed,
+		Completed:      operation.Completed,
+	}, nil
+}
+
+type trashRestoreTransition struct {
+	original  *Favorite
+	relocated *Favorite
+}
+
+func normalizeTrashRestorePlans(original, relocated []*Favorite) ([]*Favorite, []*Favorite, error) {
+	if len(original) != len(relocated) {
+		return nil, nil, fmt.Errorf("%w: restore plans have different lengths", errInvalidTrashRestoreOperation)
+	}
+	transitions := make([]trashRestoreTransition, 0, len(original))
+	seenOriginal := make(map[favoritePathIdentity]struct{}, len(original))
+	seenRelocated := make(map[favoritePathIdentity]struct{}, len(relocated))
+	for index := range original {
+		normalizedOriginal, err := validateTrashDeleteFavorite(original[index])
+		if err != nil {
+			return nil, nil, fmt.Errorf("%w: invalid original favorite at index %d", errInvalidTrashRestoreOperation, index)
+		}
+		normalizedRelocated, err := validateTrashDeleteFavorite(relocated[index])
+		if err != nil {
+			return nil, nil, fmt.Errorf("%w: invalid relocated favorite at index %d", errInvalidTrashRestoreOperation, index)
+		}
+		if normalizedOriginal.UserID != normalizedRelocated.UserID ||
+			!normalizedOriginal.CreatedAt.Equal(normalizedRelocated.CreatedAt) ||
+			normalizedOriginal.Note != normalizedRelocated.Note {
+			return nil, nil, fmt.Errorf("%w: relocated favorite at index %d changes identity or metadata", errInvalidTrashRestoreOperation, index)
+		}
+		originalIdentity := favoritePathIdentity{UserID: normalizedOriginal.UserID, Path: normalizedOriginal.Path}
+		if _, exists := seenOriginal[originalIdentity]; exists {
+			return nil, nil, fmt.Errorf("%w: duplicate original favorite path", errInvalidTrashRestoreOperation)
+		}
+		seenOriginal[originalIdentity] = struct{}{}
+		relocatedIdentity := favoritePathIdentity{UserID: normalizedRelocated.UserID, Path: normalizedRelocated.Path}
+		if _, exists := seenRelocated[relocatedIdentity]; exists {
+			return nil, nil, fmt.Errorf("%w: duplicate relocated favorite path", errInvalidTrashRestoreOperation)
+		}
+		seenRelocated[relocatedIdentity] = struct{}{}
+		transitions = append(transitions, trashRestoreTransition{original: normalizedOriginal, relocated: normalizedRelocated})
+	}
+	sort.Slice(transitions, func(i, j int) bool {
+		if transitions[i].original.UserID != transitions[j].original.UserID {
+			return transitions[i].original.UserID < transitions[j].original.UserID
+		}
+		return transitions[i].original.Path < transitions[j].original.Path
+	})
+	normalizedOriginal := make([]*Favorite, 0, len(transitions))
+	normalizedRelocated := make([]*Favorite, 0, len(transitions))
+	for _, transition := range transitions {
+		normalizedOriginal = append(normalizedOriginal, transition.original)
+		normalizedRelocated = append(normalizedRelocated, transition.relocated)
+	}
+	return normalizedOriginal, normalizedRelocated, nil
+}
+
+func normalizeTrashRestoreOperation(
+	operationID string,
+	operation *trashRestoreOperation,
+	requireCanonical bool,
+) (*trashRestoreOperation, error) {
+	if !validTrashDeleteOperationID(operationID) || operation == nil || !validTrashDeleteOperationID(operation.DeleteOperationID) || operation.Original == nil || operation.Relocated == nil || operation.Restored == nil {
+		return nil, fmt.Errorf("%w: malformed operation %q", errInvalidTrashRestoreOperation, operationID)
+	}
+	original, relocated, err := normalizeTrashRestorePlans(operation.Original, operation.Relocated)
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid restore plans for operation %q", errInvalidTrashRestoreOperation, operationID)
+	}
+	restored, err := normalizeTrashDeleteFavorites(operation.Restored)
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid restored favorites for operation %q", errInvalidTrashRestoreOperation, operationID)
+	}
+	if requireCanonical && (!favoriteSlicesEqual(original, operation.Original) || !favoriteSlicesEqual(relocated, operation.Relocated) || !favoriteSlicesEqual(restored, operation.Restored)) {
+		return nil, fmt.Errorf("%w: non-canonical operation %q", errInvalidTrashRestoreOperation, operationID)
+	}
+	return &trashRestoreOperation{
+		DeleteOperationID: operation.DeleteOperationID,
+		Original:          original,
+		Relocated:         relocated,
+		Restored:          restored,
+	}, nil
+}
+
+func validateTrashRestoreOwnership(
+	operationID string,
+	operation *trashRestoreOperation,
+	deleteOperations map[string]*trashDeleteOperation,
+) error {
+	deleteOperation := deleteOperations[operation.DeleteOperationID]
+	if deleteOperation == nil || !deleteOperation.Completed {
+		return fmt.Errorf("%w: restore operation %q does not reference completed delete ownership", errInvalidTrashRestoreOperation, operationID)
+	}
+	if !favoriteSlicesEqual(operation.Original, deleteOperation.Planned) {
+		return fmt.Errorf("%w: restore operation %q has a different delete plan", errInvalidTrashRestoreOperation, operationID)
+	}
+	for _, favorite := range operation.Restored {
+		owned := false
+		for index, original := range operation.Original {
+			for _, removed := range deleteOperation.Removed {
+				if !favoriteDeleteIdentityEqual(removed, original) {
+					continue
+				}
+				expected := copyFavorite(removed)
+				expected.Path = operation.Relocated[index].Path
+				if favoriteFullEqual(favorite, expected) {
+					owned = true
+				}
+				break
+			}
+			if owned {
+				break
+			}
+		}
+		if !owned {
+			return fmt.Errorf("%w: restore operation %q contains an unowned favorite", errInvalidTrashRestoreOperation, operationID)
+		}
+	}
+	return nil
+}
+
+func normalizeLoadedTrashRestoreOperations(
+	operations map[string]*trashRestoreOperation,
+	deleteOperations map[string]*trashDeleteOperation,
+) (map[string]*trashRestoreOperation, error) {
+	normalized := make(map[string]*trashRestoreOperation, len(operations))
+	deleteOwners := make(map[string]string, len(operations))
+	for operationID, operation := range operations {
+		normalizedOperation, err := normalizeTrashRestoreOperation(operationID, operation, true)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateTrashRestoreOwnership(operationID, normalizedOperation, deleteOperations); err != nil {
+			return nil, err
+		}
+		if owner, exists := deleteOwners[normalizedOperation.DeleteOperationID]; exists {
+			return nil, fmt.Errorf("%w: restore operations %q and %q reference the same delete ownership", errInvalidTrashRestoreOperation, owner, operationID)
+		}
+		deleteOwners[normalizedOperation.DeleteOperationID] = operationID
+		normalized[operationID] = normalizedOperation
+	}
+	return normalized, nil
+}
+
+func blockTrashDeleteRestore(
+	operations map[string]*trashDeleteOperation,
+	favorite *Favorite,
+	excludedOperationID string,
+) {
+	if favorite == nil {
+		return
+	}
+	identity := favoritePathIdentity{UserID: favorite.UserID, Path: favorite.Path}
+	for operationID, operation := range operations {
+		if operationID == excludedOperationID || operation == nil || !favoritePathInRemoved(identity, operation.Removed) || favoritePathIdentityInSlice(identity, operation.RestoreBlocked) {
+			continue
+		}
+		operation.RestoreBlocked = append(operation.RestoreBlocked, identity)
+		sortFavoritePathIdentities(operation.RestoreBlocked)
+	}
+}
+
 func (s *Store) snapshotState() favoritesSnapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	return favoritesSnapshot{
-		data:     cloneFavoritesData(s.data),
-		filePath: s.filePath,
-		version:  s.version,
+		data:                   cloneFavoritesData(s.data),
+		trashDeleteOperations:  cloneTrashDeleteOperations(s.trashDeleteOperations),
+		trashRestoreOperations: cloneTrashRestoreOperations(s.trashRestoreOperations),
+		filePath:               s.filePath,
+		version:                s.version,
 	}
 }
 
@@ -321,12 +831,19 @@ func (s *Store) commitSnapshot(snapshot favoritesSnapshot) bool {
 	}
 
 	s.data = snapshot.data
+	s.trashDeleteOperations = snapshot.trashDeleteOperations
+	s.trashRestoreOperations = snapshot.trashRestoreOperations
 	s.version++
 	return true
 }
 
 func (s *Store) persistSnapshot(snapshot favoritesSnapshot) (bool, error) {
-	err := saveFavoritesState(snapshot.filePath, snapshot.data)
+	err := saveFavoritesState(
+		snapshot.filePath,
+		snapshot.data,
+		snapshot.trashDeleteOperations,
+		snapshot.trashRestoreOperations,
+	)
 	if err != nil && !IsPersistenceWarning(err) {
 		return false, err
 	}
@@ -815,6 +1332,7 @@ func (s *Store) Add(userID, path, note string, extraUserIDs ...string) (*Favorit
 		}
 
 		snapshot.data[primaryUserID][cleanPath] = copyFavorite(fav)
+		blockTrashDeleteRestore(snapshot.trashDeleteOperations, fav, "")
 		committed, err := s.persistSnapshot(snapshot)
 		if committed {
 			return copyFavorite(fav), err
@@ -838,11 +1356,12 @@ func (s *Store) Remove(userID, path string, extraUserIDs ...string) error {
 
 	for {
 		snapshot := s.snapshotState()
-		ownerID, _ := findFavoriteOwner(snapshot.data, cleanPath, identifiers)
+		ownerID, favorite := findFavoriteOwner(snapshot.data, cleanPath, identifiers)
 		if ownerID == "" {
 			return ErrFavoriteNotFound
 		}
 
+		blockTrashDeleteRestore(snapshot.trashDeleteOperations, favorite, "")
 		delete(snapshot.data[ownerID], cleanPath)
 		if len(snapshot.data[ownerID]) == 0 {
 			delete(snapshot.data, ownerID)
@@ -951,6 +1470,7 @@ func (s *Store) UpdateNote(userID, path, note string, extraUserIDs ...string) er
 			return ErrFavoriteNotFound
 		}
 
+		blockTrashDeleteRestore(snapshot.trashDeleteOperations, fav, "")
 		fav.Note = note
 		committed, err := s.persistSnapshot(snapshot)
 		if committed {
@@ -1039,6 +1559,8 @@ func (s *Store) UpdatePathReferences(oldPath, newPath string) error {
 
 				updated := copyFavorite(fav)
 				updated.Path = updatedPath
+				blockTrashDeleteRestore(snapshot.trashDeleteOperations, fav, "")
+				blockTrashDeleteRestore(snapshot.trashDeleteOperations, updated, "")
 				pendingRewrites = append(pendingRewrites, pendingFavoriteRewrite{
 					userID:      userID,
 					currentPath: currentPath,
@@ -1072,6 +1594,510 @@ func (s *Store) RemoveFavoritesUnderPath(targetPath string) error {
 	return err
 }
 
+// SnapshotDeleteExact returns detached copies of the favorites that a delete
+// operation currently owns under targetPath.
+func (s *Store) SnapshotDeleteExact(targetPath string) ([]*Favorite, error) {
+	normalizedPath, err := normalizeStoredFavoritePath(targetPath)
+	if err != nil {
+		return nil, err
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	favorites := make([]*Favorite, 0)
+	for _, userFavorites := range s.data {
+		for currentPath, favorite := range userFavorites {
+			if favorite == nil || !favoritePathMatchesOrDescendant(normalizedPath, currentPath) {
+				continue
+			}
+			favorites = append(favorites, copyFavorite(favorite))
+		}
+	}
+	sortFavoritesCanonical(favorites)
+	return favorites, nil
+}
+
+// ApplyDeleteExact removes only favorites that still have the identity stored
+// in the supplied snapshot.
+func (s *Store) ApplyDeleteExact(favorites []*Favorite) error {
+	if len(favorites) == 0 {
+		return nil
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	for {
+		snapshot := s.snapshotState()
+		changed := false
+
+		for _, favorite := range favorites {
+			if favorite == nil {
+				continue
+			}
+			normalized, err := normalizeRestoredFavorite(favorite)
+			if err != nil {
+				return err
+			}
+
+			userFavorites := snapshot.data[normalized.UserID]
+			current, ok := userFavorites[normalized.Path]
+			if !ok || !favoriteDeleteIdentityEqual(current, normalized) {
+				continue
+			}
+
+			blockTrashDeleteRestore(snapshot.trashDeleteOperations, current, "")
+			delete(userFavorites, normalized.Path)
+			if len(userFavorites) == 0 {
+				delete(snapshot.data, normalized.UserID)
+			}
+			changed = true
+		}
+
+		if !changed {
+			return nil
+		}
+		committed, err := s.persistSnapshot(snapshot)
+		if committed {
+			return err
+		}
+		if err != nil {
+			return err
+		}
+	}
+}
+
+func favoriteDeleteIdentityEqual(current, snapshot *Favorite) bool {
+	if current == nil || snapshot == nil {
+		return current == snapshot
+	}
+	return current.UserID == snapshot.UserID &&
+		current.Path == snapshot.Path &&
+		current.CreatedAt.Equal(snapshot.CreatedAt)
+}
+
+func removeTrashDeletePlanExact(
+	data map[string]map[string]*Favorite,
+	planned []*Favorite,
+	operations map[string]*trashDeleteOperation,
+	excludedOperationID string,
+) []*Favorite {
+	removed := make([]*Favorite, 0, len(planned))
+	for _, favorite := range planned {
+		userFavorites := data[favorite.UserID]
+		current, ok := userFavorites[favorite.Path]
+		if !ok || !favoriteDeleteIdentityEqual(current, favorite) {
+			continue
+		}
+		removed = append(removed, copyFavorite(current))
+		blockTrashDeleteRestore(operations, current, excludedOperationID)
+		delete(userFavorites, favorite.Path)
+		if len(userFavorites) == 0 {
+			delete(data, favorite.UserID)
+		}
+	}
+	sortFavoritesCanonical(removed)
+	return removed
+}
+
+// ApplyTrashDeleteOperation durably applies an exact favorite deletion. A
+// precommit application retains the exact removed objects for rollback. A
+// committed application records a durable replay receipt with the deletion.
+func (s *Store) ApplyTrashDeleteOperation(operationID string, planned []*Favorite, committed bool) error {
+	if !validTrashDeleteOperationID(operationID) {
+		return fmt.Errorf("%w: invalid operation ID", errInvalidTrashDeleteOperation)
+	}
+	normalizedPlanned, err := normalizeTrashDeleteFavorites(planned)
+	if err != nil {
+		return err
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	for {
+		snapshot := s.snapshotState()
+		existing := snapshot.trashDeleteOperations[operationID]
+		if existing != nil && !favoriteSlicesEqual(existing.Planned, normalizedPlanned) {
+			return fmt.Errorf("%w: operation %q has a different plan", ErrTrashDeleteOperationConflict, operationID)
+		}
+		if !committed && existing != nil {
+			persisted, persistErr := s.persistSnapshot(snapshot)
+			if persisted {
+				return persistErr
+			}
+			if persistErr != nil {
+				return persistErr
+			}
+			continue
+		}
+		if committed && existing != nil && existing.Committed {
+			persisted, persistErr := s.persistSnapshot(snapshot)
+			if persisted {
+				return persistErr
+			}
+			if persistErr != nil {
+				return persistErr
+			}
+			continue
+		}
+
+		removed := removeTrashDeletePlanExact(
+			snapshot.data,
+			normalizedPlanned,
+			snapshot.trashDeleteOperations,
+			operationID,
+		)
+		if committed {
+			if existing == nil {
+				existing = &trashDeleteOperation{
+					Planned:        cloneFavoriteSlice(normalizedPlanned),
+					Removed:        removed,
+					RestoreBlocked: []favoritePathIdentity{},
+				}
+			}
+			existing.Committed = true
+			snapshot.trashDeleteOperations[operationID] = existing
+		} else {
+			snapshot.trashDeleteOperations[operationID] = &trashDeleteOperation{
+				Planned:        cloneFavoriteSlice(normalizedPlanned),
+				Removed:        removed,
+				RestoreBlocked: []favoritePathIdentity{},
+			}
+		}
+
+		persisted, persistErr := s.persistSnapshot(snapshot)
+		if persisted {
+			return persistErr
+		}
+		if persistErr != nil {
+			return persistErr
+		}
+	}
+}
+
+// CompleteTrashDeleteOperation marks committed delete ownership complete.
+// Missing receipts require a durability barrier; pending markers cannot complete.
+func (s *Store) CompleteTrashDeleteOperation(operationID string) error {
+	if !validTrashDeleteOperationID(operationID) {
+		return fmt.Errorf("%w: invalid operation ID", errInvalidTrashDeleteOperation)
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	for {
+		snapshot := s.snapshotState()
+		operation := snapshot.trashDeleteOperations[operationID]
+		if operation == nil {
+			persisted, persistErr := s.persistSnapshot(snapshot)
+			if persisted {
+				return persistErr
+			}
+			if persistErr != nil {
+				return persistErr
+			}
+			continue
+		}
+		if !operation.Committed {
+			return fmt.Errorf("%w: operation %q is not committed", ErrTrashDeleteOperationConflict, operationID)
+		}
+		operation.Completed = true
+
+		persisted, persistErr := s.persistSnapshot(snapshot)
+		if persisted {
+			return persistErr
+		}
+		if persistErr != nil {
+			return persistErr
+		}
+	}
+}
+
+// PurgeCompletedTrashDeleteOperation removes one explicitly selected completed
+// delete ownership marker. Missing markers require a durability barrier.
+func (s *Store) PurgeCompletedTrashDeleteOperation(operationID string) error {
+	if !validTrashDeleteOperationID(operationID) {
+		return fmt.Errorf("%w: invalid operation ID", errInvalidTrashDeleteOperation)
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	for {
+		snapshot := s.snapshotState()
+		operation := snapshot.trashDeleteOperations[operationID]
+		if operation == nil {
+			persisted, persistErr := s.persistSnapshot(snapshot)
+			if persisted {
+				return persistErr
+			}
+			if persistErr != nil {
+				return persistErr
+			}
+			continue
+		}
+		if !operation.Completed {
+			return fmt.Errorf("%w: operation %q is not completed", ErrTrashDeleteOperationConflict, operationID)
+		}
+		for restoreOperationID, restoreOperation := range snapshot.trashRestoreOperations {
+			if restoreOperation != nil && restoreOperation.DeleteOperationID == operationID {
+				return fmt.Errorf("%w: completed operation %q is owned by restore operation %q", ErrTrashDeleteOperationConflict, operationID, restoreOperationID)
+			}
+		}
+		delete(snapshot.trashDeleteOperations, operationID)
+
+		persisted, persistErr := s.persistSnapshot(snapshot)
+		if persisted {
+			return persistErr
+		}
+		if persistErr != nil {
+			return persistErr
+		}
+	}
+}
+
+// PruneCompletedTrashDeleteOperations removes completed ownership that is not
+// listed as active. Pending and committed operations are never inferred stale.
+func (s *Store) PruneCompletedTrashDeleteOperations(activeDeleteOperationIDs []string) error {
+	active := make(map[string]struct{}, len(activeDeleteOperationIDs))
+	for _, operationID := range activeDeleteOperationIDs {
+		if !validTrashDeleteOperationID(operationID) {
+			return fmt.Errorf("%w: invalid active operation ID", errInvalidTrashDeleteOperation)
+		}
+		active[operationID] = struct{}{}
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	for {
+		snapshot := s.snapshotState()
+		for operationID, operation := range snapshot.trashDeleteOperations {
+			if operation == nil || !operation.Completed {
+				continue
+			}
+			if _, exists := active[operationID]; exists {
+				continue
+			}
+			for restoreOperationID, restoreOperation := range snapshot.trashRestoreOperations {
+				if restoreOperation != nil && restoreOperation.DeleteOperationID == operationID {
+					return fmt.Errorf("%w: completed operation %q is owned by restore operation %q", ErrTrashDeleteOperationConflict, operationID, restoreOperationID)
+				}
+			}
+			delete(snapshot.trashDeleteOperations, operationID)
+		}
+
+		persisted, persistErr := s.persistSnapshot(snapshot)
+		if persisted {
+			return persistErr
+		}
+		if persistErr != nil {
+			return persistErr
+		}
+	}
+}
+
+// ApplyTrashRestoreOperation restores only favorites owned by one completed
+// delete operation and records the exact restored set in a durable receipt.
+func (s *Store) ApplyTrashRestoreOperation(
+	restoreOperationID string,
+	deleteOperationID string,
+	original []*Favorite,
+	relocated []*Favorite,
+) error {
+	if !validTrashDeleteOperationID(restoreOperationID) || !validTrashDeleteOperationID(deleteOperationID) {
+		return fmt.Errorf("%w: invalid operation ID", errInvalidTrashRestoreOperation)
+	}
+	normalizedOriginal, normalizedRelocated, err := normalizeTrashRestorePlans(original, relocated)
+	if err != nil {
+		return err
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	for {
+		snapshot := s.snapshotState()
+		existing, exists := snapshot.trashRestoreOperations[restoreOperationID]
+		if exists {
+			if existing.DeleteOperationID != deleteOperationID ||
+				!favoriteSlicesEqual(existing.Original, normalizedOriginal) ||
+				!favoriteSlicesEqual(existing.Relocated, normalizedRelocated) {
+				return fmt.Errorf("%w: operation %q has different delete ownership or plan", ErrTrashRestoreOperationConflict, restoreOperationID)
+			}
+			deleteOperation := snapshot.trashDeleteOperations[deleteOperationID]
+			if deleteOperation == nil || !deleteOperation.Completed || !favoriteSlicesEqual(deleteOperation.Planned, normalizedOriginal) {
+				return fmt.Errorf("%w: operation %q lost completed delete ownership", ErrTrashRestoreOperationConflict, restoreOperationID)
+			}
+			persisted, persistErr := s.persistSnapshot(snapshot)
+			if persisted {
+				return persistErr
+			}
+			if persistErr != nil {
+				return persistErr
+			}
+			continue
+		}
+
+		deleteOperation := snapshot.trashDeleteOperations[deleteOperationID]
+		if deleteOperation == nil || !deleteOperation.Completed || !favoriteSlicesEqual(deleteOperation.Planned, normalizedOriginal) {
+			return fmt.Errorf("%w: delete operation %q does not own the restore plan", ErrTrashRestoreOperationConflict, deleteOperationID)
+		}
+		for otherRestoreOperationID, operation := range snapshot.trashRestoreOperations {
+			if otherRestoreOperationID != restoreOperationID && operation != nil && operation.DeleteOperationID == deleteOperationID {
+				return fmt.Errorf("%w: delete operation %q already has restore operation %q", ErrTrashRestoreOperationConflict, deleteOperationID, otherRestoreOperationID)
+			}
+		}
+
+		restored := make([]*Favorite, 0, len(deleteOperation.Removed))
+		for index, initial := range normalizedOriginal {
+			var removed *Favorite
+			for _, candidate := range deleteOperation.Removed {
+				if favoriteDeleteIdentityEqual(candidate, initial) {
+					removed = candidate
+					break
+				}
+			}
+			if removed == nil {
+				continue
+			}
+			identity := favoritePathIdentity{UserID: removed.UserID, Path: removed.Path}
+			if favoritePathIdentityInSlice(identity, deleteOperation.RestoreBlocked) {
+				continue
+			}
+			target := normalizedRelocated[index]
+			userFavorites := snapshot.data[target.UserID]
+			if userFavorites != nil {
+				if _, exists := userFavorites[target.Path]; exists {
+					continue
+				}
+			} else {
+				userFavorites = make(map[string]*Favorite)
+				snapshot.data[target.UserID] = userFavorites
+			}
+
+			restoredFavorite := copyFavorite(removed)
+			restoredFavorite.Path = target.Path
+			userFavorites[target.Path] = restoredFavorite
+			restored = append(restored, copyFavorite(restoredFavorite))
+		}
+		sortFavoritesCanonical(restored)
+		snapshot.trashRestoreOperations[restoreOperationID] = &trashRestoreOperation{
+			DeleteOperationID: deleteOperationID,
+			Original:          cloneFavoriteSlice(normalizedOriginal),
+			Relocated:         cloneFavoriteSlice(normalizedRelocated),
+			Restored:          restored,
+		}
+
+		persisted, persistErr := s.persistSnapshot(snapshot)
+		if persisted {
+			return persistErr
+		}
+		if persistErr != nil {
+			return persistErr
+		}
+	}
+}
+
+// CompleteTrashRestoreOperation atomically removes a restore receipt and its
+// matching completed delete ownership. Missing receipts require a barrier.
+func (s *Store) CompleteTrashRestoreOperation(restoreOperationID string) error {
+	if !validTrashDeleteOperationID(restoreOperationID) {
+		return fmt.Errorf("%w: invalid operation ID", errInvalidTrashRestoreOperation)
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	for {
+		snapshot := s.snapshotState()
+		restoreOperation, exists := snapshot.trashRestoreOperations[restoreOperationID]
+		if !exists {
+			persisted, persistErr := s.persistSnapshot(snapshot)
+			if persisted {
+				return persistErr
+			}
+			if persistErr != nil {
+				return persistErr
+			}
+			continue
+		}
+		deleteOperation := snapshot.trashDeleteOperations[restoreOperation.DeleteOperationID]
+		if deleteOperation == nil || !deleteOperation.Completed || !favoriteSlicesEqual(deleteOperation.Planned, restoreOperation.Original) {
+			return fmt.Errorf("%w: operation %q lost completed delete ownership", ErrTrashRestoreOperationConflict, restoreOperationID)
+		}
+		delete(snapshot.trashRestoreOperations, restoreOperationID)
+		delete(snapshot.trashDeleteOperations, restoreOperation.DeleteOperationID)
+
+		persisted, persistErr := s.persistSnapshot(snapshot)
+		if persisted {
+			return persistErr
+		}
+		if persistErr != nil {
+			return persistErr
+		}
+	}
+}
+
+// RollbackTrashDeleteOperation restores only objects removed by the matching
+// pre-commit application. Later creations at the same user and path suppress
+// restoration, including when that later creation has since been deleted.
+func (s *Store) RollbackTrashDeleteOperation(operationID string) error {
+	if !validTrashDeleteOperationID(operationID) {
+		return fmt.Errorf("%w: invalid operation ID", errInvalidTrashDeleteOperation)
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	for {
+		snapshot := s.snapshotState()
+		operation := snapshot.trashDeleteOperations[operationID]
+		if operation == nil {
+			persisted, persistErr := s.persistSnapshot(snapshot)
+			if persisted {
+				return persistErr
+			}
+			if persistErr != nil {
+				return persistErr
+			}
+			continue
+		}
+		if operation.Committed {
+			return fmt.Errorf("%w: operation %q is committed", ErrTrashDeleteOperationConflict, operationID)
+		}
+
+		for _, favorite := range operation.Removed {
+			identity := favoritePathIdentity{UserID: favorite.UserID, Path: favorite.Path}
+			if favoritePathIdentityInSlice(identity, operation.RestoreBlocked) {
+				continue
+			}
+			userFavorites := snapshot.data[favorite.UserID]
+			if userFavorites != nil {
+				if _, exists := userFavorites[favorite.Path]; exists {
+					continue
+				}
+			} else {
+				userFavorites = make(map[string]*Favorite)
+				snapshot.data[favorite.UserID] = userFavorites
+			}
+			userFavorites[favorite.Path] = copyFavorite(favorite)
+			blockTrashDeleteRestore(snapshot.trashDeleteOperations, favorite, operationID)
+		}
+		delete(snapshot.trashDeleteOperations, operationID)
+
+		persisted, persistErr := s.persistSnapshot(snapshot)
+		if persisted {
+			return persistErr
+		}
+		if persistErr != nil {
+			return persistErr
+		}
+	}
+}
+
 // RemoveFavoritesUnderPathWithRestore removes favorites under a deleted path and
 // returns the removed favorites for rollback if a later step fails.
 func (s *Store) RemoveFavoritesUnderPathWithRestore(targetPath string) ([]*Favorite, error) {
@@ -1096,6 +2122,7 @@ func (s *Store) RemoveFavoritesUnderPathWithRestore(targetPath string) ([]*Favor
 				}
 
 				removed = append(removed, copyFavorite(fav))
+				blockTrashDeleteRestore(snapshot.trashDeleteOperations, fav, "")
 				delete(snapshot.data[userID], currentPath)
 				changed = true
 			}
@@ -1147,6 +2174,7 @@ func (s *Store) RestoreFavorites(favorites []*Favorite) error {
 			}
 
 			snapshot.data[normalized.UserID][normalized.Path] = normalized
+			blockTrashDeleteRestore(snapshot.trashDeleteOperations, normalized, "")
 			changed = true
 		}
 
@@ -1194,6 +2222,7 @@ func (s *Store) RestoreFavoritesIfMissing(favorites []*Favorite) error {
 			}
 
 			userFavs[normalized.Path] = normalized
+			blockTrashDeleteRestore(snapshot.trashDeleteOperations, normalized, "")
 			changed = true
 		}
 

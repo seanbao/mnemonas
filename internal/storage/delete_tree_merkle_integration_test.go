@@ -134,7 +134,10 @@ func TestFileSystem_StagedDeleteRejectsModeDrift(t *testing.T) {
 	if intent.Targets[0].DeleteIdentityToken == "" {
 		t.Skip("platform deletion identity is unavailable")
 	}
-	release := fs.beginMutation()
+	release, err := fs.beginMutation(context.Background())
+	if err != nil {
+		t.Fatalf("beginMutation() error: %v", err)
+	}
 	released := false
 	defer func() {
 		if !released {
