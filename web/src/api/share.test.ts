@@ -1,7 +1,10 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { accessShareWithPassword, copyShareUrl, createShare, deleteShare, downloadShare, formatDuration, formatExpiration, formatShareUrl, getPublicShare, getPublicShareItems, getShare, getShareDownloadUrl, getShareFileDownloadUrl, getSharePolicy, listShares, ShareError, updateShare, type Share } from './share'
+import { MAX_RETAINED_DOWNLOAD_FRAMES, reserveBrowserDownloadNavigation } from '@/lib/downloadResponse'
 
 const mockCopyTextToClipboard = vi.fn()
+const mockGetShareDownloadClientNonce = vi.fn()
+const VALID_DOWNLOAD_CLIENT_NONCE = 'A'.repeat(43)
 
 vi.mock('@/lib/utils', async () => {
   const actual = await vi.importActual('@/lib/utils')
@@ -10,6 +13,10 @@ vi.mock('@/lib/utils', async () => {
     copyTextToClipboard: (...args: unknown[]) => mockCopyTextToClipboard(...args),
   }
 })
+
+vi.mock('@/lib/shareDownloadClientNonce', () => ({
+  getOrCreateShareDownloadClientNonce: () => mockGetShareDownloadClientNonce(),
+}))
 
 function createValidShare(overrides: Partial<Share> = {}): Share {
   return {
@@ -27,11 +34,32 @@ function createValidShare(overrides: Partial<Share> = {}): Share {
   }
 }
 
+const VALID_DOWNLOAD_TICKET = '0123456789abcdef0123456789abcdef'
+const VALID_DOWNLOAD_TICKET_EXPIRY = '2999-01-01T00:00:00Z'
+
+function createDownloadTicketResponse(overrides: Record<string, unknown> = {}) {
+  return {
+    ok: true,
+    status: 200,
+    json: () => Promise.resolve({
+      ticket: VALID_DOWNLOAD_TICKET,
+      expires_at: VALID_DOWNLOAD_TICKET_EXPIRY,
+      ...overrides,
+    }),
+  }
+}
+
 describe('Share API', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     global.fetch = vi.fn()
     mockCopyTextToClipboard.mockResolvedValue(undefined)
+    mockGetShareDownloadClientNonce.mockReturnValue(VALID_DOWNLOAD_CLIENT_NONCE)
+  })
+
+  afterEach(() => {
+    window.dispatchEvent(new Event('pagehide'))
+    vi.restoreAllMocks()
   })
 
   describe('URL helpers', () => {
@@ -52,11 +80,19 @@ describe('Share API', () => {
         .toBe('/api/v1/public/shares/abc123/download/folder?archive=zip')
     })
 
+    it('adds opaque ticket parameters after archive parameters', () => {
+      expect(getShareDownloadUrl('abc123', { archive: 'zip', ticket: VALID_DOWNLOAD_TICKET }))
+        .toBe(`/api/v1/public/shares/abc123/download?archive=zip&ticket=${VALID_DOWNLOAD_TICKET}`)
+      expect(getShareFileDownloadUrl('abc123', '/folder', { ticket: VALID_DOWNLOAD_TICKET }))
+        .toBe(`/api/v1/public/shares/abc123/download/folder?ticket=${VALID_DOWNLOAD_TICKET}`)
+    })
+
     it.each([
       ['empty path', ''],
       ['root path', '/'],
       ['backslash separator', String.raw`folder\secret.txt`],
       ['control character', 'folder/secret\u0007.txt'],
+      ['format character', 'folder/secret\u202etxt'],
     ])('rejects %s for shared folder download paths', (_label, filePath) => {
       expect(() => getShareFileDownloadUrl('abc123', filePath)).toThrow('非法路径')
     })
@@ -98,175 +134,137 @@ describe('Share API', () => {
   })
 
   describe('downloadShare', () => {
-    it('downloads the root shared file as a blob', async () => {
-      const blob = new Blob(['share-content'], { type: 'text/plain' })
-      const createObjectURLSpy = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:share')
-      const revokeObjectURLSpy = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
-      const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
-
-      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-        ok: true,
-        headers: new Headers({ 'Content-Disposition': 'attachment; filename="secret.txt"' }),
-        blob: () => Promise.resolve(blob),
+    function captureDownloadFrame(): {
+      navigationSpy: ReturnType<typeof vi.fn>
+      getFrame: () => HTMLIFrameElement | undefined
+      getNavigation: () => { href: string; target: string; rel: string; referrerPolicy: string } | undefined
+    } {
+      let createdFrame: HTMLIFrameElement | undefined
+      let navigation: { href: string; target: string; rel: string; referrerPolicy: string } | undefined
+      const originalAppendChild = document.body.appendChild.bind(document.body)
+      const navigationSpy = vi.fn()
+      vi.spyOn(document.body, 'appendChild').mockImplementation(((node: Node) => {
+        if (node instanceof HTMLIFrameElement && node.hasAttribute('data-mnemonas-download-frame')) {
+          createdFrame = node
+          return node
+        }
+        return originalAppendChild(node)
+      }) as typeof document.body.appendChild)
+      vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function click(this: HTMLAnchorElement) {
+        navigation = {
+          href: this.href,
+          target: this.target,
+          rel: this.rel,
+          referrerPolicy: this.referrerPolicy,
+        }
+        navigationSpy()
       })
+      return { navigationSpy, getFrame: () => createdFrame, getNavigation: () => navigation }
+    }
 
-      await downloadShare('share-1')
+    it('requests a ticket and hands the root download to the browser without buffering content', async () => {
+      const { getFrame, getNavigation } = captureDownloadFrame()
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(createDownloadTicketResponse())
 
-      expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1/download', { credentials: 'same-origin' })
-      expect(createObjectURLSpy).toHaveBeenCalledWith(blob)
-      expect(clickSpy).toHaveBeenCalled()
-      expect(revokeObjectURLSpy).toHaveBeenCalledWith('blob:share')
+      await downloadShare('share-1', { filename: 'secret.txt' })
+
+      expect(global.fetch).toHaveBeenCalledTimes(1)
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1/download-ticket', {
+        credentials: 'same-origin',
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ client_nonce: VALID_DOWNLOAD_CLIENT_NONCE }),
+      })
+      const frame = getFrame()
+      const clickedUrl = new URL(getNavigation()?.href ?? '')
+      expect(frame?.getAttribute('src')).toBeNull()
+      expect(clickedUrl.pathname).toBe('/api/v1/public/shares/share-1/download')
+      expect(clickedUrl.searchParams.get('ticket')).toBe(VALID_DOWNLOAD_TICKET)
+      expect(frame?.title).toBe('下载 secret.txt')
     })
 
-    it('downloads nested shared files and falls back to the file path name', async () => {
-      const blob = new Blob(['nested-share-content'], { type: 'text/plain' })
-      vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:nested-share')
-      vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
-      const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
-
-      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-        ok: true,
-        headers: new Headers(),
-        blob: () => Promise.resolve(blob),
-      })
+    it('binds nested file tickets to the normalized path and uses the path basename', async () => {
+      const { getFrame, getNavigation } = captureDownloadFrame()
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(createDownloadTicketResponse())
 
       await downloadShare('share-1', { filePath: '/folder/report.txt' })
 
-      expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1/download/folder/report.txt', { credentials: 'same-origin' })
-      const clickedLink = clickSpy.mock.contexts.at(-1) as HTMLAnchorElement
-      expect(clickedLink.download).toBe('report.txt')
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1/download-ticket', expect.objectContaining({
+        body: JSON.stringify({ client_nonce: VALID_DOWNLOAD_CLIENT_NONCE, path: 'folder/report.txt' }),
+      }))
+      const frame = getFrame()
+      const clickedUrl = new URL(getNavigation()?.href ?? '')
+      expect(clickedUrl.pathname).toBe('/api/v1/public/shares/share-1/download/folder/report.txt')
+      expect(clickedUrl.searchParams.get('ticket')).toBe(VALID_DOWNLOAD_TICKET)
+      expect(frame?.title).toBe('下载 report.txt')
     })
 
-    it('downloads shared folders as zip archives and falls back to a zip filename', async () => {
-      const blob = new Blob(['zip-content'], { type: 'application/zip' })
-      vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:folder-share')
-      vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
-      const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
-
-      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-        ok: true,
-        headers: new Headers(),
-        blob: () => Promise.resolve(blob),
-      })
-
-      await downloadShare('share-1', { filePath: '/folder', archive: 'zip' })
-
-      expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1/download/folder?archive=zip', { credentials: 'same-origin' })
-      const clickedLink = clickSpy.mock.contexts.at(-1) as HTMLAnchorElement
-      expect(clickedLink.download).toBe('folder.zip')
-    })
-
-    it('does not duplicate the zip extension for zip-named shared folders', async () => {
-      const blob = new Blob(['zip-content'], { type: 'application/zip' })
-      vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:folder-share')
-      vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
-      const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
-
-      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-        ok: true,
-        headers: new Headers(),
-        blob: () => Promise.resolve(blob),
-      })
-
-      await downloadShare('share-1', { filePath: '/backups.zip', archive: 'zip' })
-
-      expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1/download/backups.zip?archive=zip', { credentials: 'same-origin' })
-      const clickedLink = clickSpy.mock.contexts.at(-1) as HTMLAnchorElement
-      expect(clickedLink.download).toBe('backups.zip')
-    })
-
-    it('adds a zip extension to custom shared archive filenames', async () => {
-      const blob = new Blob(['zip-content'], { type: 'application/zip' })
-      vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:folder-share')
-      vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
-      const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
-
-      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-        ok: true,
-        headers: new Headers(),
-        blob: () => Promise.resolve(blob),
-      })
+    it('requests an archive ticket and hands a zip download URL to the browser', async () => {
+      const { getFrame, getNavigation } = captureDownloadFrame()
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(createDownloadTicketResponse())
 
       await downloadShare('share-1', { filePath: '/folder', archive: 'zip', filename: 'team-docs' })
 
-      expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1/download/folder?archive=zip', { credentials: 'same-origin' })
-      const clickedLink = clickSpy.mock.contexts.at(-1) as HTMLAnchorElement
-      expect(clickedLink.download).toBe('team-docs.zip')
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1/download-ticket', expect.objectContaining({
+        body: JSON.stringify({ client_nonce: VALID_DOWNLOAD_CLIENT_NONCE, path: 'folder', archive: 'zip' }),
+      }))
+      const frame = getFrame()
+      const clickedUrl = new URL(getNavigation()?.href ?? '')
+      expect(clickedUrl.pathname).toBe('/api/v1/public/shares/share-1/download/folder')
+      expect(clickedUrl.searchParams.get('archive')).toBe('zip')
+      expect(clickedUrl.searchParams.get('ticket')).toBe(VALID_DOWNLOAD_TICKET)
+      expect(frame?.title).toBe('下载 team-docs.zip')
     })
 
-    it('forwards abort signal when downloading public share content', async () => {
-      const controller = new AbortController()
-      const blob = new Blob(['share-content'], { type: 'text/plain' })
-      vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:share-signal')
-      vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
-      vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    it('does not duplicate a zip extension for archive filenames', async () => {
+      const { getFrame } = captureDownloadFrame()
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(createDownloadTicketResponse())
 
-      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-        ok: true,
-        headers: new Headers(),
-        blob: () => Promise.resolve(blob),
-      })
+      await downloadShare('share-1', { filePath: '/backups.zip', archive: 'zip' })
+
+      expect(getFrame()?.title).toBe('下载 backups.zip')
+    })
+
+    it('forwards the abort signal only to the ticket request', async () => {
+      const controller = new AbortController()
+      captureDownloadFrame()
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(createDownloadTicketResponse())
 
       await downloadShare('share-1', { signal: controller.signal })
 
-      expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1/download', {
+      expect(global.fetch).toHaveBeenCalledTimes(1)
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1/download-ticket', {
         credentials: 'same-origin',
         signal: controller.signal,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ client_nonce: VALID_DOWNLOAD_CLIENT_NONCE }),
       })
     })
 
-    it('uses decoded UTF-8 filenames from content disposition', async () => {
-      const blob = new Blob(['share-content'], { type: 'text/plain' })
-      vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:utf8-share')
-      vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
-      const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
-
+    it('does not start native download after cancellation while parsing a ticket response', async () => {
+      const controller = new AbortController()
+      const { navigationSpy } = captureDownloadFrame()
+      let resolveTicket!: (value: unknown) => void
+      const ticketBody = new Promise((resolve) => {
+        resolveTicket = resolve
+      })
       ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: true,
-        headers: new Headers({ 'Content-Disposition': "attachment; filename*=UTF-8''report%20final.txt" }),
-        blob: () => Promise.resolve(blob),
+        status: 200,
+        json: () => ticketBody,
       })
 
-      await downloadShare('share-1')
-
-      const clickedLink = clickSpy.mock.contexts.at(-1) as HTMLAnchorElement
-      expect(clickedLink.download).toBe('report final.txt')
-    })
-
-    it('sanitizes filenames from content disposition before triggering download', async () => {
-      const blob = new Blob(['share-content'], { type: 'text/plain' })
-      vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:safe-share')
-      vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
-      const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
-
-      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-        ok: true,
-        headers: new Headers({ 'Content-Disposition': 'attachment; filename="folder/secret.txt"' }),
-        blob: () => Promise.resolve(blob),
+      const download = downloadShare('share-1', { signal: controller.signal })
+      await vi.waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(1))
+      controller.abort()
+      resolveTicket({
+        ticket: VALID_DOWNLOAD_TICKET,
+        expires_at: VALID_DOWNLOAD_TICKET_EXPIRY,
       })
 
-      await downloadShare('share-1')
-
-      const clickedLink = clickSpy.mock.contexts.at(-1) as HTMLAnchorElement
-      expect(clickedLink.download).toBe('folder_secret.txt')
-    })
-
-    it('falls back to the raw UTF-8 filename token when decoding fails', async () => {
-      const blob = new Blob(['share-content'], { type: 'text/plain' })
-      vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:bad-utf8-share')
-      vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
-      const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
-
-      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-        ok: true,
-        headers: new Headers({ 'Content-Disposition': "attachment; filename*=UTF-8''%E0%A4%A" }),
-        blob: () => Promise.resolve(blob),
-      })
-
-      await downloadShare('share-1')
-
-      const clickedLink = clickSpy.mock.contexts.at(-1) as HTMLAnchorElement
-      expect(clickedLink.download).toBe('%E0%A4%A')
+      await expect(download).rejects.toMatchObject({ name: 'AbortError' })
+      expect(navigationSpy).not.toHaveBeenCalled()
     })
 
     it('throws a ShareError with structured details when download fails', async () => {
@@ -309,7 +307,7 @@ describe('Share API', () => {
       expect(json).toHaveBeenCalled()
     })
 
-    it('localizes public share archive snapshot-change failures', async () => {
+    it('localizes ticket request failures with known public share codes', async () => {
       const json = vi.fn(() => Promise.resolve({
         success: false,
         error: {
@@ -340,9 +338,32 @@ describe('Share API', () => {
       expect(json).toHaveBeenCalled()
     })
 
+    it('localizes archive admission limits before starting a browser download', async () => {
+      const { navigationSpy } = captureDownloadFrame()
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: false,
+        status: 429,
+        headers: new Headers({ 'Content-Type': 'application/json', 'Retry-After': '1' }),
+        json: () => Promise.resolve({
+          success: false,
+          error: {
+            code: 'DOWNLOAD_TICKET_RATE_LIMITED',
+            message: 'too many concurrent archive downloads',
+          },
+        }),
+      })
+
+      await expect(downloadShare('share-1', { archive: 'zip' })).rejects.toMatchObject({
+        message: '下载请求暂时受限，请稍后重试',
+        status: 429,
+        code: 'DOWNLOAD_TICKET_RATE_LIMITED',
+      })
+      expect(navigationSpy).not.toHaveBeenCalled()
+    })
+
     it.each([
-      [410, '分享已过期、已禁用或访问次数已达上限'],
-      [429, '尝试次数过多，请稍后再试'],
+      [410, '分享已过期、已禁用或下载次数已达上限'],
+      [429, '下载请求暂时受限，请稍后重试'],
     ])('uses fallback download error text for status %s when the body is unreadable', async (status, message) => {
       ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: false,
@@ -356,60 +377,70 @@ describe('Share API', () => {
       })
     })
 
-    it('treats successful structured JSON without an attachment header as a download error', async () => {
-      const json = vi.fn(() => Promise.resolve({
-        success: false,
-        error: {
-          code: 'ARCHIVE_TOO_LARGE',
-          message: 'archive content is too large',
-        },
-      }))
-      const blob = vi.fn(() => Promise.resolve(new Blob(['{}'], { type: 'application/json' })))
-      const createObjectURLSpy = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:share-json-error')
-      const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
-
+    it.each([
+      ['non-object', null],
+      ['missing ticket', { expires_at: VALID_DOWNLOAD_TICKET_EXPIRY }],
+      ['short ticket', { ticket: 'short', expires_at: VALID_DOWNLOAD_TICKET_EXPIRY }],
+      ['ticket with whitespace', { ticket: '0123456789abcdef 0123456789abcdef', expires_at: VALID_DOWNLOAD_TICKET_EXPIRY }],
+      ['ticket with format character', { ticket: '0123456789abcdef\u202e0123456789abcdef', expires_at: VALID_DOWNLOAD_TICKET_EXPIRY }],
+      ['missing expiry', { ticket: VALID_DOWNLOAD_TICKET }],
+      ['invalid expiry', { ticket: VALID_DOWNLOAD_TICKET, expires_at: 'tomorrow' }],
+      ['impossible calendar expiry', { ticket: VALID_DOWNLOAD_TICKET, expires_at: '2999-02-31T00:00:00Z' }],
+      ['invalid clock expiry', { ticket: VALID_DOWNLOAD_TICKET, expires_at: '2999-01-01T24:00:00Z' }],
+      ['invalid offset expiry', { ticket: VALID_DOWNLOAD_TICKET, expires_at: '2999-01-01T00:00:00+24:00' }],
+      ['unexpected field', { ticket: VALID_DOWNLOAD_TICKET, expires_at: VALID_DOWNLOAD_TICKET_EXPIRY, share_id: 'share-1' }],
+    ])('rejects malformed successful ticket responses with %s', async (_label, payload) => {
+      const { navigationSpy } = captureDownloadFrame()
       ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: true,
         status: 200,
-        headers: new Headers({ 'Content-Type': 'application/json' }),
-        clone: () => ({ json }),
-        blob,
+        json: () => Promise.resolve(payload),
       })
 
-      await expect(downloadShare('share-1', { archive: 'zip' })).rejects.toMatchObject({
-        message: '归档内容过大',
+      await expect(downloadShare('share-1')).rejects.toMatchObject({
+        message: '服务器返回了无效的数据',
         status: 200,
-        code: 'ARCHIVE_TOO_LARGE',
       })
-      expect(json).toHaveBeenCalled()
-      expect(blob).not.toHaveBeenCalled()
-      expect(createObjectURLSpy).not.toHaveBeenCalled()
-      expect(clickSpy).not.toHaveBeenCalled()
+      expect(navigationSpy).not.toHaveBeenCalled()
     })
 
-    it('downloads shared JSON content when an attachment header is present', async () => {
-      const blob = new Blob(['{"message":"keep"}'], { type: 'application/json' })
-      const clone = vi.fn()
-      const createObjectURLSpy = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:share-json')
-      const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
-      vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
-
+    it('accepts a valid RFC3339 expiry without relying on the browser clock', async () => {
+      const { navigationSpy } = captureDownloadFrame()
       ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: true,
         status: 200,
-        headers: new Headers({
-          'Content-Type': 'application/json',
-          'Content-Disposition': 'attachment; filename="share-data.json"',
-        }),
-        clone,
-        blob: () => Promise.resolve(blob),
+        json: () => Promise.resolve({ ticket: VALID_DOWNLOAD_TICKET, expires_at: '2020-01-01T00:00:00Z' }),
       })
 
       await downloadShare('share-1')
 
-      expect(clone).not.toHaveBeenCalled()
-      expect(createObjectURLSpy).toHaveBeenCalledWith(blob)
-      expect(clickSpy).toHaveBeenCalled()
+      expect(navigationSpy).toHaveBeenCalledOnce()
+    })
+
+    it('fails before issuing a request when a secure client nonce is unavailable', async () => {
+      mockGetShareDownloadClientNonce.mockImplementationOnce(() => {
+        throw new Error('secure randomness unavailable')
+      })
+
+      await expect(downloadShare('share-1')).rejects.toMatchObject({
+        message: '当前浏览器无法创建安全下载凭证',
+        status: 0,
+        code: 'DOWNLOAD_CLIENT_NONCE_UNAVAILABLE',
+      })
+      expect(global.fetch).not.toHaveBeenCalled()
+    })
+
+    it('reserves browser navigation capacity before issuing a counted ticket request', async () => {
+      const reservations = Array.from(
+        { length: MAX_RETAINED_DOWNLOAD_FRAMES },
+        () => reserveBrowserDownloadNavigation(),
+      )
+      try {
+        await expect(downloadShare('share-1')).rejects.toThrow('当前页面已提交过多下载，请刷新页面后重试')
+        expect(global.fetch).not.toHaveBeenCalled()
+      } finally {
+        reservations.forEach((reservation) => reservation.release())
+      }
     })
   })
 
@@ -472,6 +503,20 @@ describe('Share API', () => {
       expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1/items?path=docs', { credentials: 'same-origin' })
     })
 
+    it('accepts unique direct children bound to the requested directory', async () => {
+      const items = [
+        { name: 'report.txt', path: 'docs/report.txt', is_dir: false, size: 1, mod_time: '2026-03-13T00:00:00Z' },
+        { name: 'archive', path: 'docs/archive', is_dir: true, size: 0, mod_time: '2026-03-13T00:00:00Z' },
+      ]
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ path: 'docs', items }),
+      })
+
+      await expect(getPublicShareItems('share-1', { path: 'docs' })).resolves.toEqual({ path: 'docs', items })
+    })
+
     it('rejects unsafe folder item paths before requesting items', async () => {
       await expect(getPublicShareItems('share-1', { path: 'docs/./report' })).rejects.toThrow('非法路径')
 
@@ -481,6 +526,7 @@ describe('Share API', () => {
     it.each([
       ['backslash separator', String.raw`docs\private`],
       ['control character', 'docs/private\u0007'],
+      ['format character', 'docs/private\u2066'],
     ])('rejects folder item request paths with %s before requesting items', async (_label, path) => {
       await expect(getPublicShareItems('share-1', { path })).rejects.toThrow('非法路径')
 
@@ -564,7 +610,7 @@ describe('Share API', () => {
     })
 
     it.each([
-      [410, '分享已过期、已禁用或访问次数已达上限'],
+      [410, '分享已过期、已禁用或下载次数已达上限'],
       [401, '密码错误'],
     ])('uses fallback folder listing error text for status %s when the body is unreadable', async (status, message) => {
       ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
@@ -606,6 +652,43 @@ describe('Share API', () => {
     })
 
     it.each([
+      ['a mismatched response path', {
+        path: 'other',
+        items: [],
+      }],
+      ['a nested descendant', {
+        path: 'docs',
+        items: [{ name: 'report.txt', path: 'docs/archive/report.txt', is_dir: false, size: 1, mod_time: '2026-03-13T00:00:00Z' }],
+      }],
+      ['a child from another directory', {
+        path: 'docs',
+        items: [{ name: 'report.txt', path: 'other/report.txt', is_dir: false, size: 1, mod_time: '2026-03-13T00:00:00Z' }],
+      }],
+      ['a basename mismatch', {
+        path: 'docs',
+        items: [{ name: 'visible.txt', path: 'docs/actual.txt', is_dir: false, size: 1, mod_time: '2026-03-13T00:00:00Z' }],
+      }],
+      ['duplicate child paths', {
+        path: 'docs',
+        items: [
+          { name: 'report.txt', path: 'docs/report.txt', is_dir: false, size: 1, mod_time: '2026-03-13T00:00:00Z' },
+          { name: 'report.txt', path: 'docs/report.txt', is_dir: false, size: 1, mod_time: '2026-03-13T00:00:00Z' },
+        ],
+      }],
+    ])('rejects a successful folder response containing %s', async (_label, payload) => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(payload),
+      })
+
+      await expect(getPublicShareItems('share-1', { path: 'docs' })).rejects.toMatchObject({
+        message: '服务器返回了无效的数据',
+        status: 200,
+      })
+    })
+
+    it.each([
       ['dot segment', 'docs/./private'],
       ['absolute path', '/docs/private'],
       ['trailing slash', 'docs/private/'],
@@ -622,9 +705,25 @@ describe('Share API', () => {
       })
     })
 
+    it('accepts ZWNJ and ZWJ in canonical public folder item names', async () => {
+      const items = [
+        { name: 'می\u200cشود.txt', path: 'docs/می\u200cشود.txt', is_dir: false, size: 1, mod_time: '2026-03-13T00:00:00Z' },
+        { name: 'क्\u200dष.txt', path: 'docs/क्\u200dष.txt', is_dir: false, size: 1, mod_time: '2026-03-13T00:00:00Z' },
+      ]
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ path: 'docs', items }),
+      })
+
+      await expect(getPublicShareItems('share-1', { path: 'docs' })).resolves.toEqual({ path: 'docs', items })
+    })
+
     it.each([
       ['non-object item', null],
       ['unsafe name', { name: '../secret.txt', path: 'file.txt', is_dir: false, size: 1, mod_time: '2026-03-13T00:00:00Z' }],
+      ['format character name', { name: 'secret\u202etxt', path: 'docs/secret\u202etxt', is_dir: false, size: 1, mod_time: '2026-03-13T00:00:00Z' }],
+      ['format character path', { name: 'secret.txt', path: 'docs/secret\u2066.txt', is_dir: false, size: 1, mod_time: '2026-03-13T00:00:00Z' }],
       ['invalid is_dir', { name: 'file.txt', path: '/file.txt', is_dir: 'false', size: 1, mod_time: '2026-03-13T00:00:00Z' }],
       ['invalid size', { name: 'file.txt', path: '/file.txt', is_dir: false, size: '1', mod_time: '2026-03-13T00:00:00Z' }],
       ['negative size', { name: 'file.txt', path: '/file.txt', is_dir: false, size: -1, mod_time: '2026-03-13T00:00:00Z' }],
@@ -795,7 +894,7 @@ describe('Share API', () => {
       })
 
       await expect(getPublicShare('expired')).rejects.toMatchObject({
-        message: '分享已过期、已禁用或访问次数已达上限',
+        message: '分享已过期、已禁用或下载次数已达上限',
         status: 410,
       })
     })
@@ -826,11 +925,25 @@ describe('Share API', () => {
       })
     })
 
+    it('rejects public share metadata for a different requested share ID', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ id: 'share-2', type: 'file', has_password: false, permission: 'read' }),
+      })
+
+      await expect(getPublicShare('share-1')).rejects.toMatchObject({
+        message: '服务器返回了无效的数据',
+        status: 200,
+      })
+    })
+
     it.each([
       ['description', { description: 42 }],
       ['file_name', { file_name: 42 }],
       ['unsafe file_name', { file_name: '../secret.txt' }],
       ['unicode control file_name', { file_name: 'report\u0081.txt' }],
+      ['unicode format file_name', { file_name: 'report\u202etxt' }],
       ['file_size', { file_size: '42' }],
       ['negative file_size', { file_size: -1 }],
       ['fractional file_size', { file_size: 42.5 }],
@@ -1470,7 +1583,7 @@ describe('Share API', () => {
       ['non-number', '5' as unknown as number],
     ])('rejects %s create share max_access before sending a request', async (_label, maxAccess) => {
       await expect(createShare({ path: '/docs/b.txt', max_access: maxAccess })).rejects.toMatchObject({
-        message: '访问次数必须是 0 或不超过安全范围的正整数',
+        message: '下载次数必须是 0 或不超过安全范围的正整数',
         status: 0,
         code: 'INVALID_MAX_ACCESS',
       })
@@ -1520,7 +1633,7 @@ describe('Share API', () => {
       ['non-number', '5' as unknown as number],
     ])('rejects %s update share max_access before sending a request', async (_label, maxAccess) => {
       await expect(updateShare('share-1', { max_access: maxAccess })).rejects.toMatchObject({
-        message: '访问次数必须是 0 或不超过安全范围的正整数',
+        message: '下载次数必须是 0 或不超过安全范围的正整数',
         status: 0,
         code: 'INVALID_MAX_ACCESS',
       })
@@ -1720,6 +1833,19 @@ describe('Share API', () => {
       }))
     })
 
+    it('rejects password access metadata for a different requested share ID', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ id: 'share-2', type: 'file', has_password: true, permission: 'read' }),
+      })
+
+      await expect(accessShareWithPassword('share-1', 'secret')).rejects.toMatchObject({
+        message: '服务器返回了无效的数据',
+        status: 200,
+      })
+    })
+
     it('uses wrapped password error details', async () => {
       ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: false,
@@ -1790,7 +1916,7 @@ describe('Share API', () => {
       })
 
       await expect(accessShareWithPassword('share-1', 'secret')).rejects.toMatchObject({
-        message: '分享已过期、已禁用或访问次数已达上限',
+        message: '分享已过期、已禁用或下载次数已达上限',
         status: 410,
       })
     })

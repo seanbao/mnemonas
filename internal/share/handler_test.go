@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -26,17 +27,19 @@ import (
 )
 
 type fakeShareFS struct {
-	statInfo       *storage.FileInfo
-	statInfoByPath map[string]*storage.FileInfo
-	beforeStat     func(string) error
-	statErrByPath  map[string]error
-	dirItems       []*storage.FileInfo
-	dirItemsByPath map[string][]*storage.FileInfo
-	beforeOpenFile func(string) error
-	openByPath     map[string]FileReader
-	openErrByPath  map[string]error
-	beforeReadDir  func(string) error
-	readDirErr     error
+	statInfo        *storage.FileInfo
+	statInfoByPath  map[string]*storage.FileInfo
+	beforeStat      func(string) error
+	statErrByPath   map[string]error
+	dirItems        []*storage.FileInfo
+	dirItemsByPath  map[string][]*storage.FileInfo
+	beforeOpenFile  func(string) error
+	openByPath      map[string]FileReader
+	openErrByPath   map[string]error
+	beforeReadDir   func(string) error
+	readDirErr      error
+	readDirLimits   []int
+	readDirReturned int
 }
 
 type fakeShareSnapshotFS struct {
@@ -510,6 +513,131 @@ func TestWriteShareArchiveRejectsDuplicateHeaderNames(t *testing.T) {
 	}
 }
 
+func TestWriteShareArchiveRejectsShortSnapshot(t *testing.T) {
+	store, err := NewShareStore(filepath.Join(t.TempDir(), "shares.json"))
+	if err != nil {
+		t.Fatalf("NewShareStore() error: %v", err)
+	}
+	handler := NewHandler(store, &fakeShareFS{
+		openByPath: map[string]FileReader{
+			"/short.txt": io.NopCloser(strings.NewReader("abc")),
+		},
+	})
+	var archive bytes.Buffer
+	zipWriter := zip.NewWriter(&archive)
+	err = handler.writeShareArchive(context.Background(), zipWriter, []shareArchiveEntry{{
+		sourcePath: "/short.txt",
+		zipName:    "short.txt",
+		info: &storage.FileInfo{
+			Path: "/short.txt",
+			Name: "short.txt",
+			Size: 4,
+		},
+	}})
+	if !errors.Is(err, errShareArchiveSnapshotChanged) {
+		t.Fatalf("writeShareArchive() error = %v, want errShareArchiveSnapshotChanged", err)
+	}
+}
+
+func TestServeAuthorizedShareArchive_DoesNotFinalizeZipAfterStartedSnapshotFailure(t *testing.T) {
+	store, err := NewShareStore(filepath.Join(t.TempDir(), "shares.json"))
+	if err != nil {
+		t.Fatalf("NewShareStore() error: %v", err)
+	}
+	share, err := store.Create(CreateShareOptions{Path: "/docs", Type: ShareTypeFolder, CreatedBy: "owner-1"})
+	if err != nil {
+		t.Fatalf("Create() error: %v", err)
+	}
+	data := make([]byte, 64*1024)
+	state := uint32(0x12345678)
+	for index := range data {
+		state ^= state << 13
+		state ^= state >> 17
+		state ^= state << 5
+		data[index] = byte(state)
+	}
+	handler := NewHandler(store, &fakeShareFS{
+		statInfoByPath: map[string]*storage.FileInfo{
+			"/docs": {Path: "/docs", Name: "docs", IsDir: true},
+		},
+		dirItemsByPath: map[string][]*storage.FileInfo{
+			"/docs": {{Path: "/docs/short.bin", Name: "short.bin", Size: int64(len(data) + 1)}},
+		},
+		openByPath: map[string]FileReader{
+			"/docs/short.bin": io.NopCloser(bytes.NewReader(data)),
+		},
+	})
+	recorder := httptest.NewRecorder()
+	request := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download?archive=zip", share.ID, nil)
+
+	handler.serveAuthorizedShareArchive(recorder, request, share, share.Path)
+
+	if recorder.Body.Len() == 0 {
+		t.Fatal("expected the ZIP response to have started")
+	}
+	if bytes.Contains(recorder.Body.Bytes(), []byte{'P', 'K', 0x05, 0x06}) {
+		t.Fatal("truncated ZIP contains an end-of-central-directory record")
+	}
+	if _, err := zip.NewReader(bytes.NewReader(recorder.Body.Bytes()), int64(recorder.Body.Len())); err == nil {
+		t.Fatal("truncated ZIP unexpectedly parsed as a complete archive")
+	}
+}
+
+func TestServeAuthorizedShareArchive_ClearsAttachmentHeadersBeforeJSONError(t *testing.T) {
+	store, err := NewShareStore(filepath.Join(t.TempDir(), "shares.json"))
+	if err != nil {
+		t.Fatalf("NewShareStore() error: %v", err)
+	}
+	share, err := store.Create(CreateShareOptions{Path: "/docs", Type: ShareTypeFolder, CreatedBy: "owner-1"})
+	if err != nil {
+		t.Fatalf("Create() error: %v", err)
+	}
+	handler := NewHandler(store, &fakeShareFS{
+		statInfoByPath: map[string]*storage.FileInfo{
+			"/docs": {Path: "/docs", Name: "docs", IsDir: true},
+		},
+		dirItemsByPath: map[string][]*storage.FileInfo{
+			"/docs": {{Path: "/docs/short.txt", Name: "short.txt", Size: 4}},
+		},
+		openByPath: map[string]FileReader{
+			"/docs/short.txt": io.NopCloser(strings.NewReader("abc")),
+		},
+	})
+	recorder := httptest.NewRecorder()
+	request := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download?archive=zip", share.ID, nil)
+
+	handler.serveAuthorizedShareArchive(recorder, request, share, share.Path)
+
+	if recorder.Code != http.StatusConflict || responseErrorCode(t, recorder) != "ARCHIVE_ENTRY_CHANGED" {
+		t.Fatalf("status/body = %d/%s", recorder.Code, recorder.Body.String())
+	}
+	if contentType := recorder.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "application/json") {
+		t.Fatalf("Content-Type = %q, want application/json", contentType)
+	}
+	for _, headerName := range []string{"Content-Disposition", "Content-Length", "Content-Range"} {
+		if value := recorder.Header().Get(headerName); value != "" {
+			t.Fatalf("%s = %q, want empty", headerName, value)
+		}
+	}
+	if got := recorder.Header().Get("Content-Security-Policy"); !strings.Contains(got, "sandbox;") || !strings.Contains(got, "frame-ancestors 'self'") || strings.Contains(got, "allow-downloads") {
+		t.Fatalf("Content-Security-Policy = %q, want same-origin sandbox without downloads", got)
+	}
+	if got := recorder.Header().Get("X-Frame-Options"); got != "SAMEORIGIN" {
+		t.Fatalf("X-Frame-Options = %q, want SAMEORIGIN", got)
+	}
+}
+
+func TestWritePublicShareArchiveError_NotRegularIsExplicit(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	writePublicShareArchiveError(recorder, storage.ErrNotRegular)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", recorder.Code)
+	}
+	if code := responseErrorCode(t, recorder); code != "ARCHIVE_ENTRY_NOT_REGULAR" {
+		t.Fatalf("code = %q, want ARCHIVE_ENTRY_NOT_REGULAR", code)
+	}
+}
+
 func TestWriteShareArchiveInternalErrorTextDoesNotExposePaths(t *testing.T) {
 	tempDir := t.TempDir()
 	store, err := NewShareStore(filepath.Join(tempDir, "shares.json"))
@@ -746,6 +874,9 @@ func (w *failFirstWriteResponseWriter) WriteHeader(statusCode int) {
 func (w *failFirstWriteResponseWriter) Write(p []byte) (int, error) {
 	if !w.failed {
 		w.failed = true
+		if w.status == 0 {
+			w.status = http.StatusOK
+		}
 		if w.writeErr == nil {
 			w.writeErr = errors.New("client write failed")
 		}
@@ -755,6 +886,19 @@ func (w *failFirstWriteResponseWriter) Write(p []byte) (int, error) {
 		w.status = http.StatusOK
 	}
 	return w.body.Write(p)
+}
+
+func assertFirstWriteFailureDidNotAttemptFallback(t *testing.T, writer *failFirstWriteResponseWriter) {
+	t.Helper()
+	if !writer.failed {
+		t.Fatal("expected the initial response write to be attempted")
+	}
+	if writer.status != http.StatusOK {
+		t.Fatalf("committed status = %d, want 200", writer.status)
+	}
+	if writer.body.Len() != 0 {
+		t.Fatalf("fallback body = %q, want empty", writer.body.String())
+	}
 }
 
 func (w *failPartialWriteResponseWriter) Header() http.Header {
@@ -886,12 +1030,157 @@ func (f *fakeShareFS) ReadDir(ctx context.Context, filePath string) ([]*storage.
 	return f.dirItems, nil
 }
 
+func (f *fakeShareFS) ReadDirLimit(ctx context.Context, filePath string, limit int) ([]*storage.FileInfo, error) {
+	f.readDirLimits = append(f.readDirLimits, limit)
+	items, err := f.ReadDir(ctx, filePath)
+	if err != nil || len(items) <= limit {
+		f.readDirReturned += len(items)
+		return items, err
+	}
+	f.readDirReturned += limit
+	return items[:limit], nil
+}
+
 func newRouteRequest(method, target, id string, body []byte) *http.Request {
 	req := httptest.NewRequest(method, target, bytes.NewReader(body))
 	req.RemoteAddr = "203.0.113.5:1234"
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("id", id)
 	return req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+}
+
+func serveDownloadShareWithTicket(t *testing.T, handler *Handler, w http.ResponseWriter, req *http.Request) {
+	t.Helper()
+	if !attachDownloadTicketForTest(t, handler, w, req, false) {
+		return
+	}
+	handler.DownloadShare(w, req)
+}
+
+func serveDownloadShareFileWithTicket(t *testing.T, handler *Handler, w http.ResponseWriter, req *http.Request) {
+	t.Helper()
+	if !attachDownloadTicketForTest(t, handler, w, req, true) {
+		return
+	}
+	handler.DownloadShareFile(w, req)
+}
+
+func attachDownloadTicketForTest(t *testing.T, handler *Handler, w http.ResponseWriter, req *http.Request, nested bool) bool {
+	t.Helper()
+	if req.Method != http.MethodGet {
+		return true
+	}
+	if values := req.URL.Query()["ticket"]; len(values) == 1 && values[0] != "" {
+		return true
+	}
+	id := chi.URLParam(req, "id")
+	relPath := ""
+	if nested {
+		var err error
+		relPath, err = shareDownloadPathFromRequest(req, id)
+		if err != nil {
+			return true
+		}
+		relPath, err = normalizeShareRelativePath(relPath)
+		if err != nil {
+			return true
+		}
+	}
+	archive, err := shareArchiveFormatFromRequest(req)
+	if err != nil {
+		return true
+	}
+	ensureDownloadTicketTestMetadata(t, handler, id, relPath, archive)
+
+	body := make(map[string]string, 3)
+	body["client_nonce"] = fixedDownloadTicketClientNonce
+	if relPath != "" {
+		body["path"] = relPath
+	}
+	if archive != "" {
+		body["archive"] = archive
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal test download ticket request: %v", err)
+	}
+	ticketPath := "/s/" + id + "/download-ticket"
+	if strings.HasPrefix(req.URL.Path, "/api/v1/public/shares/") {
+		ticketPath = "/api/v1/public/shares/" + id + "/download-ticket"
+	}
+	ticketReq := newRouteRequest(http.MethodPost, ticketPath, id, bodyBytes)
+	ticketReq.RemoteAddr = req.RemoteAddr
+	for _, cookie := range req.Cookies() {
+		ticketReq.AddCookie(cookie)
+	}
+	ticketRecorder := httptest.NewRecorder()
+	handler.CreateDownloadTicket(ticketRecorder, ticketReq)
+	if ticketRecorder.Code != http.StatusOK {
+		copyTestHTTPResponse(w, ticketRecorder)
+		return false
+	}
+
+	var response DownloadTicketResponse
+	if err := json.Unmarshal(ticketRecorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode test download ticket response: %v", err)
+	}
+	query := req.URL.Query()
+	query.Set("ticket", response.Ticket)
+	req.URL.RawQuery = query.Encode()
+	for _, cookie := range ticketRecorder.Result().Cookies() {
+		if strings.HasPrefix(cookie.Name, downloadTicketCookiePrefix) {
+			req.AddCookie(cookie)
+			break
+		}
+	}
+	return true
+}
+
+func ensureDownloadTicketTestMetadata(t *testing.T, handler *Handler, id, relPath, archive string) {
+	t.Helper()
+	if archive != "" || handler == nil || handler.store == nil {
+		return
+	}
+	share, err := handler.store.Get(id)
+	if err != nil {
+		return
+	}
+	targetPath := share.Path
+	if relPath != "" {
+		targetPath = path.Join(share.Path, relPath)
+	}
+	var fake *fakeShareFS
+	switch fs := handler.fs.(type) {
+	case *fakeShareFS:
+		fake = fs
+	case *fakeShareSnapshotFS:
+		fake = fs.fakeShareFS
+	}
+	if fake == nil || fake.statInfo != nil {
+		return
+	}
+	if _, ok := fake.statErrByPath[targetPath]; ok {
+		return
+	}
+	if fake.statInfoByPath == nil {
+		fake.statInfoByPath = make(map[string]*storage.FileInfo)
+	}
+	if _, ok := fake.statInfoByPath[targetPath]; !ok {
+		fake.statInfoByPath[targetPath] = &storage.FileInfo{
+			Path: targetPath,
+			Name: path.Base(targetPath),
+		}
+	}
+}
+
+func copyTestHTTPResponse(w http.ResponseWriter, source *httptest.ResponseRecorder) {
+	for key, values := range source.Header() {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	w.WriteHeader(source.Code)
+	_, _ = w.Write(source.Body.Bytes())
 }
 
 func decodeResponseBody(t *testing.T, recorder *httptest.ResponseRecorder) map[string]any {
@@ -939,11 +1228,14 @@ func assertUntrustedDownloadHeaders(t *testing.T, header http.Header) {
 	if got := header.Get("X-Content-Type-Options"); got != "nosniff" {
 		t.Fatalf("download X-Content-Type-Options = %q, want nosniff", got)
 	}
+	if got := header.Get("X-Frame-Options"); got != "SAMEORIGIN" {
+		t.Fatalf("download X-Frame-Options = %q, want SAMEORIGIN", got)
+	}
 	if got := header.Get("Referrer-Policy"); got != "no-referrer" {
 		t.Fatalf("download Referrer-Policy = %q, want no-referrer", got)
 	}
-	if got := header.Get("Content-Security-Policy"); !strings.Contains(got, "sandbox") || !strings.Contains(got, "default-src 'none'") {
-		t.Fatalf("download Content-Security-Policy = %q, want sandboxed default-src none", got)
+	if got := header.Get("Content-Security-Policy"); !strings.Contains(got, "sandbox allow-downloads") || !strings.Contains(got, "default-src 'none'") || !strings.Contains(got, "frame-ancestors 'self'") || strings.Contains(got, "frame-ancestors 'none'") {
+		t.Fatalf("download Content-Security-Policy = %q, want sandboxed attachment policy with same-origin framing only", got)
 	}
 }
 
@@ -1197,8 +1489,8 @@ func TestStreamResponseErrorWrapsAndTracksStartedState(t *testing.T) {
 	if _, err := failedTracker.Write([]byte("hello")); !errors.Is(err, baseErr) {
 		t.Fatalf("Write() error = %v, want %v", err, baseErr)
 	}
-	if failedTracker.started {
-		t.Fatal("zero-byte failed write should not mark response started")
+	if !failedTracker.started {
+		t.Fatal("zero-byte failed write must conservatively mark response started")
 	}
 
 	partialWriter := &failPartialWriteResponseWriter{limit: 2, writeErr: baseErr}
@@ -3745,7 +4037,7 @@ func TestDownloadShareFile_ReturnsBadRequestWhenParentPathIsFile(t *testing.T) {
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download/report/file.txt", share.ID, nil)
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShareFile(recorder, req)
+	serveDownloadShareFileWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected status 400, got %d", recorder.Code)
@@ -3822,7 +4114,7 @@ func TestListShareItems_PublicFolder(t *testing.T) {
 	}
 }
 
-func TestListShareItems_PublicFolderReturnsWarningWhenAccessPersistenceWarns(t *testing.T) {
+func TestListShareItems_PublicFolderDoesNotPersistAccess(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
 
@@ -3863,15 +4155,15 @@ func TestListShareItems_PublicFolderReturnsWarningWhenAccessPersistenceWarns(t *
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d: %s", recorder.Code, recorder.Body.String())
 	}
-	if recorder.Header().Get("Warning") != sharePersistenceWarningHeader {
-		t.Fatalf("expected Warning header %q, got %q", sharePersistenceWarningHeader, recorder.Header().Get("Warning"))
+	if recorder.Header().Get("Warning") != "" {
+		t.Fatalf("expected no persistence warning, got %q", recorder.Header().Get("Warning"))
 	}
 	current, err := store.Get(share.ID)
 	if err != nil {
 		t.Fatalf("failed to reload share: %v", err)
 	}
-	if current.AccessCount != 1 {
-		t.Fatalf("expected warned list to consume access count, got %d", current.AccessCount)
+	if current.AccessCount != 0 {
+		t.Fatalf("expected list not to consume access count, got %d", current.AccessCount)
 	}
 }
 
@@ -4372,7 +4664,7 @@ func TestDownloadShareFile_PathTraversal(t *testing.T) {
 	} {
 		req := newRouteRequest(http.MethodGet, target, share.ID, nil)
 		recorder := httptest.NewRecorder()
-		handler.DownloadShareFile(recorder, req)
+		serveDownloadShareFileWithTicket(t, handler, recorder, req)
 
 		if recorder.Code != http.StatusBadRequest {
 			t.Fatalf("target %q expected status 400, got %d", target, recorder.Code)
@@ -4410,7 +4702,7 @@ func TestDownloadShareFile_BackslashTraversal(t *testing.T) {
 
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download/..%5Csecret", share.ID, nil)
 	recorder := httptest.NewRecorder()
-	handler.DownloadShareFile(recorder, req)
+	serveDownloadShareFileWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected status 400, got %d", recorder.Code)
@@ -4462,7 +4754,7 @@ func TestDownloadShareFile_RejectsEncodedUnsafePathWithoutConsumingAccess(t *tes
 		t.Run(target, func(t *testing.T) {
 			req := newRouteRequest(http.MethodGet, target, share.ID, nil)
 			recorder := httptest.NewRecorder()
-			handler.DownloadShareFile(recorder, req)
+			serveDownloadShareFileWithTicket(t, handler, recorder, req)
 
 			if recorder.Code != http.StatusBadRequest {
 				t.Fatalf("target %q expected status 400, got %d; body=%s", target, recorder.Code, recorder.Body.String())
@@ -4508,7 +4800,7 @@ func TestDownloadShare_NilReaderReturnsNotFound(t *testing.T) {
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download", share.ID, nil)
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShare(recorder, req)
+	serveDownloadShareWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("expected status 404, got %d", recorder.Code)
@@ -4550,7 +4842,7 @@ func TestDownloadShare_OpenFileInternalErrorReturnsInternalServerError(t *testin
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download", share.ID, nil)
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShare(recorder, req)
+	serveDownloadShareWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusInternalServerError {
 		t.Fatalf("expected status 500, got %d", recorder.Code)
@@ -4570,8 +4862,8 @@ func TestDownloadShare_OpenFileInternalErrorReturnsInternalServerError(t *testin
 	if err != nil {
 		t.Fatalf("failed to load share: %v", err)
 	}
-	if current.AccessCount != 0 {
-		t.Fatalf("expected failed download not to consume access count, got %d", current.AccessCount)
+	if current.AccessCount != 1 {
+		t.Fatalf("expected issued ticket to consume one access before download, got %d", current.AccessCount)
 	}
 }
 
@@ -4601,7 +4893,7 @@ func TestDownloadShare_OpenFileDirectoryReturnsBadRequest(t *testing.T) {
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download", share.ID, nil)
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShare(recorder, req)
+	serveDownloadShareWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected status 400, got %d", recorder.Code)
@@ -4642,7 +4934,7 @@ func TestDownloadShare_OpenFileInvalidParentPathReturnsNotFound(t *testing.T) {
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download", share.ID, nil)
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShare(recorder, req)
+	serveDownloadShareWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("expected status 404, got %d", recorder.Code)
@@ -4702,7 +4994,7 @@ func TestDownloadShare_FolderArchiveAsZip(t *testing.T) {
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download?archive=zip", share.ID, nil)
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShare(recorder, req)
+	serveDownloadShareWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("folder archive status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
@@ -4771,7 +5063,7 @@ func TestDownloadShare_RejectsAmbiguousArchiveParameterWithoutConsumingAccess(t 
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download?archive=zip&archive=tar", share.ID, nil)
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShare(recorder, req)
+	serveDownloadShareWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("ambiguous archive parameter status = %d, want %d; body=%s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
@@ -4828,7 +5120,7 @@ func TestDownloadShare_RootFolderArchiveUsesSafeDisplayName(t *testing.T) {
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download?archive=zip", share.ID, nil)
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShare(recorder, req)
+	serveDownloadShareWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("root folder archive status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
@@ -4906,7 +5198,7 @@ func TestDownloadShare_ZipNamedFolderArchiveKeepsSingleZipSuffix(t *testing.T) {
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download?archive=zip", share.ID, nil)
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShare(recorder, req)
+	serveDownloadShareWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("zip-named folder archive status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
@@ -4958,7 +5250,7 @@ func TestDownloadShare_FolderArchiveSkipsEntriesOutsideShareRoot(t *testing.T) {
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download?archive=zip", share.ID, nil)
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShare(recorder, req)
+	serveDownloadShareWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("folder archive status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
@@ -5017,7 +5309,7 @@ func TestDownloadShare_FolderArchiveSkipsNonDirectReadDirChildren(t *testing.T) 
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download?archive=zip", share.ID, nil)
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShare(recorder, req)
+	serveDownloadShareWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("folder archive status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
@@ -5071,7 +5363,7 @@ func TestDownloadShare_FolderArchiveRejectsDuplicateEntryNamesWithoutConsumingAc
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download?archive=zip", share.ID, nil)
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShare(recorder, req)
+	serveDownloadShareWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusConflict {
 		t.Fatalf("folder archive duplicate entry status = %d, want %d; body=%s", recorder.Code, http.StatusConflict, recorder.Body.String())
@@ -5153,7 +5445,7 @@ func TestDownloadShare_FolderArchiveRejectsSnapshotSizeGrowthBeforeStreaming(t *
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download?archive=zip", share.ID, nil)
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShare(recorder, req)
+	serveDownloadShareWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("folder archive oversized snapshot status = %d, want %d; body=%s", recorder.Code, http.StatusRequestEntityTooLarge, recorder.Body.String())
@@ -5171,7 +5463,7 @@ func TestDownloadShare_FolderArchiveRejectsSnapshotSizeGrowthBeforeStreaming(t *
 		t.Fatalf("failed to reload share: %v", err)
 	}
 	if current.AccessCount != 0 {
-		t.Fatalf("oversized archive access_count = %d, want rollback to 0", current.AccessCount)
+		t.Fatalf("oversized archive access_count = %d, want preflight rejection 0", current.AccessCount)
 	}
 }
 
@@ -5226,7 +5518,7 @@ func TestDownloadShare_FolderArchiveRejectsSnapshotTypeChangeBeforeStreaming(t *
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download?archive=zip", share.ID, nil)
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShare(recorder, req)
+	serveDownloadShareWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusConflict {
 		t.Fatalf("folder archive snapshot type change status = %d, want %d; body=%s", recorder.Code, http.StatusConflict, recorder.Body.String())
@@ -5244,7 +5536,7 @@ func TestDownloadShare_FolderArchiveRejectsSnapshotTypeChangeBeforeStreaming(t *
 		t.Fatalf("failed to reload share: %v", err)
 	}
 	if current.AccessCount != 0 {
-		t.Fatalf("changed archive access_count = %d, want rollback to 0", current.AccessCount)
+		t.Fatalf("changed archive access_count = %d, want preflight rejection 0", current.AccessCount)
 	}
 }
 
@@ -5283,7 +5575,7 @@ func TestDownloadShareFile_SubfolderArchiveAsZip(t *testing.T) {
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download/nested?archive=zip", share.ID, nil)
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShareFile(recorder, req)
+	serveDownloadShareFileWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("subfolder archive status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
@@ -5328,7 +5620,7 @@ func TestDownloadShare_EscapesQuotedFilenameInContentDisposition(t *testing.T) {
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download", share.ID, nil)
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShare(recorder, req)
+	serveDownloadShareWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d", recorder.Code)
@@ -5371,7 +5663,7 @@ func TestDownloadShare_UsesExtensionContentType(t *testing.T) {
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download", share.ID, nil)
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShare(recorder, req)
+	serveDownloadShareWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d", recorder.Code)
@@ -5411,7 +5703,7 @@ func TestDownloadShare_SupportsRangeRequests(t *testing.T) {
 	req.Header.Set("Range", "bytes=1-3")
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShare(recorder, req)
+	serveDownloadShareWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusPartialContent {
 		t.Fatalf("range status = %d, want %d", recorder.Code, http.StatusPartialContent)
@@ -5477,7 +5769,7 @@ func TestDownloadShare_UnsatisfiableRangeDoesNotConsumeAccess(t *testing.T) {
 			req.Header.Set("Range", tt.rangeHeader)
 			recorder := httptest.NewRecorder()
 
-			handler.DownloadShare(recorder, req)
+			serveDownloadShareWithTicket(t, handler, recorder, req)
 
 			if recorder.Code != tt.wantStatus {
 				t.Fatalf("range status = %d, want %d", recorder.Code, tt.wantStatus)
@@ -5496,8 +5788,8 @@ func TestDownloadShare_UnsatisfiableRangeDoesNotConsumeAccess(t *testing.T) {
 			if err != nil {
 				t.Fatalf("failed to reload share: %v", err)
 			}
-			if current.AccessCount != 0 {
-				t.Fatalf("unsatisfiable range access count = %d, want 0", current.AccessCount)
+			if current.AccessCount != 1 {
+				t.Fatalf("unsatisfiable range access count = %d, want ticket reservation 1", current.AccessCount)
 			}
 		})
 	}
@@ -5526,7 +5818,7 @@ func TestDownloadShare_HeadDoesNotConsumeAccess(t *testing.T) {
 	req := newRouteRequest(http.MethodHead, "/s/"+share.ID+"/download", share.ID, nil)
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShare(recorder, req)
+	serveDownloadShareWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("HEAD download status = %d, want %d", recorder.Code, http.StatusMethodNotAllowed)
@@ -5574,7 +5866,7 @@ func TestDownloadShare_ReturnsInternalErrorWhenStreamingFailsBeforeWrite(t *test
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download", share.ID, nil)
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShare(recorder, req)
+	serveDownloadShareWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusInternalServerError {
 		t.Fatalf("expected status 500, got %d", recorder.Code)
@@ -5594,12 +5886,12 @@ func TestDownloadShare_ReturnsInternalErrorWhenStreamingFailsBeforeWrite(t *test
 	if err != nil {
 		t.Fatalf("failed to load share: %v", err)
 	}
-	if current.AccessCount != 0 {
-		t.Fatalf("expected streaming failure before write not to consume access count, got %d", current.AccessCount)
+	if current.AccessCount != 1 {
+		t.Fatalf("expected issued ticket to remain consumed after stream failure, got %d", current.AccessCount)
 	}
 }
 
-func TestDownloadShare_FirstResponseWriteFailureReturnsInternalError(t *testing.T) {
+func TestDownloadShare_FirstResponseWriteFailureDoesNotAppendJSON(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
 
@@ -5625,32 +5917,19 @@ func TestDownloadShare_FirstResponseWriteFailureReturnsInternalError(t *testing.
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download", share.ID, nil)
 	writer := &failFirstWriteResponseWriter{}
 
-	handler.DownloadShare(writer, req)
+	serveDownloadShareWithTicket(t, handler, writer, req)
 
-	if writer.status != http.StatusInternalServerError {
-		t.Fatalf("expected status 500, got %d", writer.status)
-	}
-	payload := decodeResponseBytes(t, writer.body.Bytes())
-	errorPayload, ok := payload["error"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected error payload, got %v", payload)
-	}
-	if errorPayload["code"] != "DOWNLOAD_SHARE_FAILED" {
-		t.Fatalf("expected DOWNLOAD_SHARE_FAILED code, got %v", errorPayload["code"])
-	}
-	if errorPayload["message"] != "internal server error" {
-		t.Fatalf("expected generic message, got %v", errorPayload["message"])
-	}
+	assertFirstWriteFailureDidNotAttemptFallback(t, writer)
 	current, err := store.Get(share.ID)
 	if err != nil {
 		t.Fatalf("failed to load share: %v", err)
 	}
-	if current.AccessCount != 0 {
-		t.Fatalf("expected first response write failure not to consume access count, got %d", current.AccessCount)
+	if current.AccessCount != 1 {
+		t.Fatalf("expected issued ticket to remain consumed after response failure, got %d", current.AccessCount)
 	}
 }
 
-func TestDownloadShare_FirstResponseWriteFailureReturnsRollbackErrorWhenRollbackSaveFailsClosed(t *testing.T) {
+func TestDownloadShare_FirstResponseWriteFailureDoesNotAttemptRollbackAfterCommit(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
 
@@ -5690,18 +5969,11 @@ func TestDownloadShare_FirstResponseWriteFailureReturnsRollbackErrorWhenRollback
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download", share.ID, nil)
 	writer := &failFirstWriteResponseWriter{}
 
-	handler.DownloadShare(writer, req)
+	serveDownloadShareWithTicket(t, handler, writer, req)
 
-	if writer.status != http.StatusInternalServerError {
-		t.Fatalf("expected status 500, got %d", writer.status)
-	}
-	payload := decodeResponseBytes(t, writer.body.Bytes())
-	errorPayload, ok := payload["error"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected error payload, got %v", payload)
-	}
-	if errorPayload["code"] != "DOWNLOAD_SHARE_ROLLBACK_FAILED" {
-		t.Fatalf("expected DOWNLOAD_SHARE_ROLLBACK_FAILED code, got %v", errorPayload["code"])
+	assertFirstWriteFailureDidNotAttemptFallback(t, writer)
+	if writeCalls != 1 {
+		t.Fatalf("share-store writes = %d, want only the ticket reservation", writeCalls)
 	}
 	current, err := store.Get(share.ID)
 	if err != nil {
@@ -5712,13 +5984,13 @@ func TestDownloadShare_FirstResponseWriteFailureReturnsRollbackErrorWhenRollback
 	}
 
 	retryRec := httptest.NewRecorder()
-	handler.DownloadShare(retryRec, req)
-	if retryRec.Code != http.StatusGone {
-		t.Fatalf("expected retry after rollback failure to hit max access limit, got %d", retryRec.Code)
+	serveDownloadShareWithTicket(t, handler, retryRec, req)
+	if retryRec.Code != http.StatusOK {
+		t.Fatalf("expected the issued ticket to support a retry, got %d", retryRec.Code)
 	}
 }
 
-func TestDownloadShare_FirstResponseWriteFailureReturnsOriginalErrorWhenRollbackWarns(t *testing.T) {
+func TestDownloadShare_FirstResponseWriteFailureDoesNotAppendJSONAfterTicketPersistenceWarning(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
 
@@ -5753,28 +6025,18 @@ func TestDownloadShare_FirstResponseWriteFailureReturnsOriginalErrorWhenRollback
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download", share.ID, nil)
 	writer := &failFirstWriteResponseWriter{}
 
-	handler.DownloadShare(writer, req)
+	serveDownloadShareWithTicket(t, handler, writer, req)
 
-	if writer.status != http.StatusInternalServerError {
-		t.Fatalf("expected status 500, got %d", writer.status)
-	}
-	if writer.Header().Get("Warning") != sharePersistenceWarningHeader {
-		t.Fatalf("expected Warning header %q, got %q", sharePersistenceWarningHeader, writer.Header().Get("Warning"))
-	}
-	payload := decodeResponseBytes(t, writer.body.Bytes())
-	errorPayload, ok := payload["error"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected error payload, got %v", payload)
-	}
-	if errorPayload["code"] != "DOWNLOAD_SHARE_FAILED" {
-		t.Fatalf("expected DOWNLOAD_SHARE_FAILED code, got %v", errorPayload["code"])
+	assertFirstWriteFailureDidNotAttemptFallback(t, writer)
+	if writer.Header().Get("Warning") != "" {
+		t.Fatalf("expected ticket persistence warning not to be repeated by GET, got %q", writer.Header().Get("Warning"))
 	}
 	current, err := store.Get(share.ID)
 	if err != nil {
 		t.Fatalf("failed to load share: %v", err)
 	}
-	if current.AccessCount != 0 {
-		t.Fatalf("expected rollback warning to restore access count, got %d", current.AccessCount)
+	if current.AccessCount != 1 {
+		t.Fatalf("expected ticket reservation to remain consumed, got %d", current.AccessCount)
 	}
 }
 
@@ -5806,7 +6068,7 @@ func TestDownloadShare_PartialStreamFailureConsumesAccessAndBlocksRetry(t *testi
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download", share.ID, nil)
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShare(recorder, req)
+	serveDownloadShareWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected started download to keep 200 status, got %d", recorder.Code)
@@ -5824,9 +6086,9 @@ func TestDownloadShare_PartialStreamFailureConsumesAccessAndBlocksRetry(t *testi
 
 	shareFS.openByPath["/docs/report.pdf"] = io.NopCloser(strings.NewReader("complete body"))
 	secondRecorder := httptest.NewRecorder()
-	handler.DownloadShare(secondRecorder, req)
-	if secondRecorder.Code != http.StatusGone {
-		t.Fatalf("expected retry after partial stream failure to hit max access limit, got %d", secondRecorder.Code)
+	serveDownloadShareWithTicket(t, handler, secondRecorder, req)
+	if secondRecorder.Code != http.StatusOK {
+		t.Fatalf("expected retry with the same ticket to succeed, got %d", secondRecorder.Code)
 	}
 }
 
@@ -5857,7 +6119,7 @@ func TestDownloadShare_EmptyFileConsumesAccessCount(t *testing.T) {
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download", share.ID, nil)
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShare(recorder, req)
+	serveDownloadShareWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d", recorder.Code)
@@ -5906,13 +6168,13 @@ func TestDownloadShare_EmptyFileReturnsWarningWhenAccessPersistenceWarns(t *test
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download", share.ID, nil)
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShare(recorder, req)
+	serveDownloadShareWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d", recorder.Code)
 	}
-	if recorder.Header().Get("Warning") != sharePersistenceWarningHeader {
-		t.Fatalf("expected Warning header %q, got %q", sharePersistenceWarningHeader, recorder.Header().Get("Warning"))
+	if recorder.Header().Get("Warning") != "" {
+		t.Fatalf("expected ticket persistence warning not to be repeated by GET, got %q", recorder.Header().Get("Warning"))
 	}
 	current, err := store.Get(share.ID)
 	if err != nil {
@@ -5954,7 +6216,7 @@ func TestDownloadShare_ExpiredProtectedShareReturnsGoneWithoutCookie(t *testing.
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download", share.ID, nil)
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShare(recorder, req)
+	serveDownloadShareWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusGone {
 		t.Fatalf("expected status 410, got %d", recorder.Code)
@@ -6010,7 +6272,7 @@ func TestDownloadShare_DisabledOwnerAfterAuthorizationReturnsGone(t *testing.T) 
 
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download", share.ID, nil)
 	recorder := httptest.NewRecorder()
-	handler.DownloadShare(recorder, req)
+	serveDownloadShareWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusGone {
 		t.Fatalf("expected status 410, got %d", recorder.Code)
@@ -6022,8 +6284,8 @@ func TestDownloadShare_DisabledOwnerAfterAuthorizationReturnsGone(t *testing.T) 
 	if err != nil {
 		t.Fatalf("failed to reload share: %v", err)
 	}
-	if current.AccessCount != 0 {
-		t.Fatalf("expected disabled-owner download race not to consume access count, got %d", current.AccessCount)
+	if current.AccessCount != 1 {
+		t.Fatalf("expected ticket reservation to remain consumed after owner race, got %d", current.AccessCount)
 	}
 }
 
@@ -6056,7 +6318,7 @@ func TestDownloadShareFile_PreservesWhitespaceInPath(t *testing.T) {
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download/%20report%20.txt", share.ID, nil)
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShareFile(recorder, req)
+	serveDownloadShareFileWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d", recorder.Code)
@@ -6091,7 +6353,7 @@ func TestDownloadShareFile_EscapesQuotedFilenameInContentDisposition(t *testing.
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download/report%222026.pdf", share.ID, nil)
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShareFile(recorder, req)
+	serveDownloadShareFileWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d", recorder.Code)
@@ -6136,7 +6398,7 @@ func TestDownloadShareFile_UsesExtensionContentType(t *testing.T) {
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download/manual.pdf", share.ID, nil)
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShareFile(recorder, req)
+	serveDownloadShareFileWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d", recorder.Code)
@@ -6177,7 +6439,7 @@ func TestDownloadShareFile_SupportsRangeRequests(t *testing.T) {
 	req.Header.Set("Range", "bytes=2-4")
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShareFile(recorder, req)
+	serveDownloadShareFileWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusPartialContent {
 		t.Fatalf("range status = %d, want %d", recorder.Code, http.StatusPartialContent)
@@ -6242,7 +6504,7 @@ func TestDownloadShareFile_UnsatisfiableRangeDoesNotConsumeAccess(t *testing.T) 
 			req.Header.Set("Range", tt.rangeHeader)
 			recorder := httptest.NewRecorder()
 
-			handler.DownloadShareFile(recorder, req)
+			serveDownloadShareFileWithTicket(t, handler, recorder, req)
 
 			if recorder.Code != tt.wantStatus {
 				t.Fatalf("range status = %d, want %d", recorder.Code, tt.wantStatus)
@@ -6261,8 +6523,8 @@ func TestDownloadShareFile_UnsatisfiableRangeDoesNotConsumeAccess(t *testing.T) 
 			if err != nil {
 				t.Fatalf("failed to reload share: %v", err)
 			}
-			if current.AccessCount != 0 {
-				t.Fatalf("unsatisfiable range access count = %d, want 0", current.AccessCount)
+			if current.AccessCount != 1 {
+				t.Fatalf("unsatisfiable range access count = %d, want ticket reservation 1", current.AccessCount)
 			}
 		})
 	}
@@ -6291,7 +6553,7 @@ func TestDownloadShareFile_HeadDoesNotConsumeAccess(t *testing.T) {
 	req := newRouteRequest(http.MethodHead, "/s/"+share.ID+"/download/video.mp4", share.ID, nil)
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShareFile(recorder, req)
+	serveDownloadShareFileWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("HEAD folder download status = %d, want %d", recorder.Code, http.StatusMethodNotAllowed)
@@ -6341,7 +6603,7 @@ func TestDownloadShareFile_ReturnsInternalErrorWhenStreamingFailsBeforeWrite(t *
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download/report.pdf", share.ID, nil)
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShareFile(recorder, req)
+	serveDownloadShareFileWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusInternalServerError {
 		t.Fatalf("expected status 500, got %d", recorder.Code)
@@ -6361,12 +6623,12 @@ func TestDownloadShareFile_ReturnsInternalErrorWhenStreamingFailsBeforeWrite(t *
 	if err != nil {
 		t.Fatalf("failed to load share: %v", err)
 	}
-	if current.AccessCount != 0 {
-		t.Fatalf("expected streaming failure before write not to consume access count, got %d", current.AccessCount)
+	if current.AccessCount != 1 {
+		t.Fatalf("expected issued ticket to remain consumed after stream failure, got %d", current.AccessCount)
 	}
 }
 
-func TestDownloadShareFile_FirstResponseWriteFailureReturnsInternalError(t *testing.T) {
+func TestDownloadShareFile_FirstResponseWriteFailureDoesNotAppendJSON(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
 
@@ -6394,32 +6656,19 @@ func TestDownloadShareFile_FirstResponseWriteFailureReturnsInternalError(t *test
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download/report.pdf", share.ID, nil)
 	writer := &failFirstWriteResponseWriter{}
 
-	handler.DownloadShareFile(writer, req)
+	serveDownloadShareFileWithTicket(t, handler, writer, req)
 
-	if writer.status != http.StatusInternalServerError {
-		t.Fatalf("expected status 500, got %d", writer.status)
-	}
-	payload := decodeResponseBytes(t, writer.body.Bytes())
-	errorPayload, ok := payload["error"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected error payload, got %v", payload)
-	}
-	if errorPayload["code"] != "DOWNLOAD_SHARE_FAILED" {
-		t.Fatalf("expected DOWNLOAD_SHARE_FAILED code, got %v", errorPayload["code"])
-	}
-	if errorPayload["message"] != "internal server error" {
-		t.Fatalf("expected generic message, got %v", errorPayload["message"])
-	}
+	assertFirstWriteFailureDidNotAttemptFallback(t, writer)
 	current, err := store.Get(share.ID)
 	if err != nil {
 		t.Fatalf("failed to load share: %v", err)
 	}
-	if current.AccessCount != 0 {
-		t.Fatalf("expected first response write failure not to consume access count, got %d", current.AccessCount)
+	if current.AccessCount != 1 {
+		t.Fatalf("expected issued ticket to remain consumed after response failure, got %d", current.AccessCount)
 	}
 }
 
-func TestDownloadShareFile_FirstResponseWriteFailureReturnsRollbackErrorWhenRollbackSaveFailsClosed(t *testing.T) {
+func TestDownloadShareFile_FirstResponseWriteFailureDoesNotAttemptRollbackAfterCommit(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
 
@@ -6461,18 +6710,11 @@ func TestDownloadShareFile_FirstResponseWriteFailureReturnsRollbackErrorWhenRoll
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download/report.pdf", share.ID, nil)
 	writer := &failFirstWriteResponseWriter{}
 
-	handler.DownloadShareFile(writer, req)
+	serveDownloadShareFileWithTicket(t, handler, writer, req)
 
-	if writer.status != http.StatusInternalServerError {
-		t.Fatalf("expected status 500, got %d", writer.status)
-	}
-	payload := decodeResponseBytes(t, writer.body.Bytes())
-	errorPayload, ok := payload["error"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected error payload, got %v", payload)
-	}
-	if errorPayload["code"] != "DOWNLOAD_SHARE_ROLLBACK_FAILED" {
-		t.Fatalf("expected DOWNLOAD_SHARE_ROLLBACK_FAILED code, got %v", errorPayload["code"])
+	assertFirstWriteFailureDidNotAttemptFallback(t, writer)
+	if writeCalls != 1 {
+		t.Fatalf("share-store writes = %d, want only the ticket reservation", writeCalls)
 	}
 	current, err := store.Get(share.ID)
 	if err != nil {
@@ -6483,9 +6725,9 @@ func TestDownloadShareFile_FirstResponseWriteFailureReturnsRollbackErrorWhenRoll
 	}
 
 	retryRec := httptest.NewRecorder()
-	handler.DownloadShareFile(retryRec, req)
-	if retryRec.Code != http.StatusGone {
-		t.Fatalf("expected retry after rollback failure to hit max access limit, got %d", retryRec.Code)
+	serveDownloadShareFileWithTicket(t, handler, retryRec, req)
+	if retryRec.Code != http.StatusOK {
+		t.Fatalf("expected the issued ticket to support a retry, got %d", retryRec.Code)
 	}
 }
 
@@ -6519,7 +6761,7 @@ func TestDownloadShareFile_PartialStreamFailureConsumesAccessAndBlocksRetry(t *t
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download/report.pdf", share.ID, nil)
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShareFile(recorder, req)
+	serveDownloadShareFileWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected started folder download to keep 200 status, got %d", recorder.Code)
@@ -6537,9 +6779,9 @@ func TestDownloadShareFile_PartialStreamFailureConsumesAccessAndBlocksRetry(t *t
 
 	shareFS.openByPath[targetPath] = io.NopCloser(strings.NewReader("complete body"))
 	secondRecorder := httptest.NewRecorder()
-	handler.DownloadShareFile(secondRecorder, req)
-	if secondRecorder.Code != http.StatusGone {
-		t.Fatalf("expected retry after partial folder download failure to hit max access limit, got %d", secondRecorder.Code)
+	serveDownloadShareFileWithTicket(t, handler, secondRecorder, req)
+	if secondRecorder.Code != http.StatusOK {
+		t.Fatalf("expected retry with the same ticket to succeed, got %d", secondRecorder.Code)
 	}
 }
 
@@ -6571,7 +6813,7 @@ func TestDownloadShareFile_OpenFileInternalErrorReturnsInternalServerError(t *te
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download/report.pdf", share.ID, nil)
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShareFile(recorder, req)
+	serveDownloadShareFileWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusInternalServerError {
 		t.Fatalf("expected status 500, got %d", recorder.Code)
@@ -6617,7 +6859,7 @@ func TestDownloadShareFile_OpenFileDirectoryReturnsBadRequest(t *testing.T) {
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download/subdir", share.ID, nil)
 	recorder := httptest.NewRecorder()
 
-	handler.DownloadShareFile(recorder, req)
+	serveDownloadShareFileWithTicket(t, handler, recorder, req)
 
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected status 400, got %d", recorder.Code)
@@ -7024,14 +7266,22 @@ func TestPasswordAttemptTracker_PrunesStaleEntriesOnNewFailure(t *testing.T) {
 	tracker := newPasswordAttemptTracker()
 	now := time.Date(2026, 3, 19, 12, 0, 0, 0, time.UTC)
 	tracker.now = func() time.Time { return now }
-	tracker.attempts["stale"] = passwordAttemptState{failures: 1, lastFailure: now.Add(-2 * time.Minute)}
+	tracker.partitions["share-1"] = &passwordAttemptPartition{attempts: map[string]passwordAttemptState{
+		"stale": {failures: 1, lastFailure: now.Add(-2 * time.Minute)},
+	}}
+	tracker.total = 1
 
-	tracker.recordFailure("fresh", 5, time.Minute, time.Minute)
+	finish, _, admitted := tracker.begin("share-1", "fresh", 5, time.Minute, time.Minute)
+	if !admitted {
+		t.Fatal("expected fresh tracker entry to be admitted")
+	}
+	finish(passwordAttemptFailed)
 
-	if _, ok := tracker.attempts["stale"]; ok {
+	partition := tracker.partitions["share-1"]
+	if _, ok := partition.attempts["stale"]; ok {
 		t.Fatal("expected stale tracker entry to be pruned")
 	}
-	if _, ok := tracker.attempts["fresh"]; !ok {
+	if _, ok := partition.attempts["fresh"]; !ok {
 		t.Fatal("expected fresh tracker entry to remain")
 	}
 }
@@ -7040,16 +7290,22 @@ func TestPasswordAttemptTracker_PrunesStaleEntriesOnLockCheck(t *testing.T) {
 	tracker := newPasswordAttemptTracker()
 	now := time.Date(2026, 3, 19, 12, 0, 0, 0, time.UTC)
 	tracker.now = func() time.Time { return now }
-	tracker.attempts["stale"] = passwordAttemptState{failures: 1, lastFailure: now.Add(-2 * time.Minute)}
-	tracker.attempts["current"] = passwordAttemptState{failures: 1, lastFailure: now}
+	tracker.partitions["share-1"] = &passwordAttemptPartition{attempts: map[string]passwordAttemptState{
+		"stale":   {failures: 1, lastFailure: now.Add(-2 * time.Minute)},
+		"current": {failures: 1, lastFailure: now},
+	}}
+	tracker.total = 2
 
-	if tracker.isLocked("current", time.Minute) {
+	finish, _, admitted := tracker.begin("share-1", "current", 5, time.Minute, time.Minute)
+	if !admitted {
 		t.Fatal("expected current tracker entry not to be locked")
 	}
-	if _, ok := tracker.attempts["stale"]; ok {
+	finish(passwordAttemptFailed)
+	partition := tracker.partitions["share-1"]
+	if _, ok := partition.attempts["stale"]; ok {
 		t.Fatal("expected stale tracker entry to be pruned during lock check")
 	}
-	if _, ok := tracker.attempts["current"]; !ok {
+	if _, ok := partition.attempts["current"]; !ok {
 		t.Fatal("expected current tracker entry to remain after lock check")
 	}
 }
@@ -7164,7 +7420,7 @@ func TestListShareItems_DoesNotLeakInternalErrors(t *testing.T) {
 	}
 }
 
-func TestListShareItems_FirstResponseWriteFailureDoesNotConsumeAccessCount(t *testing.T) {
+func TestListShareItems_FirstResponseWriteFailureDoesNotAppendJSONOrConsumeAccess(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
 
@@ -7196,17 +7452,7 @@ func TestListShareItems_FirstResponseWriteFailureDoesNotConsumeAccessCount(t *te
 
 	handler.ListShareItems(writer, req)
 
-	if writer.status != http.StatusInternalServerError {
-		t.Fatalf("expected status 500, got %d", writer.status)
-	}
-	payload := decodeResponseBytes(t, writer.body.Bytes())
-	errorPayload, ok := payload["error"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected error payload, got %v", payload)
-	}
-	if errorPayload["code"] != "LIST_SHARE_ITEMS_FAILED" {
-		t.Fatalf("expected LIST_SHARE_ITEMS_FAILED code, got %v", errorPayload["code"])
-	}
+	assertFirstWriteFailureDidNotAttemptFallback(t, writer)
 	current, err := store.Get(share.ID)
 	if err != nil {
 		t.Fatalf("failed to load share: %v", err)
@@ -7216,7 +7462,7 @@ func TestListShareItems_FirstResponseWriteFailureDoesNotConsumeAccessCount(t *te
 	}
 }
 
-func TestListShareItems_FirstResponseWriteFailureReturnsRollbackErrorWhenRollbackSaveFailsClosed(t *testing.T) {
+func TestListShareItems_FirstResponseWriteFailureDoesNotAttemptFallbackStoreWrite(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
 
@@ -7261,33 +7507,26 @@ func TestListShareItems_FirstResponseWriteFailureReturnsRollbackErrorWhenRollbac
 
 	handler.ListShareItems(writer, req)
 
-	if writer.status != http.StatusInternalServerError {
-		t.Fatalf("expected status 500, got %d", writer.status)
-	}
-	payload := decodeResponseBytes(t, writer.body.Bytes())
-	errorPayload, ok := payload["error"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected error payload, got %v", payload)
-	}
-	if errorPayload["code"] != "LIST_SHARE_ITEMS_ROLLBACK_FAILED" {
-		t.Fatalf("expected LIST_SHARE_ITEMS_ROLLBACK_FAILED code, got %v", errorPayload["code"])
+	assertFirstWriteFailureDidNotAttemptFallback(t, writer)
+	if writeCalls != 0 {
+		t.Fatalf("share-store writes = %d, want 0", writeCalls)
 	}
 	current, err := store.Get(share.ID)
 	if err != nil {
 		t.Fatalf("failed to load share: %v", err)
 	}
-	if current.AccessCount != 1 {
-		t.Fatalf("expected rollback save failure to leave consumed access count fail-closed, got %d", current.AccessCount)
+	if current.AccessCount != 0 {
+		t.Fatalf("expected listing not to consume access count, got %d", current.AccessCount)
 	}
 
 	retryRec := httptest.NewRecorder()
 	handler.ListShareItems(retryRec, req)
-	if retryRec.Code != http.StatusGone {
-		t.Fatalf("expected retry after rollback failure to hit max access limit, got %d", retryRec.Code)
+	if retryRec.Code != http.StatusOK {
+		t.Fatalf("expected listing retry to remain available, got %d", retryRec.Code)
 	}
 }
 
-func TestListShareItems_FirstResponseWriteFailureReturnsOriginalErrorWhenRollbackWarns(t *testing.T) {
+func TestListShareItems_FirstResponseWriteFailureDoesNotAppendJSONWithPersistenceWarningHook(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
 
@@ -7327,26 +7566,16 @@ func TestListShareItems_FirstResponseWriteFailureReturnsOriginalErrorWhenRollbac
 
 	handler.ListShareItems(writer, req)
 
-	if writer.status != http.StatusInternalServerError {
-		t.Fatalf("expected status 500, got %d", writer.status)
-	}
-	if writer.Header().Get("Warning") != sharePersistenceWarningHeader {
-		t.Fatalf("expected Warning header %q, got %q", sharePersistenceWarningHeader, writer.Header().Get("Warning"))
-	}
-	payload := decodeResponseBytes(t, writer.body.Bytes())
-	errorPayload, ok := payload["error"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected error payload, got %v", payload)
-	}
-	if errorPayload["code"] != "LIST_SHARE_ITEMS_FAILED" {
-		t.Fatalf("expected LIST_SHARE_ITEMS_FAILED code, got %v", errorPayload["code"])
+	assertFirstWriteFailureDidNotAttemptFallback(t, writer)
+	if writer.Header().Get("Warning") != "" {
+		t.Fatalf("expected no persistence warning, got %q", writer.Header().Get("Warning"))
 	}
 	current, err := store.Get(share.ID)
 	if err != nil {
 		t.Fatalf("failed to load share: %v", err)
 	}
 	if current.AccessCount != 0 {
-		t.Fatalf("expected rollback warning to restore access count, got %d", current.AccessCount)
+		t.Fatalf("expected listing not to consume access count, got %d", current.AccessCount)
 	}
 }
 
@@ -7395,14 +7624,14 @@ func TestListShareItems_PartialResponseWriteFailureConsumesAccessAndBlocksRetry(
 	if err != nil {
 		t.Fatalf("failed to load share: %v", err)
 	}
-	if current.AccessCount != 1 {
-		t.Fatalf("expected partial response write failure after response start to consume access count, got %d", current.AccessCount)
+	if current.AccessCount != 0 {
+		t.Fatalf("expected partial listing response not to consume access count, got %d", current.AccessCount)
 	}
 
 	secondWriter := httptest.NewRecorder()
 	handler.ListShareItems(secondWriter, req)
-	if secondWriter.Code != http.StatusGone {
-		t.Fatalf("expected retry after partial response write failure to hit max access limit, got %d", secondWriter.Code)
+	if secondWriter.Code != http.StatusOK {
+		t.Fatalf("expected listing retry to remain available, got %d", secondWriter.Code)
 	}
 }
 

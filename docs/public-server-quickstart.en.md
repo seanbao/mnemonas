@@ -205,10 +205,10 @@ Access tokens longer than `1h` or refresh tokens longer than `720h` (30 days) pr
 Empty, `0`, or negative values fail.
 
 When sharing is enabled, `mnemonas-doctor --public-domain` also checks `share.default_expires_in` and `share.default_max_access`.
-No default expiry, values longer than `720h` (30 days), or `0` default access limits produce warnings.
-Negative expiry or negative default access limits fail.
+No default expiry, values longer than `720h` (30 days), or `0` default download limits produce warnings.
+Negative expiry or negative default download limits fail.
 For family public sharing, keep the default at `168h` (7 days) or another explicit expiry no longer than 30 days.
-Set an explicit default access limit such as `20`.
+Set an explicit default download limit such as `20`. This value counts logical download sessions by issued ticket, not directory browsing or individual Range requests.
 
 Expected state:
 

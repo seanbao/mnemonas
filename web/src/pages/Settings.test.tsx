@@ -818,7 +818,7 @@ describe('SettingsPage', () => {
       expect(screen.getByLabelText('刷新令牌有效期')).toHaveValue('168h0m0s')
       expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
         title: '已应用公网访问推荐',
-        description: expect.stringContaining('会话有效期、新分享默认有效期和默认访问次数会保持在公网建议范围内'),
+        description: expect.stringContaining('会话有效期、新分享默认有效期和默认下载次数会保持在公网建议范围内'),
       }))
     })
 
@@ -1126,7 +1126,7 @@ describe('SettingsPage', () => {
               id: 'share_default_policy',
               status: 'pass',
               title: '分享默认策略处于建议范围',
-              message: '新分享默认有效期和默认访问次数处于公网部署建议范围内。',
+              message: '新分享默认有效期和默认下载次数处于公网部署建议范围内。',
             },
           ],
           request: { scheme: 'https' },
@@ -1825,7 +1825,7 @@ describe('SettingsPage', () => {
             {
               id: 'share_default_policy',
               status: 'warning',
-              title: '新分享默认不会过期且访问次数不限制',
+              title: '新分享默认不会过期且下载次数不限制',
               message: 'backend raw share default policy detail',
               details: {
                 share_enabled: true,
@@ -1844,8 +1844,8 @@ describe('SettingsPage', () => {
       render(<SettingsPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('新分享默认不会过期且访问次数不限制')).toBeTruthy()
-        expect(screen.getByText('分享功能已启用，但新分享默认不会过期且访问次数不限制；家庭公网分享建议同时设置默认有效期和默认访问次数。')).toBeTruthy()
+        expect(screen.getByText('新分享默认不会过期且下载次数不限制')).toBeTruthy()
+        expect(screen.getByText('分享功能已启用，但新分享默认不会过期且下载次数不限制；家庭公网分享建议同时设置默认有效期和默认下载次数。')).toBeTruthy()
       })
       expect(screen.queryByText('backend raw share default policy detail')).toBeNull()
 
@@ -1858,7 +1858,7 @@ describe('SettingsPage', () => {
       await openTab(user, '分享')
 
       expect(screen.getByLabelText('新分享默认有效期')).toHaveValue('168h')
-      expect(screen.getByLabelText('新分享默认访问次数')).toHaveValue('20')
+      expect(screen.getByLabelText('新分享默认下载次数')).toHaveValue('20')
     })
 
     it('repairs unlimited share default access count from the security check', async () => {
@@ -1883,7 +1883,7 @@ describe('SettingsPage', () => {
             {
               id: 'share_default_policy',
               status: 'warning',
-              title: '新分享默认访问次数不限制',
+              title: '新分享默认下载次数不限制',
               message: 'backend raw share default policy detail',
               details: {
                 share_enabled: true,
@@ -1902,8 +1902,8 @@ describe('SettingsPage', () => {
       render(<SettingsPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('新分享默认访问次数不限制')).toBeTruthy()
-        expect(screen.getByText('分享功能已启用，但新分享默认访问次数不限制；家庭公网分享建议设置默认访问次数，避免公开链接被反复访问。')).toBeTruthy()
+        expect(screen.getByText('新分享默认下载次数不限制')).toBeTruthy()
+        expect(screen.getByText('分享功能已启用，但新分享默认下载次数不限制；家庭公网分享建议设置默认下载次数，避免公开链接被反复下载。')).toBeTruthy()
       })
       expect(screen.queryByText('backend raw share default policy detail')).toBeNull()
 
@@ -1961,7 +1961,7 @@ describe('SettingsPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('分享默认策略无效')).toBeTruthy()
-        expect(screen.getByText('分享默认有效期或默认访问次数配置无效，请修复负值后重新检查。')).toBeTruthy()
+        expect(screen.getByText('分享默认有效期或默认下载次数配置无效，请修复负值后重新检查。')).toBeTruthy()
       })
       expect(screen.queryByText('backend raw share default policy detail')).toBeNull()
 
@@ -3460,8 +3460,8 @@ describe('SettingsPage', () => {
       await user.type(baseUrlInput, 'https://share.example.com')
       await user.clear(screen.getByLabelText('新分享默认有效期'))
       await user.type(screen.getByLabelText('新分享默认有效期'), '24h')
-      await user.clear(screen.getByLabelText('新分享默认访问次数'))
-      await user.type(screen.getByLabelText('新分享默认访问次数'), '3')
+      await user.clear(screen.getByLabelText('新分享默认下载次数'))
+      await user.type(screen.getByLabelText('新分享默认下载次数'), '3')
       await user.click(screen.getByText('保存设置'))
 
       await waitFor(() => {
@@ -3488,7 +3488,7 @@ describe('SettingsPage', () => {
       await user.clear(screen.getByLabelText('分享策略路径 1'))
       await user.type(screen.getByLabelText('分享策略路径 1'), '/Family')
       await user.type(screen.getByLabelText('分享策略最长有效期 1'), '24h')
-      await user.type(screen.getByLabelText('分享策略最多访问次数 1'), '20')
+      await user.type(screen.getByLabelText('分享策略最多下载次数 1'), '20')
       await user.type(screen.getByLabelText('分享策略允许用户 1'), 'Alice, bob')
       await user.type(screen.getByLabelText('分享策略允许组 1'), 'Family')
       await user.type(screen.getByLabelText('分享策略允许角色 1'), 'User')
@@ -3588,12 +3588,12 @@ describe('SettingsPage', () => {
       const initialCoverage = within(screen.getByLabelText('分享策略覆盖摘要'))
       expect(initialCoverage.getByText('分享策略覆盖摘要')).toBeTruthy()
       expect(initialCoverage.getByText((_content, element) => element?.textContent === '关注项 4')).toBeTruthy()
-      expect(initialCoverage.getByText('默认访问次数')).toBeTruthy()
+      expect(initialCoverage.getByText('默认下载次数')).toBeTruthy()
       expect(initialCoverage.getByText('不限制')).toBeTruthy()
       expect(initialCoverage.getByText('路径策略')).toBeTruthy()
       expect(initialCoverage.getAllByText('2 条').length).toBeGreaterThanOrEqual(1)
       expect(initialCoverage.getByText('1 条路径策略未限制最长有效期。')).toBeTruthy()
-      expect(initialCoverage.getByText('1 条路径策略未限制访问次数。')).toBeTruthy()
+      expect(initialCoverage.getByText('1 条路径策略未限制下载次数。')).toBeTruthy()
       expect(initialCoverage.getByText('2 条路径策略未限制允许创建者范围。')).toBeTruthy()
       expect(initialCoverage.getByText((_content, element) => element?.textContent === '整理项 0')).toBeTruthy()
       expect(initialCoverage.getByText('当前路径策略没有明显覆盖整理项。')).toBeTruthy()
@@ -3601,12 +3601,12 @@ describe('SettingsPage', () => {
       fireEvent.change(screen.getByLabelText('分享基础 URL'), {
         target: { value: 'https://new.example.com' },
       })
-      fireEvent.change(screen.getByLabelText('新分享默认访问次数'), { target: { value: '30' } })
+      fireEvent.change(screen.getByLabelText('新分享默认下载次数'), { target: { value: '30' } })
       fireEvent.change(screen.getByLabelText('分享策略最长有效期 1'), { target: { value: '12h' } })
       await user.click(screen.getByLabelText('删除分享策略 2'))
       await user.click(screen.getByRole('button', { name: '添加路径策略' }))
       fireEvent.change(screen.getByLabelText('分享策略路径 2'), { target: { value: '/Public' } })
-      fireEvent.change(screen.getByLabelText('分享策略最多访问次数 2'), { target: { value: '5' } })
+      fireEvent.change(screen.getByLabelText('分享策略最多下载次数 2'), { target: { value: '5' } })
 
       const updatedReview = screen.getByLabelText('分享策略变更复核')
       expect(within(updatedReview).getByText('默认项 2')).toBeTruthy()
@@ -3620,11 +3620,11 @@ describe('SettingsPage', () => {
       expect(within(updatedReview).getByText('/Archive')).toBeTruthy()
       expect(within(updatedReview).getByText('变更字段：最长有效期')).toBeTruthy()
       expect(within(updatedReview).getByText('必须设置密码 · 最长有效期：12h')).toBeTruthy()
-      expect(within(updatedReview).getByText('必须设置密码 · 最多访问：5')).toBeTruthy()
-      expect(within(updatedReview).getByText('必须设置密码 · 最多访问：10')).toBeTruthy()
+      expect(within(updatedReview).getByText('必须设置密码 · 最多下载：5')).toBeTruthy()
+      expect(within(updatedReview).getByText('必须设置密码 · 最多下载：10')).toBeTruthy()
       const updatedCoverage = within(screen.getByLabelText('分享策略覆盖摘要'))
       expect(updatedCoverage.getByText((_content, element) => element?.textContent === '关注项 3')).toBeTruthy()
-      expect(updatedCoverage.getByText('默认访问次数')).toBeTruthy()
+      expect(updatedCoverage.getByText('默认下载次数')).toBeTruthy()
       expect(updatedCoverage.getByText('30')).toBeTruthy()
       expect(updatedCoverage.getByText('强制密码路径')).toBeTruthy()
       expect(updatedCoverage.getByText('成员范围路径')).toBeTruthy()
@@ -3720,7 +3720,7 @@ describe('SettingsPage', () => {
       const coverage = within(await screen.findByLabelText('分享策略覆盖摘要'))
       expect(coverage.getByText((_content, element) => element?.textContent === '整理项 3')).toBeTruthy()
       expect(coverage.getByText('/Family/Public 的最长有效期 72h 长于上级 /Family 的 24h。')).toBeTruthy()
-      expect(coverage.getByText('/Family/Public 的访问次数 25 高于上级 /Family 的 10。')).toBeTruthy()
+      expect(coverage.getByText('/Family/Public 的下载次数 25 高于上级 /Family 的 10。')).toBeTruthy()
       expect(coverage.getByText('/Family/Public 的允许创建者范围不在上级 /Family 的范围内；请确认是否需要放宽共享创建范围。')).toBeTruthy()
     })
 
@@ -3746,14 +3746,14 @@ describe('SettingsPage', () => {
 
       await user.clear(screen.getByLabelText('新分享默认有效期'))
       await user.type(screen.getByLabelText('新分享默认有效期'), '24h')
-      await user.clear(screen.getByLabelText('新分享默认访问次数'))
-      await user.type(screen.getByLabelText('新分享默认访问次数'), '-1')
+      await user.clear(screen.getByLabelText('新分享默认下载次数'))
+      await user.type(screen.getByLabelText('新分享默认下载次数'), '-1')
       await user.click(screen.getByText('保存设置'))
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
-          title: '分享默认访问次数无效',
-          description: '默认访问次数必须是 0 或不超过安全范围的正整数',
+          title: '分享默认下载次数无效',
+          description: '默认下载次数必须是 0 或不超过安全范围的正整数',
           color: 'danger',
         })
       })
@@ -3770,14 +3770,14 @@ describe('SettingsPage', () => {
       await openTab(user, '分享')
 
       await user.click(screen.getByRole('switch'))
-      await user.clear(screen.getByLabelText('新分享默认访问次数'))
-      await user.type(screen.getByLabelText('新分享默认访问次数'), maxAccess)
+      await user.clear(screen.getByLabelText('新分享默认下载次数'))
+      await user.type(screen.getByLabelText('新分享默认下载次数'), maxAccess)
       await user.click(screen.getByText('保存设置'))
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
-          title: '分享默认访问次数无效',
-          description: '默认访问次数必须是 0 或不超过安全范围的正整数',
+          title: '分享默认下载次数无效',
+          description: '默认下载次数必须是 0 或不超过安全范围的正整数',
           color: 'danger',
         })
       })
@@ -3872,13 +3872,13 @@ describe('SettingsPage', () => {
       await user.click(screen.getByRole('button', { name: '添加路径策略' }))
       await user.clear(screen.getByLabelText('分享策略路径 1'))
       await user.type(screen.getByLabelText('分享策略路径 1'), '/Family')
-      await user.type(screen.getByLabelText('分享策略最多访问次数 1'), maxAccess)
+      await user.type(screen.getByLabelText('分享策略最多下载次数 1'), maxAccess)
       await user.click(screen.getByText('保存设置'))
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '分享路径策略格式无效',
-          description: '第 1 行访问次数上限必须是 0 或不超过安全范围的正整数',
+          description: '第 1 行下载次数上限必须是 0 或不超过安全范围的正整数',
           color: 'danger',
         })
       })
@@ -4781,7 +4781,7 @@ describe('SettingsPage', () => {
       expect(copiedReport).toContain('- alice (user · 组 family, home /users/alice): 读 允许 · 目录规则 · 规则 /team; 写 允许 · 目录规则 · 规则 /team')
       expect(copiedReport).toContain('规则生效明细:')
       expect(copiedReport).toContain('- 规则 1 /team: 读允许 1 / 读拒绝 0; 写允许 1 / 写拒绝 0 · 用户 alice')
-      expect(copiedReport).toContain('- /team (文件夹 · 父级覆盖): 可访问 · 密码保护 · 访问 0/不限 · 创建者 u1')
+      expect(copiedReport).toContain('- /team (文件夹 · 父级覆盖): 可访问 · 密码保护 · 下载 0/不限 · 创建者 u1')
       expect(mockAddToast).toHaveBeenCalledWith({ title: '目录权限复核记录已复制并保存', color: 'success' })
       await waitFor(() => {
         expect(mockCreateDirectoryAccessReviewRecord).toHaveBeenCalledWith(expect.objectContaining({

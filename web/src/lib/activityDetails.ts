@@ -16,9 +16,9 @@ const ACTIVITY_DETAIL_LABELS: Record<string, string> = {
   password_changed: '密码变更',
   expires_at: '过期时间',
   previous_expires_at: '原过期时间',
-  access_count: '访问次数',
-  max_access: '访问上限',
-  previous_max_access: '原访问上限',
+  access_count: '下载次数',
+  max_access: '下载上限',
+  previous_max_access: '原下载上限',
   change_type: '变更类型',
   changed_fields: '变更字段',
   policy_updated: '策略更新',
@@ -416,7 +416,7 @@ function formatActivityDetailValue(action: ActionType, key: string, value: strin
       password: '密码',
       permission: '权限',
       expires_at: '有效期',
-      max_access: '访问上限',
+      max_access: '下载上限',
       description: '备注',
     }
     return value

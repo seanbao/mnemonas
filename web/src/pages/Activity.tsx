@@ -815,7 +815,7 @@ function getActivityReviewDispositionItems(entries: ActivityEntry[]): string[] {
     items.push('路径变更：核对来源和目标路径，确认移动或重命名是否符合预期。')
   }
   if (hasShare) {
-    items.push('分享变更：核对分享链接、密码、有效期和访问次数，关闭不再需要的公开链接。')
+    items.push('分享变更：核对分享链接、密码、有效期和下载次数，关闭不再需要的公开链接。')
   }
   if (hasRestore) {
     items.push('恢复变更：检查恢复后的文件、权限和相关分享/收藏状态。')
@@ -1113,7 +1113,7 @@ function ActivityReviewDispositionRecorder({
                     ) : (
                       <>
                         {primaryPath && <div className="truncate" title={primaryPath}>主要路径：{primaryPath}</div>}
-                        <div>核对项：密码、有效期、访问次数、是否仍需要公开访问</div>
+                        <div>核对项：密码、有效期、下载次数、是否仍需要公开访问</div>
                       </>
                     )}
                   </dd>

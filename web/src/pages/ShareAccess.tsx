@@ -28,6 +28,7 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { FileIcon } from '@/components/ui/FileIcon'
 import { ensureZipExtension, formatBytes, formatDate } from '@/lib/utils'
 import { GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
+import { getBrowserDownloadCapacityErrorToast } from '@/lib/fileActionErrors'
 import { getFolderPathAfterShareAuth } from './shareAccessUtils'
 
 const SHARE_ACCESS_PASSWORD_INPUT_ID = 'share-access-password'
@@ -40,6 +41,15 @@ function getShareArchiveFilename(name: string | undefined): string {
   return ensureZipExtension(name || 'share')
 }
 
+function isTerminalShareError(error: unknown): error is ShareError {
+  return error instanceof ShareError
+    && (error.isExpired
+      || error.isDisabled
+      || error.isAccessLimitReached
+      || error.isNotFound
+      || error.isFeatureDisabled)
+}
+
 function getGoneSharePresentation(error: ShareError): { title: string; description: string } | null {
   if (error.isDisabled) {
     return {
@@ -50,8 +60,8 @@ function getGoneSharePresentation(error: ShareError): { title: string; descripti
 
   if (error.isAccessLimitReached) {
     return {
-      title: '分享访问次数已用尽',
-      description: '该分享已达到访问次数上限，当前不可访问。',
+      title: '分享下载次数已用尽',
+      description: '该分享已达到下载次数上限，当前不可访问。',
     }
   }
 
@@ -155,6 +165,11 @@ function getShareActionErrorToast(
   description?: string
   color: 'warning' | 'danger'
 } {
+  const browserCapacityToast = getBrowserDownloadCapacityErrorToast(error)
+  if (browserCapacityToast) {
+    return browserCapacityToast
+  }
+
   if (error instanceof ShareError) {
     if (error.isFeatureDisabled) {
       return {
@@ -187,6 +202,12 @@ function getShareActionErrorToast(
         color: 'warning',
       }
     }
+
+    return {
+      title: error.isRateLimited ? titles.unavailable : titles.failure,
+      description: error.message,
+      color: error.isRateLimited ? 'warning' : 'danger',
+    }
   }
 
   return {
@@ -209,13 +230,63 @@ export function ShareAccessPage() {
   const [folderPath, setFolderPath] = useState('')
   const [isListing, setIsListing] = useState(false)
   const [listError, setListError] = useState<unknown | null>(null)
+  const [downloadTarget, setDownloadTarget] = useState<string | null>(null)
   const shareInfoRequestRef = useRef(0)
   const folderListRequestRef = useRef(0)
   const shareInfoAbortControllerRef = useRef<AbortController | null>(null)
   const folderListAbortControllerRef = useRef<AbortController | null>(null)
   const downloadAbortControllerRef = useRef<AbortController | null>(null)
+  const errorHeadingRef = useRef<HTMLHeadingElement | null>(null)
+  const listErrorHeadingRef = useRef<HTMLHeadingElement | null>(null)
+  const passwordInputRef = useRef<HTMLInputElement | null>(null)
   const errorPresentation = getShareAccessErrorPresentation(error)
   const listErrorPresentation = getShareListErrorPresentation(listError)
+
+  useEffect(() => {
+    if (error) {
+      errorHeadingRef.current?.focus()
+    }
+  }, [error])
+
+  useEffect(() => {
+    if (listError) {
+      listErrorHeadingRef.current?.focus()
+    }
+  }, [listError])
+
+  useEffect(() => {
+    if (needsPassword && !isAuthenticated) {
+      passwordInputRef.current?.focus()
+    }
+  }, [isAuthenticated, needsPassword])
+
+  const presentTerminalShareError = useCallback((terminalError: unknown): boolean => {
+    if (!isTerminalShareError(terminalError)) {
+      return false
+    }
+
+    shareInfoRequestRef.current += 1
+    folderListRequestRef.current += 1
+    shareInfoAbortControllerRef.current?.abort()
+    folderListAbortControllerRef.current?.abort()
+    downloadAbortControllerRef.current?.abort()
+    shareInfoAbortControllerRef.current = null
+    folderListAbortControllerRef.current = null
+    downloadAbortControllerRef.current = null
+    setError(terminalError)
+    setShareInfo(null)
+    setNeedsPassword(false)
+    setPassword('')
+    setIsVerifying(false)
+    setIsAuthenticated(false)
+    setFolderItems([])
+    setFolderPath('')
+    setIsListing(false)
+    setListError(null)
+    setDownloadTarget(null)
+    setIsLoading(false)
+    return true
+  }, [])
 
   useEffect(() => () => {
     shareInfoRequestRef.current += 1
@@ -235,6 +306,7 @@ export function ShareAccessPage() {
     shareInfoAbortControllerRef.current = null
     folderListAbortControllerRef.current = null
     downloadAbortControllerRef.current = null
+    setDownloadTarget(null)
     if (!id) {
       setError(new Error('无效的分享链接'))
       setIsLoading(false)
@@ -255,6 +327,7 @@ export function ShareAccessPage() {
     setNeedsPassword(false)
     setIsAuthenticated(false)
     setPassword('')
+    setShareInfo(null)
     setFolderItems([])
     setListError(null)
     
@@ -334,6 +407,7 @@ export function ShareAccessPage() {
     downloadAbortControllerRef.current?.abort()
     folderListAbortControllerRef.current = null
     downloadAbortControllerRef.current = null
+    setDownloadTarget(null)
     const controller = new AbortController()
     shareInfoAbortControllerRef.current = controller
     setIsVerifying(true)
@@ -356,6 +430,9 @@ export function ShareAccessPage() {
       if (requestId !== shareInfoRequestRef.current) {
         return
       }
+      if (presentTerminalShareError(err)) {
+        return
+      }
       if (err instanceof ShareError && err.isUnauthorized) {
         addToast({ title: '密码错误', color: 'danger' })
       } else {
@@ -374,16 +451,53 @@ export function ShareAccessPage() {
     }
   }
 
-  const handleDownload = async () => {
-    if (!id) return
+  const runShareDownload = async (target: string, operation: (signal: AbortSignal) => Promise<void>) => {
+    if (!id || downloadAbortControllerRef.current) return
 
     const requestId = shareInfoRequestRef.current
-    downloadAbortControllerRef.current?.abort()
     const controller = new AbortController()
     downloadAbortControllerRef.current = controller
+    setDownloadTarget(target)
 
     try {
-      if (shareInfo?.type === 'folder') {
+      await operation(controller.signal)
+    } catch (err) {
+      if (controller.signal.aborted) {
+        return
+      }
+      if (requestId !== shareInfoRequestRef.current) {
+        return
+      }
+      if (presentTerminalShareError(err)) {
+        return
+      }
+      if (err instanceof ShareError && err.isUnauthorized) {
+        setIsAuthenticated(false)
+        setNeedsPassword(true)
+        setPassword('')
+        setFolderItems([])
+        setListError(null)
+        addToast({ title: '访问凭证已失效，请重新输入密码', color: 'warning' })
+        return
+      }
+      addToast(getShareActionErrorToast(err, {
+        unavailable: '下载暂不可用',
+        failure: '下载失败',
+      }))
+    } finally {
+      if (downloadAbortControllerRef.current === controller) {
+        downloadAbortControllerRef.current = null
+        setDownloadTarget(null)
+      }
+    }
+  }
+
+  const handleDownload = async () => {
+    if (!id || !shareInfo) return
+
+    const target = shareInfo.type === 'folder' ? `folder:${folderPath}` : 'shared-file'
+    await runShareDownload(target, async (signal) => {
+      if (shareInfo.type === 'folder') {
         const currentFolderName = folderPath
           ? folderPath.split('/').filter(Boolean).pop()
           : shareInfo.file_name
@@ -391,78 +505,32 @@ export function ShareAccessPage() {
           filePath: folderPath || undefined,
           archive: 'zip',
           filename: getShareArchiveFilename(currentFolderName),
-          signal: controller.signal,
+          signal,
         })
       } else {
-        await downloadShare(id, { filename: shareInfo?.file_name, signal: controller.signal })
+        await downloadShare(id, { filename: shareInfo.file_name, signal })
       }
-    } catch (err) {
-      if (controller.signal.aborted) {
-        return
-      }
-      if (requestId !== shareInfoRequestRef.current) {
-        return
-      }
-      if (err instanceof ShareError && err.isUnauthorized) {
-        setIsAuthenticated(false)
-        setNeedsPassword(true)
-        setPassword('')
-        addToast({ title: '访问凭证已失效，请重新输入密码', color: 'warning' })
-        return
-      }
-      addToast(getShareActionErrorToast(err, {
-        unavailable: '下载暂不可用',
-        failure: '下载失败',
-      }))
-    } finally {
-      if (downloadAbortControllerRef.current === controller) {
-        downloadAbortControllerRef.current = null
-      }
-    }
+    })
   }
 
   const handleDownloadItem = async (itemPath: string) => {
     if (!id) return
 
-    const requestId = shareInfoRequestRef.current
     const item = folderItems.find((folderItem) => folderItem.path === itemPath)
-    downloadAbortControllerRef.current?.abort()
-    const controller = new AbortController()
-    downloadAbortControllerRef.current = controller
-    try {
-      if (item?.is_dir) {
+    if (!item) return
+
+    await runShareDownload(`item:${itemPath}`, async (signal) => {
+      if (item.is_dir) {
         await downloadShare(id, {
           filePath: itemPath,
           filename: getShareArchiveFilename(item.name),
           archive: 'zip',
-          signal: controller.signal,
+          signal,
         })
       } else {
-        await downloadShare(id, { filePath: itemPath, filename: item?.name, signal: controller.signal })
+        await downloadShare(id, { filePath: itemPath, filename: item.name, signal })
       }
-    } catch (err) {
-      if (controller.signal.aborted) {
-        return
-      }
-      if (requestId !== shareInfoRequestRef.current) {
-        return
-      }
-      if (err instanceof ShareError && err.isUnauthorized) {
-        setIsAuthenticated(false)
-        setNeedsPassword(true)
-        setPassword('')
-        addToast({ title: '访问凭证已失效，请重新输入密码', color: 'warning' })
-        return
-      }
-      addToast(getShareActionErrorToast(err, {
-        unavailable: '下载暂不可用',
-        failure: '下载失败',
-      }))
-    } finally {
-      if (downloadAbortControllerRef.current === controller) {
-        downloadAbortControllerRef.current = null
-      }
-    }
+    })
   }
 
   const handleEnterFolder = (item: PublicShareItem) => {
@@ -505,6 +573,9 @@ export function ShareAccessPage() {
       if (requestId !== folderListRequestRef.current) {
         return
       }
+      if (presentTerminalShareError(err)) {
+        return
+      }
       if (err instanceof ShareError && err.isUnauthorized) {
         setIsAuthenticated(false)
         setNeedsPassword(true)
@@ -521,7 +592,7 @@ export function ShareAccessPage() {
         setIsListing(false)
       }
     }
-  }, [id, shareInfo, isAuthenticated, folderPath])
+  }, [id, shareInfo, isAuthenticated, folderPath, presentTerminalShareError])
 
   useEffect(() => {
     let cancelled = false
@@ -535,6 +606,13 @@ export function ShareAccessPage() {
       cancelled = true
     }
   }, [loadFolderItems])
+
+  const isDownloading = downloadTarget !== null
+  const sharedFileName = shareInfo?.file_name || '分享内容'
+  const currentFolderName = folderPath
+    ? folderPath.split('/').filter(Boolean).pop() || '当前文件夹'
+    : sharedFileName
+  const currentFolderDownloadTarget = `folder:${folderPath}`
 
   // Loading state
   if (isLoading) {
@@ -553,17 +631,19 @@ export function ShareAccessPage() {
     return (
       <div className="app-shell flex min-h-[100svh] items-center justify-center bg-background px-4 py-10">
         <Card className="w-full max-w-md rounded-lg border border-divider bg-content1 shadow-sm">
-          <CardBody className="p-6 text-center sm:p-8">
-            <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-lg bg-danger/10">
-              <AlertCircle size={28} className="text-danger" />
+          <CardBody className="p-6 sm:p-8">
+            <div className="text-center" role="alert" aria-live="assertive" aria-atomic="true">
+              <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-lg bg-danger/10">
+                <AlertCircle size={28} className="text-danger" />
+              </div>
+              <h2 ref={errorHeadingRef} tabIndex={-1} className="mb-2 text-xl font-semibold text-foreground">
+                {errorPresentation.title}
+              </h2>
+              <p className="text-sm leading-6 text-default-500">{errorPresentation.description}</p>
+              <Button className="mt-4" variant="bordered" onPress={() => { void loadShareInfo({ notify: true }) }}>
+                重新加载
+              </Button>
             </div>
-            <h2 className="mb-2 text-xl font-semibold text-foreground">
-              {errorPresentation.title}
-            </h2>
-            <p className="text-sm leading-6 text-default-500">{errorPresentation.description}</p>
-            <Button className="mt-4" variant="bordered" onPress={() => { void loadShareInfo({ notify: true }) }}>
-              重新加载
-            </Button>
           </CardBody>
         </Card>
       </div>
@@ -595,6 +675,7 @@ export function ShareAccessPage() {
                   访问密码
                 </label>
                 <Input
+                  ref={passwordInputRef}
                   id={SHARE_ACCESS_PASSWORD_INPUT_ID}
                   aria-label="访问密码"
                   type="password"
@@ -677,11 +758,14 @@ export function ShareAccessPage() {
 
             {shareInfo?.type === 'file' && (
               <Button
+                aria-label={`下载文件 ${sharedFileName}`}
                 className="w-full font-medium"
                 color="primary"
                 size="lg"
                 radius="lg"
                 startContent={<Download size={20} />}
+                isDisabled={isDownloading}
+                isLoading={downloadTarget === 'shared-file'}
                 onPress={handleDownload}
               >
                 下载文件
@@ -699,10 +783,13 @@ export function ShareAccessPage() {
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
                     <Button
+                      aria-label={`下载文件夹 ${currentFolderName} 为 ZIP`}
                       size="sm"
                       variant="flat"
                       onPress={handleDownload}
                       startContent={<Download size={16} />}
+                      isDisabled={isDownloading}
+                      isLoading={downloadTarget === currentFolderDownloadTarget}
                     >
                       下载为 ZIP
                     </Button>
@@ -723,9 +810,20 @@ export function ShareAccessPage() {
                   <div className="rounded-lg border border-divider bg-content2/40 px-4 py-3 text-sm text-default-500">加载文件夹内容…</div>
                 )}
                 {Boolean(listError) && (
-                  <div className="rounded-lg border border-danger/30 bg-danger/10 p-4">
+                  <div
+                    className="rounded-lg border border-danger/30 bg-danger/10 p-4"
+                    role="alert"
+                    aria-live="assertive"
+                    aria-atomic="true"
+                  >
                     <div className="space-y-1">
-                      <div className="text-sm font-medium text-danger">{listErrorPresentation.title}</div>
+                      <h3
+                        ref={listErrorHeadingRef}
+                        tabIndex={-1}
+                        className="text-sm font-medium text-danger"
+                      >
+                        {listErrorPresentation.title}
+                      </h3>
                       <div className="text-sm text-danger/80">{listErrorPresentation.description}</div>
                     </div>
                     <Button className="mt-3" size="sm" variant="bordered" onPress={loadFolderItems}>
@@ -750,26 +848,39 @@ export function ShareAccessPage() {
                         key={item.path}
                         className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-divider bg-content2/40 px-3 py-3 sm:flex-nowrap"
                       >
-                        <button
-                          type="button"
-                          className="flex min-w-0 flex-1 items-center gap-3 text-left"
-                          onClick={() => handleEnterFolder(item)}
-                          disabled={!item.is_dir}
-                        >
-                          <FileIcon name={item.name} isDir={item.is_dir} size={36} variant="tile" />
-                          <div className="min-w-0">
-                            <div className="truncate text-sm font-medium text-foreground">{item.name}</div>
-                            <div className="text-xs text-default-500">
-                              {item.is_dir ? '文件夹' : formatBytes(item.size)}
-                              {item.mod_time && !item.is_dir && ` · ${formatDate(item.mod_time)}`}
+                        {item.is_dir ? (
+                          <button
+                            type="button"
+                            aria-label={`打开文件夹 ${item.name}`}
+                            className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                            onClick={() => handleEnterFolder(item)}
+                          >
+                            <FileIcon name={item.name} isDir size={36} variant="tile" />
+                            <div className="min-w-0">
+                              <div className="truncate text-sm font-medium text-foreground">{item.name}</div>
+                              <div className="text-xs text-default-500">文件夹</div>
+                            </div>
+                          </button>
+                        ) : (
+                          <div className="flex min-w-0 flex-1 items-center gap-3 text-left">
+                            <FileIcon name={item.name} isDir={false} size={36} variant="tile" />
+                            <div className="min-w-0">
+                              <div className="truncate text-sm font-medium text-foreground">{item.name}</div>
+                              <div className="text-xs text-default-500">
+                                {formatBytes(item.size)}
+                                {item.mod_time && ` · ${formatDate(item.mod_time)}`}
+                              </div>
                             </div>
                           </div>
-                        </button>
+                        )}
                         <Button
+                          aria-label={`${item.is_dir ? '下载文件夹' : '下载文件'} ${item.name}${item.is_dir ? ' 为 ZIP' : ''}`}
                           size="sm"
                           variant="flat"
                           onPress={() => handleDownloadItem(item.path)}
                           startContent={<Download size={16} />}
+                          isDisabled={isDownloading}
+                          isLoading={downloadTarget === `item:${item.path}`}
                         >
                           {item.is_dir ? '下载为 ZIP' : '下载'}
                         </Button>

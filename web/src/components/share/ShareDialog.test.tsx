@@ -270,7 +270,7 @@ describe('ShareDialog', () => {
     await waitFor(() => {
       expect(screen.getByText('系统默认：不过期')).toBeInTheDocument()
       expect(screen.getByText('系统默认不设置过期时间。')).toBeInTheDocument()
-      expect(screen.getByText('系统默认不限制访问次数。')).toBeInTheDocument()
+      expect(screen.getByText('系统默认不限制下载次数。')).toBeInTheDocument()
     })
   })
 
@@ -333,7 +333,7 @@ describe('ShareDialog', () => {
       expect(screen.getByText('当前路径分享规则')).toBeInTheDocument()
       expect(screen.getByText('此路径要求设置分享密码。')).toBeInTheDocument()
       expect(screen.getByText('有效期最多 1 天。')).toBeInTheDocument()
-      expect(screen.getByText('访问次数最多 5 次。')).toBeInTheDocument()
+      expect(screen.getByText('下载次数最多 5 次。')).toBeInTheDocument()
     })
 
     const createButton = screen.getByText('创建分享链接')
@@ -407,7 +407,7 @@ describe('ShareDialog', () => {
     const review = await screen.findByLabelText('分享创建前复核')
     await waitFor(() => {
       expect(screen.getByText('当前路径分享规则')).toBeInTheDocument()
-      expect(screen.getByText('访问次数最多 5 次。')).toBeInTheDocument()
+      expect(screen.getByText('下载次数最多 5 次。')).toBeInTheDocument()
       expect(screen.queryByText('此路径要求设置分享密码。')).not.toBeInTheDocument()
       expect(screen.queryByText('当前路径要求设置分享密码')).not.toBeInTheDocument()
       expect(within(review).getByText('路径策略 /Family')).toBeInTheDocument()
@@ -471,7 +471,7 @@ describe('ShareDialog', () => {
     })
 
     fireEvent.change(screen.getByLabelText('分享有效期'), { target: { value: '7 天' } })
-    await user.type(screen.getByLabelText('分享访问次数限制'), '12')
+    await user.type(screen.getByLabelText('分享下载次数限制'), '12')
 
     expect(within(review).getByText('1 天（路径策略上限）')).toBeInTheDocument()
     expect(within(review).getByText('5 次（路径策略上限）')).toBeInTheDocument()
@@ -490,8 +490,8 @@ describe('ShareDialog', () => {
       />
     )
 
-    expect(screen.getByText('访问次数限制')).toBeInTheDocument()
-    expect(screen.getByLabelText('分享访问次数限制')).toBeInTheDocument()
+    expect(screen.getByText('下载次数限制')).toBeInTheDocument()
+    expect(screen.getByLabelText('分享下载次数限制')).toBeInTheDocument()
   })
 
   it('labels share creation controls for assistive technology', async () => {
@@ -509,7 +509,7 @@ describe('ShareDialog', () => {
     expect(screen.getByLabelText('分享访问密码')).toBeInTheDocument()
     expect(screen.getByLabelText('分享有效期')).toBeInTheDocument()
     expect(screen.getByLabelText('分享权限')).toBeInTheDocument()
-    expect(screen.getByLabelText('分享访问次数限制')).toBeInTheDocument()
+    expect(screen.getByLabelText('分享下载次数限制')).toBeInTheDocument()
     expect(screen.getByLabelText('分享备注')).toBeInTheDocument()
   })
 
@@ -782,7 +782,7 @@ describe('ShareDialog', () => {
 
     fireEvent.change(screen.getByLabelText('分享有效期'), { target: { value: '7 天' } })
     fireEvent.change(screen.getByLabelText('分享权限'), { target: { value: '仅查看' } })
-    await user.type(screen.getByLabelText('分享访问次数限制'), '12')
+    await user.type(screen.getByLabelText('分享下载次数限制'), '12')
     await user.type(screen.getByLabelText('分享备注'), '  release package  ')
     await user.click(screen.getByText('创建分享链接'))
 
@@ -818,7 +818,7 @@ describe('ShareDialog', () => {
       />
     )
 
-    await user.type(screen.getByLabelText('分享访问次数限制'), '0')
+    await user.type(screen.getByLabelText('分享下载次数限制'), '0')
     await user.click(screen.getByText('创建分享链接'))
 
     expectCreateShareCalledWithAbortSignal(expect.objectContaining({
@@ -827,9 +827,9 @@ describe('ShareDialog', () => {
   })
 
   it.each([
-    ['小数', '1.5', '访问次数必须是 0 或正整数'],
-    ['科学计数法', '1e3', '访问次数必须是 0 或正整数'],
-    ['超出安全整数范围', '9007199254740992', '访问次数过大'],
+    ['小数', '1.5', '下载次数必须是 0 或正整数'],
+    ['科学计数法', '1e3', '下载次数必须是 0 或正整数'],
+    ['超出安全整数范围', '9007199254740992', '下载次数过大'],
   ])('blocks invalid access limits with %s before creating a share', async (_label, maxAccess, message) => {
     const user = userEvent.setup()
     render(
@@ -840,7 +840,7 @@ describe('ShareDialog', () => {
       />
     )
 
-    await user.type(screen.getByLabelText('分享访问次数限制'), maxAccess)
+    await user.type(screen.getByLabelText('分享下载次数限制'), maxAccess)
 
     const createButton = screen.getByRole('button', { name: '创建分享链接' })
     expect(createButton).toBeDisabled()
@@ -981,8 +981,8 @@ describe('ShareDialog', () => {
         enabled: true,
         risk_level: 'none',
         reason_summary: '新建分享。',
-        suggested_action: '已创建该分享；继续复核有效期、密码、访问次数和外部引用。',
-        access_summary: '密码保护 · 访问 0/5',
+        suggested_action: '已创建该分享；继续复核有效期、密码、下载次数和外部引用。',
+        access_summary: '密码保护 · 下载 0/5',
         expires_at: '永不过期',
       }],
       activity_entry_ids: ['act-share-create-1'],

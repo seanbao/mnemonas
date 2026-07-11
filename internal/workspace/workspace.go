@@ -598,6 +598,19 @@ func (w *Workspace) Stat(ctx context.Context, name string) (*FileInfo, error) {
 
 // ReadDir lists directory contents
 func (w *Workspace) ReadDir(ctx context.Context, name string) ([]*FileInfo, error) {
+	return w.readDir(ctx, name, -1)
+}
+
+// ReadDirLimit lists at most limit visible directory entries without loading
+// the complete directory into memory. A positive limit is required.
+func (w *Workspace) ReadDirLimit(ctx context.Context, name string, limit int) ([]*FileInfo, error) {
+	if limit <= 0 {
+		return nil, errors.New("directory read limit must be positive")
+	}
+	return w.readDir(ctx, name, limit)
+}
+
+func (w *Workspace) readDir(ctx context.Context, name string, limit int) ([]*FileInfo, error) {
 	if err := validateWorkspaceName(name); err != nil {
 		return nil, err
 	}
@@ -626,39 +639,51 @@ func (w *Workspace) ReadDir(ctx context.Context, name string) ([]*FileInfo, erro
 		return nil, ErrNotDir
 	}
 
-	entries, err := dirHandle.ReadDir(-1)
-	if err != nil {
-		return nil, mapWorkspaceRootPathError(err)
+	capacity := 0
+	if limit > 0 {
+		capacity = limit
 	}
+	result := make([]*FileInfo, 0, capacity)
+	for limit < 0 || len(result) < limit {
+		readCount := -1
+		if limit > 0 {
+			readCount = limit - len(result)
+		}
+		entries, readErr := dirHandle.ReadDir(readCount)
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return nil, mapWorkspaceRootPathError(readErr)
+		}
+		for _, e := range entries {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			entryName, err := workspaceDirEntryName(e)
+			if err != nil {
+				return nil, err
+			}
+			childRootName := childWorkspaceRootName(workspaceRootRelativeName(name), entryName)
+			info, err := readDirEntryInfo(w.rootHandle, childRootName, e)
+			if err != nil {
+				return nil, mapWorkspaceRootPathError(err)
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				continue
+			}
 
-	result := make([]*FileInfo, 0, len(entries))
-	for _, e := range entries {
-		if err := ctx.Err(); err != nil {
-			return nil, err
+			childPath := path.Join(CleanPath(name), entryName)
+			result = append(result, &FileInfo{
+				Path:                childPath,
+				Name:                entryName,
+				IsDir:               info.IsDir(),
+				Mode:                info.Mode(),
+				Size:                info.Size(),
+				ModTime:             info.ModTime(),
+				DeleteIdentityToken: deleteIdentityToken(info),
+			})
 		}
-		entryName, err := workspaceDirEntryName(e)
-		if err != nil {
-			return nil, err
+		if errors.Is(readErr, io.EOF) || len(entries) == 0 || readCount < 0 {
+			break
 		}
-		childRootName := childWorkspaceRootName(workspaceRootRelativeName(name), entryName)
-		info, err := readDirEntryInfo(w.rootHandle, childRootName, e)
-		if err != nil {
-			return nil, mapWorkspaceRootPathError(err)
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			continue
-		}
-
-		childPath := path.Join(CleanPath(name), entryName)
-		result = append(result, &FileInfo{
-			Path:                childPath,
-			Name:                entryName,
-			IsDir:               info.IsDir(),
-			Mode:                info.Mode(),
-			Size:                info.Size(),
-			ModTime:             info.ModTime(),
-			DeleteIdentityToken: deleteIdentityToken(info),
-		})
 	}
 
 	return result, nil

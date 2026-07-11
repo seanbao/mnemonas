@@ -330,6 +330,10 @@ File downloads, version previews, media previews, thumbnails, and external-open 
 
 HTTPS mode uses `__Host-mnemonas_download_access` with `Secure`, `Path=/`, and no `Domain` attribute. Local HTTP mode uses `mnemonas_download_access` with the `/api/v1` path.
 
+On requests that allow the download-session cookie, the server fails closed before validating either token when access and download cookies are both present with different raw values. An invalid current access cookie therefore cannot fall back to a valid download cookie left by another account or session.
+
+Authenticated ZIP probes, directory collection, snapshot preflight, and complete streaming writes share one process-wide non-blocking gate with capacity 4. Saturated requests return `429`, `Retry-After: 1`, and `ARCHIVE_DOWNLOAD_RATE_LIMITED` before filesystem access.
+
 HTTPS mode is enabled only when the request uses TLS, or when `trusted_proxy_hops > 0` and the direct peer is loopback or a proxy address listed in `trusted_proxy_cidrs` forwarding `X-Forwarded-Proto=https`.
 
 ### Web UI Session Tokens
@@ -338,7 +342,7 @@ The Web UI stores the primary access and refresh session in `HttpOnly`, `SameSit
 
 HTTPS mode uses `__Host-mnemonas_access` and `__Host-mnemonas_refresh`; both cookies use `Secure`, `Path=/`, and no `Domain` attribute. Local HTTP mode uses `mnemonas_access` with `/api/v1` and `mnemonas_refresh` with `/api/v1/auth`.
 
-HTTPS requests parse only `__Host-` names, and HTTP requests parse only unprefixed names. The server rejects authentication when one request contains different values for the same cookie name, or when access and download cookies belong to different accounts.
+HTTPS requests parse only `__Host-` names, and HTTP requests parse only unprefixed names. The server rejects authentication when one request contains different values for the same cookie name. Requests that allow the download cookie also require simultaneously present access and download cookies to have identical raw values.
 
 `auth.access_token_ttl` must be at least `30s`. For public deployments, keep it at or below `1h` and keep `auth.refresh_token_ttl` at or below `720h` (30 days). The security self-check reports longer values as warnings.
 
@@ -350,7 +354,7 @@ REST API calls, uploads, refresh, and logout use same-origin cookies sent by the
 
 For REST mutations and WebDAV write methods (`POST`, `PUT`, `PATCH`, `DELETE`, `MKCOL`, `COPY`, `MOVE`, `PROPPATCH`, `LOCK`, `UNLOCK`) that carry browser `Origin`, `Referer`, or `Sec-Fetch-Site` metadata, the server rejects requests whose source scheme, host, or port does not match the current request. It also rejects browser requests explicitly marked `cross-site` or `same-site` when they do not use an `Authorization` header. Script clients without browser origin metadata and explicit `Authorization` API clients continue to work.
 
-API clients can still use `Authorization: Bearer <access-token>` and JSON refresh tokens for scripts and automation. The server adds security headers, CSP, and `Permissions-Policy`; file download, version preview, thumbnail, WebDAV file, and WebDAV directory-listing responses also include `X-Content-Type-Options: nosniff` and a sandbox CSP to reduce script execution when user files are opened in the browser. Public deployments still need careful origin hygiene.
+API clients can still use `Authorization: Bearer <access-token>` and JSON refresh tokens for scripts and automation. The server adds security headers, CSP, and `Permissions-Policy`; file download, version preview, thumbnail, WebDAV file, and WebDAV directory-listing responses also include `X-Content-Type-Options: nosniff` and a sandbox CSP to reduce script execution when user files are opened in the browser. Attachment downloads use `sandbox allow-downloads`, `frame-ancestors 'self'`, and `X-Frame-Options: SAMEORIGIN`, permitting only the application's restricted download navigation. When an archive fails before response streaming starts, its JSON error response uses a same-origin sandbox CSP without `allow-downloads`. Inline previews continue to prohibit embedding with `frame-ancestors 'none'` and the global `X-Frame-Options: DENY`. Public deployments still need careful origin hygiene.
 
 For public deployments:
 
@@ -385,7 +389,15 @@ After clearing site data, switching browser, or changing the share password, the
 
 Five failed password attempts for the same share and client address lock access for five minutes and return `429 Too Many Requests`.
 
-For family public sharing, keep newly created shares expiring by default, for example after 7 days, and set an explicit default access-count limit. The security self-check reports no default expiry, values above `720h` (30 days), or unlimited default access counts as warnings.
+For family public sharing, keep newly created shares expiring by default, for example after 7 days, and set an explicit default download-count limit. The security self-check reports no default expiry, values above `720h` (30 days), or unlimited default download counts as warnings. The count represents successfully issued logical download sessions; directory browsing and resumptions with the same ticket do not add another count.
+
+File downloads first issue a URL-safe, signed, short-lived ticket through a same-origin POST. The ticket is no longer than 256 characters and is bound to the target and relevant share state. Requests must include a 32-byte `client_nonce` generated with Web Crypto and reused from a versioned same-origin `localStorage` key. This value is a non-secret client identifier, not an authorization credential, and is not placed in download URLs or logs. The server derives the binder ID and value from the share ID and `client_nonce` under separate HMAC domains. The ticket uses an independent random ID and contains only the binder ID and binder-value digest. The same share and nonce refresh one `Path=/`, `HttpOnly`, `SameSite=Strict` cookie, while different shares derive different cookies. Cookie names end in the binder ID's 32-character lowercase hexadecimal encoding. HTTPS uses `__Host-mnemonas_share_download_<binder-id>` with `Secure`; HTTP uses `mnemonas_share_download_<binder-id>`. Download GET requests must present both the ticket query parameter and exactly one matching binder cookie. The cookie and ticket expire together after at most 24 hours and become invalid after relevant share-state or target changes.
+
+Ticket issuance applies a request-local soft limit to structurally valid binder-cookie names. HTTP counts the ordinary prefix, while HTTPS counts both the ordinary and `__Host-` prefixes. A new binder is rejected with `429` before filesystem preflight or logical-download reservation when 32 are already present. A valid existing binder remains refreshable at or above the soft limit, while a duplicate or invalid target cookie fails closed. A process-wide non-blocking issuance gate with capacity 4 is held across ZIP preflight and bounds stale-cookie-snapshot overshoot from concurrent requests using different new nonces. This is not a server-persisted session count.
+
+Public ZIP issuance preflight and actual ZIP streaming share one process-wide concurrency gate with capacity 4. A full gate returns `429 Too Many Requests` with `Retry-After: 1` and `DOWNLOAD_TICKET_RATE_LIMITED`.
+
+Password-failure state is partitioned by share ID and client address, with at most 128 states per share and 4096 across the process. At most one bcrypt check runs for a key and at most 8 public-share bcrypt checks run across the process. Failure-window-active, locked, and in-flight states are never evicted. Full state capacity or concurrency gates reject new requests with `429` without clearing prior failures. Passwords longer than 72 bytes return `400 PASSWORD_TOO_LONG` before creating state or running bcrypt.
 
 When sharing is enabled, `share.base_url` should use HTTPS on the default port, have a valid host, and contain no userinfo, query string, fragment, encoded query or fragment marker, backslash, duplicated path slash, or `.`/`..` path segments. It should be the site origin or application base path and should not include the `/s` share route. The security self-check and `mnemonas-doctor --public-domain` report base URLs that do not meet public-deployment requirements.
 

@@ -90,6 +90,7 @@ import {
   type UploadQueueItem,
 } from '@/lib/uploadQueue'
 import {
+  getSharedBrowserDownloadCapacityErrorToast,
   getFileDownloadErrorToast,
   getPathConflictErrorToast,
   getQuotaExceededErrorToast,
@@ -283,6 +284,38 @@ type DeleteFlowSession = {
 }
 
 type DeleteFlowView = Pick<DeleteFlowSession, 'id' | 'kind' | 'phase' | 'targetCount'>
+
+const BATCH_DOWNLOAD_PREFLIGHT_CONCURRENCY = 2
+const MAX_BATCH_DOWNLOAD_ITEMS = 20
+
+async function settleWithConcurrency<T>(
+  items: readonly T[],
+  concurrency: number,
+  task: (item: T) => Promise<void>,
+): Promise<PromiseSettledResult<void>[]> {
+  const results = new Array<PromiseSettledResult<void>>(items.length)
+  let nextIndex = 0
+
+  const worker = async () => {
+    while (true) {
+      const index = nextIndex
+      nextIndex += 1
+      if (index >= items.length) {
+        return
+      }
+      try {
+        await task(items[index]!)
+        results[index] = { status: 'fulfilled', value: undefined }
+      } catch (reason) {
+        results[index] = { status: 'rejected', reason }
+      }
+    }
+  }
+
+  const workerCount = Math.min(Math.max(1, concurrency), items.length)
+  await Promise.all(Array.from({ length: workerCount }, () => worker()))
+  return results
+}
 
 type DeleteTargetSnapshot = Pick<FileItem, 'path' | 'name' | 'isDir' | 'size' | 'modTime' | 'deleteIdentityToken'>
 
@@ -1452,6 +1485,8 @@ export function FilesPage() {
   const lastSelectedIndexRef = useRef<number | null>(null)
   const appliedHighlightedPathRef = useRef<string | null>(null)
   const downloadAbortControllersRef = useRef(new Set<AbortController>())
+  const batchDownloadControllerRef = useRef<AbortController | null>(null)
+  const [isBatchDownloading, setIsBatchDownloading] = useState(false)
   const [multiSelectHintVisible, setMultiSelectHintVisible] = useState(false)
   const hintTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   
@@ -3191,6 +3226,9 @@ export function FilesPage() {
 
   // Batch download handler
   const handleBatchDownload = useCallback(async () => {
+    if (batchDownloadControllerRef.current) {
+      return
+    }
     const paths = Array.from(selectedFiles)
     const items = sortedFiles.filter(f => paths.includes(f.path))
 
@@ -3199,12 +3237,35 @@ export function FilesPage() {
       return
     }
 
+    if (items.length > MAX_BATCH_DOWNLOAD_ITEMS) {
+      addToast({
+        title: '一次最多下载 20 项',
+        description: '请减少选择数量，或将文件整理到一个文件夹后下载 ZIP 归档。',
+        color: 'warning',
+      })
+      return
+    }
+
+    const selectedDirectoryCount = items.filter((item) => item.isDir).length
+    if (selectedDirectoryCount > 1) {
+      addToast({
+        title: '一次只能下载一个文件夹',
+        description: '文件夹需要单独生成 ZIP 归档，请减少所选文件夹后重试。',
+        color: 'warning',
+      })
+      return
+    }
+
     const controller = new AbortController()
+    batchDownloadControllerRef.current = controller
+    setIsBatchDownloading(true)
     downloadAbortControllersRef.current.add(controller)
 
     try {
-      const results = await Promise.allSettled(
-        items.map((file) => downloadFile(file.path, getDownloadOptionsWithSignal(file, controller.signal)))
+      const results = await settleWithConcurrency(
+        items,
+        BATCH_DOWNLOAD_PREFLIGHT_CONCURRENCY,
+        (file) => downloadFile(file.path, getDownloadOptionsWithSignal(file, controller.signal)),
       )
 
       if (controller.signal.aborted) {
@@ -3218,10 +3279,15 @@ export function FilesPage() {
       const succeeded = items.length - failed
       const archiveErrorToast = getSharedArchiveDownloadErrorToast(failedErrors)
       const missingFileErrorToast = getSharedMissingFileDownloadErrorToast(failedErrors)
-      const sharedDownloadErrorToast = archiveErrorToast ?? missingFileErrorToast
+      const browserCapacityToast = getSharedBrowserDownloadCapacityErrorToast(failedErrors)
+      const sharedDownloadErrorToast = browserCapacityToast ?? archiveErrorToast ?? missingFileErrorToast
 
       if (failed === 0) {
-        addToast({ title: `已开始下载 ${succeeded} 项`, color: 'success' })
+        addToast({
+          title: `已向浏览器提交 ${succeeded} 项下载`,
+          ...(succeeded > 1 ? { description: '浏览器可能会要求允许多个文件下载。' } : {}),
+          color: 'success',
+        })
         return
       }
 
@@ -3241,14 +3307,20 @@ export function FilesPage() {
       }
 
       addToast({
-        title: '部分项目开始下载',
+        title: '部分项目已提交到浏览器',
         description: sharedDownloadErrorToast
-          ? `已开始 ${succeeded} 项，失败 ${failed} 项；${sharedDownloadErrorToast.description}`
-          : `已开始 ${succeeded} 项，失败 ${failed} 项`,
+          ? `已提交 ${succeeded} 项，提交前失败 ${failed} 项；${sharedDownloadErrorToast.description}`
+          : `已提交 ${succeeded} 项，提交前失败 ${failed} 项`,
         color: 'warning',
       })
     } finally {
       downloadAbortControllersRef.current.delete(controller)
+      if (batchDownloadControllerRef.current === controller) {
+        batchDownloadControllerRef.current = null
+        if (isMountedRef.current) {
+          setIsBatchDownloading(false)
+        }
+      }
     }
   }, [selectedFiles, sortedFiles])
 
@@ -4001,6 +4073,8 @@ export function FilesPage() {
                     className="rounded-lg"
                     startContent={<Download size={16} />}
                     onPress={handleBatchDownload}
+                    isDisabled={isBatchDownloading}
+                    isLoading={isBatchDownloading}
                   >
                     批量下载
                   </Button>

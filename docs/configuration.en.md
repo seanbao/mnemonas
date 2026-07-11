@@ -222,7 +222,7 @@ Controls the main HTTP server for Web UI, REST API, and WebDAV.
 | `host` | string | `"0.0.0.0"` | Listen host; must be empty, `*`, a valid hostname, IPv4, or IPv6 literal, without a port, whitespace, or control characters. Use `127.0.0.1` or `::1` for local-only |
 | `port` | int | `8080` | HTTP port |
 | `read_timeout` | duration | `"30s"` | Request-read timeout |
-| `write_timeout` | duration | `"60s"` | Response-write timeout |
+| `write_timeout` | duration | `"60s"` | Total write timeout for ordinary responses; browser/API file and ZIP downloads use it as an idle write deadline refreshed for each write |
 | `idle_timeout` | duration | `"120s"` | Keep-alive idle timeout |
 | `trusted_proxy_hops` | int | `0` | Number of trusted reverse proxy hops used to interpret forwarded headers |
 | `trusted_proxy_cidrs` | string[] | `[]` | Direct-peer IP addresses or CIDRs for trusted reverse proxies; loopback peers are always trusted |
@@ -242,6 +242,8 @@ trusted_proxy_cidrs = ["10.0.0.0/8"]
 `trusted_proxy_hops = 0` ignores client-supplied forwarded headers. Set it only when MnemoNAS is behind trusted proxies. Direct peers from `127.0.0.1` or `::1` are trusted automatically. Proxies reached through Docker bridge networks, internal load balancers, or other non-loopback addresses must be listed in `trusted_proxy_cidrs`.
 
 `server.host` contains only the listen host; put the port in `server.port`. IPv6 may be written as `::1` or `[::1]`, and the runtime normalizes it for `net.JoinHostPort`. `*` and an empty string both mean wildcard listen.
+
+Browser/API download responses advance the connection write deadline by `server.write_timeout` before each response header, data chunk, or flush operation. Large file and ZIP downloads that continue producing data are therefore not truncated only because their total duration exceeds this value, while a single stalled write still times out. This behavior does not apply to WebDAV responses. Reverse-proxy timeouts must also match the expected download duration and idle boundary.
 
 ## `[server.tls]`
 
@@ -553,7 +555,7 @@ On first startup without a `users_file`, or when the file has no enabled adminis
 | `store_file` | string | `<storage.root>/.mnemonas/shares.json` | Share metadata file |
 | `base_url` | string | `""` | Base URL used when returning share URLs; non-empty values must be absolute `http` or `https` URLs without userinfo, query strings, fragments, encoded query or fragment markers, backslashes, duplicate path slashes, or `.`/`..` path segments, and with a valid host name |
 | `default_expires_in` | duration | `168h` | Default expiration for newly-created shares; `0` or empty means no default expiration. Public deployments should keep an explicit default expiry at or below `720h` (30 days) |
-| `default_max_access` | int | `0` | Default access-count limit for newly-created shares; `0` means unlimited |
+| `default_max_access` | int | `0` | Default logical download-session limit for newly-created shares; `0` means unlimited |
 | `[[share.policy_rules]]` | array | `[]` | Stricter share constraints and allowed creator/maintainer scope for a MnemoNAS path; the most specific matching path wins |
 
 Example:
@@ -588,13 +590,13 @@ A single FQDN trailing dot is treated as the same host, while repeated trailing 
 
 Public deployments that use a reverse-proxy application base path should set that base path itself, such as `https://nas.example.com/mnemonas`, and should not include the `/s` share route in `base_url`. Paths ending in `/s` produce a manual-review warning in the security self-check and public diagnostics.
 
-Default expiration and access-count limits affect only future shares; explicit `expires_in` or `max_access` values in a create request take precedence.
+Default expiration and download limits affect only future shares; explicit `expires_in` or `max_access` values in a create request take precedence. `max_access` counts successfully issued download tickets. Directory browsing, password validation, and Range or resumed transfers with the same ticket do not add another count.
 
-The `path` field in each policy rule follows the same MnemoNAS logical-path rules as directory quotas and directory access rules. Policy rules can set `require_password`, `max_expires_in`, `max_access`, `allowed_users`, `allowed_groups`, and `allowed_roles`. When a rule matches, passwordless create requests and updates that would leave an existing share passwordless are rejected if required. Expiration or access-count values above the configured limits, explicit update requests that clear those limits, and updates to existing matching shares whose stored expiry or access-count constraints are missing or above the rule limit are capped.
+The `path` field in each policy rule follows the same MnemoNAS logical-path rules as directory quotas and directory access rules. Policy rules can set `require_password`, `max_expires_in`, `max_access`, `allowed_users`, `allowed_groups`, and `allowed_roles`. When a rule matches, passwordless create requests and updates that would leave an existing share passwordless are rejected if required. Expiration or download-count values above the configured limits, explicit update requests that clear those limits, and updates to existing matching shares whose stored expiry or download-count constraints are missing or above the rule limit are capped.
 
 `allowed_users`, `allowed_groups`, and `allowed_roles` restrict which authenticated caller may create or maintain share links under the path. User values match either user IDs or usernames, group values match user groups, and role values support `admin`, `user`, and `guest`. Administrators bypass this scope restriction so they can repair existing shares. Creator-scope enforcement is skipped when application authentication is disabled. This restriction affects authenticated share creation and maintenance only; it does not change public access boundaries for already-created share links.
 
-The Web share-create dialog shows a pre-submit summary of policy source, password requirement, effective expiration, and effective access limit, including path-policy caps. The Web settings page shows a pre-save change summary for share enablement, base URL, default expiration, default access limit, and path policy rules compared with the saved configuration, and its coverage summary lists cleanup suggestions for root-wide rules, most-specific path rules that do not inherit ancestor limits, descendant rules that loosen ancestor expiration, access-count, or creator-scope limits, and duplicate-equivalent rules. The Web share list summarizes shares requiring review, passwordless links, broad-scope links, soon-expiring links, and stale links, with matching filters, current-scope review-record creation, share-type-filtered review-history handoff, expandable review details, high-risk disable actions, single-share enable or disable actions, and deletion actions. After high-risk disable, single-share disable, or share deletion actions succeed, matching `unshare` activity entries are associated with an access-closure execution-result review record. After a single share is re-enabled successfully, matching `share` activity entries are associated with a confirmed re-enable execution-result review record.
+The Web share-create dialog shows a pre-submit summary of policy source, password requirement, effective expiration, and effective download limit, including path-policy caps. The Web settings page shows a pre-save change summary for share enablement, base URL, default expiration, default download limit, and path policy rules compared with the saved configuration, and its coverage summary lists cleanup suggestions for root-wide rules, most-specific path rules that do not inherit ancestor limits, descendant rules that loosen ancestor expiration, download-count, or creator-scope limits, and duplicate-equivalent rules. The Web share list summarizes shares requiring review, passwordless links, broad-scope links, soon-expiring links, and stale links, with matching filters, current-scope review-record creation, share-type-filtered review-history handoff, expandable review details, high-risk disable actions, single-share enable or disable actions, and deletion actions. After high-risk disable, single-share disable, or share deletion actions succeed, matching `unshare` activity entries are associated with an access-closure execution-result review record. After a single share is re-enabled successfully, matching `share` activity entries are associated with a confirmed re-enable execution-result review record.
 
 ## `[security]`
 

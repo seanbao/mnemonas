@@ -243,7 +243,7 @@ describe('ShareManager', () => {
       expect(screen.getByText('已禁用')).toBeInTheDocument()
       expect(screen.getAllByText('已过期')).toHaveLength(2)
       expect(screen.getByText('密码保护')).toBeInTheDocument()
-      expect(screen.getByText('5 次访问 / 10')).toBeInTheDocument()
+      expect(screen.getByText('5 次下载 / 10')).toBeInTheDocument()
     })
   })
 
@@ -397,7 +397,7 @@ describe('ShareManager', () => {
       expect(screen.getByText('风险 1')).toBeInTheDocument()
       expect(screen.getAllByText('需处理').length).toBeGreaterThanOrEqual(1)
       expect(screen.getByText('未设置密码，持有链接的人可直接访问。')).toBeInTheDocument()
-      expect(screen.getByText('未设置访问次数上限。')).toBeInTheDocument()
+      expect(screen.getByText('未设置下载次数上限。')).toBeInTheDocument()
       expect(screen.getByText('存在低风险分享配置，请检查分享设置。')).toBeInTheDocument()
       expect(screen.getByRole('button', { name: '需复核 (1)' })).toBeInTheDocument()
       expect(screen.getByRole('button', { name: '停用需处理 (1)' })).toBeInTheDocument()
@@ -470,7 +470,7 @@ describe('ShareManager', () => {
     expect(summary.getByRole('button', { name: '筛选无密码分享 1' })).toBeInTheDocument()
     expect(summary.getByRole('button', { name: '筛选覆盖较大分享 1' })).toBeInTheDocument()
     expect(summary.getByRole('button', { name: '筛选即将到期分享 1' })).toBeInTheDocument()
-    expect(summary.getByRole('button', { name: '筛选长期未访问分享 0' })).toBeDisabled()
+    expect(summary.getByRole('button', { name: '筛选长期未下载分享 0' })).toBeDisabled()
 
     await user.click(summary.getByRole('button', { name: '筛选覆盖较大分享 1' }))
 
@@ -585,8 +585,8 @@ describe('ShareManager', () => {
     expect(report).toContain('需复核：1 个')
     expect(report).toContain('需处理：1 个')
     expect(report).toContain('路径筛选：/docs')
-    expect(report).toContain('路径 | 类型 | 状态 | 风险等级 | 访问限制 | 访问次数 | 过期时间 | 风险原因 | 建议处理')
-    expect(report).toContain('/docs/open.pdf | 文件 | 启用 | 高风险 | 无密码 | 5 / 不限 | 永不过期 | 未设置密码，拿到链接的人都能访问 | 停用或补齐密码、有效期和访问次数限制。')
+    expect(report).toContain('路径 | 类型 | 状态 | 风险等级 | 访问限制 | 下载次数 | 过期时间 | 风险原因 | 建议处理')
+    expect(report).toContain('/docs/open.pdf | 文件 | 启用 | 高风险 | 无密码 | 5 / 不限 | 永不过期 | 未设置密码，拿到链接的人都能访问 | 停用或补齐密码、有效期和下载次数限制。')
     expect(report).toContain('/docs/safe.pdf | 文件 | 启用 | 无 | 密码保护 | 1 / 10 | 永不过期 | 无 | 无需处理。')
     expect(report).not.toContain('/media/movie.mp4')
     expect(mockAddToast).toHaveBeenCalledWith({ title: '分享复核摘要已复制', color: 'success' })
@@ -670,7 +670,7 @@ describe('ShareManager', () => {
       signal: expect.any(AbortSignal),
     }))
     expect(activityApi.createActivityReviewRecord).toHaveBeenCalledWith(expect.objectContaining({
-      note: '分享复核摘要：需复核 1 个，需处理 1 个，无密码 1 个，覆盖较大 0 个，即将到期 0 个，长期未访问 0 个。',
+      note: '分享复核摘要：需复核 1 个，需处理 1 个，无密码 1 个，覆盖较大 0 个，即将到期 0 个，长期未下载 0 个。',
       scope_label: '分享路径 /docs',
       filter_summary: '审计分组 分享相关 · 路径 /docs · 当前分享 2/3',
       disposition_status: 'needs_follow_up',
@@ -690,8 +690,8 @@ describe('ShareManager', () => {
         enabled: true,
         risk_level: 'high',
         reason_summary: '未设置密码，拿到链接的人都能访问',
-        suggested_action: '停用或补齐密码、有效期和访问次数限制。',
-        access_summary: '无密码 · 访问 3/不限',
+        suggested_action: '停用或补齐密码、有效期和下载次数限制。',
+        access_summary: '无密码 · 下载 3/不限',
         expires_at: '永不过期',
       }],
       activity_entry_ids: ['act-share-1', 'act-unshare-1'],
@@ -873,7 +873,7 @@ describe('ShareManager', () => {
         risk: {
           level: 'medium',
           reasons: [
-            { code: 'stale_enabled', level: 'medium', message: '分享长期未访问，建议关闭或重新确认用途' },
+            { code: 'stale_enabled', level: 'medium', message: '分享长期未下载，建议关闭或重新确认用途' },
           ],
         },
       },
@@ -884,10 +884,10 @@ describe('ShareManager', () => {
     await waitFor(() => {
       expect(screen.getByText('active.pdf')).toBeInTheDocument()
       expect(screen.getByText('stale.pdf')).toBeInTheDocument()
-      expect(screen.getByRole('button', { name: '长期未访问 (1)' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: '长期未下载 (1)' })).toBeInTheDocument()
     })
 
-    await user.click(screen.getByRole('button', { name: '长期未访问 (1)' }))
+    await user.click(screen.getByRole('button', { name: '长期未下载 (1)' }))
 
     await waitFor(() => {
       expect(screen.queryByText('active.pdf')).not.toBeInTheDocument()
@@ -1001,7 +1001,7 @@ describe('ShareManager', () => {
         risk_level: 'high',
         reason_summary: '未设置密码，拿到链接的人都能访问',
         suggested_action: '已停用高风险分享；继续复核外部引用和访问入口。',
-        access_summary: '无密码 · 访问 3/不限',
+        access_summary: '无密码 · 下载 3/不限',
         expires_at: '永不过期',
       }],
       activity_entry_ids: ['act-unshare-1'],
@@ -1324,7 +1324,7 @@ describe('ShareManager', () => {
         risk_level: 'none',
         reason_summary: '无',
         suggested_action: '已停用该分享；继续复核外部引用和访问入口。',
-        access_summary: '无密码 · 访问 3/不限',
+        access_summary: '无密码 · 下载 3/不限',
         expires_at: '永不过期',
       }],
       activity_entry_ids: ['act-unshare-single-1'],
@@ -1475,8 +1475,8 @@ describe('ShareManager', () => {
         enabled: true,
         risk_level: 'medium',
         reason_summary: '未设置过期时间，链接会长期有效',
-        suggested_action: '已重新启用该分享；继续复核有效期、密码、访问次数和外部引用。',
-        access_summary: '无密码 · 访问 3/不限',
+        suggested_action: '已重新启用该分享；继续复核有效期、密码、下载次数和外部引用。',
+        access_summary: '无密码 · 下载 3/不限',
         expires_at: '永不过期',
       }],
       activity_entry_ids: ['act-share-enable-1'],
@@ -1554,7 +1554,7 @@ describe('ShareManager', () => {
       expect(screen.getByRole('heading', { name: '编辑分享策略' })).toBeInTheDocument()
     })
 
-    const maxAccessInput = screen.getByLabelText('分享策略访问次数上限')
+    const maxAccessInput = screen.getByLabelText('分享策略下载次数上限')
     await user.clear(maxAccessInput)
     await user.type(maxAccessInput, '5')
     await user.type(screen.getByLabelText('分享策略备注'), 'reviewed')
@@ -1590,8 +1590,8 @@ describe('ShareManager', () => {
         enabled: true,
         risk_level: 'none',
         reason_summary: '无',
-        suggested_action: '已更新该分享策略；继续复核有效期、密码、访问次数和外部引用。',
-        access_summary: '无密码 · 访问 3/5',
+        suggested_action: '已更新该分享策略；继续复核有效期、密码、下载次数和外部引用。',
+        access_summary: '无密码 · 下载 3/5',
         expires_at: '永不过期',
       }],
       activity_entry_ids: ['act-share-policy-1'],
@@ -1603,7 +1603,7 @@ describe('ShareManager', () => {
     await waitFor(() => {
       expect(screen.queryByRole('heading', { name: '编辑分享策略' })).not.toBeInTheDocument()
     })
-    expect(screen.getByText('3 次访问 / 5')).toBeInTheDocument()
+    expect(screen.getByText('3 次下载 / 5')).toBeInTheDocument()
   })
 
   it('keeps updated share settings visible when policy update review recording fails', async () => {
@@ -1637,7 +1637,7 @@ describe('ShareManager', () => {
 
     await user.click(screen.getByLabelText('report.pdf 分享操作'))
     await user.click(await screen.findByText('编辑策略'))
-    const maxAccessInput = await screen.findByLabelText('分享策略访问次数上限')
+    const maxAccessInput = await screen.findByLabelText('分享策略下载次数上限')
     await user.clear(maxAccessInput)
     await user.type(maxAccessInput, '4')
     await user.click(screen.getByRole('button', { name: '保存策略' }))
@@ -1649,7 +1649,7 @@ describe('ShareManager', () => {
         title: '分享策略已保存，复核记录写入失败',
         color: 'warning',
       }))
-      expect(screen.getByText('3 次访问 / 4')).toBeInTheDocument()
+      expect(screen.getByText('3 次下载 / 4')).toBeInTheDocument()
     })
   })
 
@@ -1863,7 +1863,7 @@ describe('ShareManager', () => {
         risk_level: 'none',
         reason_summary: '无',
         suggested_action: '已删除该分享；继续复核外部引用和访问入口。',
-        access_summary: '无密码 · 访问 3/不限',
+        access_summary: '无密码 · 下载 3/不限',
         expires_at: '永不过期',
       }],
       activity_entry_ids: ['act-unshare-delete-1'],

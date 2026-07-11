@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test'
 import { ensureAuthenticatedAt } from './helpers/auth-check'
+import { publicEntryRoutes } from './helpers/public-share-fixtures'
 import { waitForRouteSettled } from './helpers/route-ready'
 
 const routeGroups = [
@@ -182,7 +183,7 @@ async function collectHitTargetIssues(page: Page, route: string): Promise<Intera
   }, route)
 }
 
-async function collectKeyboardIssues(page: Page, route: string): Promise<InteractionIssue[]> {
+async function collectKeyboardIssues(page: Page, route: string, minimumDistinctTargets = 2): Promise<InteractionIssue[]> {
   const issues: InteractionIssue[] = []
   const seenTargets = new Set<string>()
 
@@ -284,12 +285,12 @@ async function collectKeyboardIssues(page: Page, route: string): Promise<Interac
     }
   }
 
-  if (seenTargets.size < 2) {
+  if (seenTargets.size < minimumDistinctTargets) {
     issues.push({
       route,
       rule: 'keyboard-navigation',
       target: '<document>',
-      message: `Tab navigation reached only ${seenTargets.size} distinct focus targets`,
+      message: `Tab navigation reached only ${seenTargets.size} distinct focus targets; expected at least ${minimumDistinctTargets}`,
     })
   }
 
@@ -314,4 +315,26 @@ test.describe('交互完整性扫描', () => {
       ).toEqual([])
     })
   }
+})
+
+test.describe('公开入口交互完整性扫描', () => {
+  test.use({
+    storageState: { cookies: [], origins: [] },
+  })
+
+  test('登录页和公开分享页应保持键盘和点击目标可达', async ({ page }, testInfo) => {
+    testInfo.setTimeout(90_000)
+
+    const issues: InteractionIssue[] = []
+    for (const route of publicEntryRoutes()) {
+      await page.goto(route, { waitUntil: 'domcontentloaded' })
+      await waitForRouteSettled(page, route, { waitForNetworkIdle: true })
+      issues.push(...await collectHitTargetIssues(page, route))
+      issues.push(...await collectKeyboardIssues(page, route, 1))
+    }
+
+    expect(
+      issues.map((issue) => `[${issue.rule}] ${issue.route} ${issue.target}: ${issue.message}`),
+    ).toEqual([])
+  })
 })

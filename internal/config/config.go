@@ -292,7 +292,7 @@ type ShareConfig struct {
 	StoreFile        string                  `toml:"store_file"`         // Path to shares.json
 	BaseURL          string                  `toml:"base_url"`           // Base URL for share links (optional)
 	DefaultExpiresIn time.Duration           `toml:"default_expires_in"` // Default expiry for newly-created shares
-	DefaultMaxAccess int64                   `toml:"default_max_access"` // Default max access count for newly-created shares
+	DefaultMaxAccess int64                   `toml:"default_max_access"` // Default logical download limit for newly-created shares
 	PolicyRules      []SharePolicyRuleConfig `toml:"policy_rules"`       // Path-scoped sharing constraints
 }
 
@@ -788,6 +788,9 @@ func Load(path string) (*Config, error) {
 	}
 
 	applyStorageRootDefaults(cfg, getDefaultStorageRoot())
+	if strings.TrimSpace(cfg.Auth.JWTSecret) == "" {
+		cfg.Auth.JWTSecret = ""
+	}
 	cfg.Server.TrustedProxyCIDRs = NormalizeTrustedProxyCIDRs(cfg.Server.TrustedProxyCIDRs)
 	cfg.Storage.DirectoryQuotas = NormalizeDirectoryQuotas(cfg.Storage.DirectoryQuotas)
 	cfg.Storage.DirectoryAccessRules = NormalizeDirectoryAccessRules(cfg.Storage.DirectoryAccessRules)
@@ -1616,7 +1619,8 @@ func (c *Config) Validate() error {
 	if c.Auth.RefreshTokenTTL <= 0 {
 		errs = append(errs, errors.New("auth.refresh_token_ttl must be positive"))
 	}
-	if strings.TrimSpace(c.Auth.JWTSecret) != "" && len([]byte(c.Auth.JWTSecret)) < 32 {
+	trimmedJWTSecret := strings.TrimSpace(c.Auth.JWTSecret)
+	if trimmedJWTSecret != "" && len([]byte(trimmedJWTSecret)) < 32 {
 		errs = append(errs, errors.New("auth.jwt_secret must be empty for generated secrets or at least 32 bytes"))
 	}
 	for _, ext := range c.Storage.Versioning.AutoVersionedExtensions {

@@ -190,10 +190,13 @@ describe('API: files', () => {
     vi.clearAllMocks()
     localStorage.removeItem('mnemonas_token')
     localStorage.removeItem('mnemonas_refresh_token')
+    localStorage.removeItem('mnemonas_session')
+    localStorage.removeItem('mnemonas_user')
     MockXMLHttpRequest.reset()
   })
 
   afterEach(() => {
+    window.dispatchEvent(new Event('pagehide'))
     vi.restoreAllMocks()
   })
 
@@ -262,7 +265,14 @@ describe('API: files', () => {
       localStorage.setItem('mnemonas_refresh_token', 'refresh-1')
 
       MockXMLHttpRequest.queuedResults.push({ type: 'load', status: 401, statusText: 'Unauthorized' })
-      mockFetch.mockResolvedValueOnce({ ok: false, status: 401, statusText: 'Unauthorized' })
+      mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({
+        success: false,
+        error: { code: 'INVALID_TOKEN', message: 'refresh token is invalid' },
+      }), {
+        status: 401,
+        statusText: 'Unauthorized',
+        headers: { 'Content-Type': 'application/json' },
+      }))
 
       await expect(uploadFile('/docs', new File(['content'], 'report.txt'))).rejects.toMatchObject({
         message: '上传失败',
@@ -2969,378 +2979,314 @@ describe('API: files', () => {
     })
 
     describe('downloadFile', () => {
-      it('downloads via authenticated fetch without auth query', async () => {
-        const blob = new Blob(['file-content'], { type: 'text/plain' })
-        const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
-        const createObjectURLSpy = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:test')
-        const revokeObjectURLSpy = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+      function successfulProbe(headers: HeadersInit = {}): Response {
+        return new Response('', { status: 206, statusText: 'Partial Content', headers })
+      }
 
-        localStorage.setItem('mnemonas_token', 'test-token')
-        mockFetch.mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          statusText: 'OK',
-          headers: new Headers({ 'Content-Disposition': 'attachment; filename="report.txt"' }),
-          blob: () => Promise.resolve(blob),
+      function captureDownloadFrame(): {
+        navigationSpy: ReturnType<typeof vi.fn>
+        getFrame: () => HTMLIFrameElement | undefined
+        getNavigation: () => { href: string; target: string; rel: string; referrerPolicy: string } | undefined
+      } {
+        let createdFrame: HTMLIFrameElement | undefined
+        let navigation: { href: string; target: string; rel: string; referrerPolicy: string } | undefined
+        const originalAppendChild = document.body.appendChild.bind(document.body)
+        const navigationSpy = vi.fn()
+        vi.spyOn(document.body, 'appendChild').mockImplementation(((node: Node) => {
+          if (node instanceof HTMLIFrameElement && node.hasAttribute('data-mnemonas-download-frame')) {
+            createdFrame = node
+            return node
+          }
+          return originalAppendChild(node)
+        }) as typeof document.body.appendChild)
+        vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function click(this: HTMLAnchorElement) {
+          navigation = {
+            href: this.href,
+            target: this.target,
+            rel: this.rel,
+            referrerPolicy: this.referrerPolicy,
+          }
+          navigationSpy()
         })
+        return { navigationSpy, getFrame: () => createdFrame, getNavigation: () => navigation }
+      }
+
+      it('probes a bounded range and starts a same-origin browser download without reading a blob', async () => {
+        const { navigationSpy, getFrame, getNavigation } = captureDownloadFrame()
+        const blobSpy = vi.spyOn(Response.prototype, 'blob')
+        mockFetch.mockResolvedValueOnce(successfulProbe({
+          'Content-Disposition': 'attachment; filename="report.txt"',
+        }))
 
         await downloadFile('/docs/report.txt')
 
         expectFetchCall(1, '/api/v1/download/docs/report.txt?download=true', {
-          headers: {},
+          headers: {
+            Range: 'bytes=0-0',
+            'X-Mnemonas-Download-Probe': 'json-error',
+          },
         })
-        expect(clickSpy).toHaveBeenCalled()
-        expect(createObjectURLSpy).toHaveBeenCalledWith(blob)
-        expect(revokeObjectURLSpy).toHaveBeenCalledWith('blob:test')
+        const frame = getFrame()
+        const navigation = getNavigation()
+        expect(new URL(navigation?.href ?? '').pathname + new URL(navigation?.href ?? '').search)
+          .toBe('/api/v1/download/docs/report.txt?download=true')
+        expect(frame?.getAttribute('src')).toBeNull()
+        expect(navigation?.target).toBe(frame?.name)
+        expect(navigation?.rel).toBe('')
+        expect(navigation?.referrerPolicy).toBe('no-referrer')
+        expect(frame?.title).toBe('下载 report.txt')
+        expect(navigationSpy).toHaveBeenCalledTimes(1)
+        expect(blobSpy).not.toHaveBeenCalled()
       })
 
-      it('forwards abort signal when downloading a file', async () => {
-        const controller = new AbortController()
-        const blob = new Blob(['file-content'], { type: 'text/plain' })
-        vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
-        vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:test')
-        vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+      it('prepares the authenticated download session before probing and triggering the browser', async () => {
+        localStorage.setItem('mnemonas_session', '1')
+        const { navigationSpy } = captureDownloadFrame()
+        mockFetch
+          .mockResolvedValueOnce(new Response('', { status: 200 }))
+          .mockResolvedValueOnce(successfulProbe())
 
-        mockFetch.mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          statusText: 'OK',
-          headers: new Headers(),
-          blob: () => Promise.resolve(blob),
+        await downloadFile('/docs/report.txt')
+
+        expectFetchCall(1, '/api/v1/auth/download-session', { method: 'POST' })
+        expectFetchCall(2, '/api/v1/download/docs/report.txt?download=true', {
+          headers: {
+            Range: 'bytes=0-0',
+            'X-Mnemonas-Download-Probe': 'json-error',
+          },
         })
+        expect(navigationSpy).toHaveBeenCalledTimes(1)
+      })
+
+      it('surfaces a download-session failure without probing or triggering the browser', async () => {
+        localStorage.setItem('mnemonas_session', '1')
+        const { navigationSpy } = captureDownloadFrame()
+        mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({
+          code: 'SERVICE_UNAVAILABLE',
+          message: 'download session unavailable',
+        }), {
+          status: 503,
+          statusText: 'Service Unavailable',
+          headers: { 'Content-Type': 'application/json' },
+        }))
+
+        await expect(downloadFile('/docs/report.txt')).rejects.toMatchObject({
+          message: 'download session unavailable',
+          status: 503,
+          code: 'SERVICE_UNAVAILABLE',
+        })
+        expect(mockFetch).toHaveBeenCalledTimes(1)
+        expect(navigationSpy).not.toHaveBeenCalled()
+      })
+
+      it('forwards the abort signal to the bounded range probe', async () => {
+        const controller = new AbortController()
+        captureDownloadFrame()
+        mockFetch.mockResolvedValueOnce(successfulProbe())
 
         await downloadFile('/docs/report.txt', { signal: controller.signal })
 
         expectFetchCall(1, '/api/v1/download/docs/report.txt?download=true', {
+          headers: {
+            Range: 'bytes=0-0',
+            'X-Mnemonas-Download-Probe': 'json-error',
+          },
           signal: controller.signal,
         })
       })
 
-      it('uses fallback filename when header is missing', async () => {
-        const blob = new Blob(['file-content'])
-        let createdLink: HTMLAnchorElement | undefined
-        const originalCreateElement = document.createElement.bind(document)
-        const createElementSpy = vi.spyOn(document, 'createElement').mockImplementation(((tagName: string) => {
-          const element = originalCreateElement(tagName)
-          if (tagName === 'a') {
-            createdLink = element as HTMLAnchorElement
-          }
-          return element
-        }) as typeof document.createElement)
-        vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:test')
-        vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
-        vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+      it('preserves a range-probe network failure without starting the browser download', async () => {
+        const networkError = new TypeError('network unavailable')
+        const { navigationSpy } = captureDownloadFrame()
+        mockFetch.mockRejectedValueOnce(networkError)
 
-        mockFetch.mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          statusText: 'OK',
-          headers: new Headers(),
-          blob: () => Promise.resolve(blob),
-        })
+        await expect(downloadFile('/docs/report.txt')).rejects.toBe(networkError)
 
-        await downloadFile('/docs/report.txt', { filename: 'custom.txt' })
-
-        expect(createdLink?.download).toBe('custom.txt')
-        createElementSpy.mockRestore()
+        expect(navigationSpy).not.toHaveBeenCalled()
       })
 
-      it('sanitizes filenames from content disposition before triggering download', async () => {
-        const blob = new Blob(['file-content'])
-        let createdLink: HTMLAnchorElement | undefined
-        const originalCreateElement = document.createElement.bind(document)
-        const createElementSpy = vi.spyOn(document, 'createElement').mockImplementation(((tagName: string) => {
-          const element = originalCreateElement(tagName)
-          if (tagName === 'a') {
-            createdLink = element as HTMLAnchorElement
-          }
-          return element
-        }) as typeof document.createElement)
-        vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:test')
-        vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
-        vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+      it('rejects an unstructured failed probe without starting the browser download', async () => {
+        const { navigationSpy } = captureDownloadFrame()
+        mockFetch.mockResolvedValueOnce(new Response('bad gateway', {
+          status: 502,
+          statusText: 'Bad Gateway',
+          headers: { 'Content-Type': 'text/plain' },
+        }))
 
-        mockFetch.mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          statusText: 'OK',
-          headers: new Headers({ 'Content-Disposition': 'attachment; filename="folder/secret.txt"' }),
-          blob: () => Promise.resolve(blob),
+        await expect(downloadFile('/docs/report.txt')).rejects.toMatchObject({
+          message: '下载文件失败',
+          status: 502,
         })
-
-        await downloadFile('/docs/report.txt')
-
-        expect(createdLink?.download).toBe('folder_secret.txt')
-        createElementSpy.mockRestore()
+        expect(navigationSpy).not.toHaveBeenCalled()
       })
 
-      it('passes version parameters and keeps undecodable UTF-8 filenames', async () => {
-        const blob = new Blob(['file-content'])
-        let createdLink: HTMLAnchorElement | undefined
-        const originalCreateElement = document.createElement.bind(document)
-        const createElementSpy = vi.spyOn(document, 'createElement').mockImplementation(((tagName: string) => {
-          const element = originalCreateElement(tagName)
-          if (tagName === 'a') {
-            createdLink = element as HTMLAnchorElement
-          }
-          return element
-        }) as typeof document.createElement)
-        vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:test')
-        vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
-        vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+      it('continues after a range-unsatisfied probe for an empty attachment', async () => {
+        const { navigationSpy } = captureDownloadFrame()
+        mockFetch.mockResolvedValueOnce(new Response('', {
+          status: 416,
+          statusText: 'Requested Range Not Satisfiable',
+          headers: {
+            'Content-Disposition': 'attachment; filename="empty.txt"',
+            'Content-Range': 'bytes */0',
+          },
+        }))
 
-        mockFetch.mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          statusText: 'OK',
-          headers: new Headers({ 'Content-Disposition': "attachment; filename*=UTF-8''%E0%A4%A" }),
-          blob: () => Promise.resolve(blob),
+        await downloadFile('/docs/empty.txt')
+
+        expect(navigationSpy).toHaveBeenCalledTimes(1)
+      })
+
+      it('rejects a range-unsatisfied inline response without starting the browser download', async () => {
+        const { navigationSpy } = captureDownloadFrame()
+        mockFetch.mockResolvedValueOnce(new Response('', {
+          status: 416,
+          statusText: 'Requested Range Not Satisfiable',
+          headers: {
+            'Content-Disposition': 'inline; filename="empty.txt"',
+            'Content-Range': 'bytes */0',
+          },
+        }))
+
+        await expect(downloadFile('/docs/empty.txt')).rejects.toMatchObject({
+          message: '下载文件失败',
+          status: 416,
         })
+        expect(navigationSpy).not.toHaveBeenCalled()
+      })
+
+      it('rejects a range-unsatisfied attachment without an empty-file content range', async () => {
+        const { navigationSpy } = captureDownloadFrame()
+        mockFetch.mockResolvedValueOnce(new Response('', {
+          status: 416,
+          statusText: 'Requested Range Not Satisfiable',
+          headers: {
+            'Content-Disposition': 'attachment; filename="empty.txt"',
+          },
+        }))
+
+        await expect(downloadFile('/docs/empty.txt')).rejects.toMatchObject({
+          message: '下载文件失败',
+          status: 416,
+        })
+        expect(navigationSpy).not.toHaveBeenCalled()
+      })
+
+      it('uses the response filename and preserves version parameters', async () => {
+        const { getFrame } = captureDownloadFrame()
+        mockFetch.mockResolvedValueOnce(successfulProbe({
+          'Content-Disposition': "attachment; filename*=UTF-8''%E0%A4%A",
+        }))
 
         await downloadFile('/docs/report.txt', { version: 'abc123' })
 
         expectFetchCall(1, '/api/v1/download/docs/report.txt?version=abc123&download=true')
-        expect(createdLink?.download).toBe('%E0%A4%A')
-        createElementSpy.mockRestore()
+        expect(getFrame()?.title).toBe('下载 %E0%A4%A')
       })
 
-      it('passes archive parameter and defaults folder filename to zip', async () => {
-        const blob = new Blob(['zip-content'], { type: 'application/zip' })
-        let createdLink: HTMLAnchorElement | undefined
-        const originalCreateElement = document.createElement.bind(document)
-        const createElementSpy = vi.spyOn(document, 'createElement').mockImplementation(((tagName: string) => {
-          const element = originalCreateElement(tagName)
-          if (tagName === 'a') {
-            createdLink = element as HTMLAnchorElement
-          }
-          return element
-        }) as typeof document.createElement)
-        vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:test')
-        vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
-        vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+      it.each([
+        ['/docs', undefined, 'docs.zip'],
+        ['/backups.zip', undefined, 'backups.zip'],
+        ['/docs', 'family-photos', 'family-photos.zip'],
+        ['/docs', '   ', 'download.zip'],
+      ])('keeps archive URL and fallback filename semantics for %s', async (path, filename, expectedFilename) => {
+        const { getFrame, getNavigation } = captureDownloadFrame()
+        mockFetch.mockResolvedValueOnce(successfulProbe())
 
-        mockFetch.mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          statusText: 'OK',
-          headers: new Headers(),
-          blob: () => Promise.resolve(blob),
-        })
+        await downloadFile(path, { archive: 'zip', ...(filename === undefined ? {} : { filename }) })
 
-        await downloadFile('/docs', { archive: 'zip' })
-
-        expectFetchCall(1, '/api/v1/download/docs?download=true&archive=zip')
-        expect(createdLink?.download).toBe('docs.zip')
-        createElementSpy.mockRestore()
+        expect(getFrame()?.title).toBe(`下载 ${expectedFilename}`)
+        expect(new URL(getNavigation()?.href ?? '').searchParams.get('archive')).toBe('zip')
       })
 
-      it('does not duplicate the zip extension when archiving a zip-named folder', async () => {
-        const blob = new Blob(['zip-content'], { type: 'application/zip' })
-        let createdLink: HTMLAnchorElement | undefined
-        const originalCreateElement = document.createElement.bind(document)
-        const createElementSpy = vi.spyOn(document, 'createElement').mockImplementation(((tagName: string) => {
-          const element = originalCreateElement(tagName)
-          if (tagName === 'a') {
-            createdLink = element as HTMLAnchorElement
-          }
-          return element
-        }) as typeof document.createElement)
-        vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:test')
-        vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
-        vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
-
-        mockFetch.mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          statusText: 'OK',
-          headers: new Headers(),
-          blob: () => Promise.resolve(blob),
-        })
-
-        await downloadFile('/backups.zip', { archive: 'zip' })
-
-        expectFetchCall(1, '/api/v1/download/backups.zip?download=true&archive=zip')
-        expect(createdLink?.download).toBe('backups.zip')
-        createElementSpy.mockRestore()
-      })
-
-      it('adds a zip extension to custom archive filenames', async () => {
-        const blob = new Blob(['zip-content'], { type: 'application/zip' })
-        let createdLink: HTMLAnchorElement | undefined
-        const originalCreateElement = document.createElement.bind(document)
-        const createElementSpy = vi.spyOn(document, 'createElement').mockImplementation(((tagName: string) => {
-          const element = originalCreateElement(tagName)
-          if (tagName === 'a') {
-            createdLink = element as HTMLAnchorElement
-          }
-          return element
-        }) as typeof document.createElement)
-        vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:test')
-        vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
-        vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
-
-        mockFetch.mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          statusText: 'OK',
-          headers: new Headers(),
-          blob: () => Promise.resolve(blob),
-        })
-
-        await downloadFile('/docs', { archive: 'zip', filename: 'family-photos' })
-
-        expectFetchCall(1, '/api/v1/download/docs?download=true&archive=zip')
-        expect(createdLink?.download).toBe('family-photos.zip')
-        createElementSpy.mockRestore()
-      })
-
-      it('uses the archive fallback when the custom archive filename is blank', async () => {
-        const blob = new Blob(['zip-content'], { type: 'application/zip' })
-        let createdLink: HTMLAnchorElement | undefined
-        const originalCreateElement = document.createElement.bind(document)
-        const createElementSpy = vi.spyOn(document, 'createElement').mockImplementation(((tagName: string) => {
-          const element = originalCreateElement(tagName)
-          if (tagName === 'a') {
-            createdLink = element as HTMLAnchorElement
-          }
-          return element
-        }) as typeof document.createElement)
-        vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:test')
-        vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
-        vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
-
-        mockFetch.mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          statusText: 'OK',
-          headers: new Headers(),
-          blob: () => Promise.resolve(blob),
-        })
-
-        await downloadFile('/docs', { archive: 'zip', filename: '   ' })
-
-        expectFetchCall(1, '/api/v1/download/docs?download=true&archive=zip')
-        expect(createdLink?.download).toBe('download.zip')
-        createElementSpy.mockRestore()
-      })
-
-      it('surfaces structured backend errors', async () => {
-        mockFetch.mockResolvedValueOnce({
-          ok: false,
-          status: 409,
-          statusText: 'Conflict',
-          json: () => Promise.resolve({ error: { message: '父路径不是目录' } }),
-        })
-
-        await expect(downloadFile('/docs/report.txt')).rejects.toThrow('父路径不是目录')
-      })
-
-      it('surfaces problem-json details for failed downloads', async () => {
-        const json = vi.fn(() => Promise.resolve({
-          title: 'Service unavailable',
-          detail: 'download storage unavailable',
-          status: 503,
-        }))
-
-        mockFetch.mockResolvedValueOnce({
-          ok: false,
-          status: 503,
-          statusText: 'Service Unavailable',
-          headers: new Headers({ 'Content-Type': 'application/problem+json' }),
-          clone: () => ({ json }),
-          json: () => Promise.resolve({
-            title: 'Service unavailable',
-            detail: 'download storage unavailable',
-            status: 503,
-          }),
-        })
-
-        await expect(downloadFile('/docs/report.txt')).rejects.toMatchObject({
-          message: 'download storage unavailable',
-          status: 503,
-        })
-        expect(json).toHaveBeenCalled()
-      })
-
-      it('localizes archive snapshot-change failures before streaming starts', async () => {
-        const json = vi.fn(() => Promise.resolve({
+      it('surfaces and localizes a structured range-probe failure before starting the browser download', async () => {
+        const { navigationSpy } = captureDownloadFrame()
+        mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({
           code: 'CONFLICT',
           message: 'archive entry changed during download',
-        }))
-
-        mockFetch.mockResolvedValueOnce({
-          ok: false,
+        }), {
           status: 409,
           statusText: 'Conflict',
-          headers: new Headers({ 'Content-Type': 'application/json' }),
-          clone: () => ({ json }),
-          json: () => Promise.resolve({
-            code: 'CONFLICT',
-            message: 'archive entry changed during download',
-          }),
-        })
+          headers: { 'Content-Type': 'application/json' },
+        }))
 
         await expect(downloadFile('/docs', { archive: 'zip' })).rejects.toMatchObject({
           message: '文件内容已变更，请刷新后重试',
           status: 409,
           code: 'CONFLICT',
         })
-        expect(json).toHaveBeenCalled()
+        expect(navigationSpy).not.toHaveBeenCalled()
       })
 
-      it('treats successful structured JSON without an attachment header as a download error', async () => {
-        const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
-        const createObjectURLSpy = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:test')
-        const json = vi.fn(() => Promise.resolve({
-          code: 'PAYLOAD_TOO_LARGE',
-          message: 'archive content is too large',
+      it('localizes archive concurrency rejection before starting the browser download', async () => {
+        const { navigationSpy } = captureDownloadFrame()
+        mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({
+          code: 'ARCHIVE_DOWNLOAD_RATE_LIMITED',
+          message: 'too many archive downloads, try later',
+        }), {
+          status: 429,
+          statusText: 'Too Many Requests',
+          headers: { 'Content-Type': 'application/json', 'Retry-After': '1' },
         }))
-        const blob = vi.fn(() => Promise.resolve(new Blob(['{}'], { type: 'application/json' })))
-
-        mockFetch.mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          statusText: 'OK',
-          headers: new Headers({ 'Content-Type': 'application/json' }),
-          clone: () => ({ json }),
-          blob,
-        })
 
         await expect(downloadFile('/docs', { archive: 'zip' })).rejects.toMatchObject({
-          message: '归档内容过大',
-          status: 200,
-          code: 'PAYLOAD_TOO_LARGE',
+          message: '归档下载任务较多，请稍后重试',
+          status: 429,
+          code: 'ARCHIVE_DOWNLOAD_RATE_LIMITED',
         })
-        expect(json).toHaveBeenCalled()
-        expect(blob).not.toHaveBeenCalled()
-        expect(createObjectURLSpy).not.toHaveBeenCalled()
-        expect(clickSpy).not.toHaveBeenCalled()
+        expect(navigationSpy).not.toHaveBeenCalled()
       })
 
-      it('downloads JSON content when an attachment header is present', async () => {
-        const blob = new Blob(['{"message":"keep"}'], { type: 'application/json' })
-        const clone = vi.fn()
-        const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
-        const createObjectURLSpy = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:test')
-        vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
-
-        mockFetch.mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          statusText: 'OK',
-          headers: new Headers({
-            'Content-Type': 'application/json',
-            'Content-Disposition': 'attachment; filename="data.json"',
-          }),
-          clone,
-          blob: () => Promise.resolve(blob),
-        })
+      it('starts JSON attachments natively without cloning or reading their contents', async () => {
+        const { navigationSpy, getFrame } = captureDownloadFrame()
+        const cloneSpy = vi.spyOn(Response.prototype, 'clone')
+        const blobSpy = vi.spyOn(Response.prototype, 'blob')
+        mockFetch.mockResolvedValueOnce(successfulProbe({
+          'Content-Type': 'application/json',
+          'Content-Disposition': 'attachment; filename="data.json"',
+        }))
 
         await downloadFile('/docs/data.json')
 
-        expect(clone).not.toHaveBeenCalled()
-        expect(createObjectURLSpy).toHaveBeenCalledWith(blob)
-        expect(clickSpy).toHaveBeenCalled()
+        expect(getFrame()?.title).toBe('下载 data.json')
+        expect(navigationSpy).toHaveBeenCalledTimes(1)
+        expect(cloneSpy).not.toHaveBeenCalled()
+        expect(blobSpy).not.toHaveBeenCalled()
+      })
+
+      it('cancels a superseded preflight without suppressing the replacement download', async () => {
+        const firstController = new AbortController()
+        const secondController = new AbortController()
+        const { navigationSpy } = captureDownloadFrame()
+        let resolveFirstProbe: ((response: Response) => void) | undefined
+        mockFetch
+          .mockImplementationOnce(() => new Promise<Response>((resolve) => {
+            resolveFirstProbe = resolve
+          }))
+          .mockResolvedValueOnce(successfulProbe())
+
+        const firstDownload = downloadFile('/docs/first.txt', { signal: firstController.signal })
+        await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1))
+        firstController.abort()
+        const replacementDownload = downloadFile('/docs/second.txt', { signal: secondController.signal })
+        await replacementDownload
+        resolveFirstProbe?.(successfulProbe())
+
+        await expect(firstDownload).rejects.toMatchObject({ name: 'AbortError' })
+        expect(navigationSpy).toHaveBeenCalledTimes(1)
+      })
+
+      it('allows independent callers to start separate downloads', async () => {
+        const { navigationSpy } = captureDownloadFrame()
+        mockFetch
+          .mockResolvedValueOnce(successfulProbe())
+          .mockResolvedValueOnce(successfulProbe())
+
+        await Promise.all([
+          downloadFile('/docs/first.txt'),
+          downloadFile('/docs/second.txt'),
+        ])
+
+        expect(navigationSpy).toHaveBeenCalledTimes(2)
       })
     })
 

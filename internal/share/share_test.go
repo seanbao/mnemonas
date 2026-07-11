@@ -659,7 +659,11 @@ func TestNewShareStore_LoadPreservesWhitespaceInPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read shares file after load: %v", err)
 	}
-	if !strings.Contains(string(reloadedData), `"path":"/docs/report.pdf "`) {
+	reloaded, err := decodeShareStoreFile(reloadedData)
+	if err != nil {
+		t.Fatalf("failed to decode shares file after load: %v", err)
+	}
+	if len(reloaded.Shares) != 1 || reloaded.Shares[0].Path != targetPath {
 		t.Fatalf("expected shares file to preserve trailing whitespace path, got %s", string(reloadedData))
 	}
 }

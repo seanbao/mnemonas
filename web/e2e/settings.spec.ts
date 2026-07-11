@@ -728,7 +728,7 @@ test.describe('设置页面响应式', () => {
     await page.getByRole('button', { name: '应用推荐到表单' }).click()
     await selectSettingsCategory(page, 'shares', /分享与协作/i)
     await expect(page.getByLabel('新分享默认有效期')).toHaveValue('168h')
-    await expect(page.getByLabel('新分享默认访问次数')).toHaveValue('20')
+    await expect(page.getByLabel('新分享默认下载次数')).toHaveValue('20')
 
     await page.getByRole('button', { name: /保存|保存设置/i }).click()
     await expect(page.getByText('设置已保存，部分变更需要重启后生效')).toBeVisible({ timeout: 5000 })

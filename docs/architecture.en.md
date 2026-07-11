@@ -129,7 +129,7 @@ The main logical entities are:
 - CAS objects addressed by BLAKE3 hash.
 - Trash records with original path, deletion time, and content reference.
 - Users with role, groups, and `home_dir`.
-- Share links with optional password, expiration, and access limits.
+- Share links with optional passwords, expiration, and logical download limits.
 - Favorites and activity records scoped by per-user root directory.
 
 SQLite is used for transactional metadata where ACID semantics matter. Some feature stores use JSON files when the data shape is small and local.
@@ -143,7 +143,7 @@ Security boundaries:
 - Non-admin users are scoped to their configured `home_dir`, with optional `storage.directory_access_rules` grants for shared directories.
 - Directory access rules use the same most-specific path decision for files, search, shares, favorites, trash, activity logs, and WebDAV users mode.
 - WebDAV can authenticate MnemoNAS users and apply role, group, `home_dir`, directory access-rule, home-scoped user-quota, and directory-quota boundaries; the legacy `basic` mode remains a separate global service credential.
-- Share-link password validation uses short-lived HttpOnly cookies.
+- Share-link password validation uses short-lived HttpOnly cookies; downloads use signed, target-bound tickets with paired cookies.
 - Download and preview flows use short-lived download-session cookies instead of long-lived tokens in URLs.
 
 Deployment boundaries:

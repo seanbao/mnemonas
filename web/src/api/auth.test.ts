@@ -175,6 +175,75 @@ function setPasswordChangeTestUser(id = 'u1'): void {
   }))
 }
 
+function setBrowserSessionTestUser(id = 'u1'): void {
+  storeTokens('', '', {
+    id,
+    username: id === 'u1' ? 'admin' : id,
+    role: id === 'u1' ? 'admin' : 'user',
+    homeDir: id === 'u1' ? '/' : `/${id}`,
+    mustChangePassword: false,
+  })
+}
+
+function authErrorResponse(status: number, code: string, message = code): Response {
+  return new Response(JSON.stringify({
+    success: false,
+    error: { code, message },
+  }), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
+
+function refreshSuccessResponse(id = 'u1'): Response {
+  return new Response(JSON.stringify({
+    success: true,
+    data: {
+      user: {
+        id,
+        username: id === 'u1' ? 'admin' : id,
+        role: id === 'u1' ? 'admin' : 'user',
+        home_dir: id === 'u1' ? '/' : `/${id}`,
+        must_change_password: false,
+      },
+    },
+  }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
+
+const TRANSIENT_REFRESH_FAILURE_CASES = [
+  ['429 REFRESH_RATE_LIMITED', () => Promise.resolve(authErrorResponse(
+    429,
+    'REFRESH_RATE_LIMITED',
+    'refresh requests are temporarily limited',
+  ))],
+  ['503 TOKEN_STATE_UNAVAILABLE', () => Promise.resolve(authErrorResponse(
+    503,
+    'TOKEN_STATE_UNAVAILABLE',
+    'token session state unavailable',
+  ))],
+  ['network failure', () => Promise.reject(new TypeError('network unavailable'))],
+  ['response parsing failure', () => Promise.resolve(new Response('{', {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  }))],
+  ['response contract failure', () => Promise.resolve(new Response(JSON.stringify({
+    success: false,
+    data: {},
+  }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  }))],
+] as const
+
+const DEFINITIVE_REFRESH_FAILURE_CASES = [
+  [400, 'MISSING_TOKEN'],
+  [401, 'INVALID_TOKEN'],
+  [403, 'USER_DISABLED'],
+] as const
+
 describe('auth API', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -193,18 +262,26 @@ describe('auth API', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('forwards abort signal when syncing an existing download session', async () => {
+  it('propagates caller aborts to the internal download-session request signal', async () => {
     const controller = new AbortController()
+    let requestSignal: AbortSignal | undefined
     localStorage.setItem('mnemonas_session', '1')
-    fetchMock.mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: true }) })
+    fetchMock.mockImplementationOnce((_input: RequestInfo | URL, init?: RequestInit) => {
+      requestSignal = init?.signal as AbortSignal | undefined
+      return new Promise((_resolve, reject) => {
+        requestSignal?.addEventListener('abort', () => {
+          reject(requestSignal?.reason ?? new DOMException('The operation was aborted', 'AbortError'))
+        }, { once: true })
+      })
+    })
 
-    await expect(ensureDownloadSession({ signal: controller.signal })).resolves.toEqual({ ok: true })
+    const session = ensureDownloadSession({ signal: controller.signal })
+    await vi.waitFor(() => expect(requestSignal).toBeInstanceOf(AbortSignal))
+    expect(requestSignal).not.toBe(controller.signal)
+    controller.abort()
 
-    expect(fetchMock).toHaveBeenCalledWith('/api/v1/auth/download-session', expect.objectContaining({
-      method: 'POST',
-      credentials: 'same-origin',
-      signal: controller.signal,
-    }))
+    expect(requestSignal?.aborted).toBe(true)
+    await expect(session).rejects.toMatchObject({ name: 'AbortError' })
   })
 
   it('identifies common auth error statuses', () => {
@@ -1072,6 +1149,512 @@ describe('auth API', () => {
       credentials: 'same-origin',
     }))
     expect(localStorage.getItem('mnemonas_token')).toBeNull()
+  })
+
+  it.each(TRANSIENT_REFRESH_FAILURE_CASES)(
+    'preserves browser auth state when direct refresh has %s',
+    async (_label, createFailure) => {
+      const authCleared = vi.fn()
+      setBrowserSessionTestUser()
+      window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
+      fetchMock.mockImplementationOnce(() => createFailure())
+
+      await expect(refreshAuthSession()).resolves.toBe(false)
+
+      expect(localStorage.getItem('mnemonas_session')).toBe('1')
+      expect(getStoredUser()).toMatchObject({ id: 'u1' })
+      expect(authCleared).not.toHaveBeenCalled()
+      window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
+    },
+  )
+
+  it.each(DEFINITIVE_REFRESH_FAILURE_CASES)(
+    'clears browser auth state when direct refresh has definitive %s %s',
+    async (status, code) => {
+      const authCleared = vi.fn()
+      setBrowserSessionTestUser()
+      window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
+      fetchMock.mockResolvedValueOnce(authErrorResponse(status, code))
+
+      await expect(refreshAuthSession()).resolves.toBe(false)
+
+      expect(localStorage.getItem('mnemonas_session')).toBeNull()
+      expect(getStoredUser()).toBeNull()
+      expect(authCleared).toHaveBeenCalledTimes(1)
+      window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
+    },
+  )
+
+  it.each(TRANSIENT_REFRESH_FAILURE_CASES)(
+    'preserves browser auth state when download-session recovery has %s',
+    async (_label, createFailure) => {
+      const authCleared = vi.fn()
+      setBrowserSessionTestUser()
+      window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
+      fetchMock
+        .mockResolvedValueOnce(authErrorResponse(401, 'TOKEN_EXPIRED', 'access token expired'))
+        .mockImplementationOnce(() => createFailure())
+
+      await expect(ensureDownloadSession()).resolves.toMatchObject({
+        ok: false,
+        authCleared: false,
+        status: 401,
+        code: 'TOKEN_EXPIRED',
+      })
+
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(localStorage.getItem('mnemonas_session')).toBe('1')
+      expect(getStoredUser()).toMatchObject({ id: 'u1' })
+      expect(authCleared).not.toHaveBeenCalled()
+      window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
+    },
+  )
+
+  it.each(DEFINITIVE_REFRESH_FAILURE_CASES)(
+    'clears browser auth state when download-session recovery has definitive %s %s',
+    async (status, code) => {
+      const authCleared = vi.fn()
+      setBrowserSessionTestUser()
+      window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
+      fetchMock
+        .mockResolvedValueOnce(authErrorResponse(401, 'TOKEN_EXPIRED', 'access token expired'))
+        .mockResolvedValueOnce(authErrorResponse(status, code))
+
+      await expect(ensureDownloadSession()).resolves.toMatchObject({
+        ok: false,
+        authCleared: true,
+        status: 401,
+        code: 'TOKEN_EXPIRED',
+      })
+
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(localStorage.getItem('mnemonas_session')).toBeNull()
+      expect(getStoredUser()).toBeNull()
+      expect(authCleared).toHaveBeenCalledTimes(1)
+      window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
+    },
+  )
+
+  it('refreshes an expired access cookie before retrying the download session', async () => {
+    const authCleared = vi.fn()
+    window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
+    localStorage.setItem('mnemonas_session', '1')
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'u1',
+      username: 'admin',
+      role: 'admin',
+      homeDir: '/',
+      mustChangePassword: false,
+    }))
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        success: false,
+        error: { code: 'TOKEN_EXPIRED', message: 'access token expired' },
+      }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        success: true,
+        data: {
+          user: {
+            id: 'u1',
+            username: 'admin',
+            role: 'admin',
+            home_dir: '/',
+            must_change_password: false,
+          },
+        },
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response('', { status: 200 }))
+
+    await expect(ensureDownloadSession()).resolves.toEqual({ ok: true })
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/v1/auth/download-session', expect.objectContaining({
+      method: 'POST',
+      credentials: 'same-origin',
+    }))
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/v1/auth/refresh', expect.objectContaining({
+      method: 'POST',
+      credentials: 'same-origin',
+    }))
+    expect(fetchMock).toHaveBeenNthCalledWith(3, '/api/v1/auth/download-session', expect.objectContaining({
+      method: 'POST',
+      credentials: 'same-origin',
+    }))
+    expect(localStorage.getItem('mnemonas_session')).toBe('1')
+    expect(getStoredUser()).toMatchObject({ id: 'u1' })
+    expect(authCleared).not.toHaveBeenCalled()
+
+    window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
+  })
+
+  it('propagates terminal replay recovery cleanup to an expired download session', async () => {
+    const authCleared = vi.fn()
+    setBrowserSessionTestUser()
+    window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
+    fetchMock
+      .mockResolvedValueOnce(authErrorResponse(401, 'TOKEN_EXPIRED', 'access token expired'))
+      .mockResolvedValueOnce(authErrorResponse(401, 'TOKEN_REVOKED', 'refresh token revoked'))
+      .mockResolvedValueOnce(authErrorResponse(401, 'USER_NOT_FOUND', 'user not found'))
+
+    await expect(ensureDownloadSession()).resolves.toMatchObject({
+      ok: false,
+      authCleared: true,
+      status: 401,
+      code: 'TOKEN_EXPIRED',
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(localStorage.getItem('mnemonas_session')).toBeNull()
+    expect(getStoredUser()).toBeNull()
+    expect(authCleared).toHaveBeenCalledTimes(1)
+    expect(authCleared.mock.calls[0]?.[0]).toMatchObject({
+      detail: { reason: 'missing', message: 'user not found' },
+    })
+    window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
+  })
+
+  it('does not recursively refresh when the refreshed download session is rejected', async () => {
+    const authCleared = vi.fn()
+    window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
+    localStorage.setItem('mnemonas_session', '1')
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'u1',
+      username: 'admin',
+      role: 'admin',
+      homeDir: '/',
+      mustChangePassword: false,
+    }))
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        success: false,
+        error: { code: 'TOKEN_EXPIRED', message: 'access token expired' },
+      }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        success: true,
+        data: {
+          user: {
+            id: 'u1',
+            username: 'admin',
+            role: 'admin',
+            home_dir: '/',
+            must_change_password: false,
+          },
+        },
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        success: false,
+        error: { code: 'INVALID_TOKEN', message: 'refreshed access token invalid' },
+      }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+
+    await expect(ensureDownloadSession()).resolves.toMatchObject({
+      ok: false,
+      authCleared: true,
+      status: 401,
+      code: 'INVALID_TOKEN',
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(fetchMock.mock.calls.filter(([url]) => String(url) === '/api/v1/auth/refresh')).toHaveLength(1)
+    expect(localStorage.getItem('mnemonas_session')).toBeNull()
+    expect(authCleared).toHaveBeenCalledTimes(1)
+
+    window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
+  })
+
+  it('shares one download-session synchronization for concurrent callers without a signal', async () => {
+    const pendingSync = createDeferred<Response>()
+    localStorage.setItem('mnemonas_session', '1')
+    fetchMock.mockReturnValueOnce(pendingSync.promise)
+
+    const first = ensureDownloadSession()
+    const second = ensureDownloadSession()
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    pendingSync.resolve(new Response('', { status: 200 }))
+
+    await expect(Promise.all([first, second])).resolves.toEqual([{ ok: true }, { ok: true }])
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('shares one download-session synchronization for concurrent callers with the same signal', async () => {
+    const pendingSync = createDeferred<Response>()
+    const controller = new AbortController()
+    localStorage.setItem('mnemonas_session', '1')
+    fetchMock.mockReturnValueOnce(pendingSync.promise)
+
+    const first = ensureDownloadSession({ signal: controller.signal })
+    const second = ensureDownloadSession({ signal: controller.signal })
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    pendingSync.resolve(new Response('', { status: 200 }))
+
+    await expect(Promise.all([first, second])).resolves.toEqual([{ ok: true }, { ok: true }])
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not let an aborted refresh waiter cancel a different download-session signal', async () => {
+    const pendingRefresh = createDeferred<Response>()
+    const firstController = new AbortController()
+    const secondController = new AbortController()
+    let downloadAttempt = 0
+    localStorage.setItem('mnemonas_session', '1')
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'u1',
+      username: 'admin',
+      role: 'admin',
+      homeDir: '/',
+      mustChangePassword: false,
+    }))
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/v1/auth/download-session') {
+        downloadAttempt += 1
+        if (downloadAttempt <= 2) {
+          return Promise.resolve(new Response(JSON.stringify({
+            success: false,
+            error: { code: 'TOKEN_EXPIRED', message: 'access token expired' },
+          }), {
+            status: 401,
+            headers: { 'Content-Type': 'application/json' },
+          }))
+        }
+        return Promise.resolve(new Response('', { status: 200 }))
+      }
+      if (url === '/api/v1/auth/refresh') {
+        return pendingRefresh.promise
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+
+    const first = ensureDownloadSession({ signal: firstController.signal })
+    const second = ensureDownloadSession({ signal: secondController.signal })
+    await vi.waitFor(() => {
+      expect(fetchMock.mock.calls.filter(([url]) => String(url) === '/api/v1/auth/refresh')).toHaveLength(1)
+    })
+    firstController.abort()
+    pendingRefresh.resolve(new Response(JSON.stringify({
+      success: true,
+      data: {
+        user: {
+          id: 'u1',
+          username: 'admin',
+          role: 'admin',
+          home_dir: '/',
+          must_change_password: false,
+        },
+      },
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+
+    await expect(first).rejects.toMatchObject({ name: 'AbortError' })
+    await expect(second).resolves.toEqual({ ok: true })
+    expect(secondController.signal.aborted).toBe(false)
+    expect(downloadAttempt).toBe(3)
+    expect(fetchMock.mock.calls.filter(([url]) => String(url) === '/api/v1/auth/refresh')).toHaveLength(1)
+    expect(localStorage.getItem('mnemonas_session')).toBe('1')
+  })
+
+  it('clears the current session when refresh definitively rejects an expired access cookie', async () => {
+    const authCleared = vi.fn()
+    window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
+    localStorage.setItem('mnemonas_session', '1')
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'u1',
+      username: 'admin',
+      role: 'admin',
+      homeDir: '/',
+      mustChangePassword: false,
+    }))
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        success: false,
+        error: { code: 'TOKEN_EXPIRED', message: 'access token expired' },
+      }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        success: false,
+        error: { code: 'INVALID_TOKEN', message: 'refresh token invalid' },
+      }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+
+    await expect(ensureDownloadSession()).resolves.toMatchObject({
+      ok: false,
+      authCleared: true,
+      status: 401,
+      code: 'TOKEN_EXPIRED',
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(localStorage.getItem('mnemonas_session')).toBeNull()
+    expect(localStorage.getItem('mnemonas_user')).toBeNull()
+    expect(authCleared).toHaveBeenCalledTimes(1)
+
+    window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
+  })
+
+  it('preserves the current session when refresh coordination is temporarily unavailable', async () => {
+    const authCleared = vi.fn()
+    const request = vi.fn().mockRejectedValue(new DOMException('locks are unavailable', 'SecurityError'))
+    setNavigatorLocks({
+      query: async () => ({ held: [], pending: [] }),
+      request: request as LockManager['request'],
+    })
+    window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
+    localStorage.setItem('mnemonas_session', '1')
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'u1',
+      username: 'admin',
+      role: 'admin',
+      homeDir: '/',
+      mustChangePassword: false,
+    }))
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      success: false,
+      error: { code: 'TOKEN_EXPIRED', message: 'access token expired' },
+    }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+
+    await expect(ensureDownloadSession()).resolves.toMatchObject({
+      ok: false,
+      authCleared: false,
+      status: 401,
+      code: 'TOKEN_EXPIRED',
+    })
+
+    expect(request).toHaveBeenCalledTimes(1)
+    expect(localStorage.getItem('mnemonas_session')).toBe('1')
+    expect(getStoredUser()).toMatchObject({ id: 'u1' })
+    expect(authCleared).not.toHaveBeenCalled()
+
+    window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
+  })
+
+  it('does not let a superseded download-session synchronization clear a newer login', async () => {
+    const pendingOldSync = createDeferred<Response>()
+    let downloadAttempt = 0
+    let oldRequestSignal: AbortSignal | undefined
+    localStorage.setItem('mnemonas_session', '1')
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'old-user',
+      username: 'old-user',
+      role: 'user',
+      homeDir: '/old-user',
+      mustChangePassword: false,
+    }))
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url === '/api/v1/auth/download-session') {
+        downloadAttempt += 1
+        if (downloadAttempt === 1) {
+          oldRequestSignal = init?.signal as AbortSignal | undefined
+        }
+        return downloadAttempt === 1
+          ? pendingOldSync.promise
+          : Promise.resolve(new Response('', { status: 200 }))
+      }
+      if (url === '/api/v1/auth/login') {
+        return Promise.resolve(new Response(JSON.stringify({
+          success: true,
+          data: {
+            user: {
+              id: 'new-user',
+              username: 'new-user',
+              role: 'admin',
+              home_dir: '/',
+              must_change_password: false,
+            },
+          },
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }))
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+
+    const staleSync = ensureDownloadSession()
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    await expect(login('new-user', 'new-password')).resolves.toMatchObject({
+      user: { id: 'new-user' },
+    })
+    expect(oldRequestSignal?.aborted).toBe(true)
+    pendingOldSync.resolve(new Response(JSON.stringify({
+      success: false,
+      error: { code: 'TOKEN_EXPIRED', message: 'old access token expired' },
+    }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+
+    await expect(staleSync).rejects.toMatchObject({ name: 'AbortError' })
+    expect(getStoredUser()).toMatchObject({ id: 'new-user' })
+    expect(localStorage.getItem('mnemonas_session')).toBe('1')
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not let a stale network rejection mark a newer download session unavailable', async () => {
+    const pendingOldSync = createDeferred<Response>()
+    let downloadAttempt = 0
+    let oldRequestSignal: AbortSignal | undefined
+    setBrowserSessionTestUser('old-user')
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url === '/api/v1/auth/download-session') {
+        downloadAttempt += 1
+        if (downloadAttempt === 1) {
+          oldRequestSignal = init?.signal as AbortSignal | undefined
+          return pendingOldSync.promise
+        }
+        if (downloadAttempt === 3) {
+          return Promise.resolve(new Response('', { status: 200 })).then((response) => {
+            queueMicrotask(() => pendingOldSync.reject(new TypeError('stale network failure')))
+            return response
+          })
+        }
+        return Promise.resolve(new Response('', { status: 200 }))
+      }
+      if (url === '/api/v1/auth/login' || url === '/api/v1/auth/refresh') {
+        return Promise.resolve(refreshSuccessResponse('new-user'))
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+
+    const staleSync = ensureDownloadSession()
+    const staleResult = staleSync.then(
+      () => null,
+      (error: unknown) => error,
+    )
+    await vi.waitFor(() => expect(oldRequestSignal).toBeInstanceOf(AbortSignal))
+
+    await expect(login('new-user', 'new-password')).resolves.toMatchObject({
+      user: { id: 'new-user' },
+    })
+    expect(oldRequestSignal?.aborted).toBe(true)
+
+    await expect(refreshAuthSession()).resolves.toBe(true)
+    await expect(staleResult).resolves.toMatchObject({ name: 'AbortError' })
+    expect(getStoredUser()).toMatchObject({ id: 'new-user' })
+    expect(downloadAttempt).toBe(3)
   })
 
   it('clears stale browser auth state when download session has no access cookie', async () => {
@@ -2307,15 +2890,10 @@ describe('auth API', () => {
     expect(fetchMock).toHaveBeenCalledTimes(4)
   })
 
-  it('clears auth state when refresh returns a malformed success payload', async () => {
+  it('preserves auth state when refresh returns a malformed success payload', async () => {
+    setBrowserSessionTestUser()
     localStorage.setItem('mnemonas_token', 'access-1')
     localStorage.setItem('mnemonas_refresh_token', 'refresh-1')
-    localStorage.setItem('mnemonas_user', JSON.stringify({
-      id: 'u1',
-      username: 'admin',
-      role: 'admin',
-      home_dir: '/',
-    }))
 
     fetchMock
       .mockResolvedValueOnce({
@@ -2343,19 +2921,15 @@ describe('auth API', () => {
     expect(response.status).toBe(401)
     expect(localStorage.getItem('mnemonas_token')).toBeNull()
     expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
-    expect(localStorage.getItem('mnemonas_user')).toBeNull()
+    expect(localStorage.getItem('mnemonas_session')).toBe('1')
+    expect(getStoredUser()).toMatchObject({ id: 'u1' })
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
-  it('clears auth state when refresh returns a false-success payload', async () => {
+  it('preserves auth state when refresh returns a false-success payload', async () => {
+    setBrowserSessionTestUser()
     localStorage.setItem('mnemonas_token', 'access-1')
     localStorage.setItem('mnemonas_refresh_token', 'refresh-1')
-    localStorage.setItem('mnemonas_user', JSON.stringify({
-      id: 'u1',
-      username: 'admin',
-      role: 'admin',
-      home_dir: '/',
-    }))
 
     fetchMock
       .mockResolvedValueOnce({
@@ -2383,7 +2957,8 @@ describe('auth API', () => {
     expect(response.status).toBe(401)
     expect(localStorage.getItem('mnemonas_token')).toBeNull()
     expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
-    expect(localStorage.getItem('mnemonas_user')).toBeNull()
+    expect(localStorage.getItem('mnemonas_session')).toBe('1')
+    expect(getStoredUser()).toMatchObject({ id: 'u1' })
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
@@ -3533,11 +4108,13 @@ describe('auth API', () => {
         status: 401,
         statusText: 'Unauthorized',
       })
-      .mockResolvedValueOnce({
-        ok: false,
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        success: false,
+        error: { code: 'INVALID_TOKEN', message: 'refresh token invalid' },
+      }), {
         status: 401,
-        statusText: 'Unauthorized',
-      })
+        headers: { 'Content-Type': 'application/json' },
+      }))
 
     const response = await authFetch('/api/v1/files')
 

@@ -180,6 +180,86 @@ func TestSecurityPublicShareBoundaryCheck_BlocksBroadCookiePaths(t *testing.T) {
 	}
 }
 
+func TestSecurityPublicShareBoundaryCheck_BlocksUnboundedPasswordAttempts(t *testing.T) {
+	cfg := config.Default()
+	cfg.Share.Enabled = true
+	policy := share.PublicShareAccessPolicySnapshot()
+	policy.PasswordAttemptCapacity = 0
+
+	check := securityPublicShareBoundaryCheckWithPolicy(cfg, "https", policy)
+
+	if check.Status != securityCheckBlock {
+		t.Fatalf("status = %q, want %q; check=%#v", check.Status, securityCheckBlock, check)
+	}
+	if got := check.Details["password_rate_limit_enabled"]; got != false {
+		t.Fatalf("password_rate_limit_enabled = %#v, want false", got)
+	}
+}
+
+func TestSecurityPublicShareBoundaryCheck_BlocksUnboundedGlobalPasswordAttempts(t *testing.T) {
+	cfg := config.Default()
+	cfg.Share.Enabled = true
+	policy := share.PublicShareAccessPolicySnapshot()
+	policy.PasswordGlobalAttemptCapacity = 0
+
+	check := securityPublicShareBoundaryCheckWithPolicy(cfg, "https", policy)
+
+	if check.Status != securityCheckBlock {
+		t.Fatalf("status = %q, want %q; check=%#v", check.Status, securityCheckBlock, check)
+	}
+	if got := check.Details["password_rate_limit_enabled"]; got != false {
+		t.Fatalf("password_rate_limit_enabled = %#v, want false", got)
+	}
+}
+
+func TestSecurityPublicShareBoundaryCheck_BlocksMissingPasswordBcryptGate(t *testing.T) {
+	cfg := config.Default()
+	cfg.Share.Enabled = true
+	policy := share.PublicShareAccessPolicySnapshot()
+	policy.PasswordBcryptConcurrency = 0
+
+	check := securityPublicShareBoundaryCheckWithPolicy(cfg, "https", policy)
+
+	if check.Status != securityCheckBlock {
+		t.Fatalf("status = %q, want %q; check=%#v", check.Status, securityCheckBlock, check)
+	}
+	if got := check.Details["password_rate_limit_enabled"]; got != false {
+		t.Fatalf("password_rate_limit_enabled = %#v, want false", got)
+	}
+}
+
+func TestSecurityPublicShareBoundaryCheck_BlocksInvalidDownloadTicketBinderCookie(t *testing.T) {
+	cfg := config.Default()
+	cfg.Share.Enabled = true
+	policy := share.PublicShareAccessPolicySnapshot()
+	policy.DownloadTicketCookiePrefix = ""
+
+	check := securityPublicShareBoundaryCheckWithPolicy(cfg, "https", policy)
+
+	if check.Status != securityCheckBlock {
+		t.Fatalf("status = %q, want %q; check=%#v", check.Status, securityCheckBlock, check)
+	}
+	if got := check.Details["download_ticket_binder_cookie_valid"]; got != false {
+		t.Fatalf("download_ticket_binder_cookie_valid = %#v, want false", got)
+	}
+}
+
+func TestSecurityPublicShareBoundaryCheck_BlocksMissingArchiveConcurrencyGate(t *testing.T) {
+	cfg := config.Default()
+	cfg.Share.Enabled = true
+	policy := share.PublicShareAccessPolicySnapshot()
+	policy.PublicArchiveConcurrency = 0
+
+	check := securityPublicShareBoundaryCheckWithPolicy(cfg, "https", policy)
+
+	if check.Status != securityCheckBlock {
+		t.Fatalf("status = %q, want %q; check=%#v", check.Status, securityCheckBlock, check)
+	}
+	if got := check.Details["public_archive_concurrency"]; got != 0 {
+		t.Fatalf("public_archive_concurrency = %#v, want 0", got)
+	}
+}
+
 func TestSecurityTCPAddressHost_ParsesBracketedIPv6Loopback(t *testing.T) {
 	host := securityTCPAddressHost("[::1]:9091")
 	if host != "::1" {
@@ -2002,7 +2082,7 @@ func TestServer_GetSettingsSecurityCheck_WarnsForUnsafeShareDefaultPolicy(t *tes
 			name:       "no expiry and unlimited max access",
 			expiresIn:  0,
 			maxAccess:  0,
-			wantTitle:  "新分享默认不会过期且访问次数不限制",
+			wantTitle:  "新分享默认不会过期且下载次数不限制",
 			wantDetail: "default_expires_in_unlimited",
 		},
 		{
@@ -2023,7 +2103,7 @@ func TestServer_GetSettingsSecurityCheck_WarnsForUnsafeShareDefaultPolicy(t *tes
 			name:       "unlimited max access",
 			expiresIn:  168 * time.Hour,
 			maxAccess:  0,
-			wantTitle:  "新分享默认访问次数不限制",
+			wantTitle:  "新分享默认下载次数不限制",
 			wantDetail: "default_max_access_unlimited",
 		},
 	}

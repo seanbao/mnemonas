@@ -37,6 +37,7 @@ var (
 	errInvalidMaxAccess  = errors.New("invalid max access")
 	errSharePasswordLong = errors.New("share password must be at most 72 bytes")
 	errShareStoreSymlink = errors.New("share store path must not be a symlink")
+	errTicketRevisionMax = errors.New("share download ticket revision exhausted")
 )
 
 const maxSharePasswordBytes = 72
@@ -120,19 +121,20 @@ type ShareRisk struct {
 
 // Share represents a shared file or folder
 type Share struct {
-	ID           string     `json:"id"`
-	Path         string     `json:"path"`
-	Type         ShareType  `json:"type"`
-	CreatedBy    string     `json:"created_by"`
-	CreatedAt    time.Time  `json:"created_at"`
-	ExpiresAt    *time.Time `json:"expires_at"`
-	PasswordHash string     `json:"password_hash"`
-	Permission   Permission `json:"permission"`
-	Enabled      bool       `json:"enabled"`
-	AccessCount  int64      `json:"access_count"`
-	MaxAccess    int64      `json:"max_access"`
-	LastAccess   *time.Time `json:"last_access"`
-	Description  string     `json:"description"`
+	ID             string     `json:"id"`
+	Path           string     `json:"path"`
+	Type           ShareType  `json:"type"`
+	CreatedBy      string     `json:"created_by"`
+	CreatedAt      time.Time  `json:"created_at"`
+	ExpiresAt      *time.Time `json:"expires_at"`
+	PasswordHash   string     `json:"password_hash"`
+	Permission     Permission `json:"permission"`
+	Enabled        bool       `json:"enabled"`
+	AccessCount    int64      `json:"access_count"`
+	MaxAccess      int64      `json:"max_access"`
+	LastAccess     *time.Time `json:"last_access"`
+	Description    string     `json:"description"`
+	ticketRevision uint64
 }
 
 // IsExpired checks if the share has expired
@@ -161,7 +163,7 @@ func (s *Share) CheckPassword(password string) bool {
 	return err == nil
 }
 
-// IsAccessLimitReached checks if max access count is reached
+// IsAccessLimitReached checks if the logical download limit is reached.
 func (s *Share) IsAccessLimitReached() bool {
 	if s.MaxAccess == 0 {
 		return false
@@ -225,12 +227,12 @@ func (s *Share) Risk(now time.Time) ShareRisk {
 		addReason("expiring_soon", ShareRiskLevelLow, "分享即将到期，建议确认是否需要延长或关闭")
 	}
 	if s.MaxAccess == 0 {
-		addReason("unlimited_access", ShareRiskLevelMedium, "未设置访问次数上限")
+		addReason("unlimited_access", ShareRiskLevelMedium, "未设置下载次数上限")
 	}
 	if s.LastAccess == nil && !s.CreatedAt.IsZero() && now.Sub(s.CreatedAt) >= 30*24*time.Hour {
-		addReason("unused_enabled", ShareRiskLevelLow, "该分享长期未被访问但仍处于启用状态")
+		addReason("unused_enabled", ShareRiskLevelLow, "该分享长期未被下载但仍处于启用状态")
 	} else if s.LastAccess != nil && now.Sub(*s.LastAccess) >= 90*24*time.Hour {
-		addReason("stale_enabled", ShareRiskLevelLow, "该分享最近访问时间较久，建议确认是否仍需保留")
+		addReason("stale_enabled", ShareRiskLevelLow, "该分享最近下载时间较久，建议确认是否仍需保留")
 	}
 
 	return ShareRisk{
@@ -278,6 +280,7 @@ type ShareStore struct {
 	pathIdx                 map[string][]string
 	trashDeleteOperations   map[string]*shareTrashDeleteOperation
 	trashRestoreOperations  map[string]*shareTrashRestoreOperation
+	ticketRevisions         map[string]uint64
 	filePath                string
 	version                 uint64
 	recoveredFromCorruption bool
@@ -300,6 +303,7 @@ type shareStoreFile struct {
 	Shares                 []*Share                               `json:"shares"`
 	TrashDeleteOperations  map[string]*shareTrashDeleteOperation  `json:"trash_delete_operations"`
 	TrashRestoreOperations map[string]*shareTrashRestoreOperation `json:"trash_restore_operations"`
+	TicketRevisions        map[string]uint64                      `json:"ticket_revisions,omitempty"`
 }
 
 type shareTrashDeleteOperation struct {
@@ -322,6 +326,7 @@ type shareStoreSnapshot struct {
 	pathIdx                map[string][]string
 	trashDeleteOperations  map[string]*shareTrashDeleteOperation
 	trashRestoreOperations map[string]*shareTrashRestoreOperation
+	ticketRevisions        map[string]uint64
 	filePath               string
 	version                uint64
 }
@@ -344,6 +349,7 @@ func NewShareStore(filePath string) (*ShareStore, error) {
 		pathIdx:                make(map[string][]string),
 		trashDeleteOperations:  make(map[string]*shareTrashDeleteOperation),
 		trashRestoreOperations: make(map[string]*shareTrashRestoreOperation),
+		ticketRevisions:        make(map[string]uint64),
 		filePath:               normalizedPath,
 	}
 	recoveryMarkerExists, err := shareStoreRecoveryMarkerExists(normalizedPath)
@@ -407,6 +413,8 @@ func (s *ShareStore) load() error {
 	if err != nil {
 		return err
 	}
+	storedTicketRevisions := stored.TicketRevisions
+	s.ticketRevisions = make(map[string]uint64, len(storedTicketRevisions))
 	needsRewrite := false
 
 	for i, share := range stored.Shares {
@@ -426,12 +434,22 @@ func (s *ShareStore) load() error {
 		if _, exists := s.shares[normalized.ID]; exists {
 			needsRewrite = true
 		}
+		revision := storedTicketRevisions[normalized.ID]
+		if revision == 0 {
+			revision = 1
+			needsRewrite = true
+		}
+		s.ticketRevisions[normalized.ID] = revision
+		normalized.ticketRevision = revision
 		s.shares[normalized.ID] = normalized
+	}
+	if len(s.ticketRevisions) != len(storedTicketRevisions) {
+		needsRewrite = true
 	}
 	s.pathIdx = rebuildPathIndex(s.shares)
 
 	if needsRewrite {
-		if err := saveShareStoreState(s.filePath, s.shares, s.trashDeleteOperations, s.trashRestoreOperations); err != nil {
+		if err := saveShareStoreState(s.filePath, s.shares, s.trashDeleteOperations, s.trashRestoreOperations, s.ticketRevisions); err != nil {
 			if !IsPersistenceWarning(err) {
 				return fmt.Errorf("persist normalized shares: %w", err)
 			}
@@ -496,6 +514,7 @@ func (s *ShareStore) recoverCorruptShares(loadErr error) error {
 	s.pathIdx = make(map[string][]string)
 	s.trashDeleteOperations = make(map[string]*shareTrashDeleteOperation)
 	s.trashRestoreOperations = make(map[string]*shareTrashRestoreOperation)
+	s.ticketRevisions = make(map[string]uint64)
 	s.recoveredFromCorruption = true
 	return nil
 }
@@ -520,6 +539,7 @@ func saveShareState(filePath string, shares map[string]*Share) error {
 		shares,
 		map[string]*shareTrashDeleteOperation{},
 		map[string]*shareTrashRestoreOperation{},
+		map[string]uint64{},
 	)
 }
 
@@ -528,6 +548,7 @@ func saveShareStoreState(
 	shares map[string]*Share,
 	deleteOperations map[string]*shareTrashDeleteOperation,
 	restoreOperations map[string]*shareTrashRestoreOperation,
+	ticketRevisions map[string]uint64,
 ) error {
 	serializedShares := make([]*Share, 0, len(shares))
 	for _, share := range shares {
@@ -548,6 +569,7 @@ func saveShareStoreState(
 		Shares:                 serializedShares,
 		TrashDeleteOperations:  serializedDeleteOperations,
 		TrashRestoreOperations: serializedRestoreOperations,
+		TicketRevisions:        cloneTicketRevisions(ticketRevisions),
 	}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to serialize shares: %w", err)
@@ -574,6 +596,34 @@ func clonePathIndex(pathIdx map[string][]string) map[string][]string {
 		cloned[path] = append([]string(nil), ids...)
 	}
 	return cloned
+}
+
+func cloneTicketRevisions(revisions map[string]uint64) map[string]uint64 {
+	cloned := make(map[string]uint64, len(revisions))
+	for id, revision := range revisions {
+		cloned[id] = revision
+	}
+	return cloned
+}
+
+func bumpDownloadTicketRevision(snapshot *shareStoreSnapshot, share *Share) error {
+	if snapshot == nil || share == nil {
+		return errors.New("share download ticket revision target is unavailable")
+	}
+	if snapshot.ticketRevisions == nil {
+		snapshot.ticketRevisions = make(map[string]uint64)
+	}
+	current := snapshot.ticketRevisions[share.ID]
+	if share.ticketRevision > current {
+		current = share.ticketRevision
+	}
+	if current == ^uint64(0) {
+		return errTicketRevisionMax
+	}
+	current++
+	snapshot.ticketRevisions[share.ID] = current
+	share.ticketRevision = current
+	return nil
 }
 
 func rebuildPathIndex(shares map[string]*Share) map[string][]string {
@@ -733,6 +783,7 @@ func (s *ShareStore) snapshotState() shareStoreSnapshot {
 		pathIdx:                clonePathIndex(s.pathIdx),
 		trashDeleteOperations:  cloneTrashDeleteOperations(s.trashDeleteOperations),
 		trashRestoreOperations: cloneTrashRestoreOperations(s.trashRestoreOperations),
+		ticketRevisions:        cloneTicketRevisions(s.ticketRevisions),
 		filePath:               s.filePath,
 		version:                s.version,
 	}
@@ -750,6 +801,7 @@ func (s *ShareStore) commitSnapshot(snapshot shareStoreSnapshot) bool {
 	s.pathIdx = snapshot.pathIdx
 	s.trashDeleteOperations = snapshot.trashDeleteOperations
 	s.trashRestoreOperations = snapshot.trashRestoreOperations
+	s.ticketRevisions = snapshot.ticketRevisions
 	s.version++
 	return true
 }
@@ -760,6 +812,7 @@ func (s *ShareStore) persistSnapshot(snapshot shareStoreSnapshot) (bool, error) 
 		snapshot.shares,
 		snapshot.trashDeleteOperations,
 		snapshot.trashRestoreOperations,
+		snapshot.ticketRevisions,
 	)
 	if err != nil && !IsPersistenceWarning(err) {
 		return false, err
@@ -1262,6 +1315,9 @@ func (s *ShareStore) CommitPreparedCreate(prepared *PreparedShareCreate) (*Share
 		if _, exists := snapshot.shares[share.ID]; exists {
 			return nil, errors.New("prepared share create was already committed")
 		}
+		if err := bumpDownloadTicketRevision(&snapshot, share); err != nil {
+			return nil, err
+		}
 		snapshot.shares[share.ID] = copyShare(share)
 		snapshot.pathIdx[share.Path] = append(snapshot.pathIdx[share.Path], share.ID)
 		committed, err := s.persistSnapshot(snapshot)
@@ -1400,6 +1456,9 @@ func (s *ShareStore) Update(id string, fn func(*Share) error) error {
 		blockTrashDeleteRestore(snapshot.trashDeleteOperations, share, "")
 		oldPath := share.Path
 		newPath := updated.Path
+		if err := bumpDownloadTicketRevision(&snapshot, updated); err != nil {
+			return err
+		}
 		snapshot.shares[id] = updated
 		if oldPath != newPath {
 			ids := removeShareID(snapshot.pathIdx[oldPath], id)
@@ -1440,6 +1499,7 @@ func (s *ShareStore) Delete(id string) error {
 			snapshot.pathIdx[share.Path] = ids
 		}
 		delete(snapshot.shares, id)
+		delete(snapshot.ticketRevisions, id)
 		committed, err := s.persistSnapshot(snapshot)
 		if committed {
 			return err
@@ -1490,6 +1550,9 @@ func (s *ShareStore) UpdatePathReferencesWithRestore(oldPath, newPath string) ([
 			updated := copyShare(share)
 			updated.Path = updatedPath
 			blockTrashDeleteRestore(snapshot.trashDeleteOperations, share, "")
+			if err := bumpDownloadTicketRevision(&snapshot, updated); err != nil {
+				return nil, err
+			}
 			snapshot.shares[id] = updated
 			moveSharePathIndex(snapshot.pathIdx, share.Path, updatedPath, id)
 			changed = true
@@ -1567,6 +1630,9 @@ func (s *ShareStore) ApplyDeleteExact(shares []*Share) error {
 			updated := copyShare(current)
 			updated.Enabled = false
 			blockTrashDeleteRestore(snapshot.trashDeleteOperations, current, "")
+			if err := bumpDownloadTicketRevision(&snapshot, updated); err != nil {
+				return err
+			}
 			snapshot.shares[normalized.ID] = updated
 			changed = true
 		}
@@ -1609,6 +1675,9 @@ func (s *ShareStore) DisableSharesUnderPathWithRestore(targetPath string) ([]*Sh
 			updated := copyShare(share)
 			updated.Enabled = false
 			blockTrashDeleteRestore(snapshot.trashDeleteOperations, share, "")
+			if err := bumpDownloadTicketRevision(&snapshot, updated); err != nil {
+				return nil, err
+			}
 			snapshot.shares[id] = updated
 			changed = true
 		}
@@ -1663,6 +1732,9 @@ func (s *ShareStore) RestoreShares(shares []*Share) error {
 			}
 
 			blockTrashDeleteRestore(snapshot.trashDeleteOperations, normalized, "")
+			if err := bumpDownloadTicketRevision(&snapshot, normalized); err != nil {
+				return err
+			}
 			snapshot.shares[normalized.ID] = normalized
 			changed = true
 		}
@@ -1712,6 +1784,9 @@ func (s *ShareStore) RestoreDisabledSharesPreservingCurrent(shares []*Share) err
 			}
 
 			blockTrashDeleteRestore(snapshot.trashDeleteOperations, current, "")
+			if err := bumpDownloadTicketRevision(&snapshot, updated); err != nil {
+				return err
+			}
 			snapshot.shares[original.ID] = updated
 			changed = true
 		}
@@ -1753,6 +1828,9 @@ func (s *ShareStore) RestoreSharesPreservingCurrent(shares []*Share) error {
 			current, ok := snapshot.shares[normalized.ID]
 			if !ok {
 				blockTrashDeleteRestore(snapshot.trashDeleteOperations, normalized, "")
+				if err := bumpDownloadTicketRevision(&snapshot, normalized); err != nil {
+					return err
+				}
 				snapshot.shares[normalized.ID] = normalized
 				snapshot.pathIdx[normalized.Path] = append(snapshot.pathIdx[normalized.Path], normalized.ID)
 				changed = true
@@ -1772,6 +1850,9 @@ func (s *ShareStore) RestoreSharesPreservingCurrent(shares []*Share) error {
 
 			blockTrashDeleteRestore(snapshot.trashDeleteOperations, current, "")
 			blockTrashDeleteRestore(snapshot.trashDeleteOperations, normalized, "")
+			if err := bumpDownloadTicketRevision(&snapshot, updated); err != nil {
+				return err
+			}
 			snapshot.shares[normalized.ID] = updated
 			changed = true
 		}
@@ -1820,6 +1901,9 @@ func (s *ShareStore) RestoreMovedSharesPreservingCurrent(shares []*Share) error 
 			}
 
 			blockTrashDeleteRestore(snapshot.trashDeleteOperations, current, "")
+			if err := bumpDownloadTicketRevision(&snapshot, updated); err != nil {
+				return err
+			}
 			snapshot.shares[original.ID] = updated
 			changed = true
 		}
@@ -1880,6 +1964,10 @@ func (s *ShareStore) RecordAuthorizedAccess(id string) (*Share, error) {
 }
 
 func (s *ShareStore) reserveAuthorizedAccess(id string) (*Share, *authorizedAccessReservation, error) {
+	return s.reserveAuthorizedAccessMatching(id, nil)
+}
+
+func (s *ShareStore) reserveAuthorizedAccessMatching(id string, validate func(*Share) error) (*Share, *authorizedAccessReservation, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
@@ -1888,6 +1976,11 @@ func (s *ShareStore) reserveAuthorizedAccess(id string) (*Share, *authorizedAcce
 		share, ok := snapshot.shares[id]
 		if !ok {
 			return nil, nil, ErrShareNotFound
+		}
+		if validate != nil {
+			if err := validate(share); err != nil {
+				return nil, nil, err
+			}
 		}
 
 		if err := share.CanAccess(); err != nil {

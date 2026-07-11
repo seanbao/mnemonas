@@ -26,7 +26,7 @@ Browser authentication cookie names and paths depend on the current request mode
 
 - HTTPS mode uses `__Host-mnemonas_access`, `__Host-mnemonas_refresh`, and `__Host-mnemonas_download_access`. All three cookies use `Secure`, `Path=/`, and no `Domain` attribute.
 - Local HTTP mode uses `mnemonas_access`, `mnemonas_refresh`, and `mnemonas_download_access`. Access and download cookies use `/api/v1`; the refresh cookie uses `/api/v1/auth`.
-- HTTPS requests parse only the `__Host-` names, and HTTP requests parse only the unprefixed names; neither mode falls back to the other namespace. Authentication is rejected when one request contains different values for the same cookie name, or when access and download cookies resolve to different accounts.
+- HTTPS requests parse only the `__Host-` names, and HTTP requests parse only the unprefixed names; neither mode falls back to the other namespace. Authentication is rejected when one request contains different values for the same cookie name. On requests that allow the download cookie, authentication is rejected before either candidate is validated whenever both access and download cookies are present with different raw values; the Web client must synchronize them through the download-session endpoint first.
 
 Login and refresh set the access and refresh cookies; the download-session endpoint sets the download cookie. Browser clients can send `X-MnemoNAS-Session-Mode: cookie`; in that mode the JSON response omits bearer tokens and returns only user/session metadata.
 
@@ -83,7 +83,7 @@ Authenticated share and favorite management endpoints use `success + data (+ mes
 | `403` | Authenticated but forbidden |
 | `404` | Not found |
 | `409` | Resource conflict or operation not executable |
-| `410` | Resource unavailable, expired, disabled, or access limit reached |
+| `410` | Resource unavailable, expired, disabled, or download limit reached |
 | `413` | File too large |
 | `429` | Rate limited |
 | `507` | User or directory quota exceeded |
@@ -864,16 +864,24 @@ In `trash` mode, a file or complete directory tree is moved to Trash. After the 
 - `version=<hash>`: at most once, downloads a historical version.
 - `archive=zip`: at most once, downloads the target path as a ZIP archive.
 
+The Web client first synchronizes a short-lived download session, performs a bounded error probe with `Range: bytes=0-0` and `X-Mnemonas-Download-Probe: json-error`, and then delegates the transfer to browser-native navigation. File and ZIP contents are not buffered in full as JavaScript Blobs. An authenticated ZIP probe returns an empty body after collection, authorization, and snapshot validation instead of generating the complete archive.
+
+One Web UI batch can submit at most 20 items and contain at most one directory; regular files may be submitted with that directory. Directories require separate ZIP generation. The JavaScript concurrency bound applies only to error probes and browser handoff, not to browser transfer concurrency. Browser handoff uses a randomly named, sandboxed, hidden same-origin navigation context without a `src` attribute. The actual URL exists only on a short-lived target link with `referrerpolicy="no-referrer"` and is cleared immediately after navigation is triggered. The link does not set `noopener` or `noreferrer`, which would change named-target resolution. Successful navigation contexts are removed at the end of the page lifecycle, while non-download error responses are removed after loading. A page can retain at most 64 active or pending contexts. A new submission at that limit is rejected before network probing or public-ticket issuance and instructs the operator to refresh the page before continuing.
+
+Current-file downloads derive response metadata from the same opened regular-file handle and do not read the complete content before producing headers. FIFOs, Unix sockets, device nodes, and other non-regular files are rejected without blocking request handling while opening the target.
+
 ZIP archive behavior:
 
 - Works for directories and individual files, and cannot be combined with `version`.
 - Requires concrete read access for the target and every included entry; read-only navigation ancestors cannot be archived.
 - Is capped at 10000 entries and 20 GiB of file content.
 - Entry-count or content-size limit violations return `413 Request Entity Too Large`.
+- A process-wide non-blocking concurrency gate permits at most 4 authenticated ZIP probes or complete writes at once. A full gate returns `429 Too Many Requests`, `Retry-After: 1`, and `ARCHIVE_DOWNLOAD_RATE_LIMITED` before filesystem access.
 - Duplicate archive entry names or entry snapshot changes detected before streaming return `409 Conflict`.
 - Archive entry names reject path traversal, absolute paths, backslashes, colons, and control characters to avoid cross-platform extraction ambiguity.
 - Archive attachment filenames use the target path basename; the root path uses `mnemonas-files.zip`, and names that already end with `.zip` do not receive a duplicate suffix.
 - Current-file and historical-version downloads support Range requests; ZIP archive downloads do not guarantee Range support.
+- ZIP writes verify the actual byte count for every regular-file snapshot. If an opened snapshot is truncated, a conflict detected before streaming returns `409 Conflict`; after the response starts, the stream terminates without closing the ZIP writer into a parseable partial archive.
 
 `POST /api/v1/files/{path}` requires `{path}` to identify a non-root file path. Root or root-equivalent upload targets return `400 Bad Request` with `invalid path`.
 
@@ -1125,7 +1133,7 @@ Create-share field rules:
 
 Authenticated share responses include `risk.level` (`none`, `low`, `medium`, `high`) plus optional reason objects.
 
-Risk reasons identify passwordless, long-lived, broad-folder, unlimited, stale, or soon-expiring links. An enabled share that has never been accessed after 30 days is reported as `unused_enabled`; an enabled share whose last access is more than 90 days old is reported as `stale_enabled`.
+Risk reasons identify passwordless, long-lived, broad-folder, unlimited, stale, or soon-expiring links. An enabled share that has not issued a successful download ticket within 30 days of creation is reported as `unused_enabled`; an enabled share whose last logical download is more than 90 days old is reported as `stale_enabled`.
 
 Share expiry alerts:
 
@@ -1164,11 +1172,28 @@ Public endpoints:
 | --- | --- | --- |
 | `GET` | `/api/v1/public/shares/{share_id}` | Get public share metadata |
 | `POST` | `/api/v1/public/shares/{share_id}/access` | Submit password and receive share cookie |
-| `GET` | `/api/v1/public/shares/{share_id}/download` | Download shared file or shared folder ZIP archive |
 | `GET` | `/api/v1/public/shares/{share_id}/items?path=subdir` | List shared directory items |
-| `GET` | `/api/v1/public/shares/{share_id}/download/{path}` | Download item or ZIP archive from shared directory |
+| `POST` | `/api/v1/public/shares/{share_id}/download-ticket` | Issue a download ticket for one file or ZIP archive |
+| `GET` | `/api/v1/public/shares/{share_id}/download?ticket=...` | Download the shared file or folder ZIP with a ticket |
+| `GET` | `/api/v1/public/shares/{share_id}/download/{path}?ticket=...` | Download an item or ZIP archive from the shared directory with a ticket |
 
 Password-protected shares use an `HttpOnly`, `SameSite=Strict` cookie after password validation. Failed password attempts are rate-limited.
+
+Download-ticket requests use a strict JSON body:
+
+```json
+{
+  "client_nonce": "<43-character canonical base64url value>",
+  "path": "optional/relative/path",
+  "archive": "zip"
+}
+```
+
+`client_nonce` is required and must be the canonical 43-character unpadded base64url encoding of 32 random bytes. The Web client generates it with Web Crypto and reuses it from a versioned same-origin `localStorage` key. It is a stable client identifier, not a secret or authorization credential, and must not be placed in download URLs or logs. `path` is optional. `archive` is optional and accepts only `zip` when present.
+
+A successful response contains `ticket` and an RFC 3339 `expires_at`. The `ticket` is a URL-safe, signed opaque value no longer than 256 characters and is bound to the share, download target, archive mode, and relevant state at issuance. The server uses separate HMAC domains to derive a 128-bit binder ID and 256-bit binder value from the share ID and `client_nonce`. The ticket uses an independent random 128-bit ID and contains only the binder ID and binder-value digest, not the `client_nonce` or binder value. Subsequent issuance for the same share and `client_nonce` refreshes one `Path=/`, `HttpOnly`, `SameSite=Strict` cookie; different shares derive different cookies. The cookie name ends with the binder ID encoded as 32 lowercase hexadecimal characters. HTTPS uses `__Host-mnemonas_share_download_<binder-id>` with `Secure`; HTTP uses `mnemonas_share_download_<binder-id>`. The cookie and ticket expire together, at most 24 hours after issuance and never beyond the share expiry.
+
+The issuance endpoint applies a request-local soft limit to structurally valid binder-cookie names. HTTP counts only the ordinary prefix, while HTTPS counts both the ordinary and `__Host-` prefixes. The target binder cookie must appear exactly once with the correct value; a duplicate or invalid target cookie is rejected with `429 Too Many Requests`, `Retry-After: 1`, and `DOWNLOAD_TICKET_RATE_LIMITED`. If the target binder is absent and the count has reached 32, issuance returns the same error before filesystem preflight or logical-download reservation. A valid existing target binder may still be refreshed at or above the soft limit, so normal repeated downloads for the same share do not keep increasing the cookie count. All ticket issuances also share one process-wide non-blocking concurrency gate with capacity 4, held across ZIP preflight; a full gate returns the same `429` response. Concurrent requests using different new `client_nonce` values can share one stale cookie snapshot and briefly exceed the soft limit within the bound imposed by that gate. This is not a server-persisted session count; a client that discards its binder cookie can no longer use the corresponding ticket.
 
 Public share behavior:
 
@@ -1176,32 +1201,31 @@ Public share behavior:
 - Public shares, and password-protected shares with a valid access cookie, return `description` and `file_name`, `file_size`, or `folder_items` metadata where applicable.
 - Root-folder public shares report `file_name` as the stable display name `mnemonas-share` instead of `/`.
 - Authorized zero-byte files return `file_size: 0`; authorized empty folders return `folder_items: 0`.
-- When `max_access > 0` and `access_count` has reached the limit, public access returns `410 Gone` with `SHARE_ACCESS_LIMIT_REACHED`.
+- `max_access` is the logical download-session limit, and `access_count` is the number of successfully issued download tickets. When `max_access > 0` and the count has reached the limit, ticket issuance returns `410 Gone` with `SHARE_ACCESS_LIMIT_REACHED`.
 - Shares are expired once the current time reaches or passes `expires_at`; expired shares return `410 Gone` with `SHARE_EXPIRED`.
 - Disabled shares return `410 Gone` with `SHARE_DISABLED`.
 - Shares created by a disabled or deleted owner return `404 Not Found` with `SHARE_NOT_FOUND` for public metadata, downloads, and folder listings.
-- `access_count` increments on downloads and folder-listing requests. Password validation through `POST /api/v1/public/shares/{share_id}/access` and the compatibility path `POST /s/{share_id}` does not increment it.
+- Public metadata, password validation, and folder listings do not increment `access_count`. Ticket issuance reserves one logical download atomically after authorization, target-type, and ZIP preflight checks. Full downloads, Range requests, and resumptions with the same ticket do not increment it again.
 - Subpaths in `items?path=` and `download/{path}` are relative to the shared folder root.
   The folder-listing `path` query parameter may be specified at most once.
   Control characters and standalone `.` or `..` path segments are invalid, while legal names containing repeated dots, such as `foo..txt`, remain valid.
-  Invalid subpaths do not increment `access_count`.
+  Invalid subpaths do not issue a ticket or increment `access_count`.
 - Folder-listing response `path` and `items[].path` values are canonical paths relative to the shared folder root and do not start with `/`; the root-folder response uses an empty `path`. Responses include only direct children of the current directory that remain visible to the share owner.
-- Once a download or folder-listing response has started writing to the client, that request remains counted even if the later stream fails.
+- Download GET requests must contain exactly one `ticket` query parameter and the binder cookie set at issuance. The server validates the ticket signature, binder, download target, and relevant share state. Missing or duplicate parameters return `401 DOWNLOAD_TICKET_REQUIRED`; malformed, invalidly signed, binder-mismatched, or target-mismatched tickets return `401 DOWNLOAD_TICKET_INVALID`; expired tickets return `410 DOWNLOAD_TICKET_EXPIRED`; and relevant share-state changes return `401 DOWNLOAD_TICKET_STALE`.
 - Public share downloads honor HTTP Range requests when the backing file reader supports seeking.
   Local MnemoNAS storage supports this path for resumable downloads and browser media playback.
-  Range responses increment `access_count` only when they serve at least one content byte; normal full downloads of zero-byte files still count.
 - Set `archive=zip` at most once on public download endpoints to download a shared folder root, subfolder, or file as a ZIP archive.
-  Public ZIP archives return `application/zip`, do not guarantee Range support, skip entries no longer visible to the share owner, and are capped at 10000 entries and 20 GiB of file content.
+  Public ZIP archives return `application/zip`, do not guarantee Range support, skip entries no longer visible to the share owner, and are capped at 10000 entries and 20 GiB of file content. Archives read only validated regular-file snapshots; FIFOs, sockets, and device files are rejected.
   Entry-count or content-size limit violations return `413 Request Entity Too Large` with an archive error code; duplicate archive entry names or entry snapshot changes detected before streaming return `409 Conflict` with an archive error code.
   Archive entry names reject path traversal, absolute paths, backslashes, colons, and control characters to avoid cross-platform extraction ambiguity.
   Archive attachment filenames use the archived target name; a shared root path of `/` uses `mnemonas-share.zip`, and names that already end with `.zip` do not receive a duplicate suffix.
-- Unsatisfiable Range requests that return `416 Requested Range Not Satisfiable`, and zero-length Range requests such as `bytes=-0`, do not increment `access_count`.
+  Public ZIP ticket preflight and the actual ZIP stream share one process-wide concurrency gate with capacity 4. When the gate is full, the request returns `429 Too Many Requests` with `Retry-After: 1` and `DOWNLOAD_TICKET_RATE_LIMITED`.
 - Successful password validation sets an `HttpOnly`, `SameSite=Strict` access cookie; later downloads and folder-listing requests use the cookie rather than a password query parameter.
 - Public share metadata, password-validation responses, folder-listing responses, and public-download JSON error responses include `Cache-Control: private, no-cache`, `Vary: Cookie`, `X-Content-Type-Options: nosniff`, and `Referrer-Policy: no-referrer`.
 - Repeated password failures return `429 Too Many Requests` with `SHARE_PASSWORD_RATE_LIMITED`.
-- Password failure rate limiting is keyed by share ID and client address. Forwarded headers are ignored by default and are used only when `server.trusted_proxy_hops > 0` and the direct peer is loopback or belongs to `server.trusted_proxy_cidrs`.
+- Password failure rate limiting is keyed by share ID and client address. At most one bcrypt check runs concurrently for a key, and at most 8 public-share bcrypt checks run in the process. Each share retains at most 128 active client-failure states, with at most 4096 across the process. Failure-window-active, locked, and in-flight states are never evicted to admit a new client. A full per-share or global capacity, an in-flight check for the same key, or a full bcrypt gate returns `429` without clearing prior failures. Passwords longer than 72 bytes return `400 PASSWORD_TOO_LONG` before rate-limit state or bcrypt work is created. Forwarded headers are ignored by default and are used only when `server.trusted_proxy_hops > 0` and the direct peer is loopback or belongs to `server.trusted_proxy_cidrs`.
 - Compatibility paths `GET /s/{share_id}` and `POST /s/{share_id}` return the same public JSON behavior for direct script or non-SPA use.
-- Compatibility paths `GET /s/{share_id}/items`, `GET /s/{share_id}/download`, and `GET /s/{share_id}/download/{path}` provide the same folder-listing and download behavior for direct script or non-SPA use.
+- Compatibility paths `GET /s/{share_id}/items`, `POST /s/{share_id}/download-ticket`, `GET /s/{share_id}/download`, and `GET /s/{share_id}/download/{path}` provide the same folder-listing, ticket, and download behavior for direct script or non-SPA use.
 
 ## Favorites
 
@@ -1334,7 +1358,7 @@ Notes:
 - Manual and scheduled Scrub runs write `scrub` activity entries.
   Scrub failures, object verification problems, and incomplete result persistence send `scrub_run` events through configured Webhook, Telegram, WeCom, DingTalk, or SMTP alert channels.
   Alert details use counts, status, public error types, and public messages; they do not include object hashes or lower-level error text.
-- Share creation, deletion, and enabled-state updates write `share` or `unshare` activity entries. Their `details` include review metadata such as share type, permission, password requirement, expiry, and access limit; enabled-state updates also include `enabled` and `previous_enabled`. These details do not include share passwords, public URLs, or share IDs.
+- Share creation, deletion, and enabled-state updates write `share` or `unshare` activity entries. Their `details` include review metadata such as share type, permission, password requirement, expiry, and download limit; enabled-state updates also include `enabled` and `previous_enabled`. These details do not include share passwords, public URLs, or share IDs.
 - Version restores write `restore` activity with `details.restore_source="version"` for the version-history source and `details.hash` for the restored version hash.
 - When the activity log is not configured, the API returns an empty list.
 - When the activity log is configured but failed to initialize or is currently unavailable, the API returns `503 Service Unavailable`.
@@ -1628,7 +1652,7 @@ Path field rules:
 - The Web settings page wraps paths containing spaces or double quotes in double quotes in directory-quota line-based inputs; literal double quotes inside the path are escaped as `\"`, for example `"/Family Photos" 500 GB`.
 - Directory access rules and share path policies use structured path inputs, so paths containing spaces or literal double quotes are entered directly without manual line quoting.
 
-The Web settings page derives a share-policy coverage summary from the current draft before save. It shows default expiry, default access limits, path-policy count, password-required path count, creator/maintainer-scope path count, attention items for loose defaults or path policies, and cleanup suggestions for root-wide rules, most-specific path rules that do not inherit ancestor limits, descendant rules that loosen ancestor expiration, access-count, or creator-scope limits, and duplicate-equivalent rules.
+The Web settings page derives a share-policy coverage summary from the current draft before save. It shows default expiry, default download limits, path-policy count, password-required path count, creator/maintainer-scope path count, attention items for loose defaults or path policies, and cleanup suggestions for root-wide rules, most-specific path rules that do not inherit ancestor limits, descendant rules that loosen ancestor expiration, download-count, or creator-scope limits, and duplicate-equivalent rules.
 
 This summary is for pre-save review only; enforced behavior still comes from the server policy after the Settings API save succeeds.
 
@@ -2053,8 +2077,8 @@ Important check semantics:
 - `share_base_url` checks the public share-link base URL when sharing is enabled.
   HTTP, a non-443 HTTPS port, URL userinfo, query strings, fragments, encoded query or fragment markers, backslashes, duplicated path slashes, `.`/`..` path segments, or an invalid host name is reported as `block`.
   Empty values, a different host, or a base path ending in the `/s` sharing route remain manual-review warnings.
-- `share_default_policy` checks the default expiry and default access count for newly created shares.
-  When sharing is enabled, no default expiry, values longer than `720h`, or unlimited default access counts are `warning`; negative defaults are `block`.
+- `share_default_policy` checks the default expiry and default download count for newly created shares.
+  When sharing is enabled, no default expiry, values longer than `720h`, or unlimited default download counts are `warning`; negative defaults are `block`.
   Details include only default expiry/access-limit metadata and policy-rule count.
 - `backup_local_destinations` checks enabled local backup job destinations.
   No local jobs or all local jobs disabled is `pass`; an empty or relative target, a target inside the backup source or `storage.root`, a symlink path component, symlink target, or non-directory target is `block`; a missing, unconfirmed, or non-writable target is `warning`.

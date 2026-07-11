@@ -48,7 +48,7 @@ describe('shareReview', () => {
           level: 'medium',
           reasons: [
             { code: 'expiring_soon', level: 'medium', message: '即将到期' },
-            { code: 'unused_enabled', level: 'low', message: '长期未访问' },
+            { code: 'unused_enabled', level: 'low', message: '长期未下载' },
           ],
         },
       }),
@@ -61,7 +61,7 @@ describe('shareReview', () => {
           level: 'high',
           reasons: [
             { code: 'no_password', level: 'high', message: '未设置密码' },
-            { code: 'stale_enabled', level: 'low', message: '长期未访问' },
+            { code: 'stale_enabled', level: 'low', message: '长期未下载' },
           ],
         },
       }),
@@ -136,8 +136,8 @@ describe('shareReview', () => {
     expect(report).toContain('需复核：1 个')
     expect(report).toContain('需处理：1 个')
     expect(report).toContain('路径筛选：/docs')
-    expect(report).toContain('路径 | 类型 | 状态 | 风险等级 | 访问限制 | 访问次数 | 过期时间 | 风险原因 | 建议处理')
-    expect(report).toContain('/ | 文件夹 | 启用 | 高风险 | 无密码 | 5 / 不限 | 永不过期 | 根目录分享会公开整个文件空间。；未设置密码 | 停用或补齐密码、有效期和访问次数限制。')
+    expect(report).toContain('路径 | 类型 | 状态 | 风险等级 | 访问限制 | 下载次数 | 过期时间 | 风险原因 | 建议处理')
+    expect(report).toContain('/ | 文件夹 | 启用 | 高风险 | 无密码 | 5 / 不限 | 永不过期 | 根目录分享会公开整个文件空间。；未设置密码 | 停用或补齐密码、有效期和下载次数限制。')
     expect(report).toContain('/docs/readme.md | 文件 | 启用 | 无 | 密码保护 | 2 / 10 | 永不过期 | 无 | 无需处理。')
     expect(report).toContain('/archive/old.zip | 文件 | 停用 | 无 | 密码保护 | 0 / 10 | 永不过期 | 无 | 确认是否仍需保留；不再使用时可删除。')
     expect(report).toMatch(/\/ \| 文件夹[\s\S]*\/docs\/readme\.md[\s\S]*\/archive\/old\.zip/)

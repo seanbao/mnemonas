@@ -1,10 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { forwardRef } from 'react'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom'
 import { ShareAccessPage } from './ShareAccess'
 import { getFolderPathAfterShareAuth } from './shareAccessUtils'
 import { ShareError } from '@/api/share'
+import { BrowserDownloadCapacityError } from '@/lib/downloadResponse'
 
 const mockAddToast = vi.fn()
 
@@ -16,10 +18,27 @@ vi.mock('@heroui/react', () => ({
   CardBody: ({ children, className }: { children: React.ReactNode; className?: string }) => (
     <div className={className}>{children}</div>
   ),
-  Button: ({ children, onPress, type }: { children: React.ReactNode; onPress?: () => void; type?: 'button' | 'submit' | 'reset' }) => (
-    <button onClick={onPress} type={type}>{children}</button>
+  Button: ({ children, onPress, type, isDisabled, isLoading, startContent, 'aria-label': ariaLabel }: {
+    children: React.ReactNode;
+    onPress?: () => void;
+    type?: 'button' | 'submit' | 'reset';
+    isDisabled?: boolean;
+    isLoading?: boolean;
+    startContent?: React.ReactNode;
+    'aria-label'?: string;
+  }) => (
+    <button
+      aria-label={ariaLabel}
+      data-loading={isLoading ? 'true' : undefined}
+      disabled={isDisabled}
+      onClick={onPress}
+      type={type}
+    >
+      {startContent}
+      {children}
+    </button>
   ),
-  Input: ({ label, placeholder, value, onValueChange, type, id, isDisabled }: {
+  Input: forwardRef<HTMLInputElement, {
     label?: string;
     placeholder?: string;
     value?: string;
@@ -27,17 +46,20 @@ vi.mock('@heroui/react', () => ({
     type?: string;
     id?: string;
     isDisabled?: boolean;
-  }) => (
-    <input
-      id={id}
-      aria-label={label}
-      placeholder={placeholder}
-      value={value}
-      disabled={isDisabled}
-      onChange={(e) => onValueChange?.(e.target.value)}
-      type={type}
-    />
-  ),
+  }>(function MockInput({ label, placeholder, value, onValueChange, type, id, isDisabled }, ref) {
+    return (
+      <input
+        ref={ref}
+        id={id}
+        aria-label={label}
+        placeholder={placeholder}
+        value={value}
+        disabled={isDisabled}
+        onChange={(e) => onValueChange?.(e.target.value)}
+        type={type}
+      />
+    )
+  }),
   Spinner: () => <div role="status" aria-label="加载中">Loading...</div>,
   addToast: (...args: unknown[]) => mockAddToast(...args),
 }))
@@ -67,6 +89,7 @@ vi.mock('@/api/share', () => ({
     get isDisabled() { return this.code === 'SHARE_DISABLED' }
     get isAccessLimitReached() { return this.code === 'SHARE_ACCESS_LIMIT_REACHED' }
     get isExpired() { return this.code === 'SHARE_EXPIRED' || (this.status === 410 && !this.code) }
+    get isRateLimited() { return this.status === 429 }
     get isUnavailable() { return this.status === 503 && !this.isFeatureDisabled }
   }
 }))
@@ -213,7 +236,7 @@ describe('ShareAccessPage', () => {
   })
 
   it('shows an expired-state title when the share has gone away', async () => {
-    mockGetPublicShare.mockRejectedValue(new ShareError('分享已过期、已禁用或访问次数已达上限', 410))
+    mockGetPublicShare.mockRejectedValue(new ShareError('分享已过期、已禁用或下载次数已达上限', 410))
 
     renderWithRouter('expired-share')
 
@@ -240,8 +263,8 @@ describe('ShareAccessPage', () => {
     renderWithRouter('limited-share')
 
     await waitFor(() => {
-      expect(screen.getByText('分享访问次数已用尽')).toBeInTheDocument()
-      expect(screen.getByText('该分享已达到访问次数上限，当前不可访问。')).toBeInTheDocument()
+      expect(screen.getByText('分享下载次数已用尽')).toBeInTheDocument()
+      expect(screen.getByText('该分享已达到下载次数上限，当前不可访问。')).toBeInTheDocument()
     })
   })
 
@@ -397,7 +420,7 @@ describe('ShareAccessPage', () => {
     })
   })
 
-  it('shows disabled feedback when password verification finds sharing is off', async () => {
+  it('promotes a terminal password verification error to the top-level state', async () => {
     const user = userEvent.setup()
     mockGetPublicShare.mockResolvedValue({
       id: 'abc123',
@@ -417,12 +440,13 @@ describe('ShareAccessPage', () => {
     await user.click(screen.getByText('验证密码'))
 
     await waitFor(() => {
-      expect(mockAddToast).toHaveBeenCalledWith({
-        title: '分享功能已关闭',
-        description: '当前服务已关闭分享功能，公开分享链接暂不可访问。',
-        color: 'warning',
-      })
+      expect(screen.getByText('分享功能已关闭')).toBeInTheDocument()
+      expect(screen.getByText('当前服务已关闭分享功能，公开分享链接暂不可访问。')).toBeInTheDocument()
     })
+    const verificationSignal = (mockAccessShareWithPassword.mock.calls[0]?.[2] as { signal?: AbortSignal } | undefined)?.signal
+    expect(verificationSignal?.aborted).toBe(true)
+    expect(screen.queryByText('此分享需要密码')).not.toBeInTheDocument()
+    expect(mockAddToast).not.toHaveBeenCalled()
   })
 
   it('shows fallback feedback when password verification fails with an unknown value', async () => {
@@ -593,13 +617,83 @@ describe('ShareAccessPage', () => {
       expect(screen.getByText('note.txt')).toBeInTheDocument()
     })
 
-    await user.click(screen.getByRole('button', { name: '下载' }))
+    await user.click(screen.getByRole('button', { name: '下载文件 note.txt' }))
 
     expect(mockDownloadShare).toHaveBeenCalledWith('abc123', expect.objectContaining({
       filePath: 'note.txt',
       filename: 'note.txt',
       signal: expect.any(AbortSignal),
     }))
+  })
+
+  it('keeps one ticket request in flight and disables every download action until browser handoff', async () => {
+    const user = userEvent.setup()
+    const download = createDeferred<void>()
+    mockGetPublicShare.mockResolvedValue({
+      id: 'abc123',
+      type: 'folder',
+      has_password: false,
+      permission: 'read',
+      file_name: 'team-share',
+      folder_items: 2,
+    })
+    mockGetPublicShareItems.mockResolvedValue({
+      path: '',
+      items: [
+        { name: 'docs', path: 'docs', is_dir: true, size: 0, mod_time: '2024-01-01T00:00:00Z' },
+        { name: 'note.txt', path: 'note.txt', is_dir: false, size: 12, mod_time: '2024-01-02T00:00:00Z' },
+      ],
+    })
+    mockDownloadShare.mockReturnValue(download.promise)
+
+    renderWithRouter('abc123')
+
+    const fileDownload = await screen.findByRole('button', { name: '下载文件 note.txt' })
+    const folderDownload = screen.getByRole('button', { name: '下载文件夹 docs 为 ZIP' })
+    const rootDownload = screen.getByRole('button', { name: '下载文件夹 team-share 为 ZIP' })
+
+    await user.click(fileDownload)
+    await waitFor(() => {
+      expect(mockDownloadShare).toHaveBeenCalledTimes(1)
+      expect(fileDownload).toHaveAttribute('data-loading', 'true')
+      expect(fileDownload).toBeDisabled()
+      expect(folderDownload).toBeDisabled()
+      expect(rootDownload).toBeDisabled()
+    })
+
+    await user.click(fileDownload)
+    await user.click(folderDownload)
+    expect(mockDownloadShare).toHaveBeenCalledTimes(1)
+
+    download.resolve(undefined)
+    await waitFor(() => {
+      expect(fileDownload).toBeEnabled()
+      expect(folderDownload).toBeEnabled()
+      expect(rootDownload).toBeEnabled()
+    })
+  })
+
+  it('renders file metadata as non-interactive content while directories remain open buttons', async () => {
+    mockGetPublicShare.mockResolvedValue({
+      id: 'abc123',
+      type: 'folder',
+      has_password: false,
+      permission: 'read',
+      folder_items: 2,
+    })
+    mockGetPublicShareItems.mockResolvedValue({
+      path: '',
+      items: [
+        { name: 'docs', path: 'docs', is_dir: true, size: 0, mod_time: '2024-01-01T00:00:00Z' },
+        { name: 'note.txt', path: 'note.txt', is_dir: false, size: 12, mod_time: '2024-01-02T00:00:00Z' },
+      ],
+    })
+
+    renderWithRouter('abc123')
+
+    await screen.findByRole('button', { name: '打开文件夹 docs' })
+    expect(screen.queryByRole('button', { name: /^note\.txt/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '下载文件 note.txt' })).toBeInTheDocument()
   })
 
   it('downloads the shared folder root as a zip archive', async () => {
@@ -624,7 +718,7 @@ describe('ShareAccessPage', () => {
       expect(screen.getByText('docs')).toBeInTheDocument()
     })
 
-    await user.click(screen.getByRole('button', { name: '下载为 ZIP' }))
+    await user.click(screen.getByRole('button', { name: '下载文件夹 docs 为 ZIP' }))
 
     expect(mockDownloadShare).toHaveBeenCalledWith('abc123', expect.objectContaining({
       archive: 'zip',
@@ -655,7 +749,7 @@ describe('ShareAccessPage', () => {
       expect(screen.getByText('backups.zip')).toBeInTheDocument()
     })
 
-    await user.click(screen.getByRole('button', { name: '下载为 ZIP' }))
+    await user.click(screen.getByRole('button', { name: '下载文件夹 backups.zip 为 ZIP' }))
 
     expect(mockDownloadShare).toHaveBeenCalledWith('abc123', expect.objectContaining({
       archive: 'zip',
@@ -693,13 +787,13 @@ describe('ShareAccessPage', () => {
       expect(screen.getByText('docs')).toBeInTheDocument()
     })
 
-    await user.click(screen.getByRole('button', { name: /docs/ }))
+    await user.click(screen.getByRole('button', { name: '打开文件夹 docs' }))
 
     await waitFor(() => {
       expect(screen.getByText('/docs')).toBeInTheDocument()
     })
 
-    await user.click(screen.getByRole('button', { name: '下载为 ZIP' }))
+    await user.click(screen.getByRole('button', { name: '下载文件夹 docs 为 ZIP' }))
 
     expect(mockDownloadShare).toHaveBeenCalledWith('abc123', expect.objectContaining({
       filePath: 'docs',
@@ -732,8 +826,7 @@ describe('ShareAccessPage', () => {
       expect(screen.getByText('reports')).toBeInTheDocument()
     })
 
-    const zipButtons = screen.getAllByRole('button', { name: '下载为 ZIP' })
-    await user.click(zipButtons[zipButtons.length - 1])
+    await user.click(screen.getByRole('button', { name: '下载文件夹 reports 为 ZIP' }))
 
     expect(mockDownloadShare).toHaveBeenCalledWith('abc123', expect.objectContaining({
       filePath: 'reports',
@@ -766,10 +859,11 @@ describe('ShareAccessPage', () => {
       expect(screen.getByText('note.txt')).toBeInTheDocument()
     })
 
-    await user.click(screen.getByRole('button', { name: '下载' }))
+    await user.click(screen.getByRole('button', { name: '下载文件 note.txt' }))
 
     await waitFor(() => {
       expect(screen.getByText('此分享需要密码')).toBeInTheDocument()
+      expect(screen.getByLabelText('访问密码')).toHaveFocus()
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '访问凭证已失效，请重新输入密码',
         color: 'warning',
@@ -800,7 +894,7 @@ describe('ShareAccessPage', () => {
       expect(screen.getByText('note.txt')).toBeInTheDocument()
     })
 
-    await user.click(screen.getByRole('button', { name: '下载' }))
+    await user.click(screen.getByRole('button', { name: '下载文件 note.txt' }))
 
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
@@ -811,7 +905,7 @@ describe('ShareAccessPage', () => {
     })
   })
 
-  it('shows missing-content feedback when a shared folder item no longer exists', async () => {
+  it('promotes a missing folder-item download target to the top-level state', async () => {
     const user = userEvent.setup()
     mockGetPublicShare.mockResolvedValue({
       id: 'abc123',
@@ -834,15 +928,16 @@ describe('ShareAccessPage', () => {
       expect(screen.getByText('note.txt')).toBeInTheDocument()
     })
 
-    await user.click(screen.getByRole('button', { name: '下载' }))
+    await user.click(screen.getByRole('button', { name: '下载文件 note.txt' }))
 
     await waitFor(() => {
-      expect(mockAddToast).toHaveBeenCalledWith({
-        title: '分享内容已不存在',
-        description: '该分享指向的文件或文件夹已被移动或删除，请联系分享创建者。',
-        color: 'warning',
-      })
+      expect(screen.getByText('分享内容已不存在')).toBeInTheDocument()
+      expect(screen.getByText('该分享指向的文件或文件夹已被移动或删除，请联系分享创建者。')).toBeInTheDocument()
     })
+    const downloadSignal = (mockDownloadShare.mock.calls[0]?.[1] as { signal?: AbortSignal } | undefined)?.signal
+    expect(downloadSignal?.aborted).toBe(true)
+    expect(screen.queryByText('note.txt')).not.toBeInTheDocument()
+    expect(mockAddToast).not.toHaveBeenCalled()
   })
 
   it('ignores stale folder listing responses after navigating back to a parent folder', async () => {
@@ -881,7 +976,7 @@ describe('ShareAccessPage', () => {
       expect(screen.getByText('根目录')).toBeInTheDocument()
     })
 
-    await user.click(screen.getByRole('button', { name: /docs/ }))
+    await user.click(screen.getByRole('button', { name: '打开文件夹 docs' }))
 
     await waitFor(() => {
       expect(screen.getByText('/docs')).toBeInTheDocument()
@@ -960,7 +1055,7 @@ describe('ShareAccessPage', () => {
 
     await waitFor(() => {
       expect(screen.getByText('next.txt')).toBeInTheDocument()
-      expect(screen.getByRole('button', { name: '下载文件' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: '下载文件 next.txt' })).toBeInTheDocument()
     })
 
     folderListing.resolve({
@@ -976,7 +1071,7 @@ describe('ShareAccessPage', () => {
     expect(screen.queryByText('old-folder-file.txt')).not.toBeInTheDocument()
   })
 
-  it('retries loading folder items after a listing failure', async () => {
+  it('announces and focuses a network error after navigating into a folder, then retries', async () => {
     const user = userEvent.setup()
     mockGetPublicShare.mockResolvedValue({
       id: 'abc123',
@@ -986,18 +1081,27 @@ describe('ShareAccessPage', () => {
       folder_items: 1,
     })
     mockGetPublicShareItems
-      .mockRejectedValueOnce(new Error('加载文件夹失败'))
       .mockResolvedValueOnce({
         path: '',
         items: [
           { name: 'docs', path: 'docs', is_dir: true, size: 0, mod_time: '2024-01-01T00:00:00Z' },
         ],
       })
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValueOnce({
+        path: 'docs',
+        items: [
+          { name: 'readme.txt', path: 'docs/readme.txt', is_dir: false, size: 12, mod_time: '2024-01-02T00:00:00Z' },
+        ],
+      })
 
     renderWithRouter('abc123')
 
+    await user.click(await screen.findByRole('button', { name: '打开文件夹 docs' }))
+
     await waitFor(() => {
-      expect(screen.getByText('加载文件夹失败')).toBeInTheDocument()
+      expect(screen.getByRole('alert')).toBeInTheDocument()
+      expect(screen.getByRole('heading', { name: '加载文件夹失败' })).toHaveFocus()
       expect(screen.getByText('数据加载失败，请检查网络或稍后重试。')).toBeInTheDocument()
       expect(screen.getByRole('button', { name: '重试加载' })).toBeInTheDocument()
     })
@@ -1005,11 +1109,12 @@ describe('ShareAccessPage', () => {
     await user.click(screen.getByRole('button', { name: '重试加载' }))
 
     await waitFor(() => {
-      expect(screen.getByText('docs')).toBeInTheDocument()
+      expect(screen.getByText('readme.txt')).toBeInTheDocument()
     })
   })
 
-  it('shows an unavailable message when shared folder listing returns service unavailable', async () => {
+  it('announces and focuses a service-unavailable error after navigating into a folder', async () => {
+    const user = userEvent.setup()
     mockGetPublicShare.mockResolvedValue({
       id: 'abc123',
       type: 'folder',
@@ -1017,18 +1122,28 @@ describe('ShareAccessPage', () => {
       permission: 'read',
       folder_items: 1,
     })
-    mockGetPublicShareItems.mockRejectedValueOnce(new ShareError('filesystem not available', 503, 'FILESYSTEM_UNAVAILABLE'))
+    mockGetPublicShareItems
+      .mockResolvedValueOnce({
+        path: '',
+        items: [
+          { name: 'docs', path: 'docs', is_dir: true, size: 0, mod_time: '2024-01-01T00:00:00Z' },
+        ],
+      })
+      .mockRejectedValueOnce(new ShareError('filesystem not available', 503, 'FILESYSTEM_UNAVAILABLE'))
 
     renderWithRouter('abc123')
 
+    await user.click(await screen.findByRole('button', { name: '打开文件夹 docs' }))
+
     await waitFor(() => {
-      expect(screen.getByText('文件夹内容暂不可用')).toBeInTheDocument()
+      expect(screen.getByRole('alert')).toBeInTheDocument()
+      expect(screen.getByRole('heading', { name: '文件夹内容暂不可用' })).toHaveFocus()
       expect(screen.getByText('分享目录当前不可访问，请检查设备状态或稍后重试。')).toBeInTheDocument()
       expect(screen.getByRole('button', { name: '重试加载' })).toBeInTheDocument()
     })
   })
 
-  it('downloads protected share via fetch/blob flow after password verification', async () => {
+  it('requests a protected-share download ticket after password verification', async () => {
     const user = userEvent.setup()
     mockGetPublicShare.mockResolvedValue({
       id: 'abc123',
@@ -1092,6 +1207,7 @@ describe('ShareAccessPage', () => {
 
     await waitFor(() => {
       expect(screen.getByText('此分享需要密码')).toBeInTheDocument()
+      expect(screen.getByLabelText('访问密码')).toHaveFocus()
     })
 
     expect(mockAddToast).toHaveBeenCalledWith({
@@ -1129,7 +1245,63 @@ describe('ShareAccessPage', () => {
     })
   })
 
-  it('shows missing-content feedback when file download target no longer exists', async () => {
+  it('preserves a localized structured download error in the action toast', async () => {
+    const user = userEvent.setup()
+    mockGetPublicShare.mockResolvedValue({
+      id: 'abc123',
+      type: 'file',
+      has_password: false,
+      permission: 'read',
+      file_name: 'test.txt',
+      file_size: 10,
+    })
+    mockDownloadShare.mockRejectedValue(new ShareError('归档内容过大', 413, 'ARCHIVE_TOO_LARGE'))
+
+    renderWithRouter('abc123')
+
+    await waitFor(() => {
+      expect(screen.getByText('下载文件')).toBeInTheDocument()
+    })
+    await user.click(screen.getByText('下载文件'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '下载失败',
+        description: '归档内容过大',
+        color: 'danger',
+      })
+    })
+  })
+
+  it('shows a localized warning when download admission is rate limited', async () => {
+    const user = userEvent.setup()
+    mockGetPublicShare.mockResolvedValue({
+      id: 'abc123',
+      type: 'file',
+      has_password: false,
+      permission: 'read',
+      file_name: 'test.txt',
+      file_size: 10,
+    })
+    mockDownloadShare.mockRejectedValue(new ShareError('下载请求暂时受限，请稍后重试', 429, 'DOWNLOAD_TICKET_RATE_LIMITED'))
+
+    renderWithRouter('abc123')
+
+    await waitFor(() => {
+      expect(screen.getByText('下载文件')).toBeInTheDocument()
+    })
+    await user.click(screen.getByText('下载文件'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '下载暂不可用',
+        description: '下载请求暂时受限，请稍后重试',
+        color: 'warning',
+      })
+    })
+  })
+
+  it('promotes a missing file download target to the top-level state', async () => {
     const user = userEvent.setup()
     mockGetPublicShare.mockResolvedValue({
       id: 'abc123',
@@ -1150,12 +1322,12 @@ describe('ShareAccessPage', () => {
     await user.click(screen.getByText('下载文件'))
 
     await waitFor(() => {
-      expect(mockAddToast).toHaveBeenCalledWith({
-        title: '分享内容已不存在',
-        description: '该分享指向的文件或文件夹已被移动或删除，请联系分享创建者。',
-        color: 'warning',
-      })
+      expect(screen.getByRole('heading', { name: '分享内容已不存在' })).toHaveFocus()
+      expect(screen.getByText('该分享指向的文件或文件夹已被移动或删除，请联系分享创建者。')).toBeInTheDocument()
     })
+    expect(screen.getByRole('alert')).toHaveTextContent('分享内容已不存在')
+    expect(screen.queryByText('test.txt')).not.toBeInTheDocument()
+    expect(mockAddToast).not.toHaveBeenCalled()
   })
 
   it('shows failure toast when file download fails with a generic error', async () => {
@@ -1187,7 +1359,32 @@ describe('ShareAccessPage', () => {
     })
   })
 
-  it('shows disabled feedback when file download returns a disabled share error', async () => {
+  it('shows the required refresh action when browser download capacity is exhausted', async () => {
+    const user = userEvent.setup()
+    mockGetPublicShare.mockResolvedValue({
+      id: 'abc123',
+      type: 'file',
+      has_password: false,
+      permission: 'read',
+      file_name: 'test.txt',
+      file_size: 10,
+    })
+    mockDownloadShare.mockRejectedValue(new BrowserDownloadCapacityError())
+
+    renderWithRouter('abc123')
+
+    await user.click(await screen.findByText('下载文件'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '需要刷新后继续下载',
+        description: '当前页面已提交的下载已达到上限，请刷新页面后继续。',
+        color: 'warning',
+      })
+    })
+  })
+
+  it('promotes a disabled ticket request to the top-level state', async () => {
     const user = userEvent.setup()
     mockGetPublicShare.mockResolvedValue({
       id: 'abc123',
@@ -1208,12 +1405,13 @@ describe('ShareAccessPage', () => {
     await user.click(screen.getByText('下载文件'))
 
     await waitFor(() => {
-      expect(mockAddToast).toHaveBeenCalledWith({
-        title: '分享已停用',
-        description: '该分享已被停用，当前不可访问。',
-        color: 'warning',
-      })
+      expect(screen.getByText('分享已停用')).toBeInTheDocument()
+      expect(screen.getByText('该分享已被停用，当前不可访问。')).toBeInTheDocument()
     })
+    const downloadSignal = (mockDownloadShare.mock.calls[0]?.[1] as { signal?: AbortSignal } | undefined)?.signal
+    expect(downloadSignal?.aborted).toBe(true)
+    expect(screen.queryByText('test.txt')).not.toBeInTheDocument()
+    expect(mockAddToast).not.toHaveBeenCalled()
   })
 
   it('returns to password prompt when listing fails with unauthorized', async () => {
@@ -1244,6 +1442,7 @@ describe('ShareAccessPage', () => {
 
     await waitFor(() => {
       expect(screen.getByText('此分享需要密码')).toBeInTheDocument()
+      expect(screen.getByLabelText('访问密码')).toHaveFocus()
     })
 
     expect(screen.getByLabelText('访问密码')).toHaveValue('')
@@ -1265,6 +1464,10 @@ describe('ShareAccessPage', () => {
       expect(screen.getByText('分享内容已不存在')).toBeInTheDocument()
       expect(screen.getByText('该分享指向的文件或文件夹已被移动或删除，请联系分享创建者。')).toBeInTheDocument()
     })
+    const listingSignal = (mockGetPublicShareItems.mock.calls[0]?.[1] as { signal?: AbortSignal } | undefined)?.signal
+    expect(listingSignal?.aborted).toBe(true)
+    expect(screen.queryByText('根目录')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '重试加载' })).not.toBeInTheDocument()
   })
 
   it('preserves the current folder path after re-authenticating a folder share', () => {

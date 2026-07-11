@@ -1,9 +1,15 @@
 import type { FileItem } from '@/stores/files'
-import { readDownloadJsonErrorDetails, triggerBrowserDownload } from '@/lib/downloadResponse'
+import {
+  readDownloadJsonErrorDetails,
+  readRangedDownloadJsonErrorDetails,
+  reserveBrowserDownloadNavigation,
+  triggerBrowserDownload,
+  type BrowserDownloadReservation,
+} from '@/lib/downloadResponse'
 import { INVALID_API_RESPONSE_MESSAGE } from '@/lib/apiMessages'
 import { getNonBlankJsonString, readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
 import { ensureZipExtension, sanitizeFilename, normalizePath, encodePathForUrl, getFilenameFromContentDisposition, hasControlCharacter } from '@/lib/utils'
-import { authFetch, refreshAuthSession } from './auth'
+import { authFetch, ensureDownloadSession, refreshAuthSession } from './auth'
 
 export type { FileItem }
 
@@ -438,26 +444,6 @@ async function throwDownloadApiErrorFromJsonResponse(response: Response): Promis
   throw new ApiError(localizedDetails.message, response.status, response.statusText, localizedDetails.code)
 }
 
-async function throwDownloadApiErrorFromResponse(response: Response): Promise<never> {
-  let message = '下载文件失败'
-  let code: string | undefined
-  const structuredDetails = await readStructuredJsonErrorDetails(response, message)
-  if (structuredDetails) {
-    const localizedDetails = localizeDownloadApiErrorDetails(structuredDetails)
-    throw new ApiError(localizedDetails.message, response.status, response.statusText, localizedDetails.code)
-  }
-
-  try {
-    const details = localizeDownloadApiErrorDetails(extractApiErrorDetails(await response.json(), message))
-    message = details.message
-    code = details.code
-  } catch {
-    // Keep the fallback message when the body is missing or invalid.
-  }
-
-  throw new ApiError(message, response.status, response.statusText, code)
-}
-
 function localizeDownloadApiErrorDetails(details: { message: string; code?: string }): { message: string; code?: string } {
   const localized = localizedDownloadApiErrorMessage(details.message)
   return localized ? { ...details, message: localized } : details
@@ -473,6 +459,8 @@ function localizedDownloadApiErrorMessage(message: string): string | undefined {
       return '归档条目名称冲突，请刷新后重试'
     case 'archive entry changed during download':
       return '文件内容已变更，请刷新后重试'
+    case 'too many archive downloads, try later':
+      return '归档下载任务较多，请稍后重试'
     default:
       return undefined
   }
@@ -2631,6 +2619,19 @@ export async function downloadFile(
   path: string,
   options?: { version?: string; download?: boolean; filename?: string; archive?: 'zip'; signal?: AbortSignal }
 ): Promise<void> {
+  const reservation = reserveBrowserDownloadNavigation()
+  try {
+    await downloadFileWithReservation(path, options, reservation)
+  } finally {
+    reservation.release()
+  }
+}
+
+async function downloadFileWithReservation(
+  path: string,
+  options: { version?: string; download?: boolean; filename?: string; archive?: 'zip'; signal?: AbortSignal } | undefined,
+  reservation: BrowserDownloadReservation,
+): Promise<void> {
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
   const params = new URLSearchParams()
@@ -2644,22 +2645,69 @@ export async function downloadFile(
     params.set('archive', options.archive)
   }
 
-  const query = params.toString()
-  const url = query ? `${API_BASE}/download${encodedPath}?${query}` : `${API_BASE}/download${encodedPath}`
-  const response = await authFetch(url, options?.signal ? { signal: options.signal } : {})
-
-  if (!response.ok) {
-    await throwDownloadApiErrorFromResponse(response)
-  }
-
   const pathFilename = normalizedPath.split('/').filter(Boolean).pop() ?? 'download'
   const baseFilename = options?.filename ?? pathFilename
   const fallbackFilename = options?.archive === 'zip' ? ensureZipExtension(baseFilename) : baseFilename
-  const contentDisposition = response.headers.get('Content-Disposition')
-  await throwDownloadApiErrorFromJsonResponse(response)
+
+  const query = params.toString()
+  const url = query ? `${API_BASE}/download${encodedPath}?${query}` : `${API_BASE}/download${encodedPath}`
+  const session = await ensureDownloadSession(options?.signal ? { signal: options.signal } : {})
+  if (!session.ok) {
+    throw new ApiError(session.message ?? '原始预览和下载会话同步失败，请稍后重试', session.status ?? 0, '', session.code)
+  }
+  throwIfDownloadAborted(options?.signal)
+
+  let probeStatus = 0
+  let probeStatusText = ''
+  let contentDisposition: string | null = null
+  let contentRange: string | null = null
+  let probeFetchFailed = false
+  let probeFetchError: unknown
+  const probeError = await readRangedDownloadJsonErrorDetails(url, '下载文件失败', async (probeUrl, probeOptions) => {
+    try {
+      const response = await authFetch(probeUrl, {
+        ...probeOptions,
+        ...(options?.signal ? { signal: options.signal } : {}),
+      })
+      probeStatus = response.status
+      probeStatusText = response.statusText
+      contentDisposition = response.headers?.get?.('Content-Disposition') ?? null
+      contentRange = response.headers?.get?.('Content-Range') ?? null
+      return response
+    } catch (error) {
+      probeFetchFailed = true
+      probeFetchError = error
+      throw error
+    }
+  })
+  if (probeFetchFailed) {
+    throw probeFetchError
+  }
+  throwIfDownloadAborted(options?.signal)
+  if (probeError) {
+    const localizedDetails = localizeDownloadApiErrorDetails(probeError)
+    throw new ApiError(localizedDetails.message, probeStatus, probeStatusText, localizedDetails.code)
+  }
+  if ((probeStatus < 200 || probeStatus >= 300)
+    && !(probeStatus === 416
+      && /^\s*attachment(?:\s*;|\s*$)/i.test(contentDisposition ?? '')
+      && /^\s*bytes\s+\*\/0\s*$/i.test(contentRange ?? ''))) {
+    throw new ApiError('下载文件失败', probeStatus, probeStatusText)
+  }
+
   const filename = getFilenameFromContentDisposition(contentDisposition, fallbackFilename)
-  const blob = await response.blob()
-  triggerBrowserDownload(blob, filename)
+  reservation.trigger(url, filename)
+}
+
+function throwIfDownloadAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    if (typeof DOMException !== 'undefined') {
+      throw new DOMException('Download aborted', 'AbortError')
+    }
+    const error = new Error('Download aborted')
+    error.name = 'AbortError'
+    throw error
+  }
 }
 
 // Thumbnail URL

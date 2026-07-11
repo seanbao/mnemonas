@@ -1429,6 +1429,39 @@ func setupShareServer(t *testing.T) (*Server, string) {
 	return setupShareServerWithOptions(t, true, "")
 }
 
+func issuePublicShareDownloadTicket(t *testing.T, server *Server, shareID, relativePath, archive string) (string, *http.Cookie) {
+	t.Helper()
+	body := make(map[string]string, 3)
+	body["client_nonce"] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	if relativePath != "" {
+		body["path"] = relativePath
+	}
+	if archive != "" {
+		body["archive"] = archive
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal download ticket request: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/s/"+shareID+"/download-ticket", bytes.NewReader(payload))
+	recorder := httptest.NewRecorder()
+	server.Router().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("download ticket status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response share.DownloadTicketResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode download ticket response: %v", err)
+	}
+	for _, cookie := range recorder.Result().Cookies() {
+		if strings.HasPrefix(cookie.Name, "mnemonas_share_download_") && cookie.Path == "/" {
+			return response.Ticket, cookie
+		}
+	}
+	t.Fatalf("download ticket cookie missing: %v", recorder.Header().Values("Set-Cookie"))
+	return "", nil
+}
+
 func setupShareServerWithBaseURL(t *testing.T, baseURL string) (*Server, string) {
 	return setupShareServerWithOptions(t, true, baseURL)
 }
@@ -1497,6 +1530,7 @@ func setupShareServerWithOptions(t *testing.T, shareEnabled bool, baseURL string
 		ShareEnabled:   shareEnabled,
 		ShareStoreFile: shareStorePath,
 		ShareBaseURL:   baseURL,
+		AuthJWTSecret:  "setup-share-server-download-ticket-secret",
 	})
 	if err != nil {
 		t.Fatalf("NewServer() error: %v", err)
@@ -4817,6 +4851,30 @@ func TestServer_DownloadFile_ContentDispositionEscapesFilename(t *testing.T) {
 	if !strings.Contains(contentDisposition, `filename="quote\"name.txt"`) {
 		t.Fatalf("expected escaped Content-Disposition filename, got %q", contentDisposition)
 	}
+	if got := w.Header().Get("Content-Security-Policy"); !strings.Contains(got, "sandbox allow-downloads") || !strings.Contains(got, "frame-ancestors 'self'") || strings.Contains(got, "frame-ancestors 'none'") {
+		t.Fatalf("attachment Content-Security-Policy = %q, want same-origin framing only", got)
+	}
+	if got := w.Header().Get("X-Frame-Options"); got != "SAMEORIGIN" {
+		t.Fatalf("attachment X-Frame-Options = %q, want SAMEORIGIN", got)
+	}
+
+	etag := w.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("expected forced attachment response to include ETag")
+	}
+	revalidationReq := httptest.NewRequest(http.MethodGet, "/api/v1/download/quote%22name.txt?download=true", nil)
+	revalidationReq.Header.Set("If-None-Match", etag)
+	revalidationWriter := httptest.NewRecorder()
+	server.Router().ServeHTTP(revalidationWriter, revalidationReq)
+	if revalidationWriter.Code != http.StatusNotModified {
+		t.Fatalf("attachment revalidation status = %d, want %d", revalidationWriter.Code, http.StatusNotModified)
+	}
+	if got := revalidationWriter.Header().Get("Content-Disposition"); !strings.Contains(got, `filename="quote\"name.txt"`) {
+		t.Fatalf("attachment revalidation Content-Disposition = %q, want escaped filename", got)
+	}
+	if got := revalidationWriter.Header().Get("Content-Security-Policy"); !strings.Contains(got, "frame-ancestors 'self'") {
+		t.Fatalf("attachment revalidation Content-Security-Policy = %q, want same-origin framing", got)
+	}
 }
 
 func TestServer_DownloadFile_RejectsAmbiguousDownloadParameter(t *testing.T) {
@@ -5299,6 +5357,12 @@ func TestServer_DownloadDirectoryAsZip(t *testing.T) {
 	if mediaType != "attachment" || params["filename"] != "docs.zip" {
 		t.Fatalf("directory archive Content-Disposition = media %q params %+v, want docs.zip attachment", mediaType, params)
 	}
+	if got := w.Header().Get("Content-Security-Policy"); !strings.Contains(got, "sandbox allow-downloads") || !strings.Contains(got, "frame-ancestors 'self'") || strings.Contains(got, "frame-ancestors 'none'") {
+		t.Fatalf("directory archive Content-Security-Policy = %q, want same-origin framing only", got)
+	}
+	if got := w.Header().Get("X-Frame-Options"); got != "SAMEORIGIN" {
+		t.Fatalf("directory archive X-Frame-Options = %q, want SAMEORIGIN", got)
+	}
 
 	entries := readZipEntries(t, w.Body.Bytes())
 	for _, name := range []string{"docs/", "docs/empty/", "docs/nested/", "docs/readme.txt", "docs/nested/report.txt"} {
@@ -5542,6 +5606,12 @@ func TestServer_DownloadDirectoryArchiveReturnsStructuredErrorBeforeStreaming(t 
 	if contentDisposition := w.Header().Get("Content-Disposition"); contentDisposition != "" {
 		t.Fatalf("directory archive write error must not keep attachment header, got %q", contentDisposition)
 	}
+	if got := w.Header().Get("Content-Security-Policy"); !strings.Contains(got, "sandbox;") || !strings.Contains(got, "frame-ancestors 'self'") || strings.Contains(got, "allow-downloads") {
+		t.Fatalf("directory archive write error Content-Security-Policy = %q, want same-origin sandbox without downloads", got)
+	}
+	if got := w.Header().Get("X-Frame-Options"); got != "SAMEORIGIN" {
+		t.Fatalf("directory archive write error X-Frame-Options = %q, want SAMEORIGIN", got)
+	}
 	if !strings.Contains(w.Body.String(), "archive content is too large") {
 		t.Fatalf("expected structured archive-too-large response, got %s", w.Body.String())
 	}
@@ -5673,8 +5743,8 @@ func TestServer_DownloadFile_UsesPrivateRevalidationCacheHeaders(t *testing.T) {
 	if got := w.Header().Get("X-Content-Type-Options"); got != "nosniff" {
 		t.Fatalf("download X-Content-Type-Options = %q, want nosniff", got)
 	}
-	if got := w.Header().Get("Content-Security-Policy"); !strings.Contains(got, "sandbox") || !strings.Contains(got, "default-src 'none'") {
-		t.Fatalf("download Content-Security-Policy = %q, want sandboxed default-src none", got)
+	if got := w.Header().Get("Content-Security-Policy"); !strings.Contains(got, "sandbox") || !strings.Contains(got, "default-src 'none'") || !strings.Contains(got, "frame-ancestors 'none'") {
+		t.Fatalf("preview Content-Security-Policy = %q, want sandboxed default-src none with framing disabled", got)
 	}
 	etag := w.Header().Get("ETag")
 	if etag == "" {
@@ -6391,16 +6461,26 @@ func TestServer_RejectsCrossOriginUnsafeBrowserRequests(t *testing.T) {
 
 func TestServer_RejectsCrossOriginUnsafePublicShareRequests(t *testing.T) {
 	server, shareID := setupShareServer(t)
+	for _, test := range []struct {
+		name string
+		path string
+		body string
+	}{
+		{name: "password access", path: "/access", body: `{"password":"guess"}`},
+		{name: "download ticket", path: "/download-ticket", body: `{}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "https://nas.example.test/api/v1/public/shares/"+shareID+test.path, strings.NewReader(test.body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Origin", "https://evil.example.test")
+			rec := httptest.NewRecorder()
 
-	req := httptest.NewRequest(http.MethodPost, "https://nas.example.test/api/v1/public/shares/"+shareID+"/access", strings.NewReader(`{"password":"guess"}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Origin", "https://evil.example.test")
-	rec := httptest.NewRecorder()
+			server.Router().ServeHTTP(rec, req)
 
-	server.Router().ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("cross-origin public share access status = %d, want %d; body=%s", rec.Code, http.StatusForbidden, rec.Body.String())
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("cross-origin public share request status = %d, want %d; body=%s", rec.Code, http.StatusForbidden, rec.Body.String())
+			}
+		})
 	}
 }
 
@@ -6831,7 +6911,9 @@ func TestServer_PublicShareDownloadFile_DecodesLiteralPercentFilename(t *testing
 	}
 
 	encodedPath := (&url.URL{Path: "/" + filename}).EscapedPath()
-	req := httptest.NewRequest(http.MethodGet, "/s/"+shareID+"/download"+encodedPath, nil)
+	ticket, ticketCookie := issuePublicShareDownloadTicket(t, server, shareID, filename, "")
+	req := httptest.NewRequest(http.MethodGet, "/s/"+shareID+"/download"+encodedPath+"?ticket="+ticket, nil)
+	req.AddCookie(ticketCookie)
 	w := httptest.NewRecorder()
 
 	server.Router().ServeHTTP(w, req)
@@ -6851,7 +6933,9 @@ func TestServer_PublicShareDownloadFile_SupportsRangeRequests(t *testing.T) {
 		t.Fatalf("WriteFile() error: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/s/"+shareID+"/download/range-video.mp4", nil)
+	ticket, ticketCookie := issuePublicShareDownloadTicket(t, server, shareID, "range-video.mp4", "")
+	req := httptest.NewRequest(http.MethodGet, "/s/"+shareID+"/download/range-video.mp4?ticket="+ticket, nil)
+	req.AddCookie(ticketCookie)
 	req.Header.Set("Range", "bytes=1-3")
 	w := httptest.NewRecorder()
 
@@ -6899,7 +6983,9 @@ func TestServer_PublicShareDownloadFile_UnsatisfiableRangeDoesNotConsumeAccess(t
 				t.Fatalf("WriteFile() error: %v", err)
 			}
 
-			req := httptest.NewRequest(http.MethodGet, "/s/"+shareID+"/download/range-video.mp4", nil)
+			ticket, ticketCookie := issuePublicShareDownloadTicket(t, server, shareID, "range-video.mp4", "")
+			req := httptest.NewRequest(http.MethodGet, "/s/"+shareID+"/download/range-video.mp4?ticket="+ticket, nil)
+			req.AddCookie(ticketCookie)
 			req.Header.Set("Range", tt.rangeHeader)
 			w := httptest.NewRecorder()
 
@@ -6922,8 +7008,8 @@ func TestServer_PublicShareDownloadFile_UnsatisfiableRangeDoesNotConsumeAccess(t
 			if err != nil {
 				t.Fatalf("Get(share) error: %v", err)
 			}
-			if currentShare.AccessCount != 0 {
-				t.Fatalf("share access count = %d, want 0", currentShare.AccessCount)
+			if currentShare.AccessCount != 1 {
+				t.Fatalf("share access count = %d, want ticket reservation 1", currentShare.AccessCount)
 			}
 		})
 	}
@@ -6961,6 +7047,20 @@ func TestServer_PublicShareReadHeadDoesNotConsumeAccess(t *testing.T) {
 			wantAllow: http.MethodGet,
 			path: func(shareID string) string {
 				return "/api/v1/public/shares/" + shareID + "/download/a.txt"
+			},
+		},
+		{
+			name:      "short download ticket route",
+			wantAllow: http.MethodPost,
+			path: func(shareID string) string {
+				return "/s/" + shareID + "/download-ticket"
+			},
+		},
+		{
+			name:      "api download ticket route",
+			wantAllow: http.MethodPost,
+			path: func(shareID string) string {
+				return "/api/v1/public/shares/" + shareID + "/download-ticket"
 			},
 		},
 	}
@@ -8632,6 +8732,30 @@ func TestServer_DownloadVersion_ContentDispositionEscapesFilename(t *testing.T) 
 	if !strings.Contains(contentDisposition, `filename="quote\"name.txt"`) {
 		t.Fatalf("expected escaped version Content-Disposition filename, got %q", contentDisposition)
 	}
+	if got := w.Header().Get("Content-Security-Policy"); !strings.Contains(got, "frame-ancestors 'self'") || strings.Contains(got, "frame-ancestors 'none'") {
+		t.Fatalf("version attachment Content-Security-Policy = %q, want same-origin framing only", got)
+	}
+	if got := w.Header().Get("X-Frame-Options"); got != "SAMEORIGIN" {
+		t.Fatalf("version attachment X-Frame-Options = %q, want SAMEORIGIN", got)
+	}
+
+	etag := w.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("expected forced version attachment response to include ETag")
+	}
+	revalidationReq := httptest.NewRequest(http.MethodGet, "/api/v1/download/versions/quote%22name.txt?download=true&version="+historicalHash, nil)
+	revalidationReq.Header.Set("If-None-Match", etag)
+	revalidationWriter := httptest.NewRecorder()
+	server.Router().ServeHTTP(revalidationWriter, revalidationReq)
+	if revalidationWriter.Code != http.StatusNotModified {
+		t.Fatalf("version attachment revalidation status = %d, want %d", revalidationWriter.Code, http.StatusNotModified)
+	}
+	if got := revalidationWriter.Header().Get("Content-Disposition"); !strings.Contains(got, `filename="quote\"name.txt"`) {
+		t.Fatalf("version attachment revalidation Content-Disposition = %q, want escaped filename", got)
+	}
+	if got := revalidationWriter.Header().Get("Content-Security-Policy"); !strings.Contains(got, "frame-ancestors 'self'") {
+		t.Fatalf("version attachment revalidation Content-Security-Policy = %q, want same-origin framing", got)
+	}
 }
 
 func TestServer_DownloadVersion_UsesExtensionContentTypeForPreview(t *testing.T) {
@@ -8677,8 +8801,8 @@ func TestServer_DownloadVersion_UsesExtensionContentTypeForPreview(t *testing.T)
 	if got := w.Header().Get("X-Content-Type-Options"); got != "nosniff" {
 		t.Fatalf("version preview X-Content-Type-Options = %q, want nosniff", got)
 	}
-	if got := w.Header().Get("Content-Security-Policy"); !strings.Contains(got, "sandbox") || !strings.Contains(got, "default-src 'none'") {
-		t.Fatalf("version preview Content-Security-Policy = %q, want sandboxed default-src none", got)
+	if got := w.Header().Get("Content-Security-Policy"); !strings.Contains(got, "sandbox") || !strings.Contains(got, "default-src 'none'") || !strings.Contains(got, "frame-ancestors 'none'") {
+		t.Fatalf("version preview Content-Security-Policy = %q, want sandboxed default-src none with framing disabled", got)
 	}
 	if body := w.Body.String(); body != string(historicalContent) {
 		t.Fatalf("version preview body = %q, want %q", body, string(historicalContent))
@@ -19207,7 +19331,9 @@ func TestServer_CreateShare_AllowsDirectoryAccessRulePathForNonAdmin(t *testing.
 		t.Fatalf("expected created share id, body=%s", createRec.Body.String())
 	}
 
-	publicReq := httptest.NewRequest(http.MethodGet, "/s/"+payload.Data.ID+"/download", nil)
+	ticket, cookie := issuePublicShareDownloadTicket(t, server, payload.Data.ID, "", "")
+	publicReq := httptest.NewRequest(http.MethodGet, "/s/"+payload.Data.ID+"/download?ticket="+url.QueryEscape(ticket), nil)
+	publicReq.AddCookie(cookie)
 	publicRec := httptest.NewRecorder()
 	server.Router().ServeHTTP(publicRec, publicReq)
 	if publicRec.Code != http.StatusOK || publicRec.Body.String() != "shared" {
@@ -19320,14 +19446,15 @@ func TestServer_PublicFolderShare_FiltersNestedDirectoryAccessRules(t *testing.T
 		t.Fatalf("expected private directory to be filtered from share listing, got %s", listRec.Body.String())
 	}
 
-	downloadReq := httptest.NewRequest(http.MethodGet, "/api/v1/public/shares/"+shareID+"/download/private/secret.txt", nil)
-	downloadRec := httptest.NewRecorder()
-	server.Router().ServeHTTP(downloadRec, downloadReq)
-	if downloadRec.Code != http.StatusNotFound {
-		t.Fatalf("private file public download status = %d, want %d; body=%s", downloadRec.Code, http.StatusNotFound, downloadRec.Body.String())
+	ticketBody := `{"client_nonce":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","path":"private/secret.txt"}`
+	ticketReq := httptest.NewRequest(http.MethodPost, "/api/v1/public/shares/"+shareID+"/download-ticket", strings.NewReader(ticketBody))
+	ticketRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(ticketRec, ticketReq)
+	if ticketRec.Code != http.StatusNotFound {
+		t.Fatalf("private file ticket status = %d, want %d; body=%s", ticketRec.Code, http.StatusNotFound, ticketRec.Body.String())
 	}
-	if downloadRec.Body.String() == "secret" {
-		t.Fatal("private file content leaked through public folder share")
+	if strings.Contains(ticketRec.Body.String(), "secret") {
+		t.Fatal("private file content leaked through public ticket preflight")
 	}
 }
 
@@ -24849,8 +24976,8 @@ func TestServer_ActivityReviewRecords_AdminCanCreateAndList(t *testing.T) {
 			"enabled": true,
 			"risk_level": "high",
 			"reason_summary": "未设置密码，持有链接的人可直接访问。",
-			"suggested_action": "停用或补齐密码、有效期和访问次数限制。",
-			"access_summary": "无密码 · 访问 5/不限",
+			"suggested_action": "停用或补齐密码、有效期和下载次数限制。",
+			"access_summary": "无密码 · 下载 5/不限",
 			"expires_at": "永不过期"
 		}],
 		"activity_entry_ids": ["delete-1", "move-1"]

@@ -296,12 +296,12 @@ function parseShareMaxAccessInput(value: string): { maxAccess?: number; error?: 
     return {}
   }
   if (!/^\d+$/.test(trimmed)) {
-    return { error: '访问次数必须是 0 或正整数' }
+    return { error: '下载次数必须是 0 或正整数' }
   }
 
   const parsed = Number(trimmed)
   if (!Number.isSafeInteger(parsed)) {
-    return { error: '访问次数过大' }
+    return { error: '下载次数过大' }
   }
   return { maxAccess: parsed }
 }
@@ -407,7 +407,7 @@ function shareCreateActivityMatchesPath(entry: ActivityEntry, path: string): boo
 function formatShareCreateAccessSummary(share: ShareCreateResult): string {
   const passwordLabel = share.has_password ? '密码保护' : '无密码'
   const maxAccess = share.max_access && share.max_access > 0 ? `${share.max_access}` : '不限'
-  return `${passwordLabel} · 访问 ${share.access_count}/${maxAccess}`
+  return `${passwordLabel} · 下载 ${share.access_count}/${maxAccess}`
 }
 
 function getShareCreateReasonSummary(share: ShareCreateResult): string {
@@ -450,7 +450,7 @@ function buildShareCreateExecutionRecordInput({
       enabled: share.enabled,
       risk_level: share.risk?.level ?? 'none',
       reason_summary: getShareCreateReasonSummary(share),
-      suggested_action: '已创建该分享；继续复核有效期、密码、访问次数和外部引用。',
+      suggested_action: '已创建该分享；继续复核有效期、密码、下载次数和外部引用。',
       access_summary: formatShareCreateAccessSummary(share),
       expires_at: formatExpiration(share.expires_at),
     }],
@@ -658,9 +658,9 @@ export function ShareDialog({
       warnings.push('系统默认不设置过期时间。')
     }
     if (maxAccess.trim() === '0') {
-      warnings.push('已选择不限制访问次数。')
+      warnings.push('已选择不限制下载次数。')
     } else if (maxAccess === '' && sharePolicy && sharePolicy.default_max_access === 0) {
-      warnings.push('系统默认不限制访问次数。')
+      warnings.push('系统默认不限制下载次数。')
     }
     if (isFolder && getSharePathDepth(filePath) <= 1) {
       warnings.push(filePath.trim() === '/' ? '根目录分享会公开整个文件空间。' : '顶层文件夹分享可能覆盖较多内容。')
@@ -680,7 +680,7 @@ export function ShareDialog({
       descriptions.push(`有效期最多 ${formatPolicyDuration(matchedPolicyRule.max_expires_in)}。`)
     }
     if (matchedPolicyRule.max_access && matchedPolicyRule.max_access > 0) {
-      descriptions.push(`访问次数最多 ${matchedPolicyRule.max_access} 次。`)
+      descriptions.push(`下载次数最多 ${matchedPolicyRule.max_access} 次。`)
     }
     return descriptions
   }, [matchedPolicyRule])
@@ -709,7 +709,7 @@ export function ShareDialog({
         tone: durationReview.capped ? 'warning' : 'default',
       },
       {
-        label: '访问次数',
+        label: '下载次数',
         value: accessReview.value,
         tone: accessReview.capped ? 'warning' : 'default',
       },
@@ -745,7 +745,7 @@ export function ShareDialog({
     }
     if (parsedMaxAccess.error) {
       addToast({
-        title: '访问次数格式无效',
+        title: '下载次数格式无效',
         description: parsedMaxAccess.error,
         color: 'warning',
       })
@@ -1018,10 +1018,10 @@ export function ShareDialog({
               <div className="space-y-3">
                 <div className="flex items-center gap-2">
                   <Users size={16} className="text-default-500" />
-                  <span className="text-sm font-medium">访问次数限制</span>
+                  <span className="text-sm font-medium">下载次数限制</span>
                 </div>
                 <Input
-                  aria-label="分享访问次数限制"
+                  aria-label="分享下载次数限制"
                   type="text"
                   placeholder="使用系统默认"
                   inputMode="numeric"

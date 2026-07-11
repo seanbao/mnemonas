@@ -129,7 +129,7 @@ storage.root/
 - 按 BLAKE3 哈希寻址的 CAS 对象。
 - 包含原路径、删除时间和内容引用的回收站记录。
 - 包含角色、用户组和 `home_dir` 的用户。
-- 可包含密码、过期时间和访问上限的分享链接。
+- 可包含密码、过期时间和逻辑下载上限的分享链接。
 - 按每用户根目录限定范围的收藏和活动记录。
 
 需要 ACID 语义的事务性元数据使用 SQLite。数据形状较小且本地化的部分功能存储使用 JSON 文件。
@@ -143,7 +143,7 @@ storage.root/
 - 非管理员用户受配置的 `home_dir` 限制，并可通过 `storage.directory_access_rules` 获得共享目录授权。
 - 目录访问规则对 files、search、shares、favorites、trash、activity logs 和 WebDAV users mode 使用相同的最具体路径决策。
 - WebDAV 可以认证 MnemoNAS 用户，并应用角色、用户组、`home_dir`、目录访问规则、home 范围用户配额和目录配额边界；旧版 `basic` 模式仍是独立的全局服务凭据。
-- 分享链接密码验证使用短期 HttpOnly cookie。
+- 分享链接密码验证使用短期 HttpOnly cookie；下载使用与目标绑定的签名票据和配对 cookie。
 - 下载和预览流程使用短期下载会话 cookie，而不是在 URL 中放置长期 token。
 
 部署边界：

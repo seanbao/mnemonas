@@ -194,6 +194,9 @@ func tokenCandidatesFromRequest(r *http.Request, allowScopedDownloadCookie bool)
 		if err != nil {
 			return nil, err
 		}
+		if len(candidates) > 0 && len(downloadCandidates) > 0 && candidates[0] != downloadCandidates[0] {
+			return nil, errAmbiguousSessionCookies
+		}
 		for _, candidate := range downloadCandidates {
 			if !containsCookieValue(candidates, candidate) {
 				candidates = append(candidates, candidate)

@@ -22,6 +22,7 @@ const (
 	ErrCodeNotFound                         = "NOT_FOUND"
 	ErrCodeConflict                         = "CONFLICT"
 	ErrCodePayloadTooLarge                  = "PAYLOAD_TOO_LARGE"
+	ErrCodeArchiveDownloadRateLimited       = "ARCHIVE_DOWNLOAD_RATE_LIMITED"
 	ErrCodeQuotaExceeded                    = "QUOTA_EXCEEDED"
 	ErrCodeInternal                         = "INTERNAL_ERROR"
 	ErrCodeServiceUnavail                   = "SERVICE_UNAVAILABLE"

@@ -40,7 +40,7 @@ import {
 } from '@/api/activity'
 import { readRangedDownloadJsonErrorDetails } from '@/lib/downloadResponse'
 import { GENERIC_ACTION_ERROR_DESCRIPTION, GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
-import { getFileLoadErrorDescription } from '@/lib/fileActionErrors'
+import { getBrowserDownloadCapacityErrorToast, getFileLoadErrorDescription } from '@/lib/fileActionErrors'
 import { useIsAdmin, useUser } from '@/stores/auth'
 import { copyTextToClipboard, formatBytes, formatDate, normalizePath, openUrlInNewTab } from '@/lib/utils'
 import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
@@ -601,6 +601,12 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, hasInvalidHom
         if (isMissingVersionError(error)) {
           queryClient.invalidateQueries({ queryKey: ['versions', authScopeKey, downloadPath] })
           addToast(getMissingVersionToast('download'))
+          return
+        }
+
+        const browserCapacityToast = getBrowserDownloadCapacityErrorToast(error)
+        if (browserCapacityToast) {
+          addToast(browserCapacityToast)
           return
         }
 

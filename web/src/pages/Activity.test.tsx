@@ -757,7 +757,7 @@ describe('ActivityPage', () => {
         expect(checklist.getByText('确认影响范围：3 条记录，涉及 2 个路径、2 个用户。')).toBeTruthy()
         expect(checklist.getByText('删除类操作：检查回收站、版本历史和最近备份，确认是否需要恢复。')).toBeTruthy()
         expect(checklist.getByText('路径变更：核对来源和目标路径，确认移动或重命名是否符合预期。')).toBeTruthy()
-        expect(checklist.getByText('分享变更：核对分享链接、密码、有效期和访问次数，关闭不再需要的公开链接。')).toBeTruthy()
+        expect(checklist.getByText('分享变更：核对分享链接、密码、有效期和下载次数，关闭不再需要的公开链接。')).toBeTruthy()
         expect(checklist.getByText('带警告记录：先处理持久化或清理警告，再把本次复核标记为完成。')).toBeTruthy()
         expect(checklist.getByText('记录处置结论：在团队工单或运维记录中写明复核人、处理结果和时间。')).toBeTruthy()
       })
@@ -1025,8 +1025,8 @@ describe('ActivityPage', () => {
                   enabled: true,
                   risk_level: 'high',
                   reason_summary: '未设置密码，持有链接的人可直接访问。',
-                  suggested_action: '停用或补齐密码、有效期和访问次数限制。',
-                  access_summary: '无密码 · 访问 5/不限',
+                  suggested_action: '停用或补齐密码、有效期和下载次数限制。',
+                  access_summary: '无密码 · 下载 5/不限',
                   expires_at: '永不过期',
                 }],
                 activity_entry_ids: ['share-1', 'unshare-1'],
@@ -1058,8 +1058,8 @@ describe('ActivityPage', () => {
         const detail = within(screen.getByLabelText('复核记录详情 review-share-history-1'))
         expect(detail.getByText('分享处置线索')).toBeTruthy()
         expect(detail.getByText('文件：/docs/report.pdf')).toBeTruthy()
-        expect(detail.getByText('启用 · 高风险 · 无密码 · 访问 5/不限 · 永不过期')).toBeTruthy()
-        expect(detail.getByText('建议：停用或补齐密码、有效期和访问次数限制。')).toBeTruthy()
+        expect(detail.getByText('启用 · 高风险 · 无密码 · 下载 5/不限 · 永不过期')).toBeTruthy()
+        expect(detail.getByText('建议：停用或补齐密码、有效期和下载次数限制。')).toBeTruthy()
         expect(detail.getByText('share-1, unshare-1')).toBeTruthy()
         expect(detail.getByText('/docs/report.pdf, /team/public')).toBeTruthy()
         expect(detail.getByText('owner, member')).toBeTruthy()
@@ -1528,8 +1528,8 @@ describe('ActivityPage', () => {
               enabled: true,
               risk_level: 'high',
               reason_summary: '未设置密码，持有链接的人可直接访问。',
-              suggested_action: '停用或补齐密码、有效期和访问次数限制。',
-              access_summary: '无密码 · 访问 1/不限',
+              suggested_action: '停用或补齐密码、有效期和下载次数限制。',
+              access_summary: '无密码 · 下载 1/不限',
               expires_at: '永不过期',
             }],
             activity_entry_ids: ['delete-1', 'share-1'],
@@ -1567,7 +1567,7 @@ describe('ActivityPage', () => {
       expect(csv).toContain('需跟进')
       expect(csv).toContain('删除文件 1; 创建分享 1')
       expect(csv).toContain('/documents/old.pdf; /team/report.pdf')
-      expect(csv).toContain('/team/report.pdf | 高风险 | 未设置密码，持有链接的人可直接访问。 | 停用或补齐密码、有效期和访问次数限制。')
+      expect(csv).toContain('/team/report.pdf | 高风险 | 未设置密码，持有链接的人可直接访问。 | 停用或补齐密码、有效期和下载次数限制。')
     })
 
     it('does not download an empty persisted review export', async () => {
@@ -1705,13 +1705,13 @@ describe('ActivityPage', () => {
         expect(screen.getByText('密码保护：是')).toBeTruthy()
         expect(screen.getByText('原密码保护：否')).toBeTruthy()
         expect(screen.getByText('密码变更：是')).toBeTruthy()
-        expect(screen.getByText('访问次数：1 次')).toBeTruthy()
-        expect(screen.getByText('访问上限：2 次')).toBeTruthy()
-        expect(screen.getByText('原访问上限：不限')).toBeTruthy()
+        expect(screen.getByText('下载次数：1 次')).toBeTruthy()
+        expect(screen.getByText('下载上限：2 次')).toBeTruthy()
+        expect(screen.getByText('原下载上限：不限')).toBeTruthy()
         expect(screen.getByText(/^过期时间：/)).toBeTruthy()
         expect(screen.getByText('原过期时间：永不过期')).toBeTruthy()
         expect(screen.getByText('变更类型：分享策略更新')).toBeTruthy()
-        expect(screen.getByText('变更字段：密码、访问上限、备注')).toBeTruthy()
+        expect(screen.getByText('变更字段：密码、下载上限、备注')).toBeTruthy()
         expect(screen.getByText('策略更新：是')).toBeTruthy()
         expect(screen.getByText('备注状态：已填写')).toBeTruthy()
         expect(screen.getByText('原备注状态：未填写')).toBeTruthy()

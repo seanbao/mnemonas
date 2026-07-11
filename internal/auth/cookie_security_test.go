@@ -439,3 +439,97 @@ func TestCookieAuthenticationRejectsCrossAccountAmbiguity(t *testing.T) {
 		t.Fatalf("JSON refresh client did not receive bearer tokens: %s", bodyRefreshRec.Body.String())
 	}
 }
+
+func TestDownloadAuthenticationRequiresMatchingSessionCookies(t *testing.T) {
+	fixture := newCookieSecurityFixture(t)
+	pairA, err := fixture.manager.GenerateTokenPair(fixture.userA)
+	if err != nil {
+		t.Fatalf("generate token pair A: %v", err)
+	}
+	secondPairA, err := fixture.manager.GenerateTokenPair(fixture.userA)
+	if err != nil {
+		t.Fatalf("generate second token pair A: %v", err)
+	}
+	if secondPairA.AccessToken == pairA.AccessToken {
+		t.Fatal("independent sessions for user A returned the same access token")
+	}
+	pairB, err := fixture.manager.GenerateTokenPair(fixture.userB)
+	if err != nil {
+		t.Fatalf("generate token pair B: %v", err)
+	}
+	pairBClaims, err := fixture.manager.ValidateAccessToken(pairB.AccessToken)
+	if err != nil {
+		t.Fatalf("validate token pair B before revocation: %v", err)
+	}
+	if err := fixture.manager.RevokeSession(pairBClaims.SessionID, pairBClaims.SessionExpiresAt.Time); err != nil {
+		t.Fatalf("revoke token pair B: %v", err)
+	}
+
+	tests := []struct {
+		name          string
+		authorization string
+		cookieHeader  string
+		wantStatus    int
+		wantUserID    string
+	}{
+		{
+			name:         "same token is accepted",
+			cookieHeader: HTTPSAccessSessionCookieName + "=" + pairA.AccessToken + "; " + HTTPSDownloadSessionCookieName + "=" + pairA.AccessToken,
+			wantStatus:   http.StatusNoContent,
+			wantUserID:   fixture.userA.ID,
+		},
+		{
+			name:         "revoked access token cannot fall through to valid download token",
+			cookieHeader: HTTPSAccessSessionCookieName + "=" + pairB.AccessToken + "; " + HTTPSDownloadSessionCookieName + "=" + pairA.AccessToken,
+			wantStatus:   http.StatusUnauthorized,
+		},
+		{
+			name:         "different valid tokens for the same user are rejected",
+			cookieHeader: HTTPSAccessSessionCookieName + "=" + secondPairA.AccessToken + "; " + HTTPSDownloadSessionCookieName + "=" + pairA.AccessToken,
+			wantStatus:   http.StatusUnauthorized,
+		},
+		{
+			name:          "bearer token ignores conflicting cookies",
+			authorization: "Bearer " + pairA.AccessToken,
+			cookieHeader:  HTTPSAccessSessionCookieName + "=" + pairB.AccessToken + "; " + HTTPSDownloadSessionCookieName + "=" + secondPairA.AccessToken,
+			wantStatus:    http.StatusNoContent,
+			wantUserID:    fixture.userA.ID,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			called := false
+			protected := fixture.middleware.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called = true
+				user := GetUserFromContext(r.Context())
+				if user == nil {
+					t.Fatal("authenticated request has no user")
+				}
+				w.Header().Set("X-Test-User", user.ID)
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			req := httptest.NewRequest(http.MethodGet, "https://nas.example.test/api/v1/download/test.bin", nil)
+			req.Header.Set("Cookie", test.cookieHeader)
+			if test.authorization != "" {
+				req.Header.Set("Authorization", test.authorization)
+			}
+			rec := httptest.NewRecorder()
+
+			protected.ServeHTTP(rec, req)
+
+			if rec.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d: %s", rec.Code, test.wantStatus, rec.Body.String())
+			}
+			if test.wantStatus == http.StatusUnauthorized && !strings.Contains(rec.Body.String(), `"code":"INVALID_TOKEN"`) {
+				t.Fatalf("unauthorized response did not report cookie ambiguity: %s", rec.Body.String())
+			}
+			if called != (test.wantUserID != "") {
+				t.Fatalf("handler called = %t, want %t", called, test.wantUserID != "")
+			}
+			if got := rec.Header().Get("X-Test-User"); got != test.wantUserID {
+				t.Fatalf("authenticated user = %q, want %q", got, test.wantUserID)
+			}
+		})
+	}
+}

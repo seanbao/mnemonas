@@ -214,11 +214,11 @@ function parseShareSettingsMaxAccess(value: string): { value: number; error?: st
     return { value: 0 }
   }
   if (!/^\d+$/.test(trimmed)) {
-    return { value: 0, error: '访问次数上限必须是非负整数。' }
+    return { value: 0, error: '下载次数上限必须是非负整数。' }
   }
   const parsed = Number(trimmed)
   if (!Number.isSafeInteger(parsed)) {
-    return { value: 0, error: '访问次数上限过大。' }
+    return { value: 0, error: '下载次数上限过大。' }
   }
   return { value: parsed }
 }
@@ -322,9 +322,9 @@ const shareRiskReasonMessages: Record<string, string> = {
   no_password: '未设置密码，持有链接的人可直接访问。',
   no_expiration: '未设置过期时间，链接会长期有效。',
   expiring_soon: '分享即将到期，请确认是否需要延长或关闭。',
-  unlimited_access: '未设置访问次数上限。',
-  unused_enabled: '该分享长期未被访问但仍处于启用状态。',
-  stale_enabled: '该分享最近访问时间较久，请确认是否仍需保留。',
+  unlimited_access: '未设置下载次数上限。',
+  unused_enabled: '该分享长期未被下载但仍处于启用状态。',
+  stale_enabled: '该分享最近下载时间较久，请确认是否仍需保留。',
 }
 
 function getShareRiskFallbackReasonMessage(level: ShareRiskReason['level']): string {
@@ -408,7 +408,7 @@ function getShareReviewStatus(metrics: ShareReviewSummaryMetric[]): {
   if (expiringCount > 0 || staleCount > 0) {
     return {
       label: '需确认',
-      description: '存在即将到期或长期未访问的分享，建议确认是否保留。',
+      description: '存在即将到期或长期未下载的分享，建议确认是否保留。',
       color: 'warning',
     }
   }
@@ -446,7 +446,7 @@ function getShareReviewActivityActionCounts(entries: ActivityEntry[]): ActivityA
 function formatShareReviewAccessSummary(share: Share): string {
   const passwordLabel = share.has_password ? '密码保护' : '无密码'
   const maxAccess = share.max_access && share.max_access > 0 ? `${share.max_access}` : '不限'
-  return `${passwordLabel} · 访问 ${share.access_count}/${maxAccess}`
+  return `${passwordLabel} · 下载 ${share.access_count}/${maxAccess}`
 }
 
 function getShareReviewReasonSummary(share: Share): string {
@@ -462,7 +462,7 @@ function getShareReviewSuggestedAction(share: Share): string {
     return '确认是否仍需保留；不再使用时可删除。'
   }
   if (share.risk?.level === 'high') {
-    return '停用或补齐密码、有效期和访问次数限制。'
+    return '停用或补齐密码、有效期和下载次数限制。'
   }
   if (shareHasRiskCode(share, 'expiring_soon')) {
     return '确认延期或关闭。'
@@ -504,7 +504,7 @@ function getShareReviewRecordNote(summary: ShareReviewSummary): string {
     `无密码 ${summary.passwordlessCount} 个`,
     `覆盖较大 ${summary.broadCount} 个`,
     `即将到期 ${summary.expiringSoonCount} 个`,
-    `长期未访问 ${summary.staleCount} 个。`,
+    `长期未下载 ${summary.staleCount} 个。`,
   ].join('，')
 }
 
@@ -832,7 +832,7 @@ export function ShareManager({
     },
     {
       key: 'stale',
-      label: '长期未访问',
+      label: '长期未下载',
       value: staleShares.length,
       description: '建议确认是否仍需保留',
       color: staleShares.length > 0 ? 'warning' : 'default',
@@ -949,7 +949,7 @@ export function ShareManager({
       dispositionStatus: 'confirmed',
       detailEnabled: updatedShare.enabled,
       fallbackRiskLevel: 'none',
-      suggestedAction: '已更新该分享策略；继续复核有效期、密码、访问次数和外部引用。',
+      suggestedAction: '已更新该分享策略；继续复核有效期、密码、下载次数和外部引用。',
     }), { signal })
     if (!signal.aborted) {
       addToast({ title: '分享策略更新结果已记录', color: 'success' })
@@ -1186,7 +1186,7 @@ export function ShareManager({
       dispositionStatus: 'confirmed',
       detailEnabled: true,
       fallbackRiskLevel: 'none',
-      suggestedAction: '已重新启用该分享；继续复核有效期、密码、访问次数和外部引用。',
+      suggestedAction: '已重新启用该分享；继续复核有效期、密码、下载次数和外部引用。',
     }), { signal })
     if (!signal.aborted) {
       addToast({ title: '分享启用结果已记录', color: 'success' })
@@ -1564,7 +1564,7 @@ export function ShareManager({
             className="rounded-lg"
             isDisabled={staleShares.length === 0}
           >
-            长期未访问 ({staleShares.length})
+            长期未下载 ({staleShares.length})
           </Button>
           <Button
             isIconOnly
@@ -1730,7 +1730,7 @@ export function ShareManager({
             <span>即将到期：{expiringSoonShares.length}</span>
             <span>无密码：{passwordlessShares.length}</span>
             <span>覆盖较大：{broadFolderShares.length}</span>
-            <span>长期未访问：{staleShares.length}</span>
+            <span>长期未下载：{staleShares.length}</span>
           </div>
         </div>
       )}
@@ -1831,15 +1831,15 @@ export function ShareManager({
                 </Select>
 
                 <Input
-                  aria-label="分享策略访问次数上限"
-                  label="访问次数上限"
+                  aria-label="分享策略下载次数上限"
+                  label="下载次数上限"
                   type="text"
                   inputMode="numeric"
                   pattern="[0-9]*"
                   value={editMaxAccess}
                   onValueChange={setEditMaxAccess}
-                  isInvalid={shareSettingsUpdate.error?.includes('访问次数') ?? false}
-                  errorMessage={shareSettingsUpdate.error?.includes('访问次数') ? shareSettingsUpdate.error : '0 表示不限制访问次数。'}
+                  isInvalid={shareSettingsUpdate.error?.includes('下载次数') ?? false}
+                  errorMessage={shareSettingsUpdate.error?.includes('下载次数') ? shareSettingsUpdate.error : '0 表示不限制下载次数。'}
                   classNames={{
                     inputWrapper: "bg-content2 border-divider",
                   }}
@@ -2002,7 +2002,7 @@ function ShareItem({ share, onCopy, onReviewActivity, onEditSettings, onToggle, 
               <div className="flex items-center gap-1">
                 <Eye size={12} />
                 <span>
-                  {share.access_count} 次访问
+                  {share.access_count} 次下载
                   {share.max_access && share.max_access > 0 && ` / ${share.max_access}`}
                 </span>
               </div>

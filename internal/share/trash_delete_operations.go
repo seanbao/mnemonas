@@ -45,7 +45,10 @@ func (s *ShareStore) ApplyTrashDeleteOperation(operationID string, planned []*Sh
 				}
 				continue
 			}
-			changed := disableSharesMatchingPlan(snapshot.shares, normalizedPlanned)
+			changed, err := disableSharesMatchingPlan(&snapshot, normalizedPlanned)
+			if err != nil {
+				return err
+			}
 			blockTrashDeleteRestores(snapshot.trashDeleteOperations, changed, operationID)
 			snapshot.trashDeleteOperations[operationID] = &shareTrashDeleteOperation{
 				Planned:        cloneShareSlice(normalizedPlanned),
@@ -63,7 +66,10 @@ func (s *ShareStore) ApplyTrashDeleteOperation(operationID string, planned []*Sh
 				}
 				continue
 			}
-			changed := disableSharesMatchingPlan(snapshot.shares, normalizedPlanned)
+			changed, err := disableSharesMatchingPlan(&snapshot, normalizedPlanned)
+			if err != nil {
+				return err
+			}
 			blockTrashDeleteRestores(snapshot.trashDeleteOperations, changed, operationID)
 			if !exists {
 				marker = &shareTrashDeleteOperation{
@@ -218,6 +224,9 @@ func (s *ShareStore) RollbackTrashDeleteOperation(operationID string) error {
 			updated := copyShare(current)
 			updated.Enabled = original.Enabled
 			blockTrashDeleteRestore(snapshot.trashDeleteOperations, current, operationID)
+			if err := bumpDownloadTicketRevision(&snapshot, updated); err != nil {
+				return err
+			}
 			snapshot.shares[updated.ID] = updated
 		}
 		delete(snapshot.trashDeleteOperations, operationID)
@@ -424,20 +433,23 @@ func stringSlicesEqual(left, right []string) bool {
 	return true
 }
 
-func disableSharesMatchingPlan(shares map[string]*Share, planned []*Share) []*Share {
+func disableSharesMatchingPlan(snapshot *shareStoreSnapshot, planned []*Share) ([]*Share, error) {
 	changed := make([]*Share, 0, len(planned))
 	for _, expected := range planned {
-		current, exists := shares[expected.ID]
+		current, exists := snapshot.shares[expected.ID]
 		if !exists || current.Path != expected.Path || current.Enabled != expected.Enabled || !expected.Enabled {
 			continue
 		}
 		changed = append(changed, copyShare(current))
 		updated := copyShare(current)
 		updated.Enabled = false
-		shares[updated.ID] = updated
+		if err := bumpDownloadTicketRevision(snapshot, updated); err != nil {
+			return nil, err
+		}
+		snapshot.shares[updated.ID] = updated
 	}
 	sortSharesCanonical(changed)
-	return changed
+	return changed, nil
 }
 
 func sameTrashDeleteShareGeneration(current, original *Share) bool {

@@ -1769,9 +1769,9 @@ check_public_share_default_policy() {
   elif [[ "$max_access" == -* ]]; then
     fail "public share.default_max_access must be zero or greater: $max_access"
   elif [[ "$max_access" =~ ^0+$ ]]; then
-    warn "public share.default_max_access leaves new share links without an access limit; set a default such as 20"
+    warn "public share.default_max_access leaves new share links without a logical download limit; set a default such as 20"
   else
-    ok "public share.default_max_access limits new share link accesses: $max_access"
+    ok "public share.default_max_access limits new share logical downloads: $max_access"
   fi
 
   if [[ "$configured_share_default_expires_in_set" == "1" ]]; then

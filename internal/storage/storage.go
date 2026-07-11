@@ -509,6 +509,7 @@ type FileSystem struct {
 	mu                        sync.RWMutex
 	mutationEpoch             uint64 // guarded by mu
 	hashStatWorkspaceFile     func(ctx context.Context, name string) (string, error)
+	hashOpenSnapshotFile      func(ctx context.Context, file *os.File) (string, error)
 
 	hashStagedDeleteSourceFile    func(ctx context.Context, file *os.File) (string, error)
 	hashStagedTrashContentFile    func(ctx context.Context, file *os.File) (string, error)
@@ -842,6 +843,7 @@ func New(cfg *Config) (*FileSystem, error) {
 		renameHistoryMetadataPath: vs.RenamePathHistory,
 	}
 	fs.hashStatWorkspaceFile = fs.hashWorkspaceFile
+	fs.hashOpenSnapshotFile = hashOpenWorkspaceFileContext
 	fs.removeTrashPath = fs.removeCommittedTrashPurgeStage
 	return fs, nil
 }
@@ -876,6 +878,30 @@ func (fs *FileSystem) Stat(ctx context.Context, name string) (*FileInfo, error) 
 }
 
 func (fs *FileSystem) stat(ctx context.Context, name string) (*FileInfo, error) {
+	fileInfo, err := fs.StatMetadata(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if fileInfo.IsDir || fs.currentVersioningPolicy() == nil {
+		return fileInfo, nil
+	}
+
+	hashWorkspaceFile := fs.hashStatWorkspaceFile
+	if hashWorkspaceFile == nil {
+		hashWorkspaceFile = fs.hashWorkspaceFile
+	}
+	if contentHash, err := hashWorkspaceFile(ctx, fileInfo.Path); err == nil {
+		fileInfo.ContentHash = contentHash
+	}
+
+	return fileInfo, nil
+}
+
+// StatMetadata returns file metadata without reading file content.
+func (fs *FileSystem) StatMetadata(ctx context.Context, name string) (*FileInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	var err error
 	name, err = normalizeStorageWorkspacePath(name)
 	if err != nil {
@@ -915,16 +941,11 @@ func (fs *FileSystem) stat(ctx context.Context, name string) (*FileInfo, error) 
 	}
 	policy := fs.currentVersioningPolicy()
 
-	// Check if file has versioning
 	if !info.IsDir && policy != nil {
 		fileInfo.Versioned = policy.ShouldVersion(ctx, name, info.Size)
-		hashWorkspaceFile := fs.hashStatWorkspaceFile
-		if hashWorkspaceFile == nil {
-			hashWorkspaceFile = fs.hashWorkspaceFile
-		}
-		if contentHash, err := hashWorkspaceFile(ctx, name); err == nil {
-			fileInfo.ContentHash = contentHash
-		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	return fileInfo, nil
@@ -978,13 +999,31 @@ func (fs *FileSystem) statForMutationLease(ctx context.Context, name string) (*F
 
 // ReadDir reads directory contents
 func (fs *FileSystem) ReadDir(ctx context.Context, name string) ([]*FileInfo, error) {
+	return fs.readDir(ctx, name, -1)
+}
+
+// ReadDirLimit reads at most limit directory entries without materializing the
+// complete directory. A positive limit is required.
+func (fs *FileSystem) ReadDirLimit(ctx context.Context, name string, limit int) ([]*FileInfo, error) {
+	if limit <= 0 {
+		return nil, errors.New("directory read limit must be positive")
+	}
+	return fs.readDir(ctx, name, limit)
+}
+
+func (fs *FileSystem) readDir(ctx context.Context, name string, limit int) ([]*FileInfo, error) {
 	var err error
 	name, err = normalizeStorageWorkspacePath(name)
 	if err != nil {
 		return nil, err
 	}
 
-	entries, err := fs.workspace.ReadDir(ctx, name)
+	var entries []*workspace.FileInfo
+	if limit > 0 {
+		entries, err = fs.workspace.ReadDirLimit(ctx, name, limit)
+	} else {
+		entries, err = fs.workspace.ReadDir(ctx, name)
+	}
 	if err != nil {
 		if errors.Is(err, workspace.ErrNotFound) {
 			return nil, ErrNotFound
@@ -1068,7 +1107,7 @@ func (fs *FileSystem) OpenFile(ctx context.Context, name string) (*os.File, erro
 		return nil, err
 	}
 
-	f, err := fs.workspace.OpenFile(ctx, name)
+	f, err := fs.workspace.OpenRegularFile(ctx, name)
 	if err != nil {
 		return nil, mapWorkspaceReadablePathError(err)
 	}
@@ -1079,6 +1118,28 @@ func (fs *FileSystem) OpenFile(ctx context.Context, name string) (*os.File, erro
 // OpenFileSnapshot opens a file for reading and returns metadata derived from the
 // same open file handle so callers can serve a consistent snapshot.
 func (fs *FileSystem) OpenFileSnapshot(ctx context.Context, name string) (*os.File, *FileInfo, error) {
+	f, info, err := fs.OpenFileSnapshotMetadata(ctx, name)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	hashSnapshotFile := fs.hashOpenSnapshotFile
+	if hashSnapshotFile == nil {
+		hashSnapshotFile = hashOpenWorkspaceFileContext
+	}
+	contentHash, err := hashSnapshotFile(ctx, f)
+	if err != nil {
+		_ = f.Close()
+		return nil, nil, err
+	}
+	info.ContentHash = contentHash
+
+	return f, info, nil
+}
+
+// OpenFileSnapshotMetadata opens a regular file and returns metadata derived
+// from the same handle without reading the file content.
+func (fs *FileSystem) OpenFileSnapshotMetadata(ctx context.Context, name string) (*os.File, *FileInfo, error) {
 	fs.mu.RLock()
 
 	var err error
@@ -1088,13 +1149,13 @@ func (fs *FileSystem) OpenFileSnapshot(ctx context.Context, name string) (*os.Fi
 		return nil, nil, err
 	}
 
-	f, err := fs.workspace.OpenFile(ctx, name)
+	f, err := fs.workspace.OpenRegularFile(ctx, name)
 	fs.mu.RUnlock()
 	if err != nil {
 		return nil, nil, mapWorkspaceReadablePathError(err)
 	}
 
-	info, err := fs.snapshotFileInfo(ctx, name, f, fs.currentVersioningPolicy())
+	info, err := snapshotFileMetadata(ctx, name, f, fs.currentVersioningPolicy())
 	if err != nil {
 		_ = f.Close()
 		return nil, nil, err
@@ -1103,25 +1164,32 @@ func (fs *FileSystem) OpenFileSnapshot(ctx context.Context, name string) (*os.Fi
 	return f, info, nil
 }
 
-func (fs *FileSystem) snapshotFileInfo(ctx context.Context, name string, file *os.File, policy *versionstore.VersioningPolicy) (*FileInfo, error) {
+func snapshotFileMetadata(ctx context.Context, name string, file *os.File, policy *versionstore.VersioningPolicy) (*FileInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	stat, err := file.Stat()
 	if err != nil {
 		return nil, err
 	}
+	if !stat.Mode().IsRegular() {
+		return nil, ErrNotRegular
+	}
 
 	fileInfo := &FileInfo{
-		Path:    name,
-		Name:    path.Base(name),
-		IsDir:   false,
-		Mode:    stat.Mode(),
-		Size:    stat.Size(),
-		ModTime: stat.ModTime(),
+		Path:                name,
+		Name:                path.Base(name),
+		IsDir:               false,
+		Mode:                stat.Mode(),
+		Size:                stat.Size(),
+		ModTime:             stat.ModTime(),
+		DeleteIdentityToken: workspace.DeleteIdentityTokenForFileInfo(stat),
 	}
 	if policy != nil {
 		fileInfo.Versioned = policy.ShouldVersion(ctx, name, stat.Size())
 	}
-	if contentHash, err := hashOpenWorkspaceFile(file); err == nil {
-		fileInfo.ContentHash = contentHash
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	return fileInfo, nil
@@ -2153,7 +2221,13 @@ func hashOpenWorkspaceFileContext(ctx context.Context, reader *os.File) (string,
 	if err != nil {
 		return "", err
 	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if _, err := reader.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+	if err := ctx.Err(); err != nil {
 		return "", err
 	}
 

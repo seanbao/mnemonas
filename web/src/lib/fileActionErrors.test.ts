@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
+  getBrowserDownloadCapacityErrorToast,
   getFileDownloadErrorToast,
+  getSharedBrowserDownloadCapacityErrorToast,
   getSharedArchiveDownloadErrorToast,
   getSharedMissingFileDownloadErrorToast,
   getQuotaExceededErrorToast,
@@ -11,6 +13,7 @@ import {
   isQuotaExceededError,
 } from './fileActionErrors'
 import { INVALID_API_RESPONSE_MESSAGE } from './apiMessages'
+import { BrowserDownloadCapacityError, BROWSER_DOWNLOAD_CAPACITY_CODE } from './downloadResponse'
 
 describe('fileActionErrors', () => {
   it('detects unavailable filesystem errors by status or code', () => {
@@ -40,6 +43,25 @@ describe('fileActionErrors', () => {
       description: '文件系统当前不可用，请检查设备状态或稍后重试。',
       color: 'warning',
     })
+  })
+
+  it('returns actionable single and shared warnings when browser download capacity is exhausted', () => {
+    const expected = {
+      title: '需要刷新后继续下载',
+      description: '当前页面已提交的下载已达到上限，请刷新页面后继续。',
+      color: 'warning',
+    }
+
+    expect(getBrowserDownloadCapacityErrorToast(new BrowserDownloadCapacityError())).toEqual(expected)
+    expect(getFileDownloadErrorToast({ code: BROWSER_DOWNLOAD_CAPACITY_CODE })).toEqual(expected)
+    expect(getSharedBrowserDownloadCapacityErrorToast([
+      new BrowserDownloadCapacityError(),
+      { code: BROWSER_DOWNLOAD_CAPACITY_CODE },
+    ])).toEqual(expected)
+    expect(getSharedBrowserDownloadCapacityErrorToast([
+      new BrowserDownloadCapacityError(),
+      new Error('other failure'),
+    ])).toBeNull()
   })
 
   it('returns a generic danger toast for ordinary download failures', () => {
@@ -86,6 +108,18 @@ describe('fileActionErrors', () => {
     })).toEqual({
       title: '归档下载失败',
       description: '归档内容过大，请缩小选择范围后重试。',
+      color: 'warning',
+    })
+  })
+
+  it('returns an actionable warning when archive capacity is saturated', () => {
+    expect(getFileDownloadErrorToast({
+      status: 429,
+      code: 'ARCHIVE_DOWNLOAD_RATE_LIMITED',
+      message: '归档下载任务较多，请稍后重试',
+    })).toEqual({
+      title: '归档下载繁忙',
+      description: '当前归档下载任务较多，请稍后重试。',
       color: 'warning',
     })
   })

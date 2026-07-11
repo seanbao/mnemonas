@@ -1,12 +1,18 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  MAX_RETAINED_DOWNLOAD_FRAMES,
   readDownloadJsonErrorDetails,
   readRangedDownloadJsonErrorDetails,
+  reserveBrowserDownloadNavigation,
   triggerBrowserDownload,
+  triggerBrowserDownloadUrl,
 } from './downloadResponse'
 
 describe('downloadResponse', () => {
   afterEach(() => {
+    window.dispatchEvent(new Event('pagehide'))
+    document.querySelectorAll('[data-mnemonas-download-frame]').forEach((frame) => frame.remove())
+    vi.useRealTimers()
     vi.restoreAllMocks()
   })
 
@@ -274,6 +280,171 @@ describe('downloadResponse', () => {
       expect(clickedLink).toBeDefined()
       expect(document.body.contains(clickedLink as HTMLAnchorElement)).toBe(false)
       expect(revokeObjectURLSpy).toHaveBeenCalledWith('blob:removed-link')
+    })
+  })
+
+  describe('triggerBrowserDownloadUrl', () => {
+    function captureNativeNavigation() {
+      const navigationSpy = vi.fn()
+      let navigation: { href: string; target: string; rel: string; referrerPolicy: string } | undefined
+      vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function click(this: HTMLAnchorElement) {
+        navigation = {
+          href: this.href,
+          target: this.target,
+          rel: this.rel,
+          referrerPolicy: this.referrerPolicy,
+        }
+        navigationSpy()
+      })
+      return { navigationSpy, getNavigation: () => navigation }
+    }
+
+    it('retains a hidden same-origin target frame until the page lifecycle ends', () => {
+      const createObjectURLSpy = vi.spyOn(URL, 'createObjectURL')
+      createObjectURLSpy.mockClear()
+      const appendSpy = vi.spyOn(document.body, 'appendChild')
+      const removeSpy = vi.spyOn(HTMLIFrameElement.prototype, 'remove')
+      const { navigationSpy, getNavigation } = captureNativeNavigation()
+
+      triggerBrowserDownloadUrl('/api/v1/download/report.txt?ticket=opaque-ticket', 'folder/report.txt')
+
+      const frame = appendSpy.mock.calls.map(([node]) => node).find((node) => node instanceof HTMLIFrameElement) as HTMLIFrameElement | undefined
+      const link = appendSpy.mock.calls.map(([node]) => node).find((node) => node instanceof HTMLAnchorElement) as HTMLAnchorElement | undefined
+      expect(frame?.getAttribute('src')).toBeNull()
+      expect(frame?.src).toBe('')
+      expect(frame?.title).toBe('下载 folder_report.txt')
+      expect(frame?.hidden).toBe(true)
+      expect(frame?.getAttribute('sandbox')).toBe('allow-downloads')
+      expect(frame?.referrerPolicy).toBe('no-referrer')
+      expect(getNavigation()).toEqual({
+        href: `${window.location.origin}/api/v1/download/report.txt?ticket=opaque-ticket`,
+        target: frame?.name,
+        rel: '',
+        referrerPolicy: 'no-referrer',
+      })
+      expect(createObjectURLSpy).not.toHaveBeenCalled()
+      expect(appendSpy).toHaveBeenCalledTimes(2)
+      expect(navigationSpy).toHaveBeenCalledTimes(1)
+      expect(link?.getAttribute('href')).toBeNull()
+      expect(document.body.contains(link as HTMLAnchorElement)).toBe(false)
+      expect(document.body.contains(frame as HTMLIFrameElement)).toBe(true)
+
+      expect(removeSpy).not.toHaveBeenCalled()
+      window.dispatchEvent(new Event('pagehide'))
+      expect(removeSpy).toHaveBeenCalledTimes(1)
+      expect(document.body.contains(frame as HTMLIFrameElement)).toBe(false)
+    })
+
+    it('registers one lifecycle cleanup for multiple native download frames', () => {
+      const appendSpy = vi.spyOn(document.body, 'appendChild').mockImplementation((node) => node)
+      const addEventListenerSpy = vi.spyOn(window, 'addEventListener')
+      const removeSpy = vi.spyOn(HTMLIFrameElement.prototype, 'remove').mockImplementation(() => {})
+      captureNativeNavigation()
+
+      triggerBrowserDownloadUrl('/api/v1/download/first.txt', 'first.txt')
+      triggerBrowserDownloadUrl('/api/v1/download/second.txt', 'second.txt')
+
+      const frames = appendSpy.mock.calls.map(([node]) => node).filter((node) => node instanceof HTMLIFrameElement)
+      expect(frames).toHaveLength(2)
+      expect((frames[0] as HTMLIFrameElement).name).toMatch(/^mnemonas-download-[0-9a-f]{32}$/)
+      expect((frames[1] as HTMLIFrameElement).name).not.toBe((frames[0] as HTMLIFrameElement).name)
+      expect(addEventListenerSpy.mock.calls.filter(([type]) => type === 'pagehide')).toHaveLength(1)
+      expect(removeSpy).not.toHaveBeenCalled()
+
+      window.dispatchEvent(new Event('pagehide'))
+      expect(removeSpy).toHaveBeenCalledTimes(2)
+    })
+
+    it('releases a retained frame when a non-download response finishes loading', () => {
+      const appendSpy = vi.spyOn(document.body, 'appendChild').mockImplementation((node) => node)
+      const removeSpy = vi.spyOn(HTMLIFrameElement.prototype, 'remove').mockImplementation(() => {})
+      captureNativeNavigation()
+
+      triggerBrowserDownloadUrl('/api/v1/download/error.txt', 'error.txt')
+
+      const frame = appendSpy.mock.calls[0]?.[0] as HTMLIFrameElement | undefined
+      expect(frame).toBeDefined()
+      frame?.dispatchEvent(new Event('load'))
+      expect(removeSpy).toHaveBeenCalledTimes(1)
+
+      window.dispatchEvent(new Event('pagehide'))
+      expect(removeSpy).toHaveBeenCalledTimes(1)
+    })
+
+    it('bounds retained native download frames without cancelling older submissions', () => {
+      const appendSpy = vi.spyOn(document.body, 'appendChild').mockImplementation((node) => node)
+      captureNativeNavigation()
+
+      for (let index = 0; index < MAX_RETAINED_DOWNLOAD_FRAMES; index += 1) {
+        triggerBrowserDownloadUrl(`/api/v1/download/file-${index}.txt`, `file-${index}.txt`)
+      }
+
+      const frameCount = () => appendSpy.mock.calls
+        .map(([node]) => node)
+        .filter((node) => node instanceof HTMLIFrameElement).length
+      expect(frameCount()).toBe(MAX_RETAINED_DOWNLOAD_FRAMES)
+      expect(() => triggerBrowserDownloadUrl('/api/v1/download/overflow.txt', 'overflow.txt'))
+        .toThrow('当前页面已提交过多下载，请刷新页面后重试')
+      expect(frameCount()).toBe(MAX_RETAINED_DOWNLOAD_FRAMES)
+    })
+
+    it('reserves frame capacity before asynchronous download preparation', () => {
+      const reservations = Array.from(
+        { length: MAX_RETAINED_DOWNLOAD_FRAMES },
+        () => reserveBrowserDownloadNavigation(),
+      )
+      try {
+        expect(() => reserveBrowserDownloadNavigation())
+          .toThrow('当前页面已提交过多下载，请刷新页面后重试')
+      } finally {
+        reservations.forEach((reservation) => reservation.release())
+      }
+    })
+
+    it('uses a safe frame label when URL download filename sanitization fails', () => {
+      const appendSpy = vi.spyOn(document.body, 'appendChild').mockImplementation((node) => node)
+      captureNativeNavigation()
+      triggerBrowserDownloadUrl('/api/v1/download/report.txt', '')
+
+      const frame = appendSpy.mock.calls.map(([node]) => node).find((node) => node instanceof HTMLIFrameElement) as HTMLIFrameElement | undefined
+      expect(frame?.title).toBe('下载 download')
+    })
+
+    it.each([
+      ['cross-origin URL', 'https://evil.example/report.txt'],
+      ['scheme-relative cross-origin URL', '//evil.example/report.txt'],
+      ['javascript URL', 'javascript:alert(1)'],
+      ['data URL', 'data:text/plain,secret'],
+      ['malformed URL', 'http://['],
+      ['same-origin URL with credentials', `${window.location.protocol}//user:pass@${window.location.host}/report.txt`],
+    ])('rejects a %s', (_label, url) => {
+      const appendSpy = vi.spyOn(document.body, 'appendChild').mockImplementation((node) => node)
+      expect(() => triggerBrowserDownloadUrl(url, 'report.txt')).toThrow('不安全的下载地址')
+      expect(appendSpy).not.toHaveBeenCalled()
+    })
+
+    it('does not leave a frame when attaching the native navigation fails', () => {
+      const appendSpy = vi.spyOn(document.body, 'appendChild').mockImplementation(() => {
+        throw new Error('navigation blocked')
+      })
+
+      expect(() => triggerBrowserDownloadUrl('/api/v1/download/report.txt', 'report.txt')).toThrow('navigation blocked')
+      expect(appendSpy).toHaveBeenCalledTimes(1)
+      expect(document.querySelector('[data-mnemonas-download-frame]')).toBeNull()
+    })
+
+    it('releases the target frame when the native navigation click fails', () => {
+      vi.spyOn(document.body, 'appendChild').mockImplementation((node) => node)
+      vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {
+        throw new Error('download blocked')
+      })
+      const removeSpy = vi.spyOn(HTMLIFrameElement.prototype, 'remove').mockImplementation(() => {})
+
+      expect(() => triggerBrowserDownloadUrl('/api/v1/download/report.txt', 'report.txt')).toThrow('download blocked')
+      expect(removeSpy).toHaveBeenCalledTimes(1)
+
+      window.dispatchEvent(new Event('pagehide'))
+      expect(removeSpy).toHaveBeenCalledTimes(1)
     })
   })
 })

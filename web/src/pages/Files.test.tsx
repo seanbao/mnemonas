@@ -125,6 +125,7 @@ import {
 } from '@/api/files'
 import { listShares } from '@/api/share'
 import { checkFavorites, toggleFavorite } from '@/api/favorites'
+import { BrowserDownloadCapacityError } from '@/lib/downloadResponse'
 
 const mockListFiles = vi.mocked(listFiles)
 const mockCreateFileDeleteIntent = vi.mocked(createFileDeleteIntent)
@@ -1982,6 +1983,24 @@ describe('FilesPage', () => {
       })
     })
 
+    it('shows the required refresh action when a batch reaches browser download capacity', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/video.mp4'])
+      mockDownloadFile.mockRejectedValue(new BrowserDownloadCapacityError())
+
+      render(<FilesPage />)
+
+      await user.click(await screen.findByText('批量下载'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '需要刷新后继续下载',
+          description: '当前页面已提交的下载已达到上限，请刷新页面后继续。',
+          color: 'warning',
+        })
+      })
+    })
+
     it('shows unavailable toast when batch download fully fails due to unavailable filesystem', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/video.mp4'])
@@ -2103,9 +2122,57 @@ describe('FilesPage', () => {
       await waitFor(() => {
         expectDownloadFileCalledWithOptions('/documents', { archive: 'zip', filename: 'documents.zip' })
         expect(mockAddToast).toHaveBeenCalledWith({
-          title: '已开始下载 1 项',
+          title: '已向浏览器提交 1 项下载',
           color: 'success',
         })
+      })
+    })
+
+    it('rejects a batch containing more than one folder before starting downloads', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.selectedFiles = new Set(['/documents', '/backups'])
+      mockListFiles.mockResolvedValueOnce({
+        files: [
+          { name: 'documents', path: '/documents', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z', deleteIdentityToken },
+          { name: 'backups', path: '/backups', isDir: true, size: 0, modTime: '2024-01-02T00:00:00Z', deleteIdentityToken },
+        ],
+        path: '/',
+      })
+
+      render(<FilesPage />)
+
+      await user.click(await screen.findByText('批量下载'))
+
+      expect(mockDownloadFile).not.toHaveBeenCalled()
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '一次只能下载一个文件夹',
+        description: '文件夹需要单独生成 ZIP 归档，请减少所选文件夹后重试。',
+        color: 'warning',
+      })
+    })
+
+    it('rejects an oversized batch before starting browser download submissions', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const files = Array.from({ length: 21 }, (_, index) => ({
+        name: `file-${index}.txt`,
+        path: `/file-${index}.txt`,
+        isDir: false,
+        size: index + 1,
+        modTime: '2024-01-01T00:00:00Z',
+        deleteIdentityToken,
+      }))
+      mockFilesStoreState.selectedFiles = new Set(files.map((file) => file.path))
+      mockListFiles.mockResolvedValueOnce({ files, path: '/' })
+
+      render(<FilesPage />)
+
+      await user.click(await screen.findByText('批量下载'))
+
+      expect(mockDownloadFile).not.toHaveBeenCalled()
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '一次最多下载 20 项',
+        description: '请减少选择数量，或将文件整理到一个文件夹后下载 ZIP 归档。',
+        color: 'warning',
       })
     })
 
@@ -2126,7 +2193,38 @@ describe('FilesPage', () => {
         expectDownloadFileCalledWithOptions('/documents', { archive: 'zip', filename: 'documents.zip' })
         expectDownloadFileCalledWithOptions('/photo.jpg', { filename: 'photo.jpg' })
         expect(mockAddToast).toHaveBeenCalledWith({
-          title: '已开始下载 2 项',
+          title: '已向浏览器提交 2 项下载',
+          description: '浏览器可能会要求允许多个文件下载。',
+          color: 'success',
+        })
+      })
+    })
+
+    it('bounds batch download preflight concurrency and ignores repeated activation', async () => {
+      const handoff = createDeferred<void>()
+      mockFilesStoreState.selectedFiles = new Set(['/documents', '/photo.jpg', '/video.mp4'])
+      mockDownloadFile.mockImplementation(() => handoff.promise)
+
+      render(<FilesPage />)
+
+      const button = await screen.findByRole('button', { name: '批量下载' })
+      fireEvent.click(button)
+      fireEvent.click(button)
+
+      await waitFor(() => {
+        expect(mockDownloadFile).toHaveBeenCalledTimes(2)
+      })
+
+      await act(async () => {
+        handoff.resolve()
+        await handoff.promise
+      })
+
+      await waitFor(() => {
+        expect(mockDownloadFile).toHaveBeenCalledTimes(3)
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '已向浏览器提交 3 项下载',
+          description: '浏览器可能会要求允许多个文件下载。',
           color: 'success',
         })
       })
@@ -3429,8 +3527,8 @@ describe('FilesPage', () => {
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
-          title: '部分项目开始下载',
-          description: '已开始 1 项，失败 1 项',
+          title: '部分项目已提交到浏览器',
+          description: '已提交 1 项，提交前失败 1 项',
           color: 'warning',
         })
       })
@@ -3456,8 +3554,8 @@ describe('FilesPage', () => {
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
-          title: '部分项目开始下载',
-          description: '已开始 1 项，失败 1 项；文件内容已变更，请刷新列表后重新下载。',
+          title: '部分项目已提交到浏览器',
+          description: '已提交 1 项，提交前失败 1 项；文件内容已变更，请刷新列表后重新下载。',
           color: 'warning',
         })
       })
@@ -3480,8 +3578,8 @@ describe('FilesPage', () => {
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
-          title: '部分项目开始下载',
-          description: '已开始 1 项，失败 1 项；所选文件可能已被移动或删除，请刷新列表后重试。',
+          title: '部分项目已提交到浏览器',
+          description: '已提交 1 项，提交前失败 1 项；所选文件可能已被移动或删除，请刷新列表后重试。',
           color: 'warning',
         })
       })

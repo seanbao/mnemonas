@@ -79,6 +79,24 @@ func TestConfigSaveRetriesTempNameCollision(t *testing.T) {
 	}
 }
 
+func TestLoad_NormalizesWhitespaceOnlyJWTSecret(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+	cfg := Default()
+	cfg.Auth.JWTSecret = " \t "
+	if err := cfg.Save(configPath); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+
+	loaded, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if loaded.Auth.JWTSecret != "" {
+		t.Fatalf("Auth.JWTSecret = %q, want empty generated-secret sentinel", loaded.Auth.JWTSecret)
+	}
+}
+
 func TestDefault(t *testing.T) {
 	cfg := Default()
 
@@ -851,6 +869,11 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name:    "Invalid short explicit JWT secret",
 			modify:  func(c *Config) { c.Auth.JWTSecret = "short-secret" },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid whitespace-padded short JWT secret",
+			modify:  func(c *Config) { c.Auth.JWTSecret = strings.Repeat(" ", 31) + "x" },
 			wantErr: true,
 		},
 		{

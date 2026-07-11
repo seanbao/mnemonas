@@ -633,9 +633,7 @@ func main() {
 	}
 
 	// Use secrets for JWT if not configured
-	if cfg.Auth.JWTSecret == "" {
-		cfg.Auth.JWTSecret = secrets.JWTSecret
-	}
+	applyStartupJWTSecret(cfg, secrets)
 
 	webdavPasswordGenerated := applyStartupWebDAVCredentials(cfg, secrets)
 
@@ -1010,6 +1008,12 @@ func applyStartupWebDAVCredentials(cfg *config.Config, secrets *config.Secrets) 
 		return true
 	}
 	return false
+}
+
+func applyStartupJWTSecret(cfg *config.Config, secrets *config.Secrets) {
+	if strings.TrimSpace(cfg.Auth.JWTSecret) == "" {
+		cfg.Auth.JWTSecret = secrets.JWTSecret
+	}
 }
 
 func initLogger() {

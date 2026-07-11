@@ -16,7 +16,11 @@ import (
 	"github.com/seanbao/mnemonas/internal/storage"
 )
 
-const maxDownloadArchiveEntries = 10000
+const (
+	maxDownloadArchiveEntries        = 10000
+	defaultDownloadArchiveConcurrent = 4
+	downloadArchiveRetryAfterSeconds = 1
+)
 
 var maxDownloadArchiveBytes = int64(20 * 1024 * 1024 * 1024)
 
@@ -31,6 +35,10 @@ var (
 
 var downloadArchiveWriter = func(s *Server, ctx context.Context, zipWriter *zip.Writer, entries []downloadArchiveEntry) error {
 	return s.writeDownloadArchive(ctx, zipWriter, entries)
+}
+
+var downloadArchiveSnapshotOpener = func(s *Server, ctx context.Context, filePath string) (*os.File, *storage.FileInfo, error) {
+	return s.fs.OpenFileSnapshotMetadata(ctx, filePath)
 }
 
 type downloadArchiveInternalError struct {
@@ -82,6 +90,12 @@ func downloadArchiveFormatFromRequest(r *http.Request) (string, error) {
 }
 
 func (s *Server) handleDownloadArchive(w http.ResponseWriter, r *http.Request, rootPath string) {
+	release, ok := s.acquireDownloadArchive(w)
+	if !ok {
+		return
+	}
+	defer release()
+
 	entries, err := s.collectDownloadArchiveEntries(r.Context(), rootPath)
 	if err != nil {
 		s.respondDownloadArchiveError(w, "collect download archive", err)
@@ -91,10 +105,21 @@ func (s *Server) handleDownloadArchive(w http.ResponseWriter, r *http.Request, r
 		s.respondDownloadArchiveError(w, "validate download archive", err)
 		return
 	}
+	if isDownloadProbeRequest(r) {
+		if err := s.preflightDownloadArchiveSnapshots(r.Context(), entries); err != nil {
+			s.respondDownloadArchiveError(w, "preflight download archive", err)
+			return
+		}
+	}
 
-	setUntrustedDownloadHeaders(w)
+	setUntrustedAttachmentDownloadHeaders(w)
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", formatAttachmentHeader(downloadArchiveFilename(rootPath)))
+	if isDownloadProbeRequest(r) {
+		w.Header().Set("Content-Length", "0")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 
 	trackingWriter := &apiDownloadResponseWriter{ResponseWriter: w}
 	zipWriter := zip.NewWriter(trackingWriter)
@@ -105,7 +130,6 @@ func (s *Server) handleDownloadArchive(w http.ResponseWriter, r *http.Request, r
 			s.respondDownloadArchiveError(w, "write download archive", err)
 			return
 		}
-		_ = zipWriter.Close()
 		return
 	}
 	if err := zipWriter.Close(); err != nil {
@@ -126,8 +150,24 @@ func (s *Server) handleDownloadArchive(w http.ResponseWriter, r *http.Request, r
 	}
 }
 
+func (s *Server) acquireDownloadArchive(w http.ResponseWriter) (func(), bool) {
+	if s == nil || s.downloadArchiveGate == nil {
+		ServiceUnavailable(w, "archive downloads unavailable")
+		return nil, false
+	}
+
+	select {
+	case s.downloadArchiveGate <- struct{}{}:
+		return func() { <-s.downloadArchiveGate }, true
+	default:
+		w.Header().Set("Retry-After", strconv.Itoa(downloadArchiveRetryAfterSeconds))
+		_ = NewAPIError(ErrCodeArchiveDownloadRateLimited, "too many archive downloads, try later").Write(w, http.StatusTooManyRequests)
+		return nil, false
+	}
+}
+
 func (s *Server) collectDownloadArchiveEntries(ctx context.Context, rootPath string) ([]downloadArchiveEntry, error) {
-	info, err := s.fs.Stat(ctx, rootPath)
+	info, err := s.fs.StatMetadata(ctx, rootPath)
 	if err != nil {
 		return nil, err
 	}
@@ -138,8 +178,10 @@ func (s *Server) collectDownloadArchiveEntries(ctx context.Context, rootPath str
 	}
 
 	collector := &downloadArchiveCollector{
-		server: s,
-		ctx:    ctx,
+		server:     s,
+		ctx:        ctx,
+		discovered: 1,
+		maxEntries: maxDownloadArchiveEntries,
 	}
 	if info.IsDir {
 		if err := collector.walkDirectory(rootPath, rootName, info); err != nil {
@@ -159,6 +201,8 @@ type downloadArchiveCollector struct {
 	ctx        context.Context
 	entries    []downloadArchiveEntry
 	totalBytes int64
+	discovered int
+	maxEntries int
 }
 
 func (c *downloadArchiveCollector) walkDirectory(sourcePath, zipName string, info *storage.FileInfo) error {
@@ -169,10 +213,18 @@ func (c *downloadArchiveCollector) walkDirectory(sourcePath, zipName string, inf
 		return err
 	}
 
-	children, err := c.server.fs.ReadDir(c.ctx, sourcePath)
+	remaining := c.maxEntries - c.discovered
+	if remaining < 0 {
+		return errDownloadArchiveTooManyEntries
+	}
+	children, err := c.server.fs.ReadDirLimit(c.ctx, sourcePath, remaining+1)
 	if err != nil {
 		return err
 	}
+	if len(children) > remaining {
+		return errDownloadArchiveTooManyEntries
+	}
+	c.discovered += len(children)
 	for _, child := range children {
 		if child == nil {
 			continue
@@ -297,9 +349,18 @@ func (s *Server) writeDownloadArchive(ctx context.Context, zipWriter *zip.Writer
 			continue
 		}
 
-		file, snapshotInfo, err := s.fs.OpenFileSnapshot(ctx, entry.sourcePath)
+		file, snapshotInfo, err := downloadArchiveSnapshotOpener(s, ctx, entry.sourcePath)
 		if err != nil {
+			if errors.Is(err, storage.ErrIsDir) {
+				err = errDownloadArchiveSnapshotChanged
+			}
 			return newDownloadArchiveInternalError("open archive file", err)
+		}
+		if file == nil || snapshotInfo == nil {
+			if file != nil {
+				_ = file.Close()
+			}
+			return newDownloadArchiveInternalError("open archive file", errDownloadArchiveMissingMetadata)
 		}
 		if snapshotInfo.IsDir {
 			_ = file.Close()
@@ -334,7 +395,56 @@ func (s *Server) writeDownloadArchive(ctx context.Context, zipWriter *zip.Writer
 		if written > remaining {
 			return errDownloadArchiveTooLarge
 		}
+		if written != snapshotInfo.Size {
+			return errDownloadArchiveSnapshotChanged
+		}
 		totalBytes += written
+	}
+	return nil
+}
+
+func (s *Server) preflightDownloadArchiveSnapshots(ctx context.Context, entries []downloadArchiveEntry) error {
+	var totalBytes int64
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if entry.info == nil {
+			return newDownloadArchiveInternalError("prepare archive entry", errDownloadArchiveMissingMetadata)
+		}
+		if entry.info.IsDir {
+			continue
+		}
+
+		file, snapshotInfo, err := downloadArchiveSnapshotOpener(s, ctx, entry.sourcePath)
+		if err != nil {
+			if errors.Is(err, storage.ErrIsDir) {
+				err = errDownloadArchiveSnapshotChanged
+			}
+			return newDownloadArchiveInternalError("open archive preflight file", err)
+		}
+		if file == nil || snapshotInfo == nil {
+			if file != nil {
+				_ = file.Close()
+			}
+			return newDownloadArchiveInternalError("open archive preflight file", errDownloadArchiveMissingMetadata)
+		}
+		if err := file.Close(); err != nil {
+			return newDownloadArchiveInternalError("close archive preflight file", err)
+		}
+		if snapshotInfo.IsDir {
+			return errDownloadArchiveSnapshotChanged
+		}
+		if !snapshotInfo.Mode.IsRegular() {
+			return storage.ErrNotRegular
+		}
+		if snapshotInfo.Size != entry.info.Size {
+			return errDownloadArchiveSnapshotChanged
+		}
+		if snapshotInfo.Size < 0 || totalBytes > maxDownloadArchiveBytes-snapshotInfo.Size {
+			return errDownloadArchiveTooLarge
+		}
+		totalBytes += snapshotInfo.Size
 	}
 	return nil
 }
@@ -344,6 +454,9 @@ func validateDownloadArchiveEntries(entries []downloadArchiveEntry) error {
 	for _, entry := range entries {
 		if entry.info == nil {
 			return newDownloadArchiveInternalError("prepare archive entry", errDownloadArchiveMissingMetadata)
+		}
+		if !entry.info.IsDir && !entry.info.Mode.IsRegular() {
+			return storage.ErrNotRegular
 		}
 		zipName, err := safeDownloadArchiveHeaderName(entry.zipName, entry.info.IsDir)
 		if err != nil {
@@ -378,6 +491,8 @@ func (s *Server) respondDownloadArchiveError(w http.ResponseWriter, operation st
 		badRequestInvalidPath(w)
 	case errors.Is(err, storage.ErrNotDir):
 		Conflict(w, "parent path is not a directory")
+	case errors.Is(err, storage.ErrNotRegular):
+		Conflict(w, "resource is not a regular file")
 	case isStorageNotFound(err):
 		s.respondNotFound(w, operation, err)
 	case errors.Is(err, errPathAccessDenied), errors.Is(err, errPathOutsideHomeDir):
@@ -390,6 +505,8 @@ func (s *Server) respondDownloadArchiveError(w http.ResponseWriter, operation st
 func clearDownloadArchiveHeaders(w http.ResponseWriter) {
 	w.Header().Del("Content-Disposition")
 	w.Header().Del("Content-Type")
+	w.Header().Set("X-Frame-Options", "SAMEORIGIN")
+	w.Header().Set("Content-Security-Policy", untrustedEmbeddedErrorContentSecurityPolicy)
 }
 
 func safeDownloadArchiveEntryName(name string) (string, error) {

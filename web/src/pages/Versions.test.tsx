@@ -52,6 +52,7 @@ import { VersionsPage } from './Versions'
 
 import { ApiError, downloadFile, getVersions, restoreVersion } from '@/api/files'
 import { createActivityReviewRecord, listActivity } from '@/api/activity'
+import { BrowserDownloadCapacityError } from '@/lib/downloadResponse'
 
 const mockGetVersions = vi.mocked(getVersions)
 const mockDownloadFile = vi.mocked(downloadFile)
@@ -869,6 +870,24 @@ describe('VersionsPage', () => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '下载版本暂不可用',
           description: '版本存储当前不可用，请检查设备状态或稍后重试。',
+          color: 'warning',
+        })
+      })
+    })
+
+    it('shows the required refresh action when version download capacity is exhausted', async () => {
+      mockDownloadFile.mockRejectedValue(new BrowserDownloadCapacityError())
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<VersionsPage />)
+
+      const input = screen.getByLabelText('版本文件路径')
+      await user.type(input, '/test.txt{enter}')
+      await user.click(await screen.findByRole('button', { name: '下载版本 3' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '需要刷新后继续下载',
+          description: '当前页面已提交的下载已达到上限，请刷新页面后继续。',
           color: 'warning',
         })
       })

@@ -1,8 +1,9 @@
 import { authFetch } from './auth'
-import { readDownloadJsonErrorDetails, triggerBrowserDownload } from '@/lib/downloadResponse'
+import { reserveBrowserDownloadNavigation, type BrowserDownloadReservation } from '@/lib/downloadResponse'
 import { INVALID_API_RESPONSE_MESSAGE } from '@/lib/apiMessages'
 import { getNonBlankJsonString, readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
-import { copyTextToClipboard, encodePathForUrl, ensureZipExtension, getFilenameFromContentDisposition, hasControlCharacter, normalizePath } from '@/lib/utils'
+import { getOrCreateShareDownloadClientNonce } from '@/lib/shareDownloadClientNonce'
+import { copyTextToClipboard, encodePathForUrl, ensureZipExtension, hasControlCharacter, normalizePath } from '@/lib/utils'
 
 const API_BASE = '/api/v1'
 const PUBLIC_SHARE_API_BASE = `${API_BASE}/public/shares`
@@ -128,6 +129,16 @@ export interface PublicShareDownloadOptions extends PublicShareRequestOptions {
   archive?: 'zip'
 }
 
+interface PublicShareDownloadTicket {
+  ticket: string
+  expires_at: string
+}
+
+interface PublicShareDownloadUrlOptions {
+  archive?: 'zip'
+  ticket?: string
+}
+
 export class ShareError extends Error {
   status: number
   code?: string
@@ -207,7 +218,7 @@ const localizedPublicShareErrorMessages: Record<string, string> = {
   SHARE_POLICY_PRINCIPAL_FORBIDDEN: '当前账号不允许为该路径创建或维护分享',
   SHARE_NOT_FOUND: '分享不存在或已失效',
   SHARE_DISABLED: '分享已停用',
-  SHARE_ACCESS_LIMIT_REACHED: '分享访问次数已用尽',
+  SHARE_ACCESS_LIMIT_REACHED: '分享下载次数已用尽',
   SHARE_EXPIRED: '分享已过期',
   FILE_NOT_FOUND: '分享文件不存在或已被移除',
   FILESYSTEM_UNAVAILABLE: '分享内容暂不可用',
@@ -217,6 +228,14 @@ const localizedPublicShareErrorMessages: Record<string, string> = {
   ARCHIVE_TOO_LARGE: '归档内容过大',
   ARCHIVE_DUPLICATE_ENTRY: '归档条目名称冲突，请刷新后重试',
   ARCHIVE_ENTRY_CHANGED: '分享内容已变更，请刷新后重试',
+  ARCHIVE_ENTRY_NOT_REGULAR: '归档包含不支持的特殊文件',
+  FILE_NOT_REGULAR: '下载目标不是普通文件',
+  SHARE_CHANGED: '分享状态已变更，请刷新后重试',
+  DOWNLOAD_TICKET_REQUIRED: '下载票据缺失',
+  DOWNLOAD_TICKET_INVALID: '下载票据无效',
+  DOWNLOAD_TICKET_EXPIRED: '下载票据已过期',
+  DOWNLOAD_TICKET_STALE: '分享状态已变更，请刷新后重试',
+  DOWNLOAD_TICKET_RATE_LIMITED: '下载请求暂时受限，请稍后重试',
   DOWNLOAD_SHARE_ARCHIVE_FAILED: '生成分享归档失败，请稍后重试',
 }
 
@@ -258,7 +277,7 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
 
 function validateShareMaxAccessRequest(maxAccess: unknown): void {
   if (maxAccess !== undefined && !isNonNegativeSafeInteger(maxAccess)) {
-    throw new ShareError('访问次数必须是 0 或不超过安全范围的正整数', 0, 'INVALID_MAX_ACCESS')
+    throw new ShareError('下载次数必须是 0 或不超过安全范围的正整数', 0, 'INVALID_MAX_ACCESS')
   }
 }
 
@@ -308,7 +327,7 @@ function isSafePublicShareName(value: unknown): value is string {
     return false
   }
 
-  if (hasControlCharacter(value)) {
+  if (hasControlCharacter(value) || hasUnsafeFormatCharacter(value)) {
     return false
   }
 
@@ -364,14 +383,14 @@ function isValidShare(value: unknown): value is Share {
   )
 }
 
-function isValidPublicShareInfo(value: unknown): value is PublicShareInfo {
+function isValidPublicShareInfo(value: unknown, expectedId: string): value is PublicShareInfo {
   if (!value || typeof value !== 'object') {
     return false
   }
 
   const share = value as Partial<PublicShareInfo>
   return (
-    typeof share.id === 'string' &&
+    share.id === expectedId &&
     isShareType(share.type) &&
     typeof share.has_password === 'boolean' &&
     isPermission(share.permission) &&
@@ -395,6 +414,77 @@ function isValidPublicShareItem(value: unknown): value is PublicShareItem {
     isNonNegativeSafeInteger(item.size) &&
     typeof item.mod_time === 'string'
   )
+}
+
+function isValidPublicShareDownloadTicket(value: unknown): value is PublicShareDownloadTicket {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false
+  }
+
+  const keys = Object.keys(value)
+  if (keys.length !== 2 || !keys.includes('ticket') || !keys.includes('expires_at')) {
+    return false
+  }
+
+  const ticket = value as Partial<PublicShareDownloadTicket>
+  if (
+    typeof ticket.ticket !== 'string'
+    || !/^[A-Za-z0-9_-]{16,256}$/.test(ticket.ticket)
+    || typeof ticket.expires_at !== 'string'
+    || !isValidRFC3339Timestamp(ticket.expires_at)
+  ) {
+    return false
+  }
+
+  return true
+}
+
+function isValidRFC3339Timestamp(value: string): boolean {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/)
+  if (!match) {
+    return false
+  }
+
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const hour = Number(match[4])
+  const minute = Number(match[5])
+  const second = Number(match[6])
+  const offsetHour = Number(match[7] ?? 0)
+  const offsetMinute = Number(match[8] ?? 0)
+  if (
+    month < 1
+    || month > 12
+    || day < 1
+    || day > new Date(Date.UTC(year, month, 0)).getUTCDate()
+    || hour > 23
+    || minute > 59
+    || second > 59
+    || offsetHour > 23
+    || offsetMinute > 59
+  ) {
+    return false
+  }
+
+  return Number.isFinite(Date.parse(value))
+}
+
+function hasUnsafeFormatCharacter(value: string): boolean {
+  const withoutJoinControls = value.replaceAll('\u200c', '').replaceAll('\u200d', '')
+  return /\p{Cf}/u.test(withoutJoinControls)
+}
+
+function isDirectPublicShareChild(item: PublicShareItem, requestedPath: string): boolean {
+  const prefix = requestedPath ? `${requestedPath}/` : ''
+  if (!item.path.startsWith(prefix)) {
+    return false
+  }
+
+  const relativePath = item.path.slice(prefix.length)
+  return relativePath.length > 0
+    && !relativePath.includes('/')
+    && relativePath === item.name
 }
 
 function getShareErrorMessage(
@@ -491,19 +581,8 @@ async function readShareApiError(response: Response, fallback: string): Promise<
   return new ShareError(message, response.status, code)
 }
 
-async function throwShareDownloadJsonError(response: Response): Promise<void> {
-  const details = await readDownloadJsonErrorDetails(response, '下载分享文件失败', {
-    localizeCode: (code) => localizedPublicShareErrorMessages[code],
-  })
-  if (!details) {
-    return
-  }
-
-  throw new ShareError(details.message, response.status, details.code)
-}
-
 function normalizePublicShareRelativePath(filePath: string): string {
-  if (filePath.includes('\\') || hasControlCharacter(filePath)) {
+  if (filePath.includes('\\') || hasControlCharacter(filePath) || hasUnsafeFormatCharacter(filePath)) {
     throw new Error('非法路径')
   }
   return normalizePath(filePath).split('/').filter(Boolean).join('/')
@@ -732,13 +811,13 @@ export async function getPublicShare(id: string, options: PublicShareRequestOpti
   if (!response.ok) {
     let message = '分享不存在或已失效'
     if (response.status === 410) {
-      message = '分享已过期、已禁用或访问次数已达上限'
+      message = '分享已过期、已禁用或下载次数已达上限'
     }
     throw await readPublicShareApiError(response, message)
   }
   
   const body = await parsePublicShareSuccess<unknown>(response, INVALID_API_RESPONSE_MESSAGE)
-  if (!isValidPublicShareInfo(body)) {
+  if (!isValidPublicShareInfo(body, id)) {
     throw new ShareError(INVALID_API_RESPONSE_MESSAGE, response.status)
   }
   return body
@@ -752,10 +831,11 @@ export async function getPublicShareItems(
   options: PublicShareItemsOptions = {}
 ): Promise<PublicShareItemsResponse> {
   const params = new URLSearchParams()
+  let requestedPath = ''
   if (options?.path) {
-    const normalizedPath = normalizePublicShareRelativePath(options.path)
-    if (normalizedPath) {
-      params.set('path', normalizedPath)
+    requestedPath = normalizePublicShareRelativePath(options.path)
+    if (requestedPath) {
+      params.set('path', requestedPath)
     }
   }
   const query = params.toString()
@@ -766,7 +846,7 @@ export async function getPublicShareItems(
   if (!response.ok) {
     let message = '获取分享文件夹失败'
     if (response.status === 410) {
-      message = '分享已过期、已禁用或访问次数已达上限'
+      message = '分享已过期、已禁用或下载次数已达上限'
     } else if (response.status === 401) {
       message = '密码错误'
     } else if (response.status === 429) {
@@ -776,7 +856,14 @@ export async function getPublicShareItems(
   }
 
   const body = await parsePublicShareSuccess<PublicShareItemsResponse>(response, INVALID_API_RESPONSE_MESSAGE)
-  if (!isCanonicalPublicShareRelativePathString(body.path, { allowEmpty: true }) || !Array.isArray(body.items) || !body.items.every(isValidPublicShareItem)) {
+  if (
+    body.path !== requestedPath
+    || !isCanonicalPublicShareRelativePathString(body.path, { allowEmpty: true })
+    || !Array.isArray(body.items)
+    || !body.items.every(isValidPublicShareItem)
+    || !body.items.every((item) => isDirectPublicShareChild(item, requestedPath))
+    || new Set(body.items.map((item) => item.path)).size !== body.items.length
+  ) {
     throw new ShareError(INVALID_API_RESPONSE_MESSAGE, response.status)
   }
   return body
@@ -802,7 +889,7 @@ export async function accessShareWithPassword(
     if (response.status === 401) {
       message = '密码错误'
     } else if (response.status === 410) {
-      message = '分享已过期、已禁用或访问次数已达上限'
+      message = '分享已过期、已禁用或下载次数已达上限'
     } else if (response.status === 429) {
       message = '尝试次数过多，请稍后再试'
     }
@@ -810,7 +897,7 @@ export async function accessShareWithPassword(
   }
   
   const body = await parsePublicShareSuccess<unknown>(response, INVALID_API_RESPONSE_MESSAGE)
-  if (!isValidPublicShareInfo(body)) {
+  if (!isValidPublicShareInfo(body, id)) {
     throw new ShareError(INVALID_API_RESPONSE_MESSAGE, response.status)
   }
   return body
@@ -819,55 +906,100 @@ export async function accessShareWithPassword(
 /**
  * Get download URL for shared file
  */
-export function getShareDownloadUrl(id: string, options?: { archive?: 'zip' }): string {
-  return withShareDownloadArchiveParam(`${publicShareUrl(id)}/download`, options?.archive)
+export function getShareDownloadUrl(id: string, options?: PublicShareDownloadUrlOptions): string {
+  return withShareDownloadParams(`${publicShareUrl(id)}/download`, options)
 }
 
 /**
  * Get download URL for file in shared folder
  */
-export function getShareFileDownloadUrl(id: string, filePath: string, options?: { archive?: 'zip' }): string {
+export function getShareFileDownloadUrl(id: string, filePath: string, options?: PublicShareDownloadUrlOptions): string {
   const normalizedPath = normalizePublicShareDownloadPath(filePath)
   const encodedPath = encodePathForUrl(`/${normalizedPath}`)
   const trimmedPath = encodedPath.startsWith('/') ? encodedPath.slice(1) : encodedPath
-  return withShareDownloadArchiveParam(`${publicShareUrl(id)}/download/${trimmedPath}`, options?.archive)
+  return withShareDownloadParams(`${publicShareUrl(id)}/download/${trimmedPath}`, options)
 }
 
-function withShareDownloadArchiveParam(url: string, archive?: 'zip'): string {
-  if (!archive) {
+function withShareDownloadParams(url: string, options?: PublicShareDownloadUrlOptions): string {
+  if (!options?.archive && !options?.ticket) {
     return url
   }
-  const params = new URLSearchParams({ archive })
+  const params = new URLSearchParams()
+  if (options.archive) {
+    params.set('archive', options.archive)
+  }
+  if (options.ticket) {
+    params.set('ticket', options.ticket)
+  }
   return `${url}?${params.toString()}`
 }
 
 export async function downloadShare(id: string, options: PublicShareDownloadOptions = {}): Promise<void> {
+  const reservation = reserveBrowserDownloadNavigation()
+  try {
+    await downloadShareWithReservation(id, options, reservation)
+  } finally {
+    reservation.release()
+  }
+}
+
+async function downloadShareWithReservation(
+  id: string,
+  options: PublicShareDownloadOptions,
+  reservation: BrowserDownloadReservation,
+): Promise<void> {
   const normalizedFilePath = options?.filePath ? normalizePublicShareDownloadPath(options.filePath) : undefined
-  const url = normalizedFilePath
-    ? getShareFileDownloadUrl(id, normalizedFilePath, { archive: options.archive })
-    : getShareDownloadUrl(id, { archive: options?.archive })
-  const response = await fetch(url, getPublicShareFetchOptions(options.signal))
+  let clientNonce: string
+  try {
+    clientNonce = getOrCreateShareDownloadClientNonce()
+  } catch {
+    throw new ShareError('当前浏览器无法创建安全下载凭证', 0, 'DOWNLOAD_CLIENT_NONCE_UNAVAILABLE')
+  }
+  const requestBody: { client_nonce: string; path?: string; archive?: 'zip' } = {
+    client_nonce: clientNonce,
+  }
+  if (normalizedFilePath) {
+    requestBody.path = normalizedFilePath
+  }
+  if (options.archive) {
+    requestBody.archive = options.archive
+  }
+
+  const response = await fetch(`${publicShareUrl(id)}/download-ticket`, {
+    ...getPublicShareFetchOptions(options.signal),
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(requestBody),
+  })
 
   if (!response.ok) {
     let message = '下载分享文件失败'
     if (response.status === 401) {
       message = '访问凭证已失效，请重新输入密码'
     } else if (response.status === 410) {
-      message = '分享已过期、已禁用或访问次数已达上限'
+      message = '分享已过期、已禁用或下载次数已达上限'
     } else if (response.status === 429) {
-      message = '尝试次数过多，请稍后再试'
+      message = '下载请求暂时受限，请稍后重试'
     }
     throw await readPublicShareApiError(response, message)
   }
 
+  const ticket = await parsePublicShareSuccess<unknown>(response, INVALID_API_RESPONSE_MESSAGE)
+  if (!isValidPublicShareDownloadTicket(ticket)) {
+    throw new ShareError(INVALID_API_RESPONSE_MESSAGE, response.status)
+  }
+  if (options.signal?.aborted) {
+    throw new DOMException('Download aborted', 'AbortError')
+  }
+
+  const url = normalizedFilePath
+    ? getShareFileDownloadUrl(id, normalizedFilePath, { archive: options.archive, ticket: ticket.ticket })
+    : getShareDownloadUrl(id, { archive: options?.archive, ticket: ticket.ticket })
+
   const pathFilename = normalizedFilePath ? normalizedFilePath.split('/').filter(Boolean).pop() : undefined
   const baseFilename = options?.filename ?? pathFilename ?? 'download'
   const fallbackFilename = options?.archive === 'zip' ? ensureZipExtension(baseFilename) : baseFilename
-  const contentDisposition = response.headers.get('Content-Disposition')
-  await throwShareDownloadJsonError(response)
-  const filename = getFilenameFromContentDisposition(contentDisposition, fallbackFilename)
-  const blob = await response.blob()
-  triggerBrowserDownload(blob, filename)
+  reservation.trigger(url, fallbackFilename)
 }
 
 // === Utility functions ===

@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test'
 import { ensureAuthenticatedAt } from './helpers/auth-check'
+import { publicEntryRoutes } from './helpers/public-share-fixtures'
 import { waitForRouteSettled } from './helpers/route-ready'
 
 const routeGroups = [
@@ -242,4 +243,25 @@ test.describe('可访问性语义扫描', () => {
       ).toEqual([])
     })
   }
+})
+
+test.describe('公开入口可访问性语义扫描', () => {
+  test.use({
+    storageState: { cookies: [], origins: [] },
+  })
+
+  test('登录页和公开分享页应满足基础语义规则', async ({ page }, testInfo) => {
+    testInfo.setTimeout(60_000)
+
+    const issues: AccessibilityIssue[] = []
+    for (const route of publicEntryRoutes()) {
+      await page.goto(route, { waitUntil: 'domcontentloaded' })
+      await waitForRouteSettled(page, route, { waitForNetworkIdle: true })
+      issues.push(...await collectAccessibilityIssues(page, route))
+    }
+
+    expect(
+      issues.map((issue) => `[${issue.rule}] ${issue.route} ${issue.target}: ${issue.message}`),
+    ).toEqual([])
+  })
 })

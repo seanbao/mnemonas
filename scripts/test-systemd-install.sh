@@ -2552,7 +2552,7 @@ EOF
   assert_file_contains "$case_dir/doctor-public-share-trimmed.log" "public backend host is loopback-only: LOCALHOST"
   assert_file_contains "$case_dir/doctor-public-share-trimmed.log" "public share.base_url uses HTTPS on nas.example.com"
   assert_file_contains "$case_dir/doctor-public-share-trimmed.log" "public share.default_expires_in is within 720h: 168h"
-  assert_file_contains "$case_dir/doctor-public-share-trimmed.log" "public share.default_max_access limits new share link accesses: 20"
+  assert_file_contains "$case_dir/doctor-public-share-trimmed.log" "public share.default_max_access limits new share logical downloads: 20"
   assert_file_contains "$case_dir/doctor-public-share-trimmed.log" "public share JSON responses use private cache and Cookie Vary boundaries"
   assert_file_contains "$case_dir/doctor-public-share-trimmed.log" "Summary: 0 failure(s)"
 
@@ -2852,7 +2852,7 @@ EOF
     BACKUP_ROOT="$backup_dir" \
     "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-unlimited-max-access.log"
 
-  assert_file_contains "$case_dir/doctor-public-share-unlimited-max-access.log" "public share.default_max_access leaves new share links without an access limit"
+  assert_file_contains "$case_dir/doctor-public-share-unlimited-max-access.log" "public share.default_max_access leaves new share links without a logical download limit"
   assert_file_contains "$case_dir/doctor-public-share-unlimited-max-access.log" "Summary: 0 failure(s)"
 
   write_executable "$fake_path/curl" \

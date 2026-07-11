@@ -42,6 +42,7 @@ type FileOpener interface {
 type FileStatProvider interface {
 	Stat(ctx context.Context, filePath string) (*storage.FileInfo, error)
 	ReadDir(ctx context.Context, filePath string) ([]*storage.FileInfo, error)
+	ReadDirLimit(ctx context.Context, filePath string, limit int) ([]*storage.FileInfo, error)
 }
 
 type MutationLease interface {
@@ -78,13 +79,21 @@ type Handler struct {
 	fs                    FileOpener
 	userStore             shareOwnerStore
 	baseURL               string
+	downloadTicketKeyMu   sync.RWMutex
+	downloadTicketKey     []byte
+	downloadTicketRandom  io.Reader
+	downloadTicketNow     func() time.Time
 	passwordAttempts      *passwordAttemptTracker
 	passwordFailureLimit  int
 	passwordFailureWindow time.Duration
 	passwordFailureDelay  time.Duration
 	passwordLockDuration  time.Duration
+	passwordCheckGate     chan struct{}
+	beforePasswordCheck   func(id string)
 	beforeMutateShare     func(id string) error
 	pathAccessAuthorizer  PathAccessAuthorizer
+	publicArchiveGate     chan struct{}
+	downloadTicketGate    chan struct{}
 }
 
 type shareOwnerStore interface {
@@ -93,44 +102,78 @@ type shareOwnerStore interface {
 }
 
 type passwordAttemptTracker struct {
-	mu       sync.Mutex
+	mu             sync.Mutex
+	partitions     map[string]*passwordAttemptPartition
+	now            func() time.Time
+	capacity       int
+	globalCapacity int
+	total          int
+}
+
+type passwordAttemptPartition struct {
 	attempts map[string]passwordAttemptState
-	now      func() time.Time
 }
 
 type passwordAttemptState struct {
 	failures    int
 	lastFailure time.Time
 	lockedUntil time.Time
+	lastSeen    time.Time
+	inFlight    bool
 }
 
+type passwordAttemptResult uint8
+
+const (
+	passwordAttemptCancelled passwordAttemptResult = iota
+	passwordAttemptSucceeded
+	passwordAttemptFailed
+)
+
 type PublicShareAccessPolicy struct {
-	CookieNamePrefix       string
-	CookiePaths            []string
-	CookieHTTPOnly         bool
-	CookieSameSite         http.SameSite
-	MetadataCacheControl   string
-	MetadataVaryCookie     bool
-	MetadataNosniff        bool
-	MetadataReferrerPolicy string
-	PasswordFailureLimit   int
-	PasswordFailureWindow  time.Duration
-	PasswordLockDuration   time.Duration
+	CookieNamePrefix              string
+	CookiePaths                   []string
+	CookieHTTPOnly                bool
+	CookieSameSite                http.SameSite
+	MetadataCacheControl          string
+	MetadataVaryCookie            bool
+	MetadataNosniff               bool
+	MetadataReferrerPolicy        string
+	PasswordFailureLimit          int
+	PasswordFailureWindow         time.Duration
+	PasswordLockDuration          time.Duration
+	PasswordAttemptCapacity       int
+	PasswordGlobalAttemptCapacity int
+	PasswordConcurrentLimit       int
+	PasswordBcryptConcurrency     int
+	DownloadTicketCookiePrefix    string
+	DownloadTicketSecurePrefix    string
+	DownloadTicketCookiePath      string
+	DownloadTicketTTL             time.Duration
+	DownloadTicketCookieLimit     int
+	DownloadTicketConcurrency     int
+	PublicArchiveConcurrency      int
 }
 
 const (
-	shareAccessCookiePrefix       = "mnemonas_share_"
-	sharePersistenceWarningHeader = `199 MnemoNAS "share persistence incomplete"`
-	defaultPasswordFailureLimit   = 5
-	defaultPasswordFailureWindow  = 15 * time.Minute
-	defaultPasswordFailureDelay   = 200 * time.Millisecond
-	defaultPasswordLockDuration   = 5 * time.Minute
-	defaultRateLimitErrorMessage  = "too many attempts, try later"
-	defaultJSONRequestBodyLimit   = 1 * 1024 * 1024
-	maxShareArchiveEntries        = 10000
-	maxDurationDays               = int64((1<<63 - 1) / int64(24*time.Hour))
-	untrustedDownloadCSP          = "sandbox; default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; img-src 'self' data: blob:; media-src 'self' data: blob:; style-src 'unsafe-inline'"
-	shareAccessSameSite           = http.SameSiteStrictMode
+	shareAccessCookiePrefix              = "mnemonas_share_"
+	sharePersistenceWarningHeader        = `199 MnemoNAS "share persistence incomplete"`
+	defaultPasswordFailureLimit          = 5
+	defaultPasswordFailureWindow         = 15 * time.Minute
+	defaultPasswordFailureDelay          = 200 * time.Millisecond
+	defaultPasswordLockDuration          = 5 * time.Minute
+	defaultPasswordAttemptCapacity       = 128
+	defaultPasswordGlobalAttemptCapacity = 4096
+	defaultPasswordBcryptConcurrent      = 8
+	defaultRateLimitErrorMessage         = "too many attempts, try later"
+	defaultJSONRequestBodyLimit          = 1 * 1024 * 1024
+	defaultPublicArchiveConcurrent       = 4
+	defaultDownloadTicketConcurrent      = 4
+	maxShareArchiveEntries               = 10000
+	maxDurationDays                      = int64((1<<63 - 1) / int64(24*time.Hour))
+	untrustedAttachmentCSP               = "sandbox allow-downloads; default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'self'; img-src 'self' data: blob:; media-src 'self' data: blob:; style-src 'unsafe-inline'"
+	untrustedEmbeddedErrorCSP            = "sandbox; default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'self'"
+	shareAccessSameSite                  = http.SameSiteStrictMode
 )
 
 var (
@@ -147,95 +190,290 @@ var (
 
 func newPasswordAttemptTracker() *passwordAttemptTracker {
 	return &passwordAttemptTracker{
-		attempts: make(map[string]passwordAttemptState),
-		now:      time.Now,
+		partitions:     make(map[string]*passwordAttemptPartition),
+		now:            time.Now,
+		capacity:       defaultPasswordAttemptCapacity,
+		globalCapacity: defaultPasswordGlobalAttemptCapacity,
 	}
 }
 
 func PublicShareAccessPolicySnapshot() PublicShareAccessPolicy {
 	return PublicShareAccessPolicy{
-		CookieNamePrefix:       shareAccessCookiePrefix,
-		CookiePaths:            []string{"/s/{share_id}", "/api/v1/public/shares/{share_id}"},
-		CookieHTTPOnly:         true,
-		CookieSameSite:         shareAccessSameSite,
-		MetadataCacheControl:   "private, no-cache",
-		MetadataVaryCookie:     true,
-		MetadataNosniff:        true,
-		MetadataReferrerPolicy: "no-referrer",
-		PasswordFailureLimit:   defaultPasswordFailureLimit,
-		PasswordFailureWindow:  defaultPasswordFailureWindow,
-		PasswordLockDuration:   defaultPasswordLockDuration,
+		CookieNamePrefix:              shareAccessCookiePrefix,
+		CookiePaths:                   []string{"/s/{share_id}", "/api/v1/public/shares/{share_id}"},
+		CookieHTTPOnly:                true,
+		CookieSameSite:                shareAccessSameSite,
+		MetadataCacheControl:          "private, no-cache",
+		MetadataVaryCookie:            true,
+		MetadataNosniff:               true,
+		MetadataReferrerPolicy:        "no-referrer",
+		PasswordFailureLimit:          defaultPasswordFailureLimit,
+		PasswordFailureWindow:         defaultPasswordFailureWindow,
+		PasswordLockDuration:          defaultPasswordLockDuration,
+		PasswordAttemptCapacity:       defaultPasswordAttemptCapacity,
+		PasswordGlobalAttemptCapacity: defaultPasswordGlobalAttemptCapacity,
+		PasswordConcurrentLimit:       1,
+		PasswordBcryptConcurrency:     defaultPasswordBcryptConcurrent,
+		DownloadTicketCookiePrefix:    downloadTicketCookiePrefix,
+		DownloadTicketSecurePrefix:    downloadTicketSecureCookiePrefix,
+		DownloadTicketCookiePath:      downloadTicketCookiePath,
+		DownloadTicketTTL:             defaultDownloadTicketTTL,
+		DownloadTicketCookieLimit:     maxDownloadTicketCookies,
+		DownloadTicketConcurrency:     defaultDownloadTicketConcurrent,
+		PublicArchiveConcurrency:      defaultPublicArchiveConcurrent,
 	}
 }
 
-func (t *passwordAttemptTracker) isLocked(key string, failureWindow time.Duration) bool {
+// begin atomically admits at most one password verification for a share/client
+// pair. The returned completion function must be called exactly once.
+func (t *passwordAttemptTracker) begin(shareID, clientID string, limit int, failureWindow, lockDuration time.Duration) (func(passwordAttemptResult) time.Duration, time.Duration, bool) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-
 	now := t.now()
-	t.pruneExpiredLocked(now, failureWindow)
-	state, ok := t.attempts[key]
+	partition := t.partitions[shareID]
+	if partition != nil {
+		t.prunePartitionLocked(shareID, partition, now, failureWindow)
+		partition = t.partitions[shareID]
+	}
+	state, ok := passwordAttemptState{}, false
+	if partition != nil {
+		state, ok = partition.attempts[clientID]
+	}
+	if ok && state.lockedUntil.After(now) {
+		retryAfter := state.lockedUntil.Sub(now)
+		t.mu.Unlock()
+		return nil, retryAfter, false
+	}
+	if ok && state.inFlight {
+		t.mu.Unlock()
+		return nil, time.Second, false
+	}
 	if !ok {
-		return false
+		if partition != nil && !t.makeClientRoomLocked(shareID, partition, now) {
+			t.mu.Unlock()
+			return nil, time.Second, false
+		}
+		if !t.makeGlobalRoomLocked(now, failureWindow) {
+			t.mu.Unlock()
+			return nil, time.Second, false
+		}
+		partition = t.partitions[shareID]
+		if partition == nil {
+			partition = &passwordAttemptPartition{attempts: make(map[string]passwordAttemptState)}
+			t.partitions[shareID] = partition
+		}
+		t.total++
 	}
-	if state.lockedUntil.After(now) {
-		return true
-	}
-	if !state.lockedUntil.IsZero() {
-		delete(t.attempts, key)
-	}
-	return false
-}
-
-func (t *passwordAttemptTracker) recordFailure(key string, limit int, failureWindow, lockDuration time.Duration) bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	now := t.now()
-	t.pruneExpiredLocked(now, failureWindow)
-	state := t.attempts[key]
 	if failureWindow > 0 && !state.lastFailure.IsZero() && now.Sub(state.lastFailure) > failureWindow {
 		state = passwordAttemptState{}
 	}
-	state.failures++
-	state.lastFailure = now
-	if state.failures >= limit {
-		state.lockedUntil = now.Add(lockDuration)
-	}
-	t.attempts[key] = state
+	state.inFlight = true
+	state.lastSeen = now
+	partition.attempts[clientID] = state
+	t.mu.Unlock()
 
-	return !state.lockedUntil.IsZero()
+	var once sync.Once
+	var retryAfter time.Duration
+	return func(result passwordAttemptResult) time.Duration {
+		once.Do(func() {
+			t.mu.Lock()
+			defer t.mu.Unlock()
+
+			partition := t.partitions[shareID]
+			if partition == nil {
+				return
+			}
+			current, exists := partition.attempts[clientID]
+			if !exists {
+				return
+			}
+			if result == passwordAttemptSucceeded {
+				delete(partition.attempts, clientID)
+				t.total--
+				if len(partition.attempts) == 0 {
+					delete(t.partitions, shareID)
+				}
+				return
+			}
+
+			now := t.now()
+			current.inFlight = false
+			if result == passwordAttemptCancelled {
+				if current.failures == 0 && !current.lockedUntil.After(now) {
+					delete(partition.attempts, clientID)
+					t.total--
+				} else {
+					current.lastSeen = now
+					partition.attempts[clientID] = current
+				}
+				if len(partition.attempts) == 0 {
+					delete(t.partitions, shareID)
+				}
+				return
+			}
+			current.failures++
+			current.lastFailure = now
+			current.lastSeen = now
+			if limit <= 0 || current.failures >= limit {
+				current.lockedUntil = now.Add(lockDuration)
+				retryAfter = lockDuration
+			}
+			partition.attempts[clientID] = current
+		})
+		return retryAfter
+	}, 0, true
 }
 
-func (t *passwordAttemptTracker) pruneExpiredLocked(now time.Time, failureWindow time.Duration) {
-	for key, state := range t.attempts {
+func (t *passwordAttemptTracker) makeClientRoomLocked(shareID string, partition *passwordAttemptPartition, now time.Time) bool {
+	if t.capacity <= 0 {
+		return false
+	}
+	if len(partition.attempts) < t.capacity {
+		return true
+	}
+
+	var oldestKey string
+	var oldestSeen time.Time
+	for key, state := range partition.attempts {
+		if state.inFlight || state.failures > 0 || state.lockedUntil.After(now) {
+			continue
+		}
+		if oldestKey == "" || state.lastSeen.Before(oldestSeen) {
+			oldestKey = key
+			oldestSeen = state.lastSeen
+		}
+	}
+	if oldestKey == "" {
+		return false
+	}
+	delete(partition.attempts, oldestKey)
+	t.total--
+	if len(partition.attempts) == 0 {
+		delete(t.partitions, shareID)
+	}
+	return true
+}
+
+func (t *passwordAttemptTracker) makeGlobalRoomLocked(now time.Time, failureWindow time.Duration) bool {
+	if t.globalCapacity <= 0 {
+		return false
+	}
+	if t.total < t.globalCapacity {
+		return true
+	}
+	for shareID, partition := range t.partitions {
+		t.prunePartitionLocked(shareID, partition, now, failureWindow)
+	}
+	if t.total < t.globalCapacity {
+		return true
+	}
+
+	var oldestShareID string
+	var oldestClientID string
+	var oldestSeen time.Time
+	for shareID, partition := range t.partitions {
+		for clientID, state := range partition.attempts {
+			if state.inFlight || state.failures > 0 || state.lockedUntil.After(now) {
+				continue
+			}
+			if oldestClientID == "" || state.lastSeen.Before(oldestSeen) {
+				oldestShareID = shareID
+				oldestClientID = clientID
+				oldestSeen = state.lastSeen
+			}
+		}
+	}
+	if oldestClientID == "" {
+		return false
+	}
+	partition := t.partitions[oldestShareID]
+	delete(partition.attempts, oldestClientID)
+	t.total--
+	if len(partition.attempts) == 0 {
+		delete(t.partitions, oldestShareID)
+	}
+	return true
+}
+
+func (t *passwordAttemptTracker) prunePartitionLocked(shareID string, partition *passwordAttemptPartition, now time.Time, failureWindow time.Duration) {
+	for clientID, state := range partition.attempts {
+		if state.inFlight {
+			continue
+		}
 		if !state.lockedUntil.IsZero() && !state.lockedUntil.After(now) {
-			delete(t.attempts, key)
+			delete(partition.attempts, clientID)
+			t.total--
 			continue
 		}
 		if failureWindow > 0 && !state.lastFailure.IsZero() && now.Sub(state.lastFailure) > failureWindow {
-			delete(t.attempts, key)
+			delete(partition.attempts, clientID)
+			t.total--
 		}
 	}
-}
-
-func (t *passwordAttemptTracker) reset(key string) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	delete(t.attempts, key)
+	if len(partition.attempts) == 0 {
+		delete(t.partitions, shareID)
+	}
 }
 
 // NewHandler creates a new share handler
 // fs can be nil if file download is not needed
 func NewHandler(store *ShareStore, fs FileOpener) *Handler {
-	return &Handler{
+	h := &Handler{
 		store:                 store,
 		fs:                    fs,
+		downloadTicketRandom:  defaultDownloadTicketRandomReader,
+		downloadTicketNow:     time.Now,
 		passwordAttempts:      newPasswordAttemptTracker(),
 		passwordFailureLimit:  defaultPasswordFailureLimit,
 		passwordFailureWindow: defaultPasswordFailureWindow,
 		passwordFailureDelay:  defaultPasswordFailureDelay,
 		passwordLockDuration:  defaultPasswordLockDuration,
+		passwordCheckGate:     make(chan struct{}, defaultPasswordBcryptConcurrent),
+		publicArchiveGate:     make(chan struct{}, defaultPublicArchiveConcurrent),
+		downloadTicketGate:    make(chan struct{}, defaultDownloadTicketConcurrent),
+	}
+	h.downloadTicketKey = newEphemeralDownloadTicketKey()
+	return h
+}
+
+func (h *Handler) acquirePasswordCheck() (func(), bool) {
+	if h == nil || h.passwordCheckGate == nil {
+		return nil, false
+	}
+	select {
+	case h.passwordCheckGate <- struct{}{}:
+		return func() { <-h.passwordCheckGate }, true
+	default:
+		return nil, false
+	}
+}
+
+func (h *Handler) acquireDownloadTicketIssuance(w http.ResponseWriter) (func(), bool) {
+	if h == nil || h.downloadTicketGate == nil {
+		writeShareError(w, http.StatusServiceUnavailable, "download tickets unavailable", "DOWNLOAD_TICKET_UNAVAILABLE")
+		return nil, false
+	}
+	select {
+	case h.downloadTicketGate <- struct{}{}:
+		return func() { <-h.downloadTicketGate }, true
+	default:
+		w.Header().Set("Retry-After", "1")
+		writeShareError(w, http.StatusTooManyRequests, "too many download ticket requests, try later", "DOWNLOAD_TICKET_RATE_LIMITED")
+		return nil, false
+	}
+}
+
+func (h *Handler) acquirePublicArchive(w http.ResponseWriter) (func(), bool) {
+	if h == nil || h.publicArchiveGate == nil {
+		writeShareError(w, http.StatusServiceUnavailable, "archive downloads unavailable", "DOWNLOAD_TICKET_UNAVAILABLE")
+		return nil, false
+	}
+	select {
+	case h.publicArchiveGate <- struct{}{}:
+		return func() { <-h.publicArchiveGate }, true
+	default:
+		w.Header().Set("Retry-After", "1")
+		writeShareError(w, http.StatusTooManyRequests, "too many archive downloads, try later", "DOWNLOAD_TICKET_RATE_LIMITED")
+		return nil, false
 	}
 }
 
@@ -266,6 +504,7 @@ func (h *Handler) Routes(r chi.Router) {
 func (h *Handler) PublicRoutes(r chi.Router) {
 	r.Get("/{id}", h.AccessShare)
 	r.Post("/{id}", h.AccessShareWithPassword)
+	r.Post("/{id}/download-ticket", h.CreateDownloadTicket)
 	r.Get("/{id}/items", h.ListShareItems)
 	r.Get("/{id}/download", h.DownloadShare)
 	r.Get("/{id}/download/*", h.DownloadShareFile)
@@ -939,26 +1178,60 @@ func (h *Handler) AccessShareWithPassword(w http.ResponseWriter, r *http.Request
 	}
 
 	if share.HasPassword() {
-		attemptKey := sharePasswordAttemptKey(id, r)
-		if h.passwordAttempts.isLocked(attemptKey, h.passwordFailureWindow) {
-			writeShareError(w, http.StatusTooManyRequests, defaultRateLimitErrorMessage, "SHARE_PASSWORD_RATE_LIMITED")
+		if err := validateSharePassword(req.Password); err != nil {
+			if errors.Is(err, errSharePasswordLong) {
+				writeShareError(w, http.StatusBadRequest, "share password must be at most 72 bytes", "PASSWORD_TOO_LONG")
+				return
+			}
+			writeShareError(w, http.StatusBadRequest, "invalid password", "INVALID_PASSWORD")
+			return
+		}
+		finishAttempt, retryAfter, admitted := h.passwordAttempts.begin(
+			id,
+			clientIdentifier(r),
+			h.passwordFailureLimit,
+			h.passwordFailureWindow,
+			h.passwordLockDuration,
+		)
+		if !admitted {
+			writeSharePasswordRateLimit(w, retryAfter)
+			return
+		}
+		releasePasswordCheck, acquired := h.acquirePasswordCheck()
+		if !acquired {
+			finishAttempt(passwordAttemptCancelled)
+			writeSharePasswordRateLimit(w, time.Second)
 			return
 		}
 
-		if !share.CheckPassword(req.Password) {
-			locked := h.passwordAttempts.recordFailure(attemptKey, h.passwordFailureLimit, h.passwordFailureWindow, h.passwordLockDuration)
+		var passwordValid bool
+		func() {
+			result := passwordAttemptCancelled
+			defer func() {
+				releasePasswordCheck()
+				retryAfter = finishAttempt(result)
+			}()
+			if h.beforePasswordCheck != nil {
+				h.beforePasswordCheck(id)
+			}
+			passwordValid = share.CheckPassword(req.Password)
+			if passwordValid {
+				result = passwordAttemptSucceeded
+			} else {
+				result = passwordAttemptFailed
+			}
+		}()
+		if !passwordValid {
 			if h.passwordFailureDelay > 0 {
 				time.Sleep(h.passwordFailureDelay)
 			}
-			if locked {
-				writeShareError(w, http.StatusTooManyRequests, defaultRateLimitErrorMessage, "SHARE_PASSWORD_RATE_LIMITED")
+			if retryAfter > 0 {
+				writeSharePasswordRateLimit(w, retryAfter)
 				return
 			}
 			writeShareError(w, http.StatusUnauthorized, "invalid password", "INVALID_PASSWORD")
 			return
 		}
-
-		h.passwordAttempts.reset(attemptKey)
 	}
 
 	info := &PublicShareInfo{
@@ -985,13 +1258,17 @@ func (h *Handler) AccessShareWithPassword(w http.ResponseWriter, r *http.Request
 	h.setShareAccessCookie(w, r, share)
 	writeShareJSONPayload(w, http.StatusOK, payload)
 }
-
-func sharePasswordAttemptKey(id string, r *http.Request) string {
-	return id + "|" + clientIdentifier(r)
-}
-
 func clientIdentifier(r *http.Request) string {
 	return requestip.ClientIP(r)
+}
+
+func writeSharePasswordRateLimit(w http.ResponseWriter, retryAfter time.Duration) {
+	seconds := int64((retryAfter + time.Second - 1) / time.Second)
+	if seconds < 1 {
+		seconds = 1
+	}
+	w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+	writeShareError(w, http.StatusTooManyRequests, defaultRateLimitErrorMessage, "SHARE_PASSWORD_RATE_LIMITED")
 }
 
 func shareDownloadContentType(filePath string) string {
@@ -1015,8 +1292,13 @@ func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 		writeShareError(w, http.StatusBadRequest, "unsupported archive format", "INVALID_ARCHIVE_FORMAT")
 		return
 	}
+	grant, err := h.readDownloadTicketGrant(r)
+	if err != nil {
+		writeDownloadTicketError(w, err)
+		return
+	}
 
-	share, err := h.authorizeShare(r, id)
+	share, err := h.loadShareForDownloadTicket(id)
 	if err != nil {
 		writePublicShareAccessError(w, err)
 		return
@@ -1027,11 +1309,15 @@ func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 			writeShareError(w, http.StatusServiceUnavailable, "filesystem not available", "FILESYSTEM_UNAVAILABLE")
 			return
 		}
+		if err := h.validateDownloadTicketTarget(grant, share, share.Path, archiveFormat); err != nil {
+			writeDownloadTicketValidationError(w, err)
+			return
+		}
 		if err := h.authorizeSharePath(r.Context(), share, share.Path); err != nil {
 			writePublicSharePathError(w, err, "DOWNLOAD_SHARE_FAILED")
 			return
 		}
-		h.serveAuthorizedShareArchive(w, r, share, share.Path)
+		h.serveAuthorizedShareArchive(w, r, share, share.Path, grant)
 		return
 	}
 
@@ -1045,6 +1331,10 @@ func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := h.validateDownloadTicketTarget(grant, share, share.Path, archiveFormat); err != nil {
+		writeDownloadTicketValidationError(w, err)
+		return
+	}
 	if err := h.authorizeSharePath(r.Context(), share, share.Path); err != nil {
 		writePublicSharePathError(w, err, "DOWNLOAD_SHARE_FAILED")
 		return
@@ -1064,6 +1354,10 @@ func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 			writeShareError(w, http.StatusBadRequest, "shared resource is a directory", "INVALID_SHARE_TYPE")
 			return
 		}
+		if errors.Is(err, storage.ErrNotRegular) {
+			writeShareError(w, http.StatusConflict, "download target is not a regular file", "FILE_NOT_REGULAR")
+			return
+		}
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_FAILED")
 		return
 	}
@@ -1072,6 +1366,19 @@ func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer reader.Close()
+	share, err = h.loadShareForDownloadTicket(id)
+	if err != nil {
+		writePublicShareAccessError(w, err)
+		return
+	}
+	if err := h.validateDownloadTicketTarget(grant, share, share.Path, archiveFormat); err != nil {
+		writeDownloadTicketValidationError(w, err)
+		return
+	}
+	if err := h.authorizeSharePath(r.Context(), share, share.Path); err != nil {
+		writePublicSharePathError(w, err, "DOWNLOAD_SHARE_FAILED")
+		return
+	}
 
 	h.serveAuthorizedShareDownload(w, r, share, reader, share.Path)
 }
@@ -1099,8 +1406,13 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 		writeShareError(w, http.StatusBadRequest, "unsupported archive format", "INVALID_ARCHIVE_FORMAT")
 		return
 	}
+	grant, err := h.readDownloadTicketGrant(r)
+	if err != nil {
+		writeDownloadTicketError(w, err)
+		return
+	}
 
-	share, err := h.authorizeShare(r, id)
+	share, err := h.loadShareForDownloadTicket(id)
 	if err != nil {
 		writePublicShareAccessError(w, err)
 		return
@@ -1127,13 +1439,17 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := h.validateDownloadTicketTarget(grant, share, fullPath, archiveFormat); err != nil {
+		writeDownloadTicketValidationError(w, err)
+		return
+	}
 	if err := h.authorizeSharePath(r.Context(), share, fullPath); err != nil {
 		writePublicSharePathError(w, err, "DOWNLOAD_SHARE_FAILED")
 		return
 	}
 
 	if archiveFormat == "zip" {
-		h.serveAuthorizedShareArchive(w, r, share, fullPath)
+		h.serveAuthorizedShareArchive(w, r, share, fullPath, grant)
 		return
 	}
 
@@ -1151,6 +1467,10 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 			writeShareError(w, http.StatusBadRequest, "path is a directory", "INVALID_PATH")
 			return
 		}
+		if errors.Is(err, storage.ErrNotRegular) {
+			writeShareError(w, http.StatusConflict, "download target is not a regular file", "FILE_NOT_REGULAR")
+			return
+		}
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_FAILED")
 		return
 	}
@@ -1159,6 +1479,20 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer reader.Close()
+	share, err = h.loadShareForDownloadTicket(id)
+	if err != nil {
+		writePublicShareAccessError(w, err)
+		return
+	}
+	fullPath = path.Join(share.Path, filePath)
+	if err := h.validateDownloadTicketTarget(grant, share, fullPath, archiveFormat); err != nil {
+		writeDownloadTicketValidationError(w, err)
+		return
+	}
+	if err := h.authorizeSharePath(r.Context(), share, fullPath); err != nil {
+		writePublicSharePathError(w, err, "DOWNLOAD_SHARE_FAILED")
+		return
+	}
 
 	h.serveAuthorizedShareDownload(w, r, share, reader, fullPath)
 }
@@ -1202,28 +1536,10 @@ func (h *Handler) serveAuthorizedShareDownload(w http.ResponseWriter, r *http.Re
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_FAILED")
 		return
 	}
-	accessReservation, err := h.reserveAuthorizedAccessForShare(share)
-	if err != nil {
-		if IsPersistenceWarning(err) {
-			markSharePersistenceWarningHeaders(w)
-		} else {
-			writePublicShareAccessError(w, err)
-			return
-		}
-	}
-
 	setShareDownloadHeaders(w, filePath)
 	if err := streamDownload(w, reader, firstChunk, exhausted); err != nil {
 		if streamResponseStarted(err) {
 			return
-		}
-		if rollbackErr := h.store.rollbackAuthorizedAccess(accessReservation); rollbackErr != nil {
-			if IsPersistenceWarning(rollbackErr) {
-				markSharePersistenceWarningHeaders(w)
-			} else {
-				writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_ROLLBACK_FAILED")
-				return
-			}
 		}
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_FAILED")
 		return
@@ -1284,9 +1600,16 @@ type shareArchiveCollector struct {
 	ctx          context.Context
 	entries      []shareArchiveEntry
 	totalBytes   int64
+	discovered   int
 }
 
-func (h *Handler) serveAuthorizedShareArchive(w http.ResponseWriter, r *http.Request, share *Share, rootPath string) {
+func (h *Handler) serveAuthorizedShareArchive(w http.ResponseWriter, r *http.Request, share *Share, rootPath string, grants ...*downloadTicketGrant) {
+	release, acquired := h.acquirePublicArchive(w)
+	if !acquired {
+		return
+	}
+	defer release()
+
 	statProvider, ok := h.fs.(FileStatProvider)
 	if !ok {
 		writeShareError(w, http.StatusServiceUnavailable, "filesystem not available", "FILESYSTEM_UNAVAILABLE")
@@ -1302,15 +1625,23 @@ func (h *Handler) serveAuthorizedShareArchive(w http.ResponseWriter, r *http.Req
 		writePublicShareArchiveError(w, err)
 		return
 	}
-
-	accessReservation, err := h.reserveAuthorizedAccessForShare(share)
-	if err != nil {
-		if IsPersistenceWarning(err) {
-			markSharePersistenceWarningHeaders(w)
-		} else {
+	if len(grants) > 0 && grants[0] != nil {
+		currentShare, err := h.loadShareForDownloadTicket(share.ID)
+		if err != nil {
 			writePublicShareAccessError(w, err)
 			return
 		}
+		if err := h.validateDownloadTicketTarget(grants[0], currentShare, rootPath, "zip"); err != nil {
+			writeDownloadTicketValidationError(w, err)
+			return
+		}
+		if err := h.authorizeSharePath(r.Context(), currentShare, rootPath); err != nil {
+			writePublicSharePathError(w, err, "DOWNLOAD_SHARE_FAILED")
+			return
+		}
+	} else if err := h.ensureShareOwnerActive(share); err != nil {
+		writePublicShareAccessError(w, err)
+		return
 	}
 
 	setShareArchiveDownloadHeaders(w, rootPath)
@@ -1318,35 +1649,38 @@ func (h *Handler) serveAuthorizedShareArchive(w http.ResponseWriter, r *http.Req
 	zipWriter := zip.NewWriter(trackingWriter)
 	if err := h.writeShareArchive(r.Context(), zipWriter, entries); err != nil {
 		if trackingWriter.started {
-			_ = zipWriter.Close()
 			return
 		}
-		h.rollbackShareArchiveAccessOrWriteError(w, accessReservation, err, "DOWNLOAD_SHARE_ARCHIVE_FAILED")
+		h.writeShareArchiveBeforeResponseError(w, err, "DOWNLOAD_SHARE_ARCHIVE_FAILED")
 		return
 	}
 	if err := zipWriter.Close(); err != nil {
 		if trackingWriter.started {
 			return
 		}
-		h.rollbackShareArchiveAccessOrWriteError(w, accessReservation, err, "DOWNLOAD_SHARE_ARCHIVE_FAILED")
+		h.writeShareArchiveBeforeResponseError(w, err, "DOWNLOAD_SHARE_ARCHIVE_FAILED")
 		return
 	}
 }
 
-func (h *Handler) rollbackShareArchiveAccessOrWriteError(w http.ResponseWriter, reservation *authorizedAccessReservation, err error, fallbackCode string) {
-	if rollbackErr := h.store.rollbackAuthorizedAccess(reservation); rollbackErr != nil {
-		if IsPersistenceWarning(rollbackErr) {
-			markSharePersistenceWarningHeaders(w)
-		} else {
-			writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_ARCHIVE_ROLLBACK_FAILED")
-			return
-		}
-	}
+func (h *Handler) writeShareArchiveBeforeResponseError(w http.ResponseWriter, err error, fallbackCode string) {
+	clearShareArchiveDownloadHeaders(w)
 	if isPublicShareArchiveResponseError(err) {
 		writePublicShareArchiveError(w, err)
 		return
 	}
 	writeShareError(w, http.StatusInternalServerError, "internal server error", fallbackCode)
+}
+
+func clearShareArchiveDownloadHeaders(w http.ResponseWriter) {
+	header := w.Header()
+	header.Del("Content-Disposition")
+	header.Del("Content-Length")
+	header.Del("Content-Range")
+	header.Del("Accept-Ranges")
+	header.Set("X-Frame-Options", "SAMEORIGIN")
+	header.Set("Content-Security-Policy", untrustedEmbeddedErrorCSP)
+	setPublicShareJSONHeaders(w)
 }
 
 func (h *Handler) collectShareArchiveEntries(ctx context.Context, share *Share, statProvider FileStatProvider, rootPath string) ([]shareArchiveEntry, error) {
@@ -1365,6 +1699,7 @@ func (h *Handler) collectShareArchiveEntries(ctx context.Context, share *Share, 
 		share:        share,
 		statProvider: statProvider,
 		ctx:          ctx,
+		discovered:   1,
 	}
 	if info.IsDir {
 		if err := collector.walkDirectory(rootPath, rootName, info); err != nil {
@@ -1387,10 +1722,15 @@ func (c *shareArchiveCollector) walkDirectory(sourcePath, zipName string, info *
 		return err
 	}
 
-	children, err := c.statProvider.ReadDir(c.ctx, sourcePath)
+	remaining := maxShareArchiveEntries - c.discovered
+	children, err := c.statProvider.ReadDirLimit(c.ctx, sourcePath, remaining+1)
 	if err != nil {
 		return err
 	}
+	if len(children) > remaining {
+		return errShareArchiveTooManyEntries
+	}
+	c.discovered += len(children)
 	for _, child := range children {
 		if child == nil {
 			continue
@@ -1442,6 +1782,12 @@ func (c *shareArchiveCollector) addDirectory(sourcePath, zipName string, info *s
 }
 
 func (c *shareArchiveCollector) addFile(sourcePath, zipName string, info *storage.FileInfo) error {
+	if info == nil {
+		return errShareArchiveMissingMetadata
+	}
+	if !info.Mode.IsRegular() {
+		return storage.ErrNotRegular
+	}
 	if len(c.entries)+1 > maxShareArchiveEntries {
 		return errShareArchiveTooManyEntries
 	}
@@ -1486,6 +1832,9 @@ func (h *Handler) writeShareArchive(ctx context.Context, zipWriter *zip.Writer, 
 			}
 			continue
 		}
+		if !entry.info.Mode.IsRegular() {
+			return storage.ErrNotRegular
+		}
 
 		reader, archiveInfo, err := h.openShareArchiveFile(ctx, entry)
 		if err != nil {
@@ -1500,6 +1849,10 @@ func (h *Handler) writeShareArchive(ctx context.Context, zipWriter *zip.Writer, 
 		if archiveInfo.IsDir {
 			_ = reader.Close()
 			return errShareArchiveSnapshotChanged
+		}
+		if !archiveInfo.Mode.IsRegular() {
+			_ = reader.Close()
+			return storage.ErrNotRegular
 		}
 		if archiveInfo.Size < 0 || totalBytes > maxShareArchiveBytes-archiveInfo.Size {
 			_ = reader.Close()
@@ -1530,6 +1883,9 @@ func (h *Handler) writeShareArchive(ctx context.Context, zipWriter *zip.Writer, 
 		if written > remaining {
 			return errShareArchiveContentTooLarge
 		}
+		if written != archiveInfo.Size {
+			return errShareArchiveSnapshotChanged
+		}
 		totalBytes += written
 	}
 	return nil
@@ -1540,6 +1896,9 @@ func validateShareArchiveEntries(entries []shareArchiveEntry) error {
 	for _, entry := range entries {
 		if entry.info == nil {
 			return errShareArchiveMissingMetadata
+		}
+		if !entry.info.IsDir && !entry.info.Mode.IsRegular() {
+			return storage.ErrNotRegular
 		}
 		zipName, err := safeShareArchiveHeaderName(entry.zipName, entry.info.IsDir)
 		if err != nil {
@@ -1574,6 +1933,7 @@ func isPublicShareArchiveResponseError(err error) bool {
 		errors.Is(err, errShareArchiveDuplicateEntry) ||
 		errors.Is(err, errShareArchiveSnapshotChanged) ||
 		errors.Is(err, errInvalidShareArchivePath) ||
+		errors.Is(err, storage.ErrNotRegular) ||
 		errors.Is(err, storage.ErrNotFound) ||
 		errors.Is(err, ErrShareNotFound) ||
 		errors.Is(err, storage.ErrNotDir) ||
@@ -1590,6 +1950,8 @@ func writePublicShareArchiveError(w http.ResponseWriter, err error) {
 		writeShareError(w, http.StatusConflict, "archive contains duplicate entries", "ARCHIVE_DUPLICATE_ENTRY")
 	case errors.Is(err, errShareArchiveSnapshotChanged):
 		writeShareError(w, http.StatusConflict, "archive entry changed during download", "ARCHIVE_ENTRY_CHANGED")
+	case errors.Is(err, storage.ErrNotRegular):
+		writeShareError(w, http.StatusConflict, "archive entry is not a regular file", "ARCHIVE_ENTRY_NOT_REGULAR")
 	case errors.Is(err, errInvalidShareArchivePath):
 		writeShareError(w, http.StatusBadRequest, "invalid path", "INVALID_PATH")
 	case errors.Is(err, storage.ErrNotFound), errors.Is(err, ErrShareNotFound):
@@ -1611,16 +1973,6 @@ func (h *Handler) serveSeekableShareDownload(w http.ResponseWriter, r *http.Requ
 		setShareDownloadHeaders(w, filePath)
 		http.ServeContent(w, r, path.Base(filePath), time.Time{}, reader)
 		return
-	}
-
-	_, err = h.reserveAuthorizedAccessForShare(share)
-	if err != nil {
-		if IsPersistenceWarning(err) {
-			markSharePersistenceWarningHeaders(w)
-		} else {
-			writePublicShareAccessError(w, err)
-			return
-		}
 	}
 
 	setShareDownloadHeaders(w, filePath)
@@ -1712,14 +2064,14 @@ func requestHasRangeHeader(r *http.Request) bool {
 }
 
 func setShareArchiveDownloadHeaders(w http.ResponseWriter, rootPath string) {
-	setUntrustedDownloadHeaders(w)
+	setUntrustedAttachmentDownloadHeaders(w)
 	w.Header().Set("Content-Disposition", contentDispositionAttachment(shareArchiveFilename(rootPath)))
 	w.Header().Set("Content-Type", "application/zip")
 }
 
 func setShareDownloadHeaders(w http.ResponseWriter, filePath string) {
 	filename := path.Base(filePath)
-	setUntrustedDownloadHeaders(w)
+	setUntrustedAttachmentDownloadHeaders(w)
 	w.Header().Set("Content-Disposition", contentDispositionAttachment(filename))
 	w.Header().Set("Content-Type", shareDownloadContentType(filePath))
 }
@@ -1774,11 +2126,12 @@ func shareArchiveFilename(rootPath string) string {
 	return rootName + ".zip"
 }
 
-func setUntrustedDownloadHeaders(w http.ResponseWriter) {
+func setUntrustedAttachmentDownloadHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "private, no-cache")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "SAMEORIGIN")
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	w.Header().Set("Content-Security-Policy", untrustedDownloadCSP)
+	w.Header().Set("Content-Security-Policy", untrustedAttachmentCSP)
 }
 
 func setPublicShareJSONHeaders(w http.ResponseWriter) {
@@ -1869,11 +2222,11 @@ func (w *responseStartTrackingWriter) WriteHeader(statusCode int) {
 }
 
 func (w *responseStartTrackingWriter) Write(p []byte) (int, error) {
-	n, err := w.ResponseWriter.Write(p)
-	if err == nil || n > 0 {
-		w.started = true
-	}
-	return n, err
+	// net/http can commit the response headers before the underlying write
+	// reports a zero-byte transport error, so treat every Write attempt as a
+	// committed response.
+	w.started = true
+	return w.ResponseWriter.Write(p)
 }
 
 // ListShareItems lists items within a shared folder.
@@ -1976,15 +2329,9 @@ func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 		Path:  relPath,
 		Items: items,
 	}
-
-	accessReservation, err := h.reserveAuthorizedAccessForShare(share)
-	if err != nil {
-		if IsPersistenceWarning(err) {
-			markSharePersistenceWarningHeaders(w)
-		} else {
-			writePublicShareAccessError(w, err)
-			return
-		}
+	if err := h.ensureShareOwnerActive(share); err != nil {
+		writePublicShareAccessError(w, err)
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1992,14 +2339,6 @@ func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(trackingWriter).Encode(resp); err != nil {
 		if trackingWriter.started {
 			return
-		}
-		if rollbackErr := h.store.rollbackAuthorizedAccess(accessReservation); rollbackErr != nil {
-			if IsPersistenceWarning(rollbackErr) {
-				markSharePersistenceWarningHeaders(w)
-			} else {
-				writeShareError(w, http.StatusInternalServerError, "internal server error", "LIST_SHARE_ITEMS_ROLLBACK_FAILED")
-				return
-			}
 		}
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "LIST_SHARE_ITEMS_FAILED")
 		return

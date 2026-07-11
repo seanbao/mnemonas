@@ -106,6 +106,9 @@ func (s *ShareStore) ApplyTrashRestoreOperation(
 				updated.Path = target.Path
 			}
 			updated.Enabled = target.Enabled
+			if err := bumpDownloadTicketRevision(&snapshot, updated); err != nil {
+				return err
+			}
 			snapshot.shares[updated.ID] = updated
 			restored = append(restored, copyShare(updated))
 		}

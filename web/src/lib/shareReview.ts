@@ -22,9 +22,9 @@ const shareRiskReasonMessages: Record<string, string> = {
   no_password: '未设置密码，持有链接的人可直接访问。',
   no_expiration: '未设置过期时间，链接会长期有效。',
   expiring_soon: '分享即将到期，请确认是否需要延长或关闭。',
-  unlimited_access: '未设置访问次数上限。',
-  unused_enabled: '该分享长期未被访问但仍处于启用状态。',
-  stale_enabled: '该分享最近访问时间较久，请确认是否仍需保留。',
+  unlimited_access: '未设置下载次数上限。',
+  unused_enabled: '该分享长期未被下载但仍处于启用状态。',
+  stale_enabled: '该分享最近下载时间较久，请确认是否仍需保留。',
 }
 
 function shareHasRiskCode(share: Share, code: string): boolean {
@@ -140,7 +140,7 @@ function getShareReviewAction(share: Share): string {
     return '确认是否仍需保留；不再使用时可删除。'
   }
   if (share.risk?.level === 'high') {
-    return '停用或补齐密码、有效期和访问次数限制。'
+    return '停用或补齐密码、有效期和下载次数限制。'
   }
   if (shareHasRiskCode(share, 'expiring_soon')) {
     return '确认延期或关闭。'
@@ -172,7 +172,7 @@ export function formatShareReviewReport(
     ['无密码', `${summary.passwordlessCount} 个`],
     ['覆盖较大', `${summary.broadCount} 个`],
     ['即将到期', `${summary.expiringSoonCount} 个`],
-    ['长期未访问', `${summary.staleCount} 个`],
+    ['长期未下载', `${summary.staleCount} 个`],
   ]
   if (options.pathFilter) {
     headerRows.push(['路径筛选', options.pathFilter])
@@ -195,7 +195,7 @@ export function formatShareReviewReport(
     ...headerRows.map(([label, value]) => `${label}：${value}`),
     '',
     '分享明细',
-    '路径 | 类型 | 状态 | 风险等级 | 访问限制 | 访问次数 | 过期时间 | 风险原因 | 建议处理',
+    '路径 | 类型 | 状态 | 风险等级 | 访问限制 | 下载次数 | 过期时间 | 风险原因 | 建议处理',
     ...shareRows,
   ].join('\n')
 }

@@ -1,4 +1,5 @@
 import { test, expect, type Locator, type Page } from '@playwright/test'
+import { readFile } from 'node:fs/promises'
 import { ensureAuthenticatedAt } from './helpers/auth-check'
 import { createFolderThroughUi, dropTextFileOnFileBrowser, fileRowByName, openFolderThroughUi, uploadTextFileThroughPicker } from './helpers/files'
 import { expectNoPageHorizontalOverflow } from './helpers/layout'
@@ -265,6 +266,44 @@ test.describe('文件浏览页面', () => {
     await expect(page).not.toHaveURL(/\/login/)
     await expect(page.getByRole('button', { name: '根目录' })).toBeVisible({ timeout: 5000 })
     await expect(page.getByRole('button', { name: '上传文件', exact: true })).toBeVisible()
+  })
+
+  test('认证文件下载应同步会话并交由浏览器原生传输', async ({ page }) => {
+    const fileName = 'e2e-share-fixture.txt'
+    await expect(fileRowByName(page, fileName)).toBeVisible({ timeout: 10_000 })
+
+    const sessionResponsePromise = page.waitForResponse((response) => (
+      response.request().method() === 'POST'
+      && new URL(response.url()).pathname === '/api/v1/auth/download-session'
+    ))
+    const probeResponsePromise = page.waitForResponse((response) => (
+      response.request().method() === 'GET'
+      && new URL(response.url()).pathname === `/api/v1/download/${fileName}`
+      && response.request().headers()['x-mnemonas-download-probe'] === 'json-error'
+    ))
+    const transferResponsePromise = page.waitForResponse((response) => (
+      response.request().method() === 'GET'
+      && new URL(response.url()).pathname === `/api/v1/download/${fileName}`
+      && response.request().headers()['x-mnemonas-download-probe'] === undefined
+    ))
+    const downloadPromise = page.waitForEvent('download')
+
+    await page.getByLabel(`${fileName} 操作菜单`).first().click()
+    await page.getByRole('menuitem', { name: /^下载$/ }).click()
+
+    const [sessionResponse, probeResponse, transferResponse, download] = await Promise.all([
+      sessionResponsePromise,
+      probeResponsePromise,
+      transferResponsePromise,
+      downloadPromise,
+    ])
+    expect(sessionResponse.ok()).toBe(true)
+    expect(probeResponse.status()).toBe(206)
+    expect(transferResponse.ok()).toBe(true)
+    expect(download.suggestedFilename()).toBe(fileName)
+    const downloadPath = await download.path()
+    expect(downloadPath).not.toBeNull()
+    expect(await readFile(downloadPath!, 'utf8')).toBe('fixture for public share e2e')
   })
 
   test('应显示面包屑导航', async ({ page }) => {

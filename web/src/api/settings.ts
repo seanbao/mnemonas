@@ -743,12 +743,12 @@ function validateShareSettingsUpdateRequest(share: UpdateSettingsRequest['share'
     return
   }
   if (share.default_max_access !== undefined && !isNonNegativeSafeInteger(share.default_max_access)) {
-    throw new SettingsError('默认访问次数必须是 0 或不超过安全范围的正整数', 0, 'INVALID_SHARE_DEFAULT_MAX_ACCESS')
+    throw new SettingsError('默认下载次数必须是 0 或不超过安全范围的正整数', 0, 'INVALID_SHARE_DEFAULT_MAX_ACCESS')
   }
   if (share.policy_rules) {
     for (const [index, rule] of share.policy_rules.entries()) {
       if (rule.max_access !== undefined && !isNonNegativeSafeInteger(rule.max_access)) {
-        throw new SettingsError(`第 ${index + 1} 行访问次数上限必须是 0 或不超过安全范围的正整数`, 0, 'INVALID_SHARE_POLICY_MAX_ACCESS')
+        throw new SettingsError(`第 ${index + 1} 行下载次数上限必须是 0 或不超过安全范围的正整数`, 0, 'INVALID_SHARE_POLICY_MAX_ACCESS')
       }
     }
   }

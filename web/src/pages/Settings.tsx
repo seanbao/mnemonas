@@ -102,21 +102,21 @@ const SHARE_POLICY_PRESETS = [
   {
     key: 'family',
     label: '家庭默认',
-    description: '7 天有效，最多 20 次访问',
+    description: '7 天有效，最多 20 次下载',
     defaultExpiresIn: '168h',
     defaultMaxAccess: '20',
   },
   {
     key: 'temporary',
     label: '临时协作',
-    description: '3 天有效，最多 20 次访问',
+    description: '3 天有效，最多 20 次下载',
     defaultExpiresIn: '72h',
     defaultMaxAccess: '20',
   },
   {
     key: 'public-info',
     label: '资料分发',
-    description: '30 天有效，最多 100 次访问',
+    description: '30 天有效，最多 100 次下载',
     defaultExpiresIn: '720h',
     defaultMaxAccess: '100',
   },
@@ -1469,7 +1469,7 @@ function normalizeSharePolicyRulesForSave(inputRules: SharePolicyRuleDraft[]): {
       ?? (inputRule.max_access !== undefined ? String(inputRule.max_access) : '')
     const parsedMaxAccess = parseNonNegativeSafeIntegerInput(rawMaxAccess)
     if (!parsedMaxAccess.valid) {
-      return { rules: [], error: `第 ${lineNumber} 行访问次数上限必须是 0 或不超过安全范围的正整数` }
+      return { rules: [], error: `第 ${lineNumber} 行下载次数上限必须是 0 或不超过安全范围的正整数` }
     }
     const maxAccess = parsedMaxAccess.value
 
@@ -1566,7 +1566,7 @@ const sharePolicyRuleReviewFields: Array<{
 }> = [
   { key: 'require_password', label: '必须设置密码' },
   { key: 'max_expires_in', label: '最长有效期' },
-  { key: 'max_access', label: '最多访问次数' },
+  { key: 'max_access', label: '最多下载次数' },
   { key: 'allowed_users', label: '允许用户' },
   { key: 'allowed_groups', label: '允许组' },
   { key: 'allowed_roles', label: '允许角色' },
@@ -1629,7 +1629,7 @@ function buildSharePolicyDefaultReview(
   }
   if (savedDefaultMaxAccess !== draftDefaultMaxAccess) {
     items.push({
-      label: '新分享默认访问次数',
+      label: '新分享默认下载次数',
       before: sharePolicyLimitValueLabel(savedDefaultMaxAccess),
       after: sharePolicyLimitValueLabel(draftDefaultMaxAccess),
     })
@@ -1731,7 +1731,7 @@ function sharePolicyRuleSummary(rule: SharePolicyRule): string {
   const parts = [
     rule.require_password ? '必须设置密码' : '',
     rule.max_expires_in ? `最长有效期：${rule.max_expires_in}` : '',
-    rule.max_access && rule.max_access > 0 ? `最多访问：${rule.max_access}` : '',
+    rule.max_access && rule.max_access > 0 ? `最多下载：${rule.max_access}` : '',
     rule.allowed_users?.length ? `允许用户：${rule.allowed_users.join(', ')}` : '',
     rule.allowed_groups?.length ? `允许组：${rule.allowed_groups.join(', ')}` : '',
     rule.allowed_roles?.length ? `允许角色：${rule.allowed_roles.join(', ')}` : '',
@@ -1811,7 +1811,7 @@ const sharePolicyCleanupConstraintChecks: Array<{
 }> = [
   { key: 'password', label: '强制密码约束', hasConstraint: sharePolicyRuleHasPasswordConstraint },
   { key: 'expires', label: '最长有效期约束', hasConstraint: sharePolicyRuleHasExpiresConstraint },
-  { key: 'access', label: '访问次数约束', hasConstraint: sharePolicyRuleHasAccessConstraint },
+  { key: 'access', label: '下载次数约束', hasConstraint: sharePolicyRuleHasAccessConstraint },
   { key: 'principal', label: '允许创建者范围', hasConstraint: sharePolicyRuleHasPrincipalConstraint },
 ]
 
@@ -1906,7 +1906,7 @@ function buildSharePolicyCleanupInsights(rules: SharePolicyRule[]): SharePolicyC
     ) {
       insights.push({
         key: `weaker-access:${rule.path}:${accessAncestor.path}`,
-        message: `${rule.path} 的访问次数 ${ruleMaxAccess} 高于上级 ${accessAncestor.path} 的 ${ancestorMaxAccess}。`,
+        message: `${rule.path} 的下载次数 ${ruleMaxAccess} 高于上级 ${accessAncestor.path} 的 ${ancestorMaxAccess}。`,
         tone: 'warning',
       })
     }
@@ -2060,19 +2060,19 @@ function SharePolicyCoverageSummary({ draft }: { draft: SharePolicyReviewInput }
     ? [
       draft.baseURL.trim() === '' ? '分享基础 URL 未固定，跨域名或反向代理切换后需复核已生成链接。' : '',
       defaultExpiresIn === '' ? '新分享默认不过期，建议为公网分享设置默认有效期。' : '',
-      defaultMaxAccess === '' ? '新分享默认访问次数不限制，建议为公网分享设置默认访问次数。' : '',
+      defaultMaxAccess === '' ? '新分享默认下载次数不限制，建议为公网分享设置默认下载次数。' : '',
       rules.length === 0 ? '尚未配置路径分享策略，所有路径只受全局默认值约束。' : '',
       rules.length > passwordRuleCount ? `${rules.length - passwordRuleCount} 条路径策略未强制密码。` : '',
       rules.length > expiresRuleCount ? `${rules.length - expiresRuleCount} 条路径策略未限制最长有效期。` : '',
-      rules.length > accessRuleCount ? `${rules.length - accessRuleCount} 条路径策略未限制访问次数。` : '',
+      rules.length > accessRuleCount ? `${rules.length - accessRuleCount} 条路径策略未限制下载次数。` : '',
       rules.length > principalRuleCount ? `${rules.length - principalRuleCount} 条路径策略未限制允许创建者范围。` : '',
     ].filter(Boolean)
-    : ['分享功能当前停用；重新启用前应复核默认有效期、访问次数和路径策略。']
+    : ['分享功能当前停用；重新启用前应复核默认有效期、下载次数和路径策略。']
 
   const summaryItems = [
     { label: '功能状态', value: draft.enabled ? '已启用' : '已停用', tone: draft.enabled ? 'warning' : 'success' },
     { label: '默认有效期', value: sharePolicyLimitValueLabel(defaultExpiresIn), tone: draft.enabled && defaultExpiresIn === '' ? 'warning' : 'success' },
-    { label: '默认访问次数', value: sharePolicyLimitValueLabel(defaultMaxAccess), tone: draft.enabled && defaultMaxAccess === '' ? 'warning' : 'success' },
+    { label: '默认下载次数', value: sharePolicyLimitValueLabel(defaultMaxAccess), tone: draft.enabled && defaultMaxAccess === '' ? 'warning' : 'success' },
     { label: '路径策略', value: `${rules.length} 条`, tone: draft.enabled && rules.length === 0 ? 'warning' : 'success' },
     { label: '强制密码路径', value: `${passwordRuleCount} 条`, tone: draft.enabled && rules.length > passwordRuleCount ? 'warning' : 'success' },
     { label: '成员范围路径', value: `${principalRuleCount} 条`, tone: draft.enabled && rules.length > principalRuleCount ? 'warning' : 'success' },
@@ -2281,7 +2281,7 @@ function formatDirectoryAccessShareForReport(entry: NonNullable<DirectoryAccessR
   const status = entry.active ? '可访问' : '不可访问'
   const password = entry.has_password ? '密码保护' : '无密码'
   const maxAccess = entry.max_access > 0 ? String(entry.max_access) : '不限'
-  return `- ${entry.path} (${typeLabel} · ${directoryAccessShareRelationLabel(entry.relation)}): ${status} · ${password} · 访问 ${entry.access_count}/${maxAccess} · 创建者 ${entry.created_by}`
+  return `- ${entry.path} (${typeLabel} · ${directoryAccessShareRelationLabel(entry.relation)}): ${status} · ${password} · 下载 ${entry.access_count}/${maxAccess} · 创建者 ${entry.created_by}`
 }
 
 function formatDirectoryAccessRuleEffectForReport(entry: NonNullable<DirectoryAccessReportData['rule_effects']>[number]): string {
@@ -2684,7 +2684,7 @@ function DirectoryAccessReportResult({
               {entry.has_password && <span className="rounded-full bg-content2 px-2 py-0.5 text-default-600">密码</span>}
             </div>
             <div className="min-w-0 truncate text-xs text-default-500">
-              访问 {entry.access_count}{entry.max_access > 0 ? ` / ${entry.max_access}` : ''}
+              下载 {entry.access_count}{entry.max_access > 0 ? ` / ${entry.max_access}` : ''}
             </div>
           </div>
         ))}
@@ -3456,8 +3456,8 @@ function SharePolicyRuleEditor({
                     }}
                   />
                   <Input
-                    aria-label={`分享策略最多访问次数 ${index + 1}`}
-                    label="最多访问次数"
+                    aria-label={`分享策略最多下载次数 ${index + 1}`}
+                    label="最多下载次数"
                     labelPlacement="outside"
                     type="text"
                     inputMode="numeric"
@@ -3819,20 +3819,20 @@ function getSecurityCheckDisplayMessage(check: SecurityCheckItem): string {
         : '公开分享链接应使用 HTTPS 默认端口且不包含用户信息，避免在公网中暴露不安全链接。'
     case 'share_default_policy':
       if (check.status === 'pass') {
-        return '新分享默认有效期和默认访问次数处于公网部署建议范围内，或分享功能未启用。'
+        return '新分享默认有效期和默认下载次数处于公网部署建议范围内，或分享功能未启用。'
       }
       if (check.status === 'block') {
-        return '分享默认有效期或默认访问次数配置无效，请修复负值后重新检查。'
+        return '分享默认有效期或默认下载次数配置无效，请修复负值后重新检查。'
       }
       if (check.details?.default_expires_in_unlimited === true
         && check.details?.default_max_access_unlimited === true) {
-        return '分享功能已启用，但新分享默认不会过期且访问次数不限制；家庭公网分享建议同时设置默认有效期和默认访问次数。'
+        return '分享功能已启用，但新分享默认不会过期且下载次数不限制；家庭公网分享建议同时设置默认有效期和默认下载次数。'
       }
       if (check.details?.default_expires_in_unlimited === true) {
         return '分享功能已启用，但新分享默认不会过期；家庭公网分享建议设置默认有效期，避免长期公开链接被遗忘。'
       }
       if (check.details?.default_max_access_unlimited === true) {
-        return '分享功能已启用，但新分享默认访问次数不限制；家庭公网分享建议设置默认访问次数，避免公开链接被反复访问。'
+        return '分享功能已启用，但新分享默认下载次数不限制；家庭公网分享建议设置默认下载次数，避免公开链接被反复下载。'
       }
       return '新分享默认有效期偏长；家庭公网分享建议缩短默认有效期，降低链接长期暴露风险。'
     case 'backup_local_destinations':
@@ -4874,7 +4874,7 @@ export function SettingsPage() {
     }))
     addToast({
       title: '已应用公网访问推荐',
-      description: '保存设置后生效；监听地址变更需要重启服务，会话有效期、新分享默认有效期和默认访问次数会保持在公网建议范围内。',
+      description: '保存设置后生效；监听地址变更需要重启服务，会话有效期、新分享默认有效期和默认下载次数会保持在公网建议范围内。',
       color: 'success',
     })
   }
@@ -5564,8 +5564,8 @@ export function SettingsPage() {
 
     if (!parsedShareDefaultMaxAccess.valid) {
       addToast({
-        title: '分享默认访问次数无效',
-        description: '默认访问次数必须是 0 或不超过安全范围的正整数',
+        title: '分享默认下载次数无效',
+        description: '默认下载次数必须是 0 或不超过安全范围的正整数',
         color: 'danger',
       })
       return
@@ -6957,7 +6957,7 @@ export function SettingsPage() {
                   <Divider className="bg-divider" />
                   <SettingRow
                     label="新分享策略预设"
-                    description="选择后会填入默认有效期和访问次数，可继续手动调整"
+                    description="选择后会填入默认有效期和下载次数，可继续手动调整"
                   >
                     <div className="grid w-full gap-2 sm:grid-cols-3">
                       {SHARE_POLICY_PRESETS.map((preset) => {
@@ -7004,12 +7004,12 @@ export function SettingsPage() {
                   </SettingRow>
                   <Divider className="bg-divider" />
                   <SettingRow
-                    label="新分享默认访问次数"
+                    label="新分享默认下载次数"
                     description="0 表示不限制；只影响之后创建的分享链接"
                   >
                     <Input
                       type="text"
-                      aria-label="新分享默认访问次数"
+                      aria-label="新分享默认下载次数"
                       inputMode="numeric"
                       pattern="[0-9]*"
                       value={settings.shareDefaultMaxAccess}

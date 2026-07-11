@@ -1,4 +1,5 @@
 import { getUserFacingErrorDescription } from './apiMessages'
+import { isBrowserDownloadCapacityError } from './downloadResponse'
 import { getNonBlankJsonString } from './jsonErrorResponse'
 
 function getErrorStatus(error: unknown): number | undefined {
@@ -33,6 +34,26 @@ export interface FileActionErrorToast {
   title: string
   description: string
   color: 'warning' | 'danger'
+}
+
+export function getBrowserDownloadCapacityErrorToast(error: unknown): FileActionErrorToast | null {
+  if (!isBrowserDownloadCapacityError(error)) {
+    return null
+  }
+
+  return {
+    title: '需要刷新后继续下载',
+    description: '当前页面已提交的下载已达到上限，请刷新页面后继续。',
+    color: 'warning',
+  }
+}
+
+export function getSharedBrowserDownloadCapacityErrorToast(errors: unknown[]): FileActionErrorToast | null {
+  if (errors.length === 0 || !errors.every(isBrowserDownloadCapacityError)) {
+    return null
+  }
+
+  return getBrowserDownloadCapacityErrorToast(errors[0])
 }
 
 export function isFilesystemUnavailableError(error: unknown): boolean {
@@ -157,6 +178,18 @@ export function getArchiveDownloadErrorToast(error: unknown): FileActionErrorToa
   const message = getErrorMessage(error)
 
   if (
+    code === 'ARCHIVE_DOWNLOAD_RATE_LIMITED'
+    || message === '归档下载任务较多，请稍后重试'
+    || message === 'too many archive downloads, try later'
+  ) {
+    return {
+      title: '归档下载繁忙',
+      description: '当前归档下载任务较多，请稍后重试。',
+      color: 'warning',
+    }
+  }
+
+  if (
     code === 'PAYLOAD_TOO_LARGE' &&
     (message === '归档内容过大' || message === 'archive content is too large')
   ) {
@@ -241,6 +274,11 @@ export function getSharedMissingFileDownloadErrorToast(errors: unknown[]): FileA
 }
 
 export function getFileDownloadErrorToast(error: unknown): FileActionErrorToast {
+  const browserCapacityToast = getBrowserDownloadCapacityErrorToast(error)
+  if (browserCapacityToast) {
+    return browserCapacityToast
+  }
+
   if (isFilesystemUnavailableError(error)) {
     return {
       title: '下载暂不可用',

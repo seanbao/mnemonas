@@ -72,6 +72,7 @@ func TestWithSecurityHeaders(t *testing.T) {
 func TestWithSecurityHeadersDoesNotOverrideStricterCSP(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'")
+		w.Header().Set("X-Frame-Options", "SAMEORIGIN")
 		w.WriteHeader(http.StatusNoContent)
 	})
 	w := httptest.NewRecorder()
@@ -81,6 +82,9 @@ func TestWithSecurityHeadersDoesNotOverrideStricterCSP(t *testing.T) {
 
 	if got := w.Header().Get("Content-Security-Policy"); got != "sandbox; default-src 'none'" {
 		t.Fatalf("Content-Security-Policy = %q, want stricter downstream policy", got)
+	}
+	if got := w.Header().Get("X-Frame-Options"); got != "SAMEORIGIN" {
+		t.Fatalf("X-Frame-Options = %q, want downstream SAMEORIGIN policy", got)
 	}
 }
 
@@ -1265,6 +1269,30 @@ func TestApplyStartupWebDAVCredentials_TreatsWhitespacePasswordAsGenerated(t *te
 	}
 	if cfg.WebDAV.Password != "generated-pass" {
 		t.Fatalf("expected generated WebDAV password, got %q", cfg.WebDAV.Password)
+	}
+}
+
+func TestApplyStartupJWTSecret_TreatsWhitespaceAsGenerated(t *testing.T) {
+	cfg := config.Default()
+	cfg.Auth.JWTSecret = " \t "
+	secrets := &config.Secrets{JWTSecret: "persistent-jwt-secret-at-least-32-bytes"}
+
+	applyStartupJWTSecret(cfg, secrets)
+
+	if cfg.Auth.JWTSecret != secrets.JWTSecret {
+		t.Fatalf("Auth.JWTSecret = %q, want persistent generated secret", cfg.Auth.JWTSecret)
+	}
+}
+
+func TestApplyStartupJWTSecret_PreservesCustomSecret(t *testing.T) {
+	cfg := config.Default()
+	cfg.Auth.JWTSecret = " custom-jwt-secret-at-least-32-bytes "
+	secrets := &config.Secrets{JWTSecret: "persistent-jwt-secret-at-least-32-bytes"}
+
+	applyStartupJWTSecret(cfg, secrets)
+
+	if cfg.Auth.JWTSecret != " custom-jwt-secret-at-least-32-bytes " {
+		t.Fatalf("Auth.JWTSecret = %q, want explicit custom secret unchanged", cfg.Auth.JWTSecret)
 	}
 }
 

@@ -334,6 +334,8 @@ location /api/ {
 
 - 文件下载、版本预览、音视频预览、缩略图与外部打开使用短期 `HttpOnly`、`SameSite=Strict` download-session Cookie，不通过 URL 查询参数传递长期访问令牌
 - HTTPS 模式使用 `__Host-mnemonas_download_access`、`Secure`、`Path=/` 且不设置 `Domain`；本机 HTTP 模式使用 `mnemonas_download_access`，路径为 `/api/v1`
+- 在允许 download-session Cookie 的请求上，access 与 download Cookie 同时存在但原始值不一致时，服务端会在验证任一 token 前按失败关闭原则拒绝认证；失效的当前 access Cookie 不能回退到其他账号或其他会话遗留的有效 download Cookie
+- 认证 ZIP 的探测、目录收集、快照预检与完整流式写入受同一个容量为 4 的进程级非阻塞门限约束；满载请求在文件系统访问前返回 `429`、`Retry-After: 1` 和 `ARCHIVE_DOWNLOAD_RATE_LIMITED`
 - 内部文件预览与缩略图请求路径不再依赖 `auth` 查询参数
 - HTTPS 模式只在请求实际使用 TLS，或显式启用 `trusted_proxy_hops > 0` 且请求直接来自 loopback / `trusted_proxy_cidrs` 中的代理地址并携带 `X-Forwarded-Proto=https` 时启用，避免公网请求伪造 HTTPS 语义
 
@@ -341,14 +343,14 @@ location /api/ {
 
 - Web UI 主会话使用 `HttpOnly`、`SameSite=Lax` Cookie 保存访问令牌和刷新令牌，不把 bearer token 写入 `localStorage`
 - HTTPS 模式使用 `__Host-mnemonas_access` 和 `__Host-mnemonas_refresh`；两者均带 `Secure`，作用域为 `/`，不设置 `Domain`。本机 HTTP 模式使用 `mnemonas_access` 和 `mnemonas_refresh`，路径分别为 `/api/v1` 和 `/api/v1/auth`
-- HTTPS 请求只解析 `__Host-` 名称，HTTP 请求只解析无前缀名称。同一请求中同名 Cookie 出现不同值时，服务端拒绝认证；access 和 download Cookie 属于不同账号时也会拒绝认证
+- HTTPS 请求只解析 `__Host-` 名称，HTTP 请求只解析无前缀名称。同一请求中同名 Cookie 出现不同值时，服务端拒绝认证；允许 download Cookie 的请求还要求同时存在的 access 与 download Cookie 原始值完全一致
 - `auth.access_token_ttl` 必须不少于 `30s`。公网部署建议将其保持在 `1h` 以内，并将 `auth.refresh_token_ttl` 保持在 `720h`（30 天）以内；安全自检会提示超出建议值的配置
 - 每次登录会在首次签发 token 前建立并持久化独立的活动会话；每个用户最多保留 64 个，服务全局最多保留 4096 个。超过任一限制时返回 `429 REFRESH_SESSION_LIMIT`；退出或会话到期会释放容量
 - 刷新令牌轮换不会延长登录时确定的绝对会话到期时间；单个会话每 30 秒最多轮换一次。refresh token 只能成功使用一次；重放已轮换的 token 会吊销同一会话族。access token 过期后仍可通过 refresh Cookie 退出当前会话
 - REST API、上传请求、刷新令牌与退出登录请求由浏览器自动携带同源 Cookie。Web UI 用 `storage` 信号和 `BroadcastChannel` 同步跨标签页的会话变更，并用 Web Locks 串行化跨标签页刷新；这些通道只传递会话变更信号，不传递 token 值。旧版本残留在 `localStorage` 的令牌会在认证流程中清理
 - 对带浏览器 `Origin` / `Referer` / `Sec-Fetch-Site` 元数据的 REST 写请求和 WebDAV 写方法（`POST`、`PUT`、`PATCH`、`DELETE`、`MKCOL`、`COPY`、`MOVE`、`PROPPATCH`、`LOCK`、`UNLOCK`），服务端会拒绝来源 scheme、主机或端口与当前请求不一致的请求，并拒绝浏览器明确标记为 `cross-site` 或 `same-site` 的无 `Authorization` 写请求；无浏览器来源头的脚本客户端以及显式 `Authorization` API 客户端继续可用
 - API 客户端仍可使用 `Authorization: Bearer <access-token>` 与 JSON refresh token，兼容脚本和自动化调用
-- 服务端已设置基础安全响应头、CSP 与 `Permissions-Policy`；文件下载、版本预览、缩略图、WebDAV 文件与 WebDAV 目录列表响应额外带 `X-Content-Type-Options: nosniff` 和 sandbox CSP，降低同源打开用户文件时的脚本执行面。公网部署仍必须使用受信任的静态资源、HTTPS 反向代理和较新的浏览器，不要在同一域名下注入第三方脚本
+- 服务端已设置基础安全响应头、CSP 与 `Permissions-Policy`；文件下载、版本预览、缩略图、WebDAV 文件与 WebDAV 目录列表响应额外带 `X-Content-Type-Options: nosniff` 和 sandbox CSP，降低同源打开用户文件时的脚本执行面。附件下载使用 `sandbox allow-downloads`、`frame-ancestors 'self'` 和 `X-Frame-Options: SAMEORIGIN`，只允许应用自身的受限下载导航；归档在响应流开始前失败时，JSON 错误响应改用不含 `allow-downloads` 的同源 sandbox CSP。内联预览继续通过 `frame-ancestors 'none'` 和全局 `X-Frame-Options: DENY` 禁止嵌入。公网部署仍必须使用受信任的静态资源、HTTPS 反向代理和较新的浏览器，不要在同一域名下注入第三方脚本
 - 共用电脑上使用后应主动退出登录；修改密码、退出登录、删除用户、禁用用户或管理员手动让用户现有登录失效时，会撤销或清理对应会话
 - `auth-sessions.json` 是权威且有界的活动会话注册表，使用 schema v3，文件上限为 2 MiB。即使 JWT 签名有效，会话 ID 不在注册表中时也会拒绝请求。退出会话会直接删除对应记录，不保留 tombstone，因此长期登录与退出不会线性增大文件
 - 服务会在 `auth-sessions.json` 中保存 60 秒重启时间租约，并在剩余 15 秒时尝试续租。续租持久化明确失败时，现有租约有效期内仍可验证请求；租约耗尽后继续失败，服务端会拒绝继续验证并返回 `503 TOKEN_STATE_UNAVAILABLE`，避免时钟回拨让已失效会话恢复有效
@@ -360,9 +362,13 @@ location /api/ {
 ### 公开分享密码验证
 
 - 受密码保护的公开分享在浏览器完成一次密码验证后，会下发 `HttpOnly`、`SameSite=Strict` cookie；cookie 只作用于对应的 `/s/<id>` 与 `/api/v1/public/shares/<id>` 路径
-- 家庭公网分享建议让新分享默认 7 天过期，并设置明确的默认访问次数；安全自检会提示默认不过期、超过 `720h`（30 天）或默认访问次数不限制的配置。
+- 家庭公网分享建议让新分享默认 7 天过期，并设置明确的默认下载次数；安全自检会提示默认不过期、超过 `720h`（30 天）或默认下载次数不限制的配置。次数按成功签发的逻辑下载会话计算，目录浏览与同一票据的断点续传不重复计数。
 - 启用分享功能时，`share.base_url` 应使用 HTTPS 默认端口，不能包含 userinfo、查询参数、片段、编码后的查询或片段标记、反斜杠、重复路径斜杠或 `.`/`..` 路径段，且主机名必须有效；该值应是站点 origin 或应用基础路径，不应包含 `/s` 分享路由。安全自检和 `mnemonas-doctor --public-domain` 会报告不符合公网部署要求的基础 URL。
 - 文件夹浏览与文件下载依赖该 cookie，不再通过 URL 查询参数传递分享密码
+- 文件下载先通过同源 POST 签发 URL-safe、带签名且与目标和分享状态绑定的短期票据；票据长度不超过 256 个字符。请求必须包含由 Web Crypto 生成并从同源版本化 `localStorage` 键复用的 32 字节 `client_nonce`。该值是非秘密客户端标识符，不是授权凭据，也不进入下载 URL 或日志。服务端使用独立 HMAC 域，根据分享 ID 和 `client_nonce` 派生 binder ID 与 binder 值；票据使用独立随机 ID，只保存 binder ID 与 binder 值摘要。同一分享与同一 nonce 会刷新一个 `Path=/`、`HttpOnly`、`SameSite=Strict` cookie，不同分享派生不同 cookie。名称以 binder ID 的 32 字符小写十六进制形式结尾；HTTPS 使用带 `Secure` 的 `__Host-mnemonas_share_download_<binder-id>`，HTTP 使用 `mnemonas_share_download_<binder-id>`。下载 GET 必须同时携带票据查询参数和唯一匹配的 binder cookie；cookie 与票据同时过期，最长有效 24 小时，且分享状态或目标变更后会失效
+- 票据签发按请求携带的结构合法 binder cookie 名执行局部软限制：HTTP 统计普通前缀，HTTPS 同时统计普通前缀和 `__Host-` 前缀。新增 binder 且已有 32 个时返回 `429`，不执行文件系统预检或逻辑下载计数保留；正确的既有 binder 在达到或超过软限制后仍可刷新，重复或无效目标 cookie 会关闭式拒绝。容量为 4 的进程级非阻塞签发门限覆盖 ZIP 预检，并限制不同新 nonce 的并发请求基于旧 cookie 快照超出软上限。该边界不是服务端持久会话计数
+- 公开 ZIP 的签发预检与实际 ZIP 流共用容量为 4 的进程级全局并发门限；门限占满时返回 `429 Too Many Requests`、`Retry-After: 1` 和 `DOWNLOAD_TICKET_RATE_LIMITED`
+- 密码失败状态按分享 ID 和客户端地址隔离；每个分享最多保留 128 个状态，进程内总计最多 4096 个。同一分桶最多执行一次 bcrypt，进程内公开分享 bcrypt 并发上限为 8。仍在失败窗口内、已锁定或正在校验的状态不会被驱逐；容量或并发门限占满时以 `429` 拒绝新请求，并保留既有失败计数。超过 72 字节的密码在创建状态或执行 bcrypt 前返回 `400 PASSWORD_TOO_LONG`
 - 公开分享信息、密码验证响应与文件夹列表响应会返回 `Cache-Control: private, no-cache`、`Vary: Cookie`、`X-Content-Type-Options: nosniff` 和 `Referrer-Policy: no-referrer`，避免浏览器或中间缓存复用依赖 cookie 的分享元数据
 - 安全自检会优先阻断公开分享 cookie、失败限速或缓存边界异常；只有这些边界正常但当前请求未被识别为 HTTPS 时，才会降级为 `Secure` cookie 标记告警
 - 清除浏览器站点数据、切换浏览器或密码变更后，需要重新输入分享密码

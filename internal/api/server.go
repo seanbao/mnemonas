@@ -60,6 +60,8 @@ const scrubObjectReadPublicMessage = "object could not be read"
 const scrubObjectUnknownPublicMessage = "object verification failed"
 const redactedSettingsSecretValue = "<redacted>"
 const untrustedDownloadContentSecurityPolicy = "sandbox; default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; img-src 'self' data: blob:; media-src 'self' data: blob:; style-src 'unsafe-inline'"
+const untrustedAttachmentContentSecurityPolicy = "sandbox allow-downloads; default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'self'; img-src 'self' data: blob:; media-src 'self' data: blob:; style-src 'unsafe-inline'"
+const untrustedEmbeddedErrorContentSecurityPolicy = "sandbox; default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'self'"
 
 var errScrubDataplaneNotConnected = errors.New("dataplane not connected")
 
@@ -129,6 +131,7 @@ type Server struct {
 	shareExpiryReminderMu            sync.Mutex
 	shareExpiryReminderSent          map[string]time.Time
 	shareExpiryReminderCancel        context.CancelFunc
+	downloadArchiveGate              chan struct{}
 	backgroundTasksMu                sync.Mutex
 	backgroundTasksStarted           bool
 	closed                           bool
@@ -1465,18 +1468,19 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 	r.Use(metrics.MetricsMiddleware) // Collect request metrics
 	r.Use(zerologMiddleware(logger))
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(DefaultRequestTimeout * time.Second))
+	r.Use(requestTimeoutExceptStreamingDownloads(DefaultRequestTimeout * time.Second))
 	// Keep observability endpoints reachable even when the request concurrency
 	// budget is saturated by slow data operations.
 	r.Use(throttleExceptPaths(DefaultMaxConcurrentRequests, "/health", "/api/v1/version", "/api/v1/metrics"))
 
 	appVersion, buildTime := serverBuildMetadata(cfg)
 	s := &Server{
-		router:     r,
-		logger:     logger,
-		startTime:  time.Now(),
-		appVersion: appVersion,
-		buildTime:  buildTime,
+		router:              r,
+		logger:              logger,
+		downloadArchiveGate: make(chan struct{}, defaultDownloadArchiveConcurrent),
+		startTime:           time.Now(),
+		appVersion:          appVersion,
+		buildTime:           buildTime,
 	}
 	constructed := false
 	defer func() {
@@ -1647,6 +1651,11 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 			fsAdapter = &fileSystemAdapter{fs: s.fs}
 		}
 		s.shareHandler = share.NewHandler(shareStore, fsAdapter)
+		if strings.TrimSpace(cfg.AuthJWTSecret) != "" {
+			if err := s.shareHandler.SetDownloadTicketSigningKey(share.DeriveDownloadTicketSigningKey(cfg.AuthJWTSecret)); err != nil {
+				return nil, fmt.Errorf("configure share download ticket signing key: %w", err)
+			}
+		}
 		if s.userStore != nil {
 			s.shareHandler.SetUserStore(s.userStore)
 		}
@@ -1748,6 +1757,37 @@ func throttleExceptPaths(limit int, bypassPaths ...string) func(http.Handler) ht
 			throttled.ServeHTTP(w, r)
 		})
 	}
+}
+
+func requestTimeoutExceptStreamingDownloads(timeout time.Duration) func(http.Handler) http.Handler {
+	timeoutMiddleware := middleware.Timeout(timeout)
+	return func(next http.Handler) http.Handler {
+		timed := timeoutMiddleware(next)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if isStreamingDownloadRequest(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			timed.ServeHTTP(w, r)
+		})
+	}
+}
+
+func isStreamingDownloadRequest(r *http.Request) bool {
+	if r == nil || r.Method != http.MethodGet {
+		return false
+	}
+	segments := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(segments) >= 3 && segments[0] == "s" && segments[1] != "" && segments[2] == "download" {
+		return true
+	}
+	if len(segments) >= 3 && segments[0] == "api" && segments[1] == "v1" && segments[2] == "download" {
+		return true
+	}
+	return len(segments) >= 6 &&
+		segments[0] == "api" && segments[1] == "v1" &&
+		segments[2] == "public" && segments[3] == "shares" &&
+		segments[4] != "" && segments[5] == "download"
 }
 
 func RejectCrossOriginUnsafeRequests(next http.Handler) http.Handler {
@@ -1884,6 +1924,7 @@ func (s *Server) setupRoutes() {
 			r.MethodNotAllowed(handlePublicShareMethodNotAllowed)
 			r.Get("/{id}", s.handleAccessShare)
 			r.Post("/{id}", s.handleAccessShareWithPassword)
+			r.Post("/{id}/download-ticket", s.handleCreateDownloadTicket)
 			r.Get("/{id}/items", s.handleListShareItems)
 			r.Get("/{id}/download", s.handleDownloadShare)
 			r.Get("/{id}/download/*", s.handleDownloadShareFile)
@@ -1893,6 +1934,7 @@ func (s *Server) setupRoutes() {
 			r.MethodNotAllowed(handlePublicShareMethodNotAllowed)
 			r.Get("/{id}", s.handleAccessShare)
 			r.Post("/{id}/access", s.handleAccessShareWithPassword)
+			r.Post("/{id}/download-ticket", s.handleCreateDownloadTicket)
 			r.Get("/{id}/items", s.handleListShareItems)
 			r.Get("/{id}/download", s.handleDownloadShare)
 			r.Get("/{id}/download/*", s.handleDownloadShareFile)
@@ -2869,6 +2911,10 @@ func (s *Server) respondReadableOpenFileError(w http.ResponseWriter, operation s
 		BadRequest(w, directoryMessage)
 		return
 	}
+	if errors.Is(err, storage.ErrNotRegular) {
+		Conflict(w, "resource is not a regular file")
+		return
+	}
 	s.respondInternalError(w, operation, err)
 }
 
@@ -3654,6 +3700,8 @@ func validDeletePolicyToken(token string) bool {
 }
 
 func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
+	w = s.withDownloadWriteDeadline(w)
+
 	filePath, err := routePathAfterPrefix(r, "/api/v1/download")
 	if err != nil {
 		badRequestInvalidPath(w)
@@ -3752,13 +3800,13 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 		setUntrustedDownloadHeaders(w)
 		w.Header().Set("ETag", versionETag)
 		w.Header().Set("Cache-Control", "private, no-cache")
+		if forceDownload {
+			setUntrustedAttachmentDownloadHeaders(w)
+			w.Header().Set("Content-Disposition", formatAttachmentHeader(path.Base(filePath)))
+		}
 		if apiETagMatch(r.Header.Get("If-None-Match"), versionETag) {
 			w.WriteHeader(http.StatusNotModified)
 			return
-		}
-
-		if forceDownload {
-			w.Header().Set("Content-Disposition", formatAttachmentHeader(path.Base(filePath)))
 		}
 
 		versionModTime := time.Time{}
@@ -3774,28 +3822,9 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get file info
-	info, err := s.fs.Stat(r.Context(), filePath)
-	if err != nil {
-		if isStorageNotFound(err) {
-			s.respondNotFound(w, "stat file", err)
-			return
-		}
-		if errors.Is(err, storage.ErrNotDir) {
-			Conflict(w, "parent path is not a directory")
-			return
-		}
-		s.respondInternalError(w, "stat file", err)
-		return
-	}
-
-	if info.IsDir {
-		BadRequest(w, "cannot download directory")
-		return
-	}
-
-	// Open a snapshot so headers and bytes come from the same file handle.
-	file, snapshotInfo, err := s.fs.OpenFileSnapshot(r.Context(), filePath)
+	// Open a metadata-only snapshot so headers and bytes come from the same file
+	// handle without reading the complete file before serving it.
+	file, snapshotInfo, err := s.fs.OpenFileSnapshotMetadata(r.Context(), filePath)
 	if err != nil {
 		s.respondReadableOpenFileError(w, "open file", err, "cannot download directory")
 		return
@@ -3804,11 +3833,12 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 
 	// Set cache headers
 	setUntrustedDownloadHeaders(w)
-	if snapshotInfo.ContentHash != "" {
-		w.Header().Set("ETag", fmt.Sprintf(`"%s"`, snapshotInfo.ContentHash))
+	if snapshotInfo.DeleteIdentityToken != "" {
+		w.Header().Set("ETag", fmt.Sprintf(`W/"%s"`, snapshotInfo.DeleteIdentityToken))
 	}
 	w.Header().Set("Cache-Control", "private, no-cache")
 	if forceDownload {
+		setUntrustedAttachmentDownloadHeaders(w)
 		w.Header().Set("Content-Disposition", formatAttachmentHeader(path.Base(filePath)))
 	}
 
@@ -5855,6 +5885,12 @@ func setUntrustedDownloadHeaders(w http.ResponseWriter) {
 	w.Header().Set("Content-Security-Policy", untrustedDownloadContentSecurityPolicy)
 }
 
+func setUntrustedAttachmentDownloadHeaders(w http.ResponseWriter) {
+	setUntrustedDownloadHeaders(w)
+	w.Header().Set("X-Frame-Options", "SAMEORIGIN")
+	w.Header().Set("Content-Security-Policy", untrustedAttachmentContentSecurityPolicy)
+}
+
 func streamAPIResponse(w http.ResponseWriter, reader io.Reader) error {
 	trackingWriter := &apiDownloadResponseWriter{ResponseWriter: w}
 	_, err := io.Copy(trackingWriter, reader)
@@ -5897,13 +5933,14 @@ func (w *apiDownloadResponseWriter) WriteHeader(statusCode int) {
 }
 
 func (w *apiDownloadResponseWriter) Write(p []byte) (int, error) {
-	n, err := w.ResponseWriter.Write(p)
-	if err == nil || n > 0 {
-		w.started = true
-		if w.statusCode == 0 {
-			w.statusCode = http.StatusOK
-		}
+	// A net/http write attempt can commit the response before a transport error
+	// is reported with zero bytes written. Mark it started before delegating so
+	// callers never try to replace a possibly committed stream with JSON.
+	w.started = true
+	if w.statusCode == 0 {
+		w.statusCode = http.StatusOK
 	}
+	n, err := w.ResponseWriter.Write(p)
 	w.bytesWritten += int64(n)
 	if err != nil {
 		w.writeErr = err
@@ -6017,21 +6054,31 @@ func parseUint32(s string) (uint32, error) {
 	return uint32(v), err
 }
 
-// fileSystemAdapter wraps FileSystem to implement share.FileOpener
+// fileSystemAdapter exposes storage operations through the share interfaces.
 type fileSystemAdapter struct {
 	fs *storage.FileSystem
 }
+
+var _ share.FileSnapshotOpener = (*fileSystemAdapter)(nil)
 
 func (a *fileSystemAdapter) OpenFile(ctx context.Context, filePath string) (share.FileReader, error) {
 	return a.fs.OpenFile(ctx, filePath)
 }
 
+func (a *fileSystemAdapter) OpenFileSnapshot(ctx context.Context, filePath string) (*os.File, *storage.FileInfo, error) {
+	return a.fs.OpenFileSnapshotMetadata(ctx, filePath)
+}
+
 func (a *fileSystemAdapter) Stat(ctx context.Context, filePath string) (*storage.FileInfo, error) {
-	return a.fs.Stat(ctx, filePath)
+	return a.fs.StatMetadata(ctx, filePath)
 }
 
 func (a *fileSystemAdapter) ReadDir(ctx context.Context, filePath string) ([]*storage.FileInfo, error) {
 	return a.fs.ReadDir(ctx, filePath)
+}
+
+func (a *fileSystemAdapter) ReadDirLimit(ctx context.Context, filePath string, limit int) ([]*storage.FileInfo, error) {
+	return a.fs.ReadDirLimit(ctx, filePath, limit)
 }
 
 func (a *fileSystemAdapter) AcquireMutationLease(ctx context.Context) (share.MutationLease, error) {
@@ -9013,6 +9060,13 @@ func securityPublicShareCookiePathsScoped(paths []string) bool {
 	return true
 }
 
+func securityPublicShareDownloadTicketBinderCookieValid(prefix, securePrefix, cookiePath string) bool {
+	return strings.TrimSpace(prefix) != "" &&
+		strings.HasPrefix(strings.TrimSpace(securePrefix), "__Host-") &&
+		prefix != securePrefix &&
+		cookiePath == "/"
+}
+
 func securitySessionTokenTTLCheck(cfg *config.Config, authEnabled bool) securityCheckItem {
 	const checkID = "session_token_ttl"
 
@@ -9135,8 +9189,29 @@ func securityPublicShareBoundaryCheckWithPolicy(cfg *config.Config, requestSchem
 	secureCookie := requestSchemeValue == "https"
 	passwordRateLimitEnabled := policy.PasswordFailureLimit > 0 &&
 		policy.PasswordFailureWindow > 0 &&
-		policy.PasswordLockDuration > 0
+		policy.PasswordLockDuration > 0 &&
+		policy.PasswordAttemptCapacity > 0 &&
+		policy.PasswordAttemptCapacity <= 128 &&
+		policy.PasswordGlobalAttemptCapacity > 0 &&
+		policy.PasswordGlobalAttemptCapacity <= 4096 &&
+		policy.PasswordConcurrentLimit == 1 &&
+		policy.PasswordBcryptConcurrency > 0 &&
+		policy.PasswordBcryptConcurrency <= 8
 	cookiePathsScoped := securityPublicShareCookiePathsScoped(policy.CookiePaths)
+	downloadTicketBinderCookieValid := securityPublicShareDownloadTicketBinderCookieValid(
+		policy.DownloadTicketCookiePrefix,
+		policy.DownloadTicketSecurePrefix,
+		policy.DownloadTicketCookiePath,
+	)
+	downloadTicketBoundaryValid := downloadTicketBinderCookieValid &&
+		policy.DownloadTicketTTL > 0 &&
+		policy.DownloadTicketTTL <= 24*time.Hour &&
+		policy.DownloadTicketCookieLimit > 0 &&
+		policy.DownloadTicketCookieLimit <= 32 &&
+		policy.DownloadTicketConcurrency > 0 &&
+		policy.DownloadTicketConcurrency <= 4 &&
+		policy.PublicArchiveConcurrency > 0 &&
+		policy.PublicArchiveConcurrency <= 4
 	metadataCachePrivate := securityHeaderHasToken(policy.MetadataCacheControl, "private")
 	metadataCacheNoCache := securityHeaderHasToken(policy.MetadataCacheControl, "no-cache")
 	metadataReferrerNoReferrer := strings.EqualFold(strings.TrimSpace(policy.MetadataReferrerPolicy), "no-referrer")
@@ -9144,6 +9219,7 @@ func securityPublicShareBoundaryCheckWithPolicy(cfg *config.Config, requestSchem
 		policy.CookieSameSite == http.SameSiteStrictMode &&
 		cookiePathsScoped &&
 		passwordRateLimitEnabled &&
+		downloadTicketBoundaryValid &&
 		policy.MetadataVaryCookie &&
 		policy.MetadataNosniff &&
 		metadataCachePrivate &&
@@ -9163,6 +9239,19 @@ func securityPublicShareBoundaryCheckWithPolicy(cfg *config.Config, requestSchem
 		"password_failure_window_seconds":         securityDurationSeconds(policy.PasswordFailureWindow),
 		"password_lock_duration":                  policy.PasswordLockDuration.String(),
 		"password_lock_duration_seconds":          securityDurationSeconds(policy.PasswordLockDuration),
+		"password_attempt_capacity":               policy.PasswordAttemptCapacity,
+		"password_global_attempt_capacity":        policy.PasswordGlobalAttemptCapacity,
+		"password_concurrent_limit":               policy.PasswordConcurrentLimit,
+		"password_bcrypt_concurrency":             policy.PasswordBcryptConcurrency,
+		"download_ticket_binder_cookie_prefix":    policy.DownloadTicketCookiePrefix,
+		"download_ticket_binder_secure_prefix":    policy.DownloadTicketSecurePrefix,
+		"download_ticket_binder_cookie_path":      policy.DownloadTicketCookiePath,
+		"download_ticket_binder_cookie_valid":     downloadTicketBinderCookieValid,
+		"download_ticket_ttl":                     policy.DownloadTicketTTL.String(),
+		"download_ticket_ttl_seconds":             securityDurationSeconds(policy.DownloadTicketTTL),
+		"download_ticket_cookie_limit":            policy.DownloadTicketCookieLimit,
+		"download_ticket_concurrency":             policy.DownloadTicketConcurrency,
+		"public_archive_concurrency":              policy.PublicArchiveConcurrency,
 		"metadata_cache_control":                  policy.MetadataCacheControl,
 		"metadata_cache_private":                  metadataCachePrivate,
 		"metadata_cache_no_cache":                 metadataCacheNoCache,
@@ -9306,7 +9395,7 @@ func securityShareDefaultPolicyCheck(cfg *config.Config) securityCheckItem {
 			ID:      checkID,
 			Status:  securityCheckBlock,
 			Title:   "分享默认策略无效",
-			Message: "分享默认有效期和默认访问次数不能为负值。",
+			Message: "分享默认有效期和默认下载次数不能为负值。",
 			Details: details,
 		}
 	}
@@ -9316,8 +9405,8 @@ func securityShareDefaultPolicyCheck(cfg *config.Config) securityCheckItem {
 		return securityCheckItem{
 			ID:      checkID,
 			Status:  securityCheckWarning,
-			Title:   "新分享默认不会过期且访问次数不限制",
-			Message: "分享功能已启用，但新分享默认没有过期时间和访问次数上限；公网访问前建议同时设置默认有效期和默认访问次数。",
+			Title:   "新分享默认不会过期且下载次数不限制",
+			Message: "分享功能已启用，但新分享默认没有过期时间和下载次数上限；公网访问前建议同时设置默认有效期和默认下载次数。",
 			Details: details,
 		}
 	}
@@ -9348,8 +9437,8 @@ func securityShareDefaultPolicyCheck(cfg *config.Config) securityCheckItem {
 		return securityCheckItem{
 			ID:      checkID,
 			Status:  securityCheckWarning,
-			Title:   "新分享默认访问次数不限制",
-			Message: "分享功能已启用，但新分享默认没有访问次数上限；公网访问前建议设置默认访问次数，避免公开链接被反复访问。",
+			Title:   "新分享默认下载次数不限制",
+			Message: "分享功能已启用，但新分享默认没有下载次数上限；公网访问前建议设置默认下载次数，避免公开链接被反复下载。",
 			Details: details,
 		}
 	}
@@ -9358,7 +9447,7 @@ func securityShareDefaultPolicyCheck(cfg *config.Config) securityCheckItem {
 		ID:      checkID,
 		Status:  securityCheckPass,
 		Title:   "分享默认策略符合建议",
-		Message: "新分享默认有效期和默认访问次数处于公网部署建议范围内。",
+		Message: "新分享默认有效期和默认下载次数处于公网部署建议范围内。",
 		Details: details,
 	}
 }
@@ -11897,6 +11986,9 @@ func publicShareAllowedMethods(r *http.Request) string {
 	if isPublicShareAPIAccessPath(cleanPath) {
 		return http.MethodPost
 	}
+	if isPublicShareDownloadTicketPath(cleanPath) {
+		return http.MethodPost
+	}
 	return http.MethodGet
 }
 
@@ -11913,6 +12005,20 @@ func isPublicShareAPIAccessPath(cleanPath string) bool {
 	}
 	shareID, suffix, ok := strings.Cut(rest, "/")
 	return ok && shareID != "" && suffix == "access"
+}
+
+func isPublicShareDownloadTicketPath(cleanPath string) bool {
+	for _, prefix := range []string{"/s/", "/api/v1/public/shares/"} {
+		rest, ok := strings.CutPrefix(cleanPath, prefix)
+		if !ok {
+			continue
+		}
+		shareID, suffix, ok := strings.Cut(rest, "/")
+		if ok && shareID != "" && suffix == "download-ticket" {
+			return true
+		}
+	}
+	return false
 }
 
 func setPublicShareResponseHeaders(w http.ResponseWriter) {
@@ -12198,12 +12304,35 @@ func (s *Server) handleAccessShareWithPassword(w http.ResponseWriter, r *http.Re
 	s.shareHandler.AccessShareWithPassword(w, r)
 }
 
+func (s *Server) handleCreateDownloadTicket(w http.ResponseWriter, r *http.Request) {
+	setPublicShareResponseHeaders(w)
+	if r.Method != http.MethodPost {
+		writePublicShareMethodNotAllowed(w, r)
+		return
+	}
+	w = s.withDownloadWriteDeadline(w)
+	if !s.isShareFeatureEnabled() {
+		s.writeShareFeatureDisabled(w, http.StatusGone)
+		return
+	}
+	if _, err := s.ensureShareWithinOwnerHome(chi.URLParam(r, "id")); err != nil {
+		if errors.Is(err, share.ErrShareNotFound) {
+			writeShareErrorResponse(w, http.StatusNotFound, "share not found", "SHARE_NOT_FOUND")
+			return
+		}
+		s.respondInternalError(w, "authorize public share download ticket", err)
+		return
+	}
+	s.shareHandler.CreateDownloadTicket(w, r)
+}
+
 func (s *Server) handleDownloadShare(w http.ResponseWriter, r *http.Request) {
 	setPublicShareResponseHeaders(w)
 	if r.Method != http.MethodGet {
 		writePublicShareMethodNotAllowed(w, r)
 		return
 	}
+	w = s.withDownloadWriteDeadline(w)
 	if !s.isShareFeatureEnabled() {
 		s.writeShareFeatureDisabled(w, http.StatusGone)
 		return
@@ -12225,6 +12354,7 @@ func (s *Server) handleDownloadShareFile(w http.ResponseWriter, r *http.Request)
 		writePublicShareMethodNotAllowed(w, r)
 		return
 	}
+	w = s.withDownloadWriteDeadline(w)
 	if !s.isShareFeatureEnabled() {
 		s.writeShareFeatureDisabled(w, http.StatusGone)
 		return

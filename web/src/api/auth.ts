@@ -182,8 +182,15 @@ interface RefreshOperation {
   promise: Promise<RefreshSessionResult>
 }
 
+interface DownloadSessionOperation {
+  generation: number
+  controller: AbortController
+  promise: Promise<DownloadSessionResult>
+}
+
 let authSessionGeneration = 0
 let refreshOperation: RefreshOperation | null = null
+const downloadSessionOperations = new Map<AbortSignal | undefined, DownloadSessionOperation>()
 let isDownloadSessionReady = true
 let legacyAuthRequestCount = 0
 let authCrossTabSyncSequence = 0
@@ -261,6 +268,11 @@ function assertAuthGenerationCurrent(generation: number): void {
 
 export function invalidateAuthSessionRequests(): number {
   authSessionGeneration += 1
+  const pendingDownloadSessions = [...downloadSessionOperations.values()]
+  downloadSessionOperations.clear()
+  for (const operation of pendingDownloadSessions) {
+    operation.controller.abort()
+  }
   const pendingRefresh = refreshOperation
   pendingRefresh?.controller.abort()
   if (refreshOperation === pendingRefresh) {
@@ -399,9 +411,9 @@ async function readAuthApiError(response: Response, fallback = ''): Promise<Auth
 async function handleUnauthorizedSessionResponse(
   response: Response,
   generation = authSessionGeneration,
-): Promise<void> {
+): Promise<boolean> {
   if (response.status !== 401 || !hasStoredAuthState() || !isAuthGenerationCurrent(generation)) {
-    return
+    return false
   }
 
   let detail: AuthClearedDetail = {
@@ -412,7 +424,7 @@ async function handleUnauthorizedSessionResponse(
   try {
     const error = await readAuthApiError(response)
     if (!isAuthGenerationCurrent(generation)) {
-      return
+      return false
     }
     if (error?.code === 'USER_NOT_FOUND') {
       detail = {
@@ -426,31 +438,35 @@ async function handleUnauthorizedSessionResponse(
 
   if (isAuthGenerationCurrent(generation)) {
     clearTokens(detail)
+    return true
   }
+  return false
 }
 
 async function handleForbiddenSessionResponse(
   response: Response,
   generation = authSessionGeneration,
-): Promise<void> {
+): Promise<boolean> {
   if (response.status !== 403 || !isAuthGenerationCurrent(generation)) {
-    return
+    return false
   }
 
   try {
     const error = await readAuthApiError(response)
     if (!isAuthGenerationCurrent(generation)) {
-      return
+      return false
     }
     if (error?.code === 'USER_DISABLED') {
       clearTokens({
         reason: 'disabled',
         message: getSessionEndedMessage(error.message),
       })
+      return true
     }
   } catch {
     // Ignore invalid error payloads and let callers handle the response body.
   }
+  return false
 }
 
 export function getStoredToken(): string | null {
@@ -786,12 +802,16 @@ interface RefreshReplayRecoveryResult {
   recovered: boolean
   terminal: boolean
   passwordChangeRequired: boolean
+  authCleared: boolean
   user?: User
+  downloadSession?: DownloadSessionResult
 }
 
 interface RefreshSessionResult {
   refreshed: boolean
   passwordChangeRequired: boolean
+  authCleared: boolean
+  downloadSession?: DownloadSessionResult
 }
 
 type BrowserSessionProbeResult =
@@ -850,13 +870,30 @@ function hasSameAuthSecurityScope(expected: User, current: User): boolean {
     && expected.mustChangePassword === current.mustChangePassword
 }
 
+const DOWNLOAD_SESSION_REFRESHABLE_AUTH_CODES = new Set([
+  'INVALID_TOKEN',
+  'TOKEN_EXPIRED',
+  'TOKEN_REVOKED',
+])
+
+type DownloadSessionUnauthorizedHandling = 'clear' | 'preserve-refreshable'
+
+function assertRequestSignalActive(signal?: AbortSignal): void {
+  if (!signal?.aborted) {
+    return
+  }
+  throw signal.reason ?? new DOMException('The operation was aborted', 'AbortError')
+}
+
 async function syncDownloadSession(
   options: AuthRequestOptions = {},
   force = false,
   generation = authSessionGeneration,
+  unauthorizedHandling: DownloadSessionUnauthorizedHandling = 'clear',
 ): Promise<DownloadSessionResult> {
   const hadBrowserSessionState = force || hasBrowserSessionState()
   clearLegacyTokenStorage()
+  assertRequestSignalActive(options.signal)
   if (!hadBrowserSessionState) {
     isDownloadSessionReady = true
     return { ok: true }
@@ -869,11 +906,13 @@ async function syncDownloadSession(
       ...(options.signal ? { signal: options.signal } : {}),
     })
     assertAuthGenerationCurrent(generation)
+    assertRequestSignalActive(options.signal)
 
     if (!response.ok) {
       let message = getDownloadSessionSyncMessage()
       const error = await readAuthApiError(response)
       assertAuthGenerationCurrent(generation)
+      assertRequestSignalActive(options.signal)
 
       if (response.status === 401) {
         message = error?.code === 'USER_NOT_FOUND'
@@ -881,13 +920,18 @@ async function syncDownloadSession(
           : error?.code === 'MISSING_AUTH_HEADER' || error?.code === 'NOT_AUTHENTICATED'
             ? getMissingBrowserSessionMessage()
             : '登录已过期，请重新登录'
-        clearTokens({
-          reason: error?.code === 'USER_NOT_FOUND' ? 'missing' : 'expired',
-          message,
-        })
+        const preserveForRefresh = unauthorizedHandling === 'preserve-refreshable'
+          && error?.code !== undefined
+          && DOWNLOAD_SESSION_REFRESHABLE_AUTH_CODES.has(error.code)
+        if (!preserveForRefresh) {
+          clearTokens({
+            reason: error?.code === 'USER_NOT_FOUND' ? 'missing' : 'expired',
+            message,
+          })
+        }
         return {
           ok: false,
-          authCleared: true,
+          authCleared: !preserveForRefresh,
           status: response.status,
           code: error?.code,
           message,
@@ -919,7 +963,13 @@ async function syncDownloadSession(
     isDownloadSessionReady = true
     return { ok: true }
   } catch (error) {
-    if (options.signal?.aborted || isAbortError(error)) {
+    if (!isAuthGenerationCurrent(generation)) {
+      throw createSupersededAuthError()
+    }
+    if (options.signal?.aborted) {
+      assertRequestSignalActive(options.signal)
+    }
+    if (isAbortError(error)) {
       throw error
     }
     isDownloadSessionReady = false
@@ -933,6 +983,8 @@ async function syncDownloadSessionForUser(
   force = false,
   generation = authSessionGeneration,
 ): Promise<DownloadSessionResult> {
+  assertAuthGenerationCurrent(generation)
+  assertRequestSignalActive(options.signal)
   if (user.mustChangePassword) {
     isDownloadSessionReady = true
     return { ok: true }
@@ -946,7 +998,99 @@ export async function ensureDownloadSession(options: AuthRequestOptions = {}): P
     return { ok: true }
   }
 
-  return syncDownloadSession(options)
+  const generation = authSessionGeneration
+  const signal = options.signal
+  const existingOperation = downloadSessionOperations.get(signal)
+  if (existingOperation && existingOperation.generation === generation) {
+    return existingOperation.promise
+  }
+
+  const controller = new AbortController()
+  const unlinkCallerSignal = linkAbortSignal(signal, controller)
+  const operation: DownloadSessionOperation = {
+    generation,
+    controller,
+    promise: Promise.resolve({ ok: false }),
+  }
+  operation.promise = (async () => {
+    const initialSync = await syncDownloadSession(
+      { signal: controller.signal },
+      false,
+      generation,
+      'preserve-refreshable',
+    )
+    if (initialSync.ok || initialSync.status !== 401 || initialSync.authCleared) {
+      return initialSync
+    }
+
+    assertAuthGenerationCurrent(generation)
+    assertRequestSignalActive(signal)
+    const refreshResult = await waitForAuthRefresh(tryRefreshToken(true), signal)
+    if (refreshResult.authCleared) {
+      return refreshResult.downloadSession ?? { ...initialSync, authCleared: true }
+    }
+    assertAuthGenerationCurrent(generation)
+    if (controller.signal.aborted) {
+      throw new DOMException('The operation was aborted', 'AbortError')
+    }
+    if (!refreshResult.refreshed || refreshResult.passwordChangeRequired) {
+      return { ...initialSync, authCleared: false }
+    }
+
+    return refreshResult.downloadSession ?? (isDownloadSessionReady
+      ? { ok: true }
+      : { ok: false, message: getDownloadSessionSyncMessage() })
+  })().finally(() => {
+    unlinkCallerSignal()
+    if (downloadSessionOperations.get(signal) === operation) {
+      downloadSessionOperations.delete(signal)
+    }
+  })
+  downloadSessionOperations.set(signal, operation)
+  return operation.promise
+}
+
+function linkAbortSignal(source: AbortSignal | undefined, controller: AbortController): () => void {
+  if (!source) {
+    return () => undefined
+  }
+  if (source.aborted) {
+    controller.abort(source.reason)
+    return () => undefined
+  }
+
+  const abort = () => controller.abort(source.reason)
+  source.addEventListener('abort', abort, { once: true })
+  return () => source.removeEventListener('abort', abort)
+}
+
+function waitForAuthRefresh(
+  refresh: Promise<RefreshSessionResult>,
+  signal?: AbortSignal,
+): Promise<RefreshSessionResult> {
+  if (!signal) {
+    return refresh
+  }
+  if (signal.aborted) {
+    return Promise.reject(new DOMException('The operation was aborted', 'AbortError'))
+  }
+
+  return new Promise((resolve, reject) => {
+    const abort = () => {
+      reject(new DOMException('The operation was aborted', 'AbortError'))
+    }
+    signal.addEventListener('abort', abort, { once: true })
+    void refresh.then(
+      (result) => {
+        signal.removeEventListener('abort', abort)
+        resolve(result)
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', abort)
+        reject(error)
+      },
+    )
+  })
 }
 
 // Auth header helper
@@ -1058,8 +1202,29 @@ export async function refreshAuthSession(): Promise<boolean> {
   return result.refreshed && !result.passwordChangeRequired && isDownloadSessionReady
 }
 
-function failedRefreshResult(): RefreshSessionResult {
-  return { refreshed: false, passwordChangeRequired: false }
+function failedRefreshResult(authCleared = false): RefreshSessionResult {
+  return { refreshed: false, passwordChangeRequired: false, authCleared }
+}
+
+const DEFINITIVE_REFRESH_FAILURES = new Set([
+  '400:MISSING_TOKEN',
+  '401:INVALID_TOKEN',
+  '401:TOKEN_EXPIRED',
+  '401:TOKEN_REVOKED',
+  '401:USER_NOT_FOUND',
+  '403:USER_DISABLED',
+])
+
+function isDefinitiveRefreshFailure(status: number, code?: string): boolean {
+  return code !== undefined && DEFINITIVE_REFRESH_FAILURES.has(`${status}:${code}`)
+}
+
+function clearStoredAuthAfterDefinitiveRefreshFailure(hadAuthState: boolean): boolean {
+  if (!hadAuthState || !hasStoredAuthState()) {
+    return false
+  }
+  clearTokens()
+  return true
 }
 
 async function requestAuthRefreshLock<T>(
@@ -1104,6 +1269,12 @@ async function performRefreshRequest(
     }
     if (error?.code === 'TOKEN_REVOKED') {
       const recovery = await recoverBrowserSessionAfterRefreshRevoked(generation, signal)
+      if (recovery.authCleared) {
+        return {
+          ...failedRefreshResult(true),
+          ...(recovery.downloadSession ? { downloadSession: recovery.downloadSession } : {}),
+        }
+      }
       if (!isCurrent()) {
         return failedRefreshResult()
       }
@@ -1111,32 +1282,55 @@ async function performRefreshRequest(
         return {
           refreshed: true,
           passwordChangeRequired: recovery.passwordChangeRequired,
+          authCleared: false,
+          ...(recovery.downloadSession ? { downloadSession: recovery.downloadSession } : {}),
         }
       }
       if (!recovery.terminal) {
         return failedRefreshResult()
       }
+      return failedRefreshResult()
     }
-    if (hadAuthState && hasStoredAuthState()) {
-      clearTokens()
+    if (isDefinitiveRefreshFailure(response.status, error?.code)) {
+      return failedRefreshResult(clearStoredAuthAfterDefinitiveRefreshFailure(hadAuthState))
     }
     return failedRefreshResult()
   }
 
-  const body: AuthApiResponse<RefreshResponse> = await response.json()
+  let body: AuthApiResponse<RefreshResponse>
+  try {
+    body = await response.json()
+  } catch {
+    return failedRefreshResult()
+  }
   if (!isCurrent()) {
     return failedRefreshResult()
   }
-  const data = parseAuthSessionData(readAuthSuccessData(body))
+  let data: AuthSessionData
+  try {
+    data = parseAuthSessionData(readAuthSuccessData(body))
+  } catch {
+    return failedRefreshResult()
+  }
   storeSessionUser(data.user)
   notifyAuthSessionUpdated(data.user)
   const downloadSession = await syncDownloadSessionForUser(data.user, { signal }, true, generation)
+  if (downloadSession.authCleared) {
+    return {
+      refreshed: false,
+      passwordChangeRequired: false,
+      authCleared: true,
+      downloadSession,
+    }
+  }
   if (!isCurrent()) {
     return failedRefreshResult()
   }
   return {
     refreshed: !downloadSession.authCleared,
     passwordChangeRequired: data.user.mustChangePassword && !downloadSession.authCleared,
+    authCleared: Boolean(downloadSession.authCleared),
+    downloadSession,
   }
 }
 
@@ -1178,12 +1372,22 @@ async function reuseProbedBrowserSession(
   storeSessionUser(user)
   notifyAuthSessionUpdated(user)
   const downloadSession = await syncDownloadSessionForUser(user, { signal }, true, generation)
+  if (downloadSession.authCleared) {
+    return {
+      refreshed: false,
+      passwordChangeRequired: false,
+      authCleared: true,
+      downloadSession,
+    }
+  }
   if (!isAuthGenerationCurrent(generation) || signal.aborted) {
     return failedRefreshResult()
   }
   return {
     refreshed: !downloadSession.authCleared,
     passwordChangeRequired: user.mustChangePassword && !downloadSession.authCleared,
+    authCleared: Boolean(downloadSession.authCleared),
+    downloadSession,
   }
 }
 
@@ -1256,7 +1460,6 @@ async function tryRefreshToken(hadAuthState = hasStoredAuthState()): Promise<Ref
     controller,
     promise: Promise.resolve(failedRefreshResult()),
   }
-  const isCurrent = () => isAuthGenerationCurrent(generation) && !controller.signal.aborted
 
   operation.promise = (async () => {
     try {
@@ -1264,13 +1467,7 @@ async function tryRefreshToken(hadAuthState = hasStoredAuthState()): Promise<Ref
       return lockManager
         ? await performCoordinatedRefresh(lockManager, generation, controller.signal, hadAuthState)
         : await performRefreshRequest(generation, controller.signal, hadAuthState)
-    } catch (error) {
-      if (isCurrent()
-        && hadAuthState
-        && !isAbortError(error)
-        && !(error instanceof AuthRefreshCoordinationError)) {
-        clearTokens()
-      }
+    } catch {
       return failedRefreshResult()
     } finally {
       if (refreshOperation === operation) {
@@ -1294,21 +1491,26 @@ async function recoverBrowserSessionAfterRefreshRevoked(
       signal,
     })
     if (!isCurrent()) {
-      return { recovered: false, terminal: false, passwordChangeRequired: false }
+      return { recovered: false, terminal: false, passwordChangeRequired: false, authCleared: false }
     }
 
     if (!response.ok) {
       if (response.status === 401 || response.status === 403) {
-        await handleUnauthorizedSessionResponse(response, generation)
-        await handleForbiddenSessionResponse(response, generation)
-        return { recovered: false, terminal: true, passwordChangeRequired: false }
+        const unauthorizedCleared = await handleUnauthorizedSessionResponse(response, generation)
+        const forbiddenCleared = await handleForbiddenSessionResponse(response, generation)
+        return {
+          recovered: false,
+          terminal: true,
+          passwordChangeRequired: false,
+          authCleared: unauthorizedCleared || forbiddenCleared,
+        }
       }
-      return { recovered: false, terminal: false, passwordChangeRequired: false }
+      return { recovered: false, terminal: false, passwordChangeRequired: false, authCleared: false }
     }
 
     const body: AuthApiResponse<{ user: ApiUser }> = await response.json()
     if (!isCurrent()) {
-      return { recovered: false, terminal: false, passwordChangeRequired: false }
+      return { recovered: false, terminal: false, passwordChangeRequired: false, authCleared: false }
     }
     const data = readAuthSuccessData(body)
     const user = normalizeUser(data.user)
@@ -1316,17 +1518,28 @@ async function recoverBrowserSessionAfterRefreshRevoked(
     notifyAuthSessionUpdated(user)
 
     const downloadSession = await syncDownloadSessionForUser(user, { signal }, true, generation)
+    if (downloadSession.authCleared) {
+      return {
+        recovered: false,
+        terminal: true,
+        passwordChangeRequired: false,
+        authCleared: true,
+        downloadSession,
+      }
+    }
     if (!isCurrent()) {
-      return { recovered: false, terminal: false, passwordChangeRequired: false }
+      return { recovered: false, terminal: false, passwordChangeRequired: false, authCleared: false }
     }
     return {
       recovered: !downloadSession.authCleared,
       terminal: Boolean(downloadSession.authCleared),
       passwordChangeRequired: user.mustChangePassword && !downloadSession.authCleared,
+      authCleared: Boolean(downloadSession.authCleared),
       user,
+      downloadSession,
     }
   } catch {
-    return { recovered: false, terminal: false, passwordChangeRequired: false }
+    return { recovered: false, terminal: false, passwordChangeRequired: false, authCleared: false }
   }
 }
 
