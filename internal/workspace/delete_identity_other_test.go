@@ -26,4 +26,11 @@ func TestWorkspaceDeleteIdentityIsEmptyOnUnsupportedPlatform(t *testing.T) {
 	if info.DeleteIdentityToken != "" {
 		t.Fatalf("unsupported delete identity token = %q, want empty", info.DeleteIdentityToken)
 	}
+	hostInfo, err := os.Lstat(filepath.Join(root, "item.bin"))
+	if err != nil {
+		t.Fatalf("Lstat() error: %v", err)
+	}
+	if token := PersistentIdentityTokenForFileInfo(hostInfo); token != "" {
+		t.Fatalf("unsupported persistent identity token = %q, want empty", token)
+	}
 }

@@ -116,6 +116,45 @@ func TestWorkspaceDeleteIdentityTokenChangesForSameMetadataReplacement(t *testin
 	}
 }
 
+func TestPersistentIdentityTokenSurvivesRenameAndRejectsReplacement(t *testing.T) {
+	root := t.TempDir()
+	originalPath := filepath.Join(root, "original.bin")
+	replacementPath := filepath.Join(root, "replacement.bin")
+	if err := os.WriteFile(originalPath, []byte("same"), 0o600); err != nil {
+		t.Fatalf("WriteFile(original) error: %v", err)
+	}
+	if err := os.WriteFile(replacementPath, []byte("same"), 0o600); err != nil {
+		t.Fatalf("WriteFile(replacement) error: %v", err)
+	}
+	originalInfo, err := os.Lstat(originalPath)
+	if err != nil {
+		t.Fatalf("Lstat(original) error: %v", err)
+	}
+	replacementInfo, err := os.Lstat(replacementPath)
+	if err != nil {
+		t.Fatalf("Lstat(replacement) error: %v", err)
+	}
+	originalToken := PersistentIdentityTokenForFileInfo(originalInfo)
+	replacementToken := PersistentIdentityTokenForFileInfo(replacementInfo)
+	assertDeleteIdentityToken(t, originalToken)
+	assertDeleteIdentityToken(t, replacementToken)
+	if originalToken == replacementToken {
+		t.Fatalf("different objects share persistent identity %q", originalToken)
+	}
+
+	renamedPath := filepath.Join(root, "renamed.bin")
+	if err := os.Rename(originalPath, renamedPath); err != nil {
+		t.Fatalf("Rename() error: %v", err)
+	}
+	renamedInfo, err := os.Lstat(renamedPath)
+	if err != nil {
+		t.Fatalf("Lstat(renamed) error: %v", err)
+	}
+	if renamedToken := PersistentIdentityTokenForFileInfo(renamedInfo); renamedToken != originalToken {
+		t.Fatalf("persistent identity after rename = %q, want %q", renamedToken, originalToken)
+	}
+}
+
 func assertDeleteIdentityToken(t *testing.T, token string) {
 	t.Helper()
 	if len(token) != 64 {

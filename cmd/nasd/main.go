@@ -693,14 +693,24 @@ func main() {
 	}
 	defer fs.Close()
 
-	retentionMonitor := storage.NewRetentionMonitor(fs, storage.RetentionMonitorConfig{
-		MaxVersions:   cfg.Storage.Retention.MaxVersions,
-		MaxVersionAge: cfg.Storage.Retention.MaxAge,
-		MinFreeSpace:  cfg.Storage.Retention.MinFreeSpace,
-		SweepInterval: cfg.Storage.Retention.GCInterval,
-	}, log.Logger)
-	retentionMonitor.Start(ctx)
-	defer retentionMonitor.Stop()
+	trashRecovery, recoveryErr := fs.RecoverTrashDeletions(ctx)
+	if trashRecovery.RolledBack > 0 || trashRecovery.RolledForward > 0 {
+		log.Info().
+			Int("rolled_back", trashRecovery.RolledBack).
+			Int("rolled_forward", trashRecovery.RolledForward).
+			Msg("recovered interrupted Trash deletions")
+	}
+	if len(trashRecovery.UntrackedPaths) > 0 {
+		log.Warn().
+			Strs("paths", trashRecovery.UntrackedPaths).
+			Msg("untracked Trash deletion residue requires manual inspection")
+	}
+	if recoveryErr != nil {
+		log.Fatal().
+			Err(recoveryErr).
+			Strs("operations", trashRecovery.Blocked).
+			Msg("interrupted Trash deletion recovery is blocked; refusing to start writable services")
+	}
 
 	// Cleanup staging files from previous crashes
 	if cleanedFiles, cleanedBytes, cleanErr := fs.CleanupStaging(ctx); cleanErr != nil {
@@ -711,6 +721,15 @@ func main() {
 			Int64("bytes", cleanedBytes).
 			Msg("cleaned up staging files from previous crash")
 	}
+
+	retentionMonitor := storage.NewRetentionMonitor(fs, storage.RetentionMonitorConfig{
+		MaxVersions:   cfg.Storage.Retention.MaxVersions,
+		MaxVersionAge: cfg.Storage.Retention.MaxAge,
+		MinFreeSpace:  cfg.Storage.Retention.MinFreeSpace,
+		SweepInterval: cfg.Storage.Retention.GCInterval,
+	}, log.Logger)
+	retentionMonitor.Start(ctx)
+	defer retentionMonitor.Stop()
 
 	// Create router
 	router := chi.NewRouter()

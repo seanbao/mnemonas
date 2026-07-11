@@ -483,6 +483,7 @@ type FileSystem struct {
 	renameMetadataPath        func(ctx context.Context, oldName, newName string) error
 	renameHistoryMetadataPath func(ctx context.Context, oldName, newName string) error
 	removeTrashPath           func(path string) error
+	trashMutationBlocked      error
 	hookMu                    sync.RWMutex
 	gcMu                      sync.RWMutex
 	mu                        sync.RWMutex
@@ -725,24 +726,12 @@ func New(cfg *Config) (*FileSystem, error) {
 			_ = trashRootHandle.Close()
 		}
 	}()
-	removeTrashPath := func(target string) error {
-		absTarget, err := normalizeStorageHostPath(target)
-		if err != nil {
-			return err
-		}
-		rel, ok := storageRelativePath(trashRoot, absTarget)
-		if !ok || rel == "." {
-			return errStoragePathSymlink
-		}
-		return mapStorageRootPathError(rootio.RemoveAllNoFollow(trashRootHandle, rel))
-	}
-
 	cleanupWorkspace = false
 	cleanupVersionStore = false
 	cleanupFilesRoot = false
 	cleanupTrashRoot = false
 
-	return &FileSystem{
+	fs := &FileSystem{
 		workspace:                 ws,
 		filesRootHandle:           filesRootHandle,
 		trashRootHandle:           trashRootHandle,
@@ -772,8 +761,9 @@ func New(cfg *Config) (*FileSystem, error) {
 		renameWorkspacePath:       ws.Rename,
 		renameMetadataPath:        vs.RenamePath,
 		renameHistoryMetadataPath: vs.RenamePathHistory,
-		removeTrashPath:           removeTrashPath,
-	}, nil
+	}
+	fs.removeTrashPath = fs.removeCommittedTrashPurgeStage
+	return fs, nil
 }
 
 // Close closes the filesystem
@@ -1577,6 +1567,9 @@ func (fs *FileSystem) authorizeDeleteTreeLocked(ctx context.Context, name string
 }
 
 func (fs *FileSystem) ensureTrashCapacityLocked(ctx context.Context, incomingSize int64, protectedIDs ...string) error {
+	if err := fs.checkTrashMutationAllowedLocked(); err != nil {
+		return err
+	}
 	if fs.config == nil || fs.config.MaxTrashSize <= 0 {
 		return nil
 	}
@@ -2404,6 +2397,9 @@ func (fs *FileSystem) walkTrashContentRestorePaths(ctx context.Context, mountBou
 func (fs *FileSystem) RestoreFromTrash(ctx context.Context, id string) error {
 	release := fs.beginMutation()
 	defer release()
+	if err := fs.checkTrashMutationAllowedLocked(); err != nil {
+		return err
+	}
 
 	item, err := fs.versions.GetTrashItem(ctx, id)
 	if err != nil {
@@ -2482,6 +2478,9 @@ func (fs *FileSystem) RestoreFromTrash(ctx context.Context, id string) error {
 func (fs *FileSystem) RestoreFromTrashTo(ctx context.Context, id, newPath string) error {
 	release := fs.beginMutation()
 	defer release()
+	if err := fs.checkTrashMutationAllowedLocked(); err != nil {
+		return err
+	}
 
 	var err error
 	newPath, err = normalizeStorageWorkspacePath(newPath)
@@ -2733,6 +2732,9 @@ func (fs *FileSystem) workspacePathExists(ctx context.Context, targetPath string
 func (fs *FileSystem) DeleteFromTrash(ctx context.Context, id string) error {
 	release := fs.beginMutation()
 	defer release()
+	if err := fs.checkTrashMutationAllowedLocked(); err != nil {
+		return err
+	}
 
 	item, err := fs.versions.GetTrashItem(ctx, id)
 	if err != nil {
@@ -2755,6 +2757,9 @@ func (fs *FileSystem) EmptyTrashSelection(ctx context.Context, ids []string, aut
 	defer release()
 
 	var result TrashSelectionResult
+	if err := fs.checkTrashMutationAllowedLocked(); err != nil {
+		return result, err
+	}
 	if len(ids) == 0 || len(ids) > MaxTrashSelectionIDs {
 		return result, ErrInvalidTrashSelection
 	}
@@ -2884,11 +2889,14 @@ func (fs *FileSystem) CleanupExpiredTrash(ctx context.Context) (int, error) {
 }
 
 func (fs *FileSystem) cleanupExpiredTrashLocked(ctx context.Context) (int, error) {
+	if err := fs.checkTrashMutationAllowedLocked(); err != nil {
+		return 0, err
+	}
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
 
-	// Get expired items first so metadata is removed only after content deletion succeeds.
+	// Snapshot the expiration candidates before beginning journaled mutations.
 	items, err := fs.versions.ListTrash(ctx)
 	if err != nil {
 		return 0, err
@@ -2929,47 +2937,24 @@ func (fs *FileSystem) cleanupExpiredTrashLocked(ctx context.Context) (int, error
 }
 
 func (fs *FileSystem) permanentlyDeleteTrashItem(ctx context.Context, item *versionstore.TrashItem) (bool, error) {
-	err := fs.deleteTrashItem(ctx, item)
-	visibleDeleted := err == nil
-	if !item.HadVersions {
-		var durabilityErr *trashDeleteDurabilityError
-		if errors.As(err, &durabilityErr) {
-			visibleDeleted = true
-		}
-		return visibleDeleted, err
-	}
-
-	var durabilityErr *trashDeleteDurabilityError
-	if err != nil && !errors.As(err, &durabilityErr) {
+	if err := fs.checkTrashMutationAllowedLocked(); err != nil {
 		return false, err
 	}
-	if durabilityErr != nil {
-		visibleDeleted = true
+	operation, err := fs.prepareTrashPurge(ctx, item)
+	if err != nil {
+		return false, err
 	}
-	sharedMetadata, sharedErr := fs.hasOtherTrashItemWithOriginalPath(ctx, item.OriginalPath, item.ID)
-	if sharedErr != nil {
-		return visibleDeleted, errors.Join(err, sharedErr)
+	committed, err := fs.executeTrashPurge(ctx, operation)
+	if err != nil {
+		return committed, err
 	}
-	if sharedMetadata {
-		return visibleDeleted, err
+	if err := fs.finishTrashPurge(ctx, operation); err != nil {
+		return true, err
 	}
-	livePathExists, pathErr := fs.workspacePathExists(ctx, item.OriginalPath)
-	if pathErr != nil {
-		return visibleDeleted, errors.Join(err, pathErr)
-	}
-	if livePathExists {
-		return visibleDeleted, err
-	}
-
-	cleanupErr := fs.cleanupDeletedTrashVersions(ctx, item)
-	if cleanupErr != nil {
-		return visibleDeleted, errors.Join(err, cleanupErr)
-	}
-
-	return visibleDeleted, err
+	return true, nil
 }
 
-func (fs *FileSystem) cleanupDeletedTrashVersions(ctx context.Context, item *versionstore.TrashItem) error {
+func (fs *FileSystem) cleanupDeletedTrashVersionMetadata(ctx context.Context, item *versionstore.TrashItem) error {
 	versionPaths := []string{item.OriginalPath}
 	if item.IsDir {
 		paths, err := fs.listVersionPaths(ctx)
@@ -2984,7 +2969,6 @@ func (fs *FileSystem) cleanupDeletedTrashVersions(ctx context.Context, item *ver
 		}
 	}
 
-	versionHashes := make([]string, 0)
 	retainedVersionPaths := make(map[string]struct{})
 	for _, versionPath := range versionPaths {
 		retained, err := fs.versionPathReferencedOutsideTrashItem(ctx, versionPath, item.ID)
@@ -2995,13 +2979,6 @@ func (fs *FileSystem) cleanupDeletedTrashVersions(ctx context.Context, item *ver
 			retainedVersionPaths[versionPath] = struct{}{}
 			continue
 		}
-		versions, err := fs.versions.GetVersions(ctx, versionPath)
-		if err != nil {
-			return fmt.Errorf("failed to read version metadata for trash item: %w", err)
-		}
-		for _, version := range versions {
-			versionHashes = append(versionHashes, version.Hash)
-		}
 	}
 
 	for _, versionPath := range versionPaths {
@@ -3011,107 +2988,6 @@ func (fs *FileSystem) cleanupDeletedTrashVersions(ctx context.Context, item *ver
 		if err := fs.versions.DeleteVersions(ctx, versionPath); err != nil {
 			return fmt.Errorf("failed to delete version metadata for trash item: %w", err)
 		}
-	}
-	if err := fs.deleteUnreferencedVersionObjects(ctx, versionHashes); err != nil {
-		return fmt.Errorf("failed to delete version objects for trash item: %w", err)
-	}
-
-	return nil
-}
-
-func (fs *FileSystem) deleteTrashItem(ctx context.Context, item *versionstore.TrashItem) error {
-	trashItemPath := path.Join(fs.trashRoot, item.ID)
-	if err := fs.captureDeleteMountBoundary(fs.trashRoot).checkHostTree(trashItemPath); err != nil {
-		return err
-	}
-	stageID, err := generateID()
-	if err != nil {
-		return fmt.Errorf("generate trash staging ID for %s: %w", item.ID, err)
-	}
-	stagedTrashPath := path.Join(fs.trashRoot, ".deleting", item.ID+"-"+stageID)
-
-	// Stage the trash entry first so metadata deletion can be rolled back safely.
-	if err := fs.movePath(trashItemPath, stagedTrashPath); err != nil {
-		return fmt.Errorf("failed to stage trash content for %s: %w", item.ID, err)
-	}
-
-	if err := fs.removeTrashMetadata(ctx, item.ID); err != nil {
-		if rollbackErr := fs.rollbackStagedTrashItem(stagedTrashPath, trashItemPath); rollbackErr != nil {
-			return errors.Join(
-				fmt.Errorf("failed to remove trash metadata for %s: %w", item.ID, err),
-				fmt.Errorf("failed to rollback trash content for %s: %w", item.ID, rollbackErr),
-			)
-		}
-		fs.cleanupTrashStagingDir(stagedTrashPath)
-		return fmt.Errorf("failed to remove trash metadata for %s: %w", item.ID, err)
-	}
-
-	removedContent, err := fs.removeTrashPathDurably(stagedTrashPath)
-	if err != nil {
-		if removedContent {
-			return &trashDeleteDurabilityError{err: fmt.Errorf("failed to sync deleted trash content for %s: %w", item.ID, err)}
-		}
-		rollbackErr := fs.rollbackStagedTrashItem(stagedTrashPath, trashItemPath)
-		metadataErr := fs.addTrashMetadata(ctx, item)
-		fs.cleanupTrashStagingDir(stagedTrashPath)
-		if rollbackErr != nil && metadataErr != nil {
-			return errors.Join(
-				fmt.Errorf("failed to delete trash content for %s: %w", item.ID, err),
-				fmt.Errorf("failed to rollback trash content for %s: %w", item.ID, rollbackErr),
-				fmt.Errorf("failed to restore trash metadata for %s: %w", item.ID, metadataErr),
-			)
-		}
-		if rollbackErr != nil {
-			return errors.Join(
-				fmt.Errorf("failed to delete trash content for %s: %w", item.ID, err),
-				fmt.Errorf("failed to rollback trash content for %s: %w", item.ID, rollbackErr),
-			)
-		}
-		if metadataErr != nil {
-			return errors.Join(
-				fmt.Errorf("failed to delete trash content for %s: %w", item.ID, err),
-				fmt.Errorf("failed to restore trash metadata for %s: %w", item.ID, metadataErr),
-			)
-		}
-		return fmt.Errorf("failed to delete trash content for %s: %w", item.ID, err)
-	}
-
-	fs.cleanupTrashStagingDir(stagedTrashPath)
-
-	return nil
-}
-
-func (fs *FileSystem) rollbackStagedTrashItem(stagedTrashPath, trashItemPath string) error {
-	trashRoot := &storagePathRoot{absRoot: fs.trashRoot, handle: fs.trashRootHandle}
-	stagedRel, ok := storageRelativePath(fs.trashRoot, filepath.Clean(stagedTrashPath))
-	if !ok {
-		return fmt.Errorf("managed path %q is outside trash root", stagedTrashPath)
-	}
-	trashItemRel, ok := storageRelativePath(fs.trashRoot, filepath.Clean(trashItemPath))
-	if !ok {
-		return fmt.Errorf("managed path %q is outside trash root", trashItemPath)
-	}
-
-	if err := ensureStorageManagedDir(trashRoot, filepath.Dir(storageAbsolutePath(trashRoot, trashItemRel)), 0755); err != nil {
-		return err
-	}
-	if err := movePathRename(trashRoot.handle, stagedRel, trashItemRel, storageAbsolutePath(trashRoot, stagedRel), storageAbsolutePath(trashRoot, trashItemRel)); err != nil {
-		return mapStorageRootPathError(err)
-	}
-	if syncErr := syncStorageManagedRenameDirs(trashRoot, stagedRel, trashRoot, trashItemRel); syncErr != nil {
-		if rollbackErr := movePathRename(trashRoot.handle, trashItemRel, stagedRel, storageAbsolutePath(trashRoot, trashItemRel), storageAbsolutePath(trashRoot, stagedRel)); rollbackErr != nil {
-			return errors.Join(
-				fmt.Errorf("failed to sync renamed path: %w", syncErr),
-				fmt.Errorf("failed to rollback renamed path: %w", mapStorageRootPathError(rollbackErr)),
-			)
-		}
-		if rollbackSyncErr := syncStorageManagedRenameDirs(trashRoot, trashItemRel, trashRoot, stagedRel); rollbackSyncErr != nil {
-			return errors.Join(
-				fmt.Errorf("failed to sync renamed path: %w", syncErr),
-				fmt.Errorf("failed to sync rollback path: %w", rollbackSyncErr),
-			)
-		}
-		return fmt.Errorf("failed to sync renamed path: %w", syncErr)
 	}
 	return nil
 }
@@ -3703,7 +3579,7 @@ func (fs *FileSystem) deleteUnreferencedVersionObjects(ctx context.Context, hash
 		if referenced {
 			continue
 		}
-		if err := fs.deleteVersionObject(ctx, hash); err != nil {
+		if err := fs.deleteVersionObject(ctx, hash); err != nil && !errors.Is(err, versionstore.ErrNotFound) {
 			deleteErr = errors.Join(deleteErr, fmt.Errorf("delete version object %s: %w", hash, err))
 		}
 	}
@@ -4592,7 +4468,13 @@ func wrapStorageStepError(step string, err error) error {
 }
 
 func (fs *FileSystem) removeTrashPathDurably(trashPath string) (bool, error) {
+	if err := fs.checkTrashRootPathIdentity(); err != nil {
+		return false, err
+	}
 	if err := fs.captureDeleteMountBoundary(fs.trashRoot).checkHostTree(trashPath); err != nil {
+		return false, err
+	}
+	if err := fs.checkTrashRootPathIdentity(); err != nil {
 		return false, err
 	}
 	root, relPath, _, err := fs.resolveStoragePathRoot(trashPath)
@@ -4611,24 +4493,6 @@ func (fs *FileSystem) removeTrashPathDurably(trashPath string) (bool, error) {
 		return true, fmt.Errorf("failed to sync trash delete directory: %w", err)
 	}
 	return true, nil
-}
-
-func (fs *FileSystem) cleanupTrashStagingDir(stagedTrashPath string) {
-	if fs.captureDeleteMountBoundary(fs.trashRoot).checkHostTree(stagedTrashPath) != nil {
-		return
-	}
-	root, relPath, _, err := fs.resolveStoragePathRoot(stagedTrashPath)
-	if err != nil {
-		return
-	}
-	if relPath != "." {
-		_ = rootio.RemoveAllNoFollow(root.handle, relPath)
-	}
-	stagingDir := filepath.Dir(relPath)
-	if stagingDir == "." {
-		return
-	}
-	_ = root.handle.Remove(stagingDir)
 }
 
 func (fs *FileSystem) cleanupTrashItemDir(trashItemPath string, expected os.FileInfo) {

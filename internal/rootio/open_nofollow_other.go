@@ -103,6 +103,12 @@ func RemoveAllFromDirNoFollowChecked(dir *os.File, name string, verify func(stri
 	return rootPathError("remove", name, errors.ErrUnsupported)
 }
 
+// RemoveAllFromDirNoFollowCheckedInPlace is unsupported without
+// descriptor-relative traversal and removal support.
+func RemoveAllFromDirNoFollowCheckedInPlace(dir *os.File, name string, verify func(string, os.FileInfo) error) error {
+	return rootPathError("remove", name, errors.ErrUnsupported)
+}
+
 // RenameNoFollow renames sourceName to targetName relative to root without
 // following symlinks observed during the precheck and without intentionally
 // replacing an existing target. Platforms without openat support retain a

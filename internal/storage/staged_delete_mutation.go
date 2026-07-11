@@ -16,6 +16,11 @@ import (
 )
 
 func (fs *FileSystem) deletePreparedWithPolicyLocked(ctx context.Context, name string, policy DeletePolicy, expected DeleteTargetSnapshot) error {
+	if policy.Mode == DeleteModeTrash {
+		if err := fs.checkTrashMutationAllowedLocked(); err != nil {
+			return err
+		}
+	}
 	if policy.Mode == DeleteModePermanent && expected.Root.IsDir && len(expected.Entries) > 1 {
 		return ErrDirNotEmpty
 	}

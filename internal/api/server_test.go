@@ -16751,18 +16751,17 @@ func TestServer_Trash_EmptySelectionReturnsOrderedCompletePartition(t *testing.T
 func TestServer_Trash_EmptySelectionReturnsPartialPartitionOnExecutionFailure(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ids := createTrashSelectionItems(t, fs, "/partial-a.txt", "/partial-b.txt")
-	deleteCalls := 0
-	setStorageHook(t, fs, "removeTrashPath", func(path string) error {
-		deleteCalls++
-		if deleteCalls == 2 {
+	requestIDs := []string{ids["/partial-a.txt"], ids["/partial-b.txt"]}
+	originalRemoveTrashMetadata := getStorageHook[func(context.Context, string) error](t, fs, "removeTrashMetadata")
+	setStorageHook(t, fs, "removeTrashMetadata", func(ctx context.Context, id string) error {
+		if id == requestIDs[1] {
 			return errors.New("trash delete failed")
 		}
-		return os.RemoveAll(path)
+		return originalRemoveTrashMetadata(ctx, id)
 	})
 	var logOutput bytes.Buffer
 	server.logger = zerolog.New(&logOutput)
 
-	requestIDs := []string{ids["/partial-a.txt"], ids["/partial-b.txt"]}
 	req := newEmptyTrashSelectionRequest(t, requestIDs)
 	w := httptest.NewRecorder()
 	server.Router().ServeHTTP(w, req)
@@ -16797,7 +16796,7 @@ func TestServer_Trash_EmptySelectionReturnsPartialPartitionOnExecutionFailure(t 
 func TestServer_Trash_EmptySelectionReturnsErrorWhenExecutionDeletesNothing(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ids := createTrashSelectionItems(t, fs, "/failed-a.txt", "/failed-b.txt")
-	setStorageHook(t, fs, "removeTrashPath", func(string) error {
+	setStorageHook(t, fs, "removeTrashMetadata", func(context.Context, string) error {
 		return errors.New("trash delete failed before mutation")
 	})
 
@@ -16894,11 +16893,12 @@ func TestServer_Trash_EmptySelectionPreservesCleanupWarningOnPartialFailure(t *t
 		ids[item.OriginalPath] = item.ID
 	}
 	cleanupWarningTriggered := false
-	setStorageHook(t, fs, "removeTrashPath", func(path string) error {
+	originalRemoveTrashMetadata := getStorageHook[func(context.Context, string) error](t, fs, "removeTrashMetadata")
+	setStorageHook(t, fs, "removeTrashMetadata", func(ctx context.Context, id string) error {
 		if cleanupWarningTriggered {
 			return storage.ErrNotRegular
 		}
-		return os.RemoveAll(path)
+		return originalRemoveTrashMetadata(ctx, id)
 	})
 	setStorageHook(t, fs, "deleteVersionObject", func(context.Context, string) error {
 		cleanupWarningTriggered = true
