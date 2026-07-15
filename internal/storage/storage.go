@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -40,6 +41,10 @@ var (
 	ErrAlreadyExists             = errors.New("already exists")
 	ErrFileLocked                = errors.New("file is locked")
 	ErrFileTooLarge              = errors.New("file too large")
+	ErrWriteBusy                 = errors.New("write staging capacity exhausted")
+	ErrInsufficientStorage       = errors.New("insufficient storage for write staging")
+	ErrWriteConflict             = errors.New("write target changed")
+	ErrWriteRecoveryRequired     = errors.New("write recovery is required")
 	ErrVersionNotFound           = errors.New("version not found")
 	ErrDeletePolicyChanged       = errors.New("delete policy changed")
 	ErrDeleteTargetChanged       = errors.New("delete target changed")
@@ -47,8 +52,10 @@ var (
 	ErrInvalidTrashSelection     = errors.New("invalid trash selection")
 	ErrDeleteIdentityUnavailable = errors.New("delete identity verification unavailable")
 	ErrMutationLeaseReleased     = errors.New("storage mutation lease is released")
+	ErrFileSystemClosed          = errors.New("storage filesystem is closed")
 	errStoragePathSymlink        = errors.New("storage path contains symlink")
 	errEmptyDeleteTargetToken    = errors.New("delete target token is empty")
+	errWriteStageChanged         = errors.New("write staging entry changed")
 )
 
 // MaxDeleteIntentTargets bounds one atomic delete-intent snapshot request.
@@ -204,8 +211,7 @@ func wrapVisibleMutationWarning(err error) error {
 	if err == nil {
 		return nil
 	}
-	var warningErr *VisibleMutationWarningError
-	if errors.As(err, &warningErr) {
+	if _, ok := err.(*VisibleMutationWarningError); ok {
 		return err
 	}
 	return &VisibleMutationWarningError{err: err}
@@ -216,7 +222,45 @@ func isVisibleMutationWarning(err error) bool {
 	return errors.As(err, &warningErr)
 }
 
+func isOnlyVisibleMutationWarning(err error) bool {
+	if err == nil {
+		return false
+	}
+	if _, ok := err.(*VisibleMutationWarningError); ok {
+		return true
+	}
+	if multi, ok := err.(interface{ Unwrap() []error }); ok {
+		found := false
+		for _, child := range multi.Unwrap() {
+			if child == nil {
+				continue
+			}
+			found = true
+			if !isOnlyVisibleMutationWarning(child) {
+				return false
+			}
+		}
+		return found
+	}
+	if single, ok := err.(interface{ Unwrap() error }); ok {
+		return isOnlyVisibleMutationWarning(single.Unwrap())
+	}
+	return false
+}
+
 var syncStoragePathDir = syncStorageDir
+
+// removeStagedWriteFile is a fault-injection hook. The actual removal remains
+// identity-checked by removeOwnedStagedWriteFile.
+var removeStagedWriteFile = func(*os.Root, string) error { return nil }
+var syncWriteStagingDirectory = func(root *os.Root) error {
+	dir, err := rootio.OpenDirNoFollow(root, writeStagingDir)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
+}
 var syncManagedStorageDir = func(root *os.Root, relName, absPath string) error {
 	dirHandle, err := rootio.OpenDirNoFollow(root, relName)
 	if err != nil {
@@ -234,7 +278,6 @@ var movePathRemove = removeCopiedMoveSource
 var movePathRemoveAll = func(root *os.Root, rel, abs string) error {
 	return rootio.RemoveAllNoFollow(root, rel)
 }
-var beforeStorageWorkspaceWrite = func() error { return nil }
 var afterValidateStoragePaths = func() error { return nil }
 var afterStorageCopySourceStat = func(string) error { return nil }
 var beforeCopiedFileDestinationCleanup = func(string) error { return nil }
@@ -255,6 +298,65 @@ var readMountInfo = func() ([]byte, error) {
 var errDeleteSnapshotRootComplete = errors.New("delete snapshot root complete")
 
 const defaultMaxWriteSize int64 = 10 * 1024 * 1024 * 1024 // 10GB
+
+const writeStagingDir = "write-staging"
+const writeSourceStagePrefix = ".mnemonas-write-source-"
+const writeExchangeStagePrefix = ".mnemonas-write-exchange-"
+const writeRollbackStagePrefix = ".mnemonas-write-rollback-"
+const writeCapturedStagePrefix = ".mnemonas-write-captured-"
+const writePublishedStagePrefix = ".mnemonas-write-published-"
+const writeCommittedStagePrefix = ".mnemonas-write-committed-"
+const writeRecoveryStagePrefix = ".mnemonas-write-recovery-"
+const writeRecoveryMarkerPrefix = ".mnemonas-write-recovery-marker-"
+const writeRecoveryMarkerVersion = 1
+const writeStagePersistentIdentityHexLength = sha256.Size * 2
+const maxConcurrentWriteStaging = 4
+const writeCommitTimeout = 30 * time.Minute
+const writeRollbackTimeout = 30 * time.Minute
+
+// WriteRecoveryRequiredError reports an old-content stage that must be kept
+// because a visible write could not be rolled back safely.
+type WriteRecoveryRequiredError struct {
+	TargetPath      string
+	StagePath       string
+	InspectionPaths []string
+	err             error
+}
+
+type writeRecoveryMarker struct {
+	Version         int       `json:"version"`
+	TargetPath      string    `json:"target_path"`
+	State           string    `json:"state"`
+	InspectionPaths []string  `json:"inspection_paths,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
+func (e *WriteRecoveryRequiredError) Error() string {
+	if e == nil {
+		return ErrWriteRecoveryRequired.Error()
+	}
+	message := ErrWriteRecoveryRequired.Error()
+	if e.TargetPath != "" {
+		message += fmt.Sprintf(": target %s", e.TargetPath)
+	}
+	if e.StagePath != "" {
+		message += fmt.Sprintf("; stage %s", e.StagePath)
+	}
+	if len(e.InspectionPaths) > 0 {
+		message += fmt.Sprintf("; inspect %s", strings.Join(e.InspectionPaths, ", "))
+	}
+	if e.err != nil {
+		message += fmt.Sprintf("; cause: %v", e.err)
+	}
+	return message
+}
+
+func (e *WriteRecoveryRequiredError) Unwrap() error {
+	if e == nil || e.err == nil {
+		return ErrWriteRecoveryRequired
+	}
+	return errors.Join(ErrWriteRecoveryRequired, e.err)
+}
 
 // FileInfo represents file metadata
 type FileInfo struct {
@@ -468,7 +570,10 @@ type RuntimePolicySettings struct {
 type FileSystem struct {
 	workspace                 *workspace.Workspace
 	filesRootHandle           *os.Root
+	internalRootHandle        *os.Root
 	trashRootHandle           *os.Root
+	rootLifecycleLock         *storageRootLifecycleLock
+	writeTransactionJournal   *WriteTransactionJournal
 	versions                  *versionstore.Store
 	policy                    *versionstore.VersioningPolicy
 	trashRoot                 string
@@ -482,11 +587,7 @@ type FileSystem struct {
 	deleteFileIndex           func(ctx context.Context, path string) error
 	deleteFileIndexPrefix     func(ctx context.Context, path string) error
 	updateFileIndex           func(ctx context.Context, path string, size int64, modTime time.Time, hash string) error
-	hasVersionObject          func(ctx context.Context, hash string) (bool, error)
 	getVersionObject          func(ctx context.Context, hash string) ([]byte, error)
-	putVersionObject          func(ctx context.Context, data []byte) (string, error)
-	addFileVersion            func(ctx context.Context, path, hash string, size int64, comment string) error
-	deleteFileVersion         func(ctx context.Context, path, hash string) error
 	deleteVersionObject       func(ctx context.Context, hash string) error
 	hashDeleteTargetFile      func(ctx context.Context, path string) (string, error)
 	readDeleteMountPoints     func() ([]string, error)
@@ -495,7 +596,6 @@ type FileSystem struct {
 	removeTrashMetadata       func(ctx context.Context, id string) error
 	commitTrashDelete         func(ctx context.Context, item *versionstore.TrashItem, operation *versionstore.TrashOperation) error
 	commitTrashRestore        func(ctx context.Context, item *versionstore.TrashItem, destinationPath string, fileIndex []versionstore.FileIndexEntry, renameHistory bool, operation *versionstore.TrashOperation) error
-	writeWorkspacePath        func(ctx context.Context, name string, data []byte) error
 	mkdirWorkspacePath        func(ctx context.Context, name string) error
 	copyWorkspacePath         func(ctx context.Context, oldName, newName string) error
 	deleteStagedWorkspacePath func(ctx context.Context, logicalName string, remove func() error) error
@@ -507,6 +607,12 @@ type FileSystem struct {
 	hookMu                    sync.RWMutex
 	gcMu                      sync.RWMutex
 	mu                        sync.RWMutex
+	writeStagingMu            sync.RWMutex
+	writeStageGate            chan struct{}
+	writeStagingBudget        *writeStagingBudget
+	writeStagingAvailable     func() (uint64, error)
+	writeMutationBlocked      error
+	writeTransactionStore     writeTransactionRuntimeStore
 	mutationEpoch             uint64 // guarded by mu
 	hashStatWorkspaceFile     func(ctx context.Context, name string) (string, error)
 	hashOpenSnapshotFile      func(ctx context.Context, file *os.File) (string, error)
@@ -516,6 +622,10 @@ type FileSystem struct {
 	hashStorageCopiedFile         func(file *os.File) (string, error)
 	hashDeleteWitnessRecoveryFile func(file *os.File) (string, error)
 	hashTrashTransferFile         func(ctx context.Context, root *storagePathRoot, rel string, file *os.File) (string, error)
+
+	closeMu  sync.RWMutex
+	closeErr error
+	closed   bool
 }
 
 // UpdateTrashSettings applies trash settings to the running filesystem.
@@ -685,6 +795,9 @@ func (lease *MutationLease) Release() {
 func (fs *FileSystem) SetDataplaneClient(client *dataplane.Client) {
 	fs.lockMutation()
 	defer fs.mu.Unlock()
+	if err := fs.validateOpenLocked(); err != nil {
+		return
+	}
 
 	if fs.config != nil {
 		fs.config.Dataplane = client
@@ -725,49 +838,164 @@ func (fs *FileSystem) RunRetentionSweep(ctx context.Context) error {
 
 // New creates a new FileSystem
 func New(cfg *Config) (*FileSystem, error) {
+	if cfg == nil {
+		return nil, errors.New("storage configuration is required")
+	}
 	if cfg.Dataplane == nil {
 		return nil, errors.New("dataplane client is required")
+	}
+	internalRoot, err := normalizeStorageHostPath(cfg.InternalRoot)
+	if err != nil {
+		return nil, fmt.Errorf("failed to normalize internal root: %w", err)
 	}
 	trashRoot, err := normalizeStorageHostPath(cfg.TrashRoot)
 	if err != nil {
 		return nil, fmt.Errorf("failed to normalize trash root: %w", err)
 	}
 
-	if err := validateStoragePath(cfg.InternalRoot); err != nil {
+	if err := validateStoragePath(internalRoot); err != nil {
 		return nil, fmt.Errorf("failed to validate internal root: %w", err)
 	}
 	if err := validateStoragePath(trashRoot); err != nil {
 		return nil, fmt.Errorf("failed to validate trash root: %w", err)
 	}
 
-	// Create workspace for native file operations
-	ws, err := workspace.New(cfg.FilesRoot)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create workspace: %w", err)
-	}
-	cleanupWorkspace := true
+	var (
+		ws                 *workspace.Workspace
+		filesRootHandle    *os.Root
+		internalRootHandle *os.Root
+		trashRootHandle    *os.Root
+		rootLifecycleLock  *storageRootLifecycleLock
+		writeJournal       *WriteTransactionJournal
+		pendingWrites      []WriteTransactionOperation
+		vs                 *versionstore.Store
+		initialized        bool
+	)
 	defer func() {
-		if cleanupWorkspace {
+		if initialized {
+			return
+		}
+		if vs != nil {
+			_ = vs.Close()
+		}
+		if writeJournal != nil {
+			_ = writeJournal.Close()
+		}
+		if ws != nil {
 			_ = ws.Close()
+		}
+		if filesRootHandle != nil {
+			_ = filesRootHandle.Close()
+		}
+		if internalRootHandle != nil {
+			_ = internalRootHandle.Close()
+		}
+		if trashRootHandle != nil {
+			_ = trashRootHandle.Close()
+		}
+		if rootLifecycleLock != nil {
+			_ = rootLifecycleLock.Close()
 		}
 	}()
 
-	// Create version store
-	vs, err := versionstore.New(versionstore.Config{
-		DBPath:    path.Join(cfg.InternalRoot, "index.db"),
+	// Root creation is the only bootstrap step that can precede locking.
+	// No database, recovery, probe, or user-visible content mutation begins
+	// until all three resulting directory inodes are locked.
+	ws, err = workspace.New(cfg.FilesRoot)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create workspace: %w", err)
+	}
+	if err := runStorageRootLifecycleLockTestHook("new-workspace-opened"); err != nil {
+		return nil, fmt.Errorf("after opening workspace root: %w", err)
+	}
+	if err := ensureStorageDir(internalRoot, 0700); err != nil {
+		return nil, fmt.Errorf("failed to create internal root: %w", err)
+	}
+	if err := ensureStorageDir(trashRoot, 0700); err != nil {
+		return nil, fmt.Errorf("failed to create trash directory: %w", err)
+	}
+
+	filesRootHandle, err = os.OpenRoot(ws.Root())
+	if err != nil {
+		return nil, fmt.Errorf("failed to open files root: %w", err)
+	}
+	internalRootHandle, err = os.OpenRoot(internalRoot)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open internal root: %w", err)
+	}
+	trashRootHandle, err = os.OpenRoot(trashRoot)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open trash root: %w", err)
+	}
+	if err := verifyWorkspaceStorageRootLifecycleBinding(ws, filesRootHandle); err != nil {
+		return nil, fmt.Errorf("failed to bind workspace root lifecycle lock: %w", err)
+	}
+
+	rootLifecycleLock, err = acquireStorageRootLifecycleLock(
+		storageRootLifecycleLockSpec{label: "files", path: ws.Root(), root: filesRootHandle},
+		storageRootLifecycleLockSpec{label: "internal", path: internalRoot, root: internalRootHandle},
+		storageRootLifecycleLockSpec{label: "trash", path: trashRoot, root: trashRootHandle},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire storage root lifecycle lock: %w", err)
+	}
+	if err := verifyWorkspaceStorageRootLifecycleBinding(ws, filesRootHandle); err != nil {
+		return nil, fmt.Errorf("failed to revalidate workspace root lifecycle lock: %w", err)
+	}
+	if err := runStorageRootLifecycleLockTestHook("new-acquired"); err != nil {
+		return nil, fmt.Errorf("after acquiring storage root lifecycle lock: %w", err)
+	}
+
+	// Keep network and caller-owned write sources outside the visible workspace.
+	// The dedicated directory is created only while every storage root is held.
+	if err := ensureStorageRootRelativeDirectory(internalRootHandle, writeStagingDir, 0700); err != nil {
+		return nil, fmt.Errorf("failed to create write staging directory: %w", err)
+	}
+	if err := validateAtomicWriteRenamePrerequisite(filesRootHandle, internalRootHandle); err != nil {
+		return nil, fmt.Errorf("invalid storage root layout: %w", err)
+	}
+	if err := runStorageRootLifecycleLockTestHook("new-before-versionstore"); err != nil {
+		return nil, fmt.Errorf("before opening version store: %w", err)
+	}
+	if err := rootLifecycleLock.Validate(); err != nil {
+		return nil, fmt.Errorf("failed to revalidate storage roots before version store initialization: %w", err)
+	}
+
+	// Inspect the durable write decision log before SQLite initialization can
+	// recover or replace database state. A corrupt journal must stop startup
+	// before any metadata reconciliation is attempted.
+	writeJournal, err = OpenWriteTransactionJournal(internalRootHandle)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open write transaction journal: %w", err)
+	}
+	pendingWrites, err = writeJournal.Scan()
+	if err != nil {
+		return nil, fmt.Errorf("failed to inspect write transaction journal: %w", err)
+	}
+	if err := rootLifecycleLock.Validate(); err != nil {
+		return nil, fmt.Errorf("failed to revalidate storage roots after opening write transaction journal: %w", err)
+	}
+
+	// Schema initialization is protected by the same root locks as content and
+	// recovery mutations.
+	vs, err = versionstore.New(versionstore.Config{
+		DBRoot:    internalRootHandle,
+		DBName:    "index.db",
 		Dataplane: cfg.Dataplane,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create version store: %w", err)
 	}
-	cleanupVersionStore := true
-	defer func() {
-		if cleanupVersionStore {
-			_ = vs.Close()
-		}
-	}()
+	if err := rootLifecycleLock.Validate(); err != nil {
+		return nil, fmt.Errorf("failed to revalidate storage roots after version store initialization: %w", err)
+	}
+	if vs.RecoveredFromCorruption() && len(pendingWrites) != 0 {
+		return nil, errors.Join(
+			ErrWriteRecoveryRequired,
+			errors.New("version metadata was recovered from corruption while durable write transactions remain"),
+		)
+	}
 
-	// Create versioning policy
 	policy := versionstore.DefaultVersioningPolicy(vs)
 	if len(cfg.AutoVersionedExtensions) > 0 {
 		policy.AutoVersionedExtensions = cfg.AutoVersionedExtensions
@@ -779,62 +1007,31 @@ func New(cfg *Config) (*FileSystem, error) {
 		policy.MaxVersionedSize = cfg.MaxVersionedSize
 	}
 
-	// Ensure trash directory exists
-	if err := ensureStorageDir(trashRoot, 0700); err != nil {
-		return nil, fmt.Errorf("failed to create trash directory: %w", err)
-	}
-
-	filesRootHandle, err := os.OpenRoot(ws.Root())
-	if err != nil {
-		return nil, fmt.Errorf("failed to open files root: %w", err)
-	}
-	cleanupFilesRoot := true
-	defer func() {
-		if cleanupFilesRoot {
-			_ = filesRootHandle.Close()
-		}
-	}()
-	trashRootHandle, err := os.OpenRoot(trashRoot)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open trash root: %w", err)
-	}
-	cleanupTrashRoot := true
-	defer func() {
-		if cleanupTrashRoot {
-			_ = trashRootHandle.Close()
-		}
-	}()
-	cleanupWorkspace = false
-	cleanupVersionStore = false
-	cleanupFilesRoot = false
-	cleanupTrashRoot = false
-
 	fs := &FileSystem{
 		workspace:                 ws,
 		filesRootHandle:           filesRootHandle,
+		internalRootHandle:        internalRootHandle,
 		trashRootHandle:           trashRootHandle,
+		rootLifecycleLock:         rootLifecycleLock,
+		writeTransactionJournal:   writeJournal,
 		versions:                  vs,
 		policy:                    policy,
 		trashRoot:                 trashRoot,
 		config:                    cfg,
+		writeStageGate:            make(chan struct{}, maxConcurrentWriteStaging),
 		listReferencedHashes:      vs.GetAllVersionHashes,
 		listVersionPaths:          vs.ListVersionPaths,
 		getVersions:               vs.GetVersions,
 		deleteFileIndex:           vs.DeleteFileIndex,
 		deleteFileIndexPrefix:     vs.DeleteFileIndexPrefix,
 		updateFileIndex:           vs.UpdateFileIndex,
-		hasVersionObject:          vs.HasObject,
 		getVersionObject:          vs.GetObject,
-		putVersionObject:          vs.PutObject,
-		addFileVersion:            vs.AddVersion,
-		deleteFileVersion:         vs.DeleteVersion,
 		deleteVersionObject:       vs.DeleteObject,
 		addTrashMetadata:          vs.AddToTrash,
 		updateTrashRestoreData:    vs.UpdateTrashRestoreData,
 		removeTrashMetadata:       vs.RemoveFromTrash,
 		commitTrashDelete:         vs.CommitTrashDelete,
 		commitTrashRestore:        vs.CommitTrashRestore,
-		writeWorkspacePath:        nil,
 		mkdirWorkspacePath:        ws.Mkdir,
 		copyWorkspacePath:         ws.Copy,
 		deleteStagedWorkspacePath: func(_ context.Context, _ string, remove func() error) error { return remove() },
@@ -842,28 +1039,124 @@ func New(cfg *Config) (*FileSystem, error) {
 		renameMetadataPath:        vs.RenamePath,
 		renameHistoryMetadataPath: vs.RenamePathHistory,
 	}
+	recoveryCtx, cancelRecovery := context.WithTimeout(context.Background(), writeRollbackTimeout)
+	_, recoveryErr := fs.recoverWriteTransactions(recoveryCtx, writeJournal)
+	cancelRecovery()
+	if recoveryErr != nil {
+		return nil, fmt.Errorf("failed to recover durable write transactions: %w", recoveryErr)
+	}
 	fs.hashStatWorkspaceFile = fs.hashWorkspaceFile
 	fs.hashOpenSnapshotFile = hashOpenWorkspaceFileContext
 	fs.removeTrashPath = fs.removeCommittedTrashPurgeStage
+	fs.writeStagingAvailable = func() (uint64, error) {
+		dir, err := rootio.OpenDirNoFollow(internalRootHandle, ".")
+		if err != nil {
+			return 0, err
+		}
+		defer dir.Close()
+		stats, err := diskStatsForOpenDirectory(dir, internalRoot)
+		if err != nil {
+			return 0, err
+		}
+		return stats.AvailableBytes, nil
+	}
+	initialStagingBytes, stagingScanErr := scanInitialWriteStagingBytes(internalRootHandle)
+	if stagingScanErr != nil {
+		initialStagingBytes = maxWriteStagingBytes
+	}
+	fs.writeStagingBudget = newWriteStagingBudget(
+		maxWriteStagingBytes,
+		initialStagingBytes,
+		func() (uint64, error) {
+			return fs.writeStagingAvailable()
+		},
+		func() uint64 {
+			fs.mu.RLock()
+			defer fs.mu.RUnlock()
+			if fs.config == nil {
+				return 0
+			}
+			return fs.config.MinFreeSpace
+		},
+	)
+	initialized = true
 	return fs, nil
 }
 
 // Close closes the filesystem
 func (fs *FileSystem) Close() error {
+	if fs == nil {
+		return nil
+	}
+	fs.closeMu.Lock()
+	defer fs.closeMu.Unlock()
+	if fs.closed {
+		return fs.closeErr
+	}
+
+	fs.writeStagingMu.Lock()
+	fs.gcMu.Lock()
+	fs.mu.Lock()
+	defer func() {
+		fs.mu.Unlock()
+		fs.gcMu.Unlock()
+		fs.writeStagingMu.Unlock()
+	}()
+	fs.closed = true
+
 	var err error
 	if fs.versions != nil {
 		err = errors.Join(err, fs.versions.Close())
+	}
+	if fs.writeTransactionJournal != nil {
+		err = errors.Join(err, fs.writeTransactionJournal.Close())
 	}
 	if fs.workspace != nil {
 		err = errors.Join(err, fs.workspace.Close())
 	}
 	if fs.filesRootHandle != nil {
 		err = errors.Join(err, fs.filesRootHandle.Close())
-		fs.filesRootHandle = nil
+	}
+	if fs.internalRootHandle != nil {
+		err = errors.Join(err, fs.internalRootHandle.Close())
 	}
 	if fs.trashRootHandle != nil {
 		err = errors.Join(err, fs.trashRootHandle.Close())
-		fs.trashRootHandle = nil
+	}
+	if fs.rootLifecycleLock != nil {
+		err = errors.Join(err, fs.rootLifecycleLock.Close())
+	}
+	fs.closeErr = err
+	return fs.closeErr
+}
+
+func (fs *FileSystem) validateOpenLocked() error {
+	if err := fs.ensureOpenLocked(); err != nil {
+		return err
+	}
+	if fs.rootLifecycleLock == nil {
+		return nil
+	}
+	if err := fs.rootLifecycleLock.Validate(); err != nil {
+		return fmt.Errorf("validate storage root lifecycle lock: %w", err)
+	}
+	return nil
+}
+
+func (fs *FileSystem) ensureOpenLocked() error {
+	if fs.closed {
+		return ErrFileSystemClosed
+	}
+	return nil
+}
+
+func (fs *FileSystem) validateMutationRootsLocked() error {
+	err := fs.validateOpenLocked()
+	if err == nil || errors.Is(err, ErrFileSystemClosed) {
+		return err
+	}
+	if trashErr := fs.checkTrashRootPathIdentity(); trashErr != nil {
+		return errors.Join(ErrTrashRecoveryRequired, trashErr, err)
 	}
 	return err
 }
@@ -878,11 +1171,29 @@ func (fs *FileSystem) Stat(ctx context.Context, name string) (*FileInfo, error) 
 }
 
 func (fs *FileSystem) stat(ctx context.Context, name string) (*FileInfo, error) {
-	fileInfo, err := fs.StatMetadata(ctx, name)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	normalizedName, err := normalizeStorageWorkspacePath(name)
 	if err != nil {
 		return nil, err
 	}
-	if fileInfo.IsDir || fs.currentVersioningPolicy() == nil {
+	if err := acquireContextLock(ctx, fs.mu.TryRLock); err != nil {
+		return nil, err
+	}
+	defer fs.mu.RUnlock()
+	if err := fs.ensureOpenLocked(); err != nil {
+		return nil, err
+	}
+
+	fileInfo, err := fs.statMetadataLocked(ctx, normalizedName)
+	if err != nil {
+		return nil, err
+	}
+	if fileInfo.IsDir || fs.currentVersioningPolicyLocked() == nil {
 		return fileInfo, nil
 	}
 
@@ -899,6 +1210,9 @@ func (fs *FileSystem) stat(ctx context.Context, name string) (*FileInfo, error) 
 
 // StatMetadata returns file metadata without reading file content.
 func (fs *FileSystem) StatMetadata(ctx context.Context, name string) (*FileInfo, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -907,7 +1221,17 @@ func (fs *FileSystem) StatMetadata(ctx context.Context, name string) (*FileInfo,
 	if err != nil {
 		return nil, err
 	}
+	if err := acquireContextLock(ctx, fs.mu.TryRLock); err != nil {
+		return nil, err
+	}
+	defer fs.mu.RUnlock()
+	if err := fs.ensureOpenLocked(); err != nil {
+		return nil, err
+	}
+	return fs.statMetadataLocked(ctx, name)
+}
 
+func (fs *FileSystem) statMetadataLocked(ctx context.Context, name string) (*FileInfo, error) {
 	// Handle root directory
 	if name == "/" {
 		return &FileInfo{
@@ -939,7 +1263,7 @@ func (fs *FileSystem) StatMetadata(ctx context.Context, name string) (*FileInfo,
 		ModTime:             info.ModTime,
 		DeleteIdentityToken: info.DeleteIdentityToken,
 	}
-	policy := fs.currentVersioningPolicy()
+	policy := fs.currentVersioningPolicyLocked()
 
 	if !info.IsDir && policy != nil {
 		fileInfo.Versioned = policy.ShouldVersion(ctx, name, info.Size)
@@ -1012,9 +1336,19 @@ func (fs *FileSystem) ReadDirLimit(ctx context.Context, name string, limit int) 
 }
 
 func (fs *FileSystem) readDir(ctx context.Context, name string, limit int) ([]*FileInfo, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var err error
 	name, err = normalizeStorageWorkspacePath(name)
 	if err != nil {
+		return nil, err
+	}
+	if err := acquireContextLock(ctx, fs.mu.TryRLock); err != nil {
+		return nil, err
+	}
+	defer fs.mu.RUnlock()
+	if err := fs.ensureOpenLocked(); err != nil {
 		return nil, err
 	}
 
@@ -1035,7 +1369,7 @@ func (fs *FileSystem) readDir(ctx context.Context, name string, limit int) ([]*F
 	}
 
 	result := make([]*FileInfo, 0, len(entries))
-	policy := fs.currentVersioningPolicy()
+	policy := fs.currentVersioningPolicyLocked()
 	for _, e := range entries {
 		childPath, childName, err := storageReadDirChildPath(name, e)
 		if err != nil {
@@ -1100,6 +1434,9 @@ func safeStorageReadDirFallbackChildName(name string) (string, error) {
 func (fs *FileSystem) OpenFile(ctx context.Context, name string) (*os.File, error) {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
+	if err := fs.ensureOpenLocked(); err != nil {
+		return nil, err
+	}
 
 	var err error
 	name, err = normalizeStorageWorkspacePath(name)
@@ -1141,6 +1478,10 @@ func (fs *FileSystem) OpenFileSnapshot(ctx context.Context, name string) (*os.Fi
 // from the same handle without reading the file content.
 func (fs *FileSystem) OpenFileSnapshotMetadata(ctx context.Context, name string) (*os.File, *FileInfo, error) {
 	fs.mu.RLock()
+	if err := fs.ensureOpenLocked(); err != nil {
+		fs.mu.RUnlock()
+		return nil, nil, err
+	}
 
 	var err error
 	name, err = normalizeStorageWorkspacePath(name)
@@ -1195,14 +1536,50 @@ func snapshotFileMetadata(ctx context.Context, name string, file *os.File, polic
 	return fileInfo, nil
 }
 
-// WriteFile writes a file, creating versions if needed
-func (fs *FileSystem) WriteFile(ctx context.Context, name string, r io.Reader) error {
-	release, err := fs.beginMutation(ctx)
-	if err != nil {
-		return err
-	}
-	defer release()
+// WriteFileCondition binds a streamed write to the target observed by its
+// caller. Existing targets require a delete-identity token returned by Stat;
+// an absent target is represented by ExpectedExists=false.
+type WriteFileCondition struct {
+	ExpectedExists      bool
+	DeleteIdentityToken string
+}
 
+type writeFileTransactionOptions struct {
+	condition      *WriteFileCondition
+	forceVersion   bool
+	versionComment string
+}
+
+// WriteFile stages caller-owned input outside the global mutation lock, then
+// validates and publishes it in a bounded local-I/O critical section.
+func (fs *FileSystem) WriteFile(ctx context.Context, name string, r io.Reader) error {
+	return fs.writeFileTransaction(ctx, name, r, writeFileTransactionOptions{})
+}
+
+// WriteFileIfUnchanged writes only when the current target still matches the
+// caller-observed condition.
+func (fs *FileSystem) WriteFileIfUnchanged(ctx context.Context, name string, r io.Reader, condition WriteFileCondition) error {
+	return fs.writeFileTransaction(ctx, name, r, writeFileTransactionOptions{condition: &condition})
+}
+
+func (fs *FileSystem) writeFileTransaction(
+	ctx context.Context,
+	name string,
+	r io.Reader,
+	options writeFileTransactionOptions,
+) (resultErr error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	fs.closeMu.RLock()
+	defer fs.closeMu.RUnlock()
+	fs.mu.RLock()
+	openErr := fs.validateMutationRootsLocked()
+	fs.mu.RUnlock()
+	if openErr != nil {
+		return openErr
+	}
+	var err error
 	name, err = normalizeStorageWorkspacePath(name)
 	if err != nil {
 		return err
@@ -1210,114 +1587,668 @@ func (fs *FileSystem) WriteFile(ctx context.Context, name string, r io.Reader) e
 	if err := rejectStorageRootMutation(name); err != nil {
 		return err
 	}
-	previousData, hadPreviousFile, err := fs.readExistingFileForRollback(ctx, name)
-	if err != nil {
+	if err := fs.validateAtomicWriteTargetMount(name); err != nil {
 		return err
 	}
-	createdWorkspaceDirs := []string(nil)
-
-	var rollbackVersionHash string
-	var rollbackVersionRecorded bool
-	var rollbackVersionObjectCreated bool
-	rollbackMutation := func(cause error) error {
-		versionRollbackErr := fs.rollbackWriteVersion(ctx, name, rollbackVersionHash, rollbackVersionRecorded, rollbackVersionObjectCreated)
-		fileRollbackErr := fs.restoreFileAfterIndexFailure(ctx, name, hadPreviousFile, previousData, createdWorkspaceDirs)
-		if fileRollbackErr != nil && versionRollbackErr != nil {
-			return errors.Join(
-				cause,
-				fmt.Errorf("failed to rollback file content: %w", fileRollbackErr),
-				fmt.Errorf("failed to rollback version metadata: %w", versionRollbackErr),
-			)
-		}
-		if fileRollbackErr != nil {
-			return errors.Join(cause, fmt.Errorf("failed to rollback file content: %w", fileRollbackErr))
-		}
-		if versionRollbackErr != nil {
-			return errors.Join(cause, fmt.Errorf("failed to rollback version metadata: %w", versionRollbackErr))
-		}
-		return cause
-	}
-
-	hasher := blake3.New()
-
 	if err := fs.validateWorkspaceParentForWrite(name); err != nil {
 		return err
 	}
-	if err := beforeStorageWorkspaceWrite(); err != nil {
-		return rollbackMutation(err)
+	if err := fs.currentWriteAdmissionBlock(); err != nil {
+		return err
 	}
-
-	written, err := fs.workspace.WriteFileFromReaderWithOptions(ctx, name, io.TeeReader(r, hasher), workspace.WriteFileOptions{
-		MaxBytes:    defaultMaxWriteSize,
-		SyncParent:  syncStoragePathDir,
-		CreatedDirs: &createdWorkspaceDirs,
-	})
-	if err != nil {
-		mappedErr := mapWorkspaceWritablePathError(unwrapWorkspaceVisibleMutationError(err))
-		if workspace.IsVisibleMutationWarning(err) {
-			return rollbackMutation(mappedErr)
-		}
-		return mappedErr
-	}
-
-	shouldVersion := fs.policy.ShouldVersion(ctx, name, written)
-	if shouldVersion && hadPreviousFile {
-		oldData := previousData
-		candidateHash := computeHash(oldData)
-		rollbackVersionHash = candidateHash
-		hasObject, err := fs.hasVersionObject(ctx, candidateHash)
-		if err != nil {
-			return rollbackMutation(fmt.Errorf("failed to check existing version object: %w", err))
-		}
-		rollbackVersionObjectCreated = !hasObject
-
-		_, versionErr := fs.versions.GetVersion(ctx, name, candidateHash)
-		versionAlreadyRecorded := versionErr == nil
-		if versionErr != nil && !errors.Is(versionErr, versionstore.ErrNotFound) {
-			return rollbackMutation(fmt.Errorf("failed to check existing version: %w", versionErr))
-		}
-
-		oldHash, err := fs.putVersionObject(ctx, oldData)
-		if err != nil {
-			return rollbackMutation(fmt.Errorf("failed to store version: %w", err))
-		}
-		rollbackVersionHash = oldHash
-
-		if !versionAlreadyRecorded {
-			if err := fs.addFileVersion(ctx, name, oldHash, int64(len(oldData)), ""); err != nil {
-				return rollbackMutation(fmt.Errorf("failed to record version: %w", err))
+	if fs.writeStageGate != nil {
+		select {
+		case fs.writeStageGate <- struct{}{}:
+			defer func() { <-fs.writeStageGate }()
+		default:
+			if err := fs.currentWriteAdmissionBlock(); err != nil {
+				return err
 			}
-			rollbackVersionRecorded = true
+			return ErrWriteBusy
 		}
 	}
-
-	newHash := fmt.Sprintf("%x", hasher.Sum(nil))
-	if err := fs.updateFileIndex(ctx, name, written, time.Now(), newHash); err != nil {
-		return rollbackMutation(fmt.Errorf("failed to update file index: %w", err))
+	if err := fs.currentWriteAdmissionBlock(); err != nil {
+		return err
 	}
 
-	if shouldVersion && (fs.config.MaxVersions > 0 || fs.config.MaxVersionAge > 0) {
-		if err := fs.cleanupVersions(ctx, name); err != nil {
-			// The new content, index, and current-version metadata are already
-			// committed here. Retention cleanup failures should leave extra history
-			// behind, not turn the caller's successful write into a false-negative.
-			return nil
+	// CleanupStaging publishes recovery state while holding the exclusive
+	// staging lock. Recheck after joining the shared staging generation so a
+	// writer that waited behind cleanup cannot consume the request body under
+	// a newly published recovery gate.
+	fs.writeStagingMu.RLock()
+	defer fs.writeStagingMu.RUnlock()
+	if err := fs.currentWriteAdmissionBlock(); err != nil {
+		return err
+	}
+	if fs.internalRootHandle == nil {
+		return errors.New("write staging is unavailable")
+	}
+
+	target, err := fs.captureWriteTarget(ctx, name)
+	if err != nil {
+		return err
+	}
+	if err := validateWriteFileCondition(target, options.condition); err != nil {
+		return err
+	}
+	if options.forceVersion && target.exists && target.size > versionstore.MaxVersionObjectSize {
+		return fmt.Errorf(
+			"%w: current file exceeds the %d-byte version safety snapshot limit",
+			ErrFileTooLarge,
+			versionstore.MaxVersionObjectSize,
+		)
+	}
+	var stagedSource *stagedWriteFile
+	defer func() {
+		cleanupErr := stagedSource.discard()
+		stageChangeErr := errors.Join(resultErr, cleanupErr)
+		recoveryBlocked := errors.Is(stageChangeErr, ErrWriteRecoveryRequired)
+		if writeStageIdentityChanged(stageChangeErr) {
+			cleanupErr = errors.Join(
+				cleanupErr,
+				fs.blockChangedWriteStages(name, stageChangeErr, stagedSource),
+			)
+			recoveryBlocked = true
 		}
-	}
-
-	if fs.shouldForceRetentionSweepLocked() {
-		if err := fs.runRetentionSweepLocked(ctx); err != nil {
-			// The new content and index are already committed at this point, so
-			// retention enforcement failures must not turn a successful write into
-			// a false-negative for callers.
-			return nil
+		if cleanupErr != nil && !recoveryBlocked &&
+			writeStageHasPath(stagedSource) {
+			cleanupErr = errors.Join(
+				cleanupErr,
+				fs.blockRetainedWriteStages(name, cleanupErr, stagedSource),
+			)
 		}
+		if cleanupErr == nil {
+			return
+		}
+		cleanupErr = fmt.Errorf("failed to cleanup write staging: %w", cleanupErr)
+		if resultErr != nil {
+			combinedErr := errors.Join(resultErr, cleanupErr)
+			if isVisibleMutationWarning(resultErr) {
+				resultErr = wrapVisibleMutationWarning(combinedErr)
+			} else {
+				resultErr = combinedErr
+			}
+			return
+		}
+		resultErr = cleanupErr
+	}()
+	stagedSource, err = fs.stageWriteReader(ctx, r, defaultMaxWriteSize, writeSourceStagePrefix)
+	if err != nil {
+		return err
 	}
+	return fs.runWriteTransactionRuntimeLocked(
+		ctx,
+		name,
+		stagedSource,
+		options,
+		target,
+	)
+}
 
+type writeTargetSnapshot struct {
+	exists              bool
+	mode                os.FileMode
+	size                int64
+	modTime             time.Time
+	deleteIdentityToken string
+}
+
+func validateWriteFileCondition(actual writeTargetSnapshot, expected *WriteFileCondition) error {
+	if expected == nil {
+		return nil
+	}
+	if expected.ExpectedExists != actual.exists {
+		return ErrWriteConflict
+	}
+	if !expected.ExpectedExists {
+		if expected.DeleteIdentityToken != "" {
+			return ErrWriteConflict
+		}
+		return nil
+	}
+	if expected.DeleteIdentityToken == "" || actual.deleteIdentityToken == "" ||
+		expected.DeleteIdentityToken != actual.deleteIdentityToken {
+		return ErrWriteConflict
+	}
 	return nil
 }
 
-// Mkdir creates a directory
+type stagedWriteFile struct {
+	root              *os.Root
+	file              *os.File
+	rel               string
+	size              int64
+	hash              string
+	reservation       *writeStagingReservation
+	stageInfo         os.FileInfo
+	stageIdentity     string
+	stagePersistentID string
+	trusted           bool
+	retained          bool
+	sealed            bool
+}
+
+func writeStageHasPath(stage *stagedWriteFile) bool {
+	return stage != nil && stage.rel != ""
+}
+
+func (s *stagedWriteFile) bindStageInfo(info os.FileInfo) error {
+	if s == nil || info == nil || !info.Mode().IsRegular() {
+		return errors.New("write staging entry is not a regular file")
+	}
+	deleteIdentity := workspace.DeleteIdentityTokenForFileInfo(info)
+	persistentIdentity := workspace.PersistentIdentityTokenForFileInfo(info)
+	if deleteIdentity == "" || !isWriteStagePersistentIdentity(persistentIdentity) {
+		return errors.New("write staging identity is unavailable")
+	}
+	s.stageInfo = info
+	s.stageIdentity = deleteIdentity
+	s.stagePersistentID = persistentIdentity
+	s.trusted = true
+	return nil
+}
+
+func (s *stagedWriteFile) refreshStageInfoFromOpenFile() error {
+	if s == nil || s.file == nil {
+		return errors.New("write staging file is unavailable")
+	}
+	info, err := s.file.Stat()
+	if err != nil {
+		return err
+	}
+	return s.bindStageInfo(info)
+}
+
+func (s *stagedWriteFile) matchesStageInfo(info os.FileInfo) bool {
+	return s != nil && s.trusted && sameDeleteStageEntry(s.stageInfo, s.stageIdentity, info) &&
+		(s.stagePersistentID == "" || workspace.PersistentIdentityTokenForFileInfo(info) == s.stagePersistentID)
+}
+
+func (s *stagedWriteFile) verifyStageContent(ctx context.Context) error {
+	if s == nil || s.root == nil || s.rel == "" || s.hash == "" || s.stageInfo == nil {
+		return errors.New("write staging content evidence is unavailable")
+	}
+	file, err := rootio.OpenRegularFileNoFollow(s.root, s.rel)
+	if err != nil {
+		return err
+	}
+	before, statErr := file.Stat()
+	if statErr != nil || !s.matchesStageInfo(before) {
+		_ = file.Close()
+		return errors.Join(errWriteStageChanged, statErr)
+	}
+	actualHash, hashErr := hashOpenWorkspaceFileContext(ctx, file)
+	after, restatErr := file.Stat()
+	closeErr := file.Close()
+	current, currentErr := rootio.OpenRegularFileNoFollow(s.root, s.rel)
+	var currentInfo os.FileInfo
+	var currentCloseErr error
+	if currentErr == nil {
+		currentInfo, currentErr = current.Stat()
+		currentCloseErr = current.Close()
+	}
+	if hashErr != nil || restatErr != nil || closeErr != nil || currentErr != nil || currentCloseErr != nil ||
+		!sameStableWriteTargetHandle(before, after) || !sameStableWriteTargetHandle(after, currentInfo) || actualHash != s.hash {
+		return errors.Join(errWriteStageChanged, hashErr, restatErr, closeErr, currentErr, currentCloseErr)
+	}
+	return nil
+}
+
+func (s *stagedWriteFile) renameOwnedStage(targetRel string) error {
+	if s == nil || s.root == nil || s.rel == "" || targetRel == "" || !s.trusted || s.stageInfo == nil {
+		return errors.New("write staging entry is unavailable")
+	}
+	before, err := s.root.Lstat(s.rel)
+	if err != nil || !s.matchesStageInfo(before) {
+		s.retained = true
+		s.trusted = false
+		return errors.Join(errWriteStageChanged, err)
+	}
+	if err := rootio.RenameNoFollow(s.root, s.rel, targetRel); err != nil {
+		return err
+	}
+	s.rel = targetRel
+	after, err := s.root.Lstat(targetRel)
+	if err != nil || !sameRenamedWriteTargetHandle(before, after) ||
+		workspace.PersistentIdentityTokenForFileInfo(after) != s.stagePersistentID {
+		s.retained = true
+		s.trusted = false
+		return errors.Join(errWriteStageChanged, err)
+	}
+	return s.bindStageInfo(after)
+}
+
+func removeOwnedStagedWriteFile(
+	root *os.Root,
+	rel string,
+	expected os.FileInfo,
+	expectedIdentity string,
+	expectedSize int64,
+	expectedHash string,
+) error {
+	if root == nil || rel == "" || expected == nil || expectedIdentity == "" {
+		return errors.New("write staging removal identity is unavailable")
+	}
+	if err := removeStagedWriteFile(root, rel); err != nil {
+		return err
+	}
+	parent, err := rootio.OpenDirNoFollow(root, filepath.Dir(rel))
+	if err != nil {
+		return err
+	}
+	defer parent.Close()
+	verifyEntry := func(_ string, actual os.FileInfo) error {
+		if !sameDeleteStageEntry(expected, expectedIdentity, actual) {
+			return errWriteStageChanged
+		}
+		return nil
+	}
+	if expectedHash == "" {
+		return rootio.RemoveAllFromDirNoFollowChecked(parent, filepath.Base(rel), verifyEntry)
+	}
+	return rootio.RemoveAllFromDirNoFollowCheckedWithRegularFile(
+		parent,
+		filepath.Base(rel),
+		verifyEntry,
+		func(_ string, file *os.File, info os.FileInfo) error {
+			if info == nil || info.Size() != expectedSize {
+				return errWriteStageChanged
+			}
+			before, err := file.Stat()
+			if err != nil || !sameStableWriteTargetHandle(info, before) {
+				return errors.Join(errWriteStageChanged, err)
+			}
+			actualHash, hashErr := hashOpenWorkspaceFileContext(context.Background(), file)
+			after, statErr := file.Stat()
+			if hashErr != nil || statErr != nil || !sameStableWriteTargetHandle(before, after) ||
+				actualHash != expectedHash {
+				return errors.Join(errWriteStageChanged, hashErr, statErr)
+			}
+			return nil
+		},
+	)
+}
+
+func (fs *FileSystem) captureWriteTarget(ctx context.Context, name string) (writeTargetSnapshot, error) {
+	info, err := fs.lstatWriteTarget(ctx, name)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return writeTargetSnapshot{}, nil
+		}
+		if errors.Is(err, syscall.ENOTDIR) {
+			return writeTargetSnapshot{}, ErrNotDir
+		}
+		return writeTargetSnapshot{}, err
+	}
+	if info.IsDir() {
+		return writeTargetSnapshot{}, ErrIsDir
+	}
+	if !info.Mode().IsRegular() {
+		return writeTargetSnapshot{}, ErrNotRegular
+	}
+	return writeTargetSnapshot{
+		exists:              true,
+		mode:                info.Mode(),
+		size:                info.Size(),
+		modTime:             info.ModTime(),
+		deleteIdentityToken: workspace.DeleteIdentityTokenForFileInfo(info),
+	}, nil
+}
+
+func (fs *FileSystem) validateWriteTarget(ctx context.Context, name string, expected writeTargetSnapshot) error {
+	actual, err := fs.lstatWriteTarget(ctx, name)
+	if !expected.exists {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			if errors.Is(err, syscall.ENOTDIR) {
+				return ErrWriteConflict
+			}
+			return err
+		}
+		return ErrWriteConflict
+	}
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+			return ErrWriteConflict
+		}
+		return err
+	}
+	if !actual.Mode().IsRegular() {
+		return ErrWriteConflict
+	}
+	actualIdentity := workspace.DeleteIdentityTokenForFileInfo(actual)
+	if expected.deleteIdentityToken != "" && actualIdentity != "" {
+		if expected.deleteIdentityToken != actualIdentity {
+			return ErrWriteConflict
+		}
+		return nil
+	}
+	if expected.mode != actual.Mode() || expected.size != actual.Size() || !expected.modTime.Equal(actual.ModTime()) {
+		return ErrWriteConflict
+	}
+	return nil
+}
+
+func (fs *FileSystem) lstatWriteTarget(ctx context.Context, name string) (os.FileInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if fs.filesRootHandle == nil {
+		return nil, errors.New("workspace root is unavailable")
+	}
+	rel, ok := storageRelativePath(fs.workspace.Root(), fs.workspace.FullPath(name))
+	if !ok || rel == "." {
+		return nil, ErrNotFound
+	}
+	info, err := fs.filesRootHandle.Lstat(rel)
+	if err != nil {
+		return nil, mapStorageRootPathError(err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return info, nil
+}
+
+func (fs *FileSystem) stageWriteReader(ctx context.Context, reader io.Reader, maxBytes int64, prefix string) (*stagedWriteFile, error) {
+	if reader == nil {
+		return nil, errors.New("write source is unavailable")
+	}
+	if fs.writeStagingBudget == nil {
+		return nil, errors.New("write staging budget is unavailable")
+	}
+	file, rel, err := createStorageTempFile(fs.internalRootHandle, writeStagingDir, prefix)
+	if err != nil {
+		return nil, mapWriteStorageCapacityError(err)
+	}
+	reservation := fs.writeStagingBudget.newReservation()
+	staged := &stagedWriteFile{
+		root:        fs.internalRootHandle,
+		file:        file,
+		rel:         rel,
+		reservation: reservation,
+	}
+	if err := staged.refreshStageInfoFromOpenFile(); err != nil {
+		staged.retained = true
+		return staged, errors.Join(errWriteStageChanged, err)
+	}
+	identified := false
+	for range 32 {
+		identifiedRel, nameErr := newIdentifiedWriteStageName(writeStagingDir, prefix, staged.stagePersistentID, ".tmp")
+		if nameErr != nil {
+			return staged, nameErr
+		}
+		if renameErr := staged.renameOwnedStage(identifiedRel); errors.Is(renameErr, os.ErrExist) {
+			continue
+		} else if renameErr != nil {
+			return staged, mapWriteStorageCapacityError(renameErr)
+		}
+		identified = true
+		break
+	}
+	if !identified {
+		return staged, errors.New("failed to allocate identified write staging file")
+	}
+
+	copyReader := io.Reader(contextCheckingReader{ctx: ctx, reader: reader})
+	if maxBytes > 0 {
+		copyReader = &io.LimitedReader{R: copyReader, N: maxBytes + 1}
+	}
+	hasher := blake3.New()
+	budgetWriter := &writeStagingBudgetWriter{
+		writer:      file,
+		reservation: reservation,
+	}
+	if maxBytes > 0 {
+		budgetWriter.maxBytes = uint64(maxBytes)
+	}
+	written, copyErr := io.Copy(budgetWriter, io.TeeReader(copyReader, hasher))
+	reservation.trimPending()
+	if copyErr == nil {
+		copyErr = ctx.Err()
+	}
+	if copyErr == nil && maxBytes > 0 && written > maxBytes {
+		copyErr = ErrFileTooLarge
+	}
+	if copyErr != nil {
+		return staged, mapWriteStorageCapacityError(copyErr)
+	}
+	if err := file.Sync(); err != nil {
+		return staged, mapWriteStorageCapacityError(err)
+	}
+	if err := staged.refreshStageInfoFromOpenFile(); err != nil {
+		staged.retained = true
+		return staged, errors.Join(errWriteStageChanged, err)
+	}
+	if err := syncWriteStagingDirectory(fs.internalRootHandle); err != nil {
+		return staged, fmt.Errorf("sync write staging directory: %w", mapWriteStorageCapacityError(err))
+	}
+	staged.size = written
+	staged.hash = fmt.Sprintf("%x", hasher.Sum(nil))
+	if err := staged.rewind(); err != nil {
+		return staged, err
+	}
+	staged.sealed = true
+	return staged, nil
+}
+
+func writeTargetHandleMatchesSnapshot(expected writeTargetSnapshot, actual os.FileInfo) bool {
+	if actual == nil || !actual.Mode().IsRegular() {
+		return false
+	}
+	actualDeleteIdentity := workspace.DeleteIdentityTokenForFileInfo(actual)
+	if expected.deleteIdentityToken != "" && actualDeleteIdentity != "" {
+		return expected.deleteIdentityToken == actualDeleteIdentity
+	}
+	return expected.mode == actual.Mode() &&
+		expected.size == actual.Size() &&
+		expected.modTime.Equal(actual.ModTime())
+}
+
+func sameStableWriteTargetHandle(before, after os.FileInfo) bool {
+	if before == nil || after == nil || !before.Mode().IsRegular() || !after.Mode().IsRegular() || !os.SameFile(before, after) {
+		return false
+	}
+	beforeIdentity := workspace.PersistentIdentityTokenForFileInfo(before)
+	afterIdentity := workspace.PersistentIdentityTokenForFileInfo(after)
+	if beforeIdentity != "" && afterIdentity != "" && beforeIdentity != afterIdentity {
+		return false
+	}
+	beforeDeleteIdentity := workspace.DeleteIdentityTokenForFileInfo(before)
+	afterDeleteIdentity := workspace.DeleteIdentityTokenForFileInfo(after)
+	if beforeDeleteIdentity != "" && afterDeleteIdentity != "" {
+		return beforeDeleteIdentity == afterDeleteIdentity
+	}
+	return before.Mode() == after.Mode() &&
+		before.Size() == after.Size() &&
+		before.ModTime().Equal(after.ModTime())
+}
+
+func sameRenamedWriteTargetHandle(before, after os.FileInfo) bool {
+	if before == nil || after == nil || !before.Mode().IsRegular() || !after.Mode().IsRegular() || !os.SameFile(before, after) {
+		return false
+	}
+	beforeIdentity := workspace.PersistentIdentityTokenForFileInfo(before)
+	afterIdentity := workspace.PersistentIdentityTokenForFileInfo(after)
+	if beforeIdentity != "" && afterIdentity != "" && beforeIdentity != afterIdentity {
+		return false
+	}
+	return before.Mode() == after.Mode() &&
+		before.Size() == after.Size() &&
+		before.ModTime().Equal(after.ModTime())
+}
+
+func (s *stagedWriteFile) rewind() error {
+	if s == nil || s.file == nil {
+		return errors.New("staged write file is unavailable")
+	}
+	_, err := s.file.Seek(0, io.SeekStart)
+	return err
+}
+
+func (s *stagedWriteFile) discard() error {
+	if s == nil {
+		return nil
+	}
+	var err error
+	if s.file != nil {
+		if !s.retained {
+			var statErr error
+			if s.sealed {
+				var current os.FileInfo
+				current, statErr = s.file.Stat()
+				if statErr == nil && !s.matchesStageInfo(current) {
+					statErr = errWriteStageChanged
+				}
+			} else {
+				statErr = s.refreshStageInfoFromOpenFile()
+			}
+			if statErr != nil {
+				s.retained = true
+				s.trusted = false
+				err = errors.Join(errWriteStageChanged, statErr)
+			}
+		}
+		err = errors.Join(err, s.file.Close())
+		s.file = nil
+	}
+	if !s.retained && s.root != nil && s.rel != "" {
+		removeErr := removeOwnedStagedWriteFile(s.root, s.rel, s.stageInfo, s.stageIdentity, s.size, s.hash)
+		err = errors.Join(err, removeErr)
+		if removeErr == nil {
+			s.rel = ""
+			s.releaseReservation()
+		} else {
+			s.retained = true
+		}
+	}
+	return err
+}
+
+func (s *stagedWriteFile) releaseReservation() {
+	if s == nil || s.reservation == nil {
+		return
+	}
+	s.reservation.release()
+	s.reservation = nil
+}
+
+func (fs *FileSystem) retainWriteRecoveryEvidenceMarker(
+	name string,
+	state string,
+	inspectionPaths []string,
+) (string, error) {
+	payload, err := json.Marshal(writeRecoveryMarker{
+		Version:         writeRecoveryMarkerVersion,
+		TargetPath:      name,
+		State:           state,
+		InspectionPaths: append([]string(nil), inspectionPaths...),
+		CreatedAt:       time.Now().UTC(),
+	})
+	if err != nil {
+		return "", fmt.Errorf("encode write recovery marker: %w", err)
+	}
+	payload = append(payload, '\n')
+
+	file, tempRel, err := createStorageTempFile(fs.internalRootHandle, writeStagingDir, writeRecoveryMarkerPrefix)
+	if err != nil {
+		return "", fmt.Errorf("create write recovery marker: %w", err)
+	}
+	tempPath := filepath.Join(fs.config.InternalRoot, tempRel)
+	if err := syncWriteStagingDirectory(fs.internalRootHandle); err != nil {
+		return tempPath, errors.Join(fmt.Errorf("sync temporary write recovery marker entry: %w", err), file.Close())
+	}
+	if _, err := file.Write(payload); err != nil {
+		return tempPath, errors.Join(fmt.Errorf("write recovery marker: %w", err), file.Close())
+	}
+	if err := file.Sync(); err != nil {
+		return tempPath, errors.Join(fmt.Errorf("sync write recovery marker: %w", err), file.Close())
+	}
+	if err := file.Close(); err != nil {
+		return tempPath, fmt.Errorf("close write recovery marker: %w", err)
+	}
+
+	markerRel := strings.TrimSuffix(tempRel, ".tmp") + ".json"
+	if err := rootio.RenameNoFollow(fs.internalRootHandle, tempRel, markerRel); err != nil {
+		return tempPath, fmt.Errorf("publish write recovery marker: %w", err)
+	}
+	markerPath := filepath.Join(fs.config.InternalRoot, markerRel)
+	return markerPath, syncWriteStagingDirectory(fs.internalRootHandle)
+}
+
+func writeStageIdentityChanged(err error) bool {
+	return errors.Is(err, errWriteStageChanged) || errors.Is(err, rootio.ErrEntryChanged)
+}
+
+func (fs *FileSystem) blockChangedWriteStagesLocked(name string, cause error, stages ...*stagedWriteFile) error {
+	return fs.blockWriteStagesLocked(name, "stage_identity_changed", cause, stages...)
+}
+
+func (fs *FileSystem) blockRetainedWriteStagesLocked(name string, cause error, stages ...*stagedWriteFile) error {
+	return fs.blockWriteStagesLocked(name, "staging_cleanup_failed", cause, stages...)
+}
+
+func (fs *FileSystem) blockWriteStagesLocked(
+	name string,
+	state string,
+	cause error,
+	stages ...*stagedWriteFile,
+) error {
+	inspectionPaths := make([]string, 0, len(stages))
+	seen := make(map[string]struct{}, len(stages))
+	for _, stage := range stages {
+		if stage == nil || stage.rel == "" {
+			continue
+		}
+		stage.retained = true
+		stagePath := filepath.Join(fs.config.InternalRoot, stage.rel)
+		if _, ok := seen[stagePath]; ok {
+			continue
+		}
+		seen[stagePath] = struct{}{}
+		inspectionPaths = append(inspectionPaths, stagePath)
+	}
+	markerPath, markerErr := fs.retainWriteRecoveryEvidenceMarker(
+		name,
+		state,
+		inspectionPaths,
+	)
+	recoveryErr := &WriteRecoveryRequiredError{
+		TargetPath:      name,
+		StagePath:       markerPath,
+		InspectionPaths: inspectionPaths,
+		err:             errors.Join(cause, markerErr),
+	}
+	fs.writeMutationBlocked = errors.Join(fs.writeMutationBlocked, recoveryErr)
+	return recoveryErr
+}
+
+func (fs *FileSystem) blockChangedWriteStages(name string, cause error, stages ...*stagedWriteFile) error {
+	release := fs.beginRecoveryMutation()
+	defer release()
+	return fs.blockChangedWriteStagesLocked(name, cause, stages...)
+}
+
+func (fs *FileSystem) blockRetainedWriteStages(name string, cause error, stages ...*stagedWriteFile) error {
+	release := fs.beginRecoveryMutation()
+	defer release()
+	return fs.blockRetainedWriteStagesLocked(name, cause, stages...)
+}
+
+func (fs *FileSystem) currentWriteAdmissionBlock() error {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+	if err := fs.validateMutationRootsLocked(); err != nil {
+		return err
+	}
+	if fs.trashMutationBlocked != nil {
+		return fs.trashMutationBlocked
+	}
+	return fs.writeMutationBlocked
+}
+
 func (fs *FileSystem) Mkdir(ctx context.Context, name string) error {
 	release, err := fs.beginMutation(ctx)
 	if err != nil {
@@ -1408,9 +2339,15 @@ func (fs *FileSystem) PrepareObservedDeleteIntents(ctx context.Context, targets 
 const maxOptimisticDeleteIntentAttempts = 2
 
 func (fs *FileSystem) prepareDeleteIntents(ctx context.Context, targets []ObservedDeleteTarget, authorize DeletePathAuthorizer) (DeleteIntentSnapshot, error) {
+	fs.closeMu.RLock()
+	defer fs.closeMu.RUnlock()
 	for attempt := 0; attempt < maxOptimisticDeleteIntentAttempts; attempt++ {
 		fs.mu.RLock()
 		if err := ctx.Err(); err != nil {
+			fs.mu.RUnlock()
+			return DeleteIntentSnapshot{}, err
+		}
+		if err := fs.validateOpenLocked(); err != nil {
 			fs.mu.RUnlock()
 			return DeleteIntentSnapshot{}, err
 		}
@@ -1428,6 +2365,9 @@ func (fs *FileSystem) prepareDeleteIntents(ctx context.Context, targets []Observ
 
 		fs.mu.RLock()
 		validationErr := ctx.Err()
+		if validationErr == nil {
+			validationErr = fs.validateOpenLocked()
+		}
 		stable := fs.mutationEpoch == epoch
 		fs.mu.RUnlock()
 		if validationErr != nil {
@@ -1446,6 +2386,9 @@ func (fs *FileSystem) prepareDeleteIntents(ctx context.Context, targets []Observ
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
 	if err := ctx.Err(); err != nil {
+		return DeleteIntentSnapshot{}, err
+	}
+	if err := fs.validateOpenLocked(); err != nil {
 		return DeleteIntentSnapshot{}, err
 	}
 
@@ -2053,6 +2996,11 @@ func (fs *FileSystem) ListVersions(ctx context.Context, name string) ([]VersionR
 	if err != nil {
 		return nil, err
 	}
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+	if err := fs.ensureOpenLocked(); err != nil {
+		return nil, err
+	}
 
 	// Get current file info
 	info, err := fs.workspace.Stat(ctx, name)
@@ -2116,21 +3064,6 @@ func mapWorkspaceReadablePathError(err error) error {
 	return err
 }
 
-func mapWorkspaceWritablePathError(err error) error {
-	if errors.Is(err, workspace.ErrFileTooLarge) {
-		return fmt.Errorf("%w (max: %d bytes)", ErrFileTooLarge, defaultMaxWriteSize)
-	}
-	return mapWorkspaceReadablePathError(err)
-}
-
-func unwrapWorkspaceVisibleMutationError(err error) error {
-	var warningErr *workspace.VisibleMutationWarningError
-	if errors.As(err, &warningErr) {
-		return warningErr.Unwrap()
-	}
-	return err
-}
-
 type readSeekNopCloser struct {
 	*bytes.Reader
 }
@@ -2144,6 +3077,11 @@ func (fs *FileSystem) GetVersion(ctx context.Context, name, hash string) (io.Rea
 	var err error
 	name, err = normalizeStorageWorkspacePath(name)
 	if err != nil {
+		return nil, err
+	}
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+	if err := fs.ensureOpenLocked(); err != nil {
 		return nil, err
 	}
 	info, err := fs.workspace.Stat(ctx, name)
@@ -2262,12 +3200,7 @@ func (r contextCheckingReader) Read(buffer []byte) (int, error) {
 
 // RestoreVersion restores a file to a specific version
 func (fs *FileSystem) RestoreVersion(ctx context.Context, name, hash string) error {
-	release, err := fs.beginMutation(ctx)
-	if err != nil {
-		return err
-	}
-	defer release()
-
+	var err error
 	name, err = normalizeStorageWorkspacePath(name)
 	if err != nil {
 		return err
@@ -2275,121 +3208,85 @@ func (fs *FileSystem) RestoreVersion(ctx context.Context, name, hash string) err
 	if err := rejectStorageRootMutation(name); err != nil {
 		return err
 	}
-	previousData, hadPreviousFile, err := fs.readExistingFileForRollback(ctx, name)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	currentHashMatches := hadPreviousFile && computeHash(previousData) == hash
-	if !currentHashMatches {
+
+	data, err := func() ([]byte, error) {
+		fs.mu.RLock()
+		defer fs.mu.RUnlock()
+		if err := fs.validateOpenLocked(); err != nil {
+			return nil, err
+		}
 		if _, err := fs.versions.GetVersion(ctx, name, hash); err != nil {
-			if errors.Is(err, versionstore.ErrNotFound) {
-				return ErrVersionNotFound
+			if !errors.Is(err, versionstore.ErrNotFound) {
+				return nil, err
 			}
-			return err
+			matches, matchErr := fs.currentFileMatchesVersionHash(ctx, name, hash)
+			if matchErr != nil {
+				return nil, matchErr
+			}
+			if matches {
+				return nil, nil
+			}
+			return nil, ErrVersionNotFound
 		}
+		return fs.getVersionObject(ctx, hash)
+	}()
+	if err != nil {
+		if errors.Is(err, versionstore.ErrNotFound) {
+			return ErrVersionNotFound
+		}
+		return err
+	}
+	if data == nil {
+		return nil
+	}
+	if int64(len(data)) > versionstore.MaxVersionObjectSize {
+		return fmt.Errorf(
+			"%w: stored version exceeds the %d-byte object limit",
+			ErrFileTooLarge,
+			versionstore.MaxVersionObjectSize,
+		)
+	}
+	if actualHash := computeHash(data); actualHash != hash {
+		return fmt.Errorf("stored version content hash %s does not match requested hash %s", actualHash, hash)
 	}
 
-	var data []byte
-	if currentHashMatches {
-		data = previousData
-	} else {
-		// Get version data
-		data, err = fs.getVersionObject(ctx, hash)
-		if err != nil {
-			if errors.Is(err, versionstore.ErrNotFound) {
-				return ErrVersionNotFound
-			}
-			return err
-		}
-	}
+	return fs.writeFileTransaction(ctx, name, bytes.NewReader(data), writeFileTransactionOptions{
+		forceVersion:   true,
+		versionComment: "before restore",
+	})
+}
 
-	rollbackVersionHash := ""
-	rollbackVersionRecorded := false
-	rollbackVersionObjectCreated := false
-	var restoreWriteWarning error
-
-	// Save current as a version first
-	if hadPreviousFile {
-		currentHash := computeHash(previousData)
-		if currentHash != hash {
-			hasObject, err := fs.hasVersionObject(ctx, currentHash)
-			if err != nil {
-				return fmt.Errorf("failed to check current version object before restore: %w", err)
-			}
-			rollbackObjectCreated := !hasObject
-			_, versionErr := fs.versions.GetVersion(ctx, name, currentHash)
-			versionAlreadyRecorded := versionErr == nil
-			if versionErr != nil && !errors.Is(versionErr, versionstore.ErrNotFound) {
-				return fmt.Errorf("failed to check current version before restore: %w", versionErr)
-			}
-			storedHash, err := fs.putVersionObject(ctx, previousData)
-			if err != nil {
-				return fmt.Errorf("failed to store current version before restore: %w", err)
-			}
-			rollbackVersionHash = storedHash
-			rollbackVersionObjectCreated = rollbackObjectCreated
-			if !versionAlreadyRecorded {
-				if err := fs.addFileVersion(ctx, name, storedHash, int64(len(previousData)), "before restore"); err != nil {
-					if rollbackErr := fs.rollbackWriteVersion(ctx, name, storedHash, false, rollbackObjectCreated); rollbackErr != nil {
-						return errors.Join(
-							fmt.Errorf("failed to record current version before restore: %w", err),
-							fmt.Errorf("failed to cleanup current snapshot version during rollback: %w", rollbackErr),
-						)
-					}
-					return fmt.Errorf("failed to record current version before restore: %w", err)
-				}
-				rollbackVersionRecorded = true
-			}
-		}
+func (fs *FileSystem) currentFileMatchesVersionHash(ctx context.Context, name, expectedHash string) (bool, error) {
+	target, err := fs.captureWriteTarget(ctx, name)
+	if err != nil {
+		return false, err
 	}
-
-	// Write restored version
-	writeWorkspacePath := fs.writeWorkspacePath
-	if writeWorkspacePath == nil {
-		writeWorkspacePath = fs.writeWorkspaceFile
+	if !target.exists {
+		return false, nil
 	}
-	if err := writeWorkspacePath(ctx, name, data); err != nil {
-		if workspace.IsVisibleMutationWarning(err) || isVisibleMutationWarning(err) {
-			restoreWriteWarning = wrapVisibleMutationWarning(err)
-		} else {
-			if rollbackErr := fs.rollbackWriteVersion(ctx, name, rollbackVersionHash, rollbackVersionRecorded, rollbackVersionObjectCreated); rollbackErr != nil {
-				return errors.Join(
-					err,
-					fmt.Errorf("failed to rollback current snapshot version: %w", rollbackErr),
-				)
-			}
-			return err
-		}
+	file, err := fs.workspace.OpenRegularFile(ctx, name)
+	if err != nil {
+		return false, mapWorkspaceReadablePathError(err)
 	}
-
-	if err := fs.updateFileIndex(ctx, name, int64(len(data)), time.Now(), computeHash(data)); err != nil {
-		rollbackErr := fs.restoreFileAfterIndexFailure(ctx, name, hadPreviousFile, previousData, nil)
-		versionRollbackErr := fs.rollbackWriteVersion(ctx, name, rollbackVersionHash, rollbackVersionRecorded, rollbackVersionObjectCreated)
-		if rollbackErr != nil && versionRollbackErr != nil {
-			return errors.Join(
-				fmt.Errorf("failed to update file index: %w", err),
-				fmt.Errorf("failed to rollback restored version: %w", rollbackErr),
-				fmt.Errorf("failed to rollback current snapshot version: %w", versionRollbackErr),
-			)
-		}
-		if rollbackErr != nil {
-			return errors.Join(
-				fmt.Errorf("failed to update file index: %w", err),
-				fmt.Errorf("failed to rollback restored version: %w", rollbackErr),
-			)
-		}
-		if versionRollbackErr != nil {
-			return errors.Join(
-				fmt.Errorf("failed to update file index: %w", err),
-				fmt.Errorf("failed to rollback current snapshot version: %w", versionRollbackErr),
-			)
-		}
-		return fmt.Errorf("failed to update file index: %w", err)
+	before, statErr := file.Stat()
+	if statErr != nil || !writeTargetHandleMatchesSnapshot(target, before) {
+		_ = file.Close()
+		return false, errors.Join(ErrWriteConflict, statErr)
 	}
-	if restoreWriteWarning != nil {
-		return restoreWriteWarning
+	actualHash, hashErr := hashOpenWorkspaceFileContext(ctx, file)
+	after, restatErr := file.Stat()
+	closeErr := file.Close()
+	if hashErr != nil || restatErr != nil || closeErr != nil ||
+		!sameStableWriteTargetHandle(before, after) {
+		return false, errors.Join(ErrWriteConflict, hashErr, restatErr, closeErr)
 	}
-	return nil
+	if err := fs.validateWriteTarget(ctx, name, target); err != nil {
+		return false, err
+	}
+	return actualHash == expectedHash, nil
 }
 
 // SetVersioning sets the versioning override for a file
@@ -2429,6 +3326,11 @@ func (fs *FileSystem) GetVersioningStatus(ctx context.Context, name string) (ena
 	if err != nil {
 		return false, "", err
 	}
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+	if err := fs.ensureOpenLocked(); err != nil {
+		return false, "", err
+	}
 
 	info, err := fs.workspace.Stat(ctx, name)
 	if err != nil {
@@ -2441,7 +3343,7 @@ func (fs *FileSystem) GetVersioningStatus(ctx context.Context, name string) (ena
 		return false, "", err
 	}
 
-	policy := fs.currentVersioningPolicy()
+	policy := fs.currentVersioningPolicyLocked()
 	if policy == nil {
 		return false, "not_versioned_type", nil
 	}
@@ -2457,6 +3359,9 @@ func (fs *FileSystem) GetVersioningStatus(ctx context.Context, name string) (ena
 func (fs *FileSystem) ListTrash(ctx context.Context) ([]*TrashItem, error) {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
+	if err := fs.ensureOpenLocked(); err != nil {
+		return nil, err
+	}
 
 	items, err := fs.versions.ListTrash(ctx)
 	if err != nil {
@@ -2484,6 +3389,9 @@ func (fs *FileSystem) ListTrash(ctx context.Context) ([]*TrashItem, error) {
 func (fs *FileSystem) GetTrashItem(ctx context.Context, id string) (*TrashItem, error) {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
+	if err := fs.ensureOpenLocked(); err != nil {
+		return nil, err
+	}
 
 	item, err := fs.versions.GetTrashItem(ctx, id)
 	if err != nil {
@@ -2514,6 +3422,9 @@ func (fs *FileSystem) WalkTrashItemRestorePaths(ctx context.Context, id string, 
 
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
+	if err := fs.ensureOpenLocked(); err != nil {
+		return err
+	}
 
 	item, err := fs.versions.GetTrashItem(ctx, id)
 	if err != nil {
@@ -2711,6 +3622,9 @@ func (fs *FileSystem) hasOtherTrashItemReferencingRestoredMetadata(ctx context.C
 func (fs *FileSystem) HasVersionMetadataPath(ctx context.Context, name string, includeDescendants bool) (bool, error) {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
+	if err := fs.ensureOpenLocked(); err != nil {
+		return false, err
+	}
 	return fs.versionMetadataPathExists(ctx, name, includeDescendants)
 }
 
@@ -3127,13 +4041,22 @@ func wrapDeleteCleanupWarning(err error) error {
 func (fs *FileSystem) GetTrashStats(ctx context.Context) (count int, totalSize int64, err error) {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
+	if err := fs.ensureOpenLocked(); err != nil {
+		return 0, 0, err
+	}
 
 	return fs.versions.GetTrashStats(ctx)
 }
 
 // GetFileCount returns the number of current workspace files.
 func (fs *FileSystem) GetFileCount(ctx context.Context) (int, error) {
+	fs.closeMu.RLock()
+	defer fs.closeMu.RUnlock()
 	fs.mu.RLock()
+	if err := fs.ensureOpenLocked(); err != nil {
+		fs.mu.RUnlock()
+		return 0, err
+	}
 	workspaceRef := fs.workspace
 	fs.mu.RUnlock()
 
@@ -3154,17 +4077,20 @@ func (fs *FileSystem) GetFileCount(ctx context.Context) (int, error) {
 // DiskStats returns capacity for the filesystem hosting the workspace.
 func (fs *FileSystem) DiskStats() (*DiskStats, error) {
 	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+	if err := fs.ensureOpenLocked(); err != nil {
+		return nil, err
+	}
 	workspaceRef := fs.workspace
-	fs.mu.RUnlock()
 	if workspaceRef == nil {
 		return nil, errors.New("workspace not initialized")
 	}
-
-	return diskStatsForPath(workspaceRef.Root())
-}
-
-func diskStatsForPath(root string) (*DiskStats, error) {
-	return diskStatsForHostPath(root)
+	dir, err := rootio.OpenDirNoFollow(fs.filesRootHandle, ".")
+	if err != nil {
+		return nil, mapStorageRootPathError(err)
+	}
+	defer dir.Close()
+	return diskStatsForOpenDirectory(dir, workspaceRef.Root())
 }
 
 type diskMountDetails struct {
@@ -3476,7 +4402,13 @@ func (fs *FileSystem) search(ctx context.Context, root, query string, limit int,
 		limit = 50
 	}
 
+	fs.closeMu.RLock()
+	defer fs.closeMu.RUnlock()
 	fs.mu.RLock()
+	if err := fs.ensureOpenLocked(); err != nil {
+		fs.mu.RUnlock()
+		return nil, err
+	}
 	workspaceRef := fs.workspace
 	fs.mu.RUnlock()
 
@@ -3528,13 +4460,196 @@ func (fs *FileSystem) search(ctx context.Context, root, query string, limit int,
 
 // CleanupStaging removes incomplete staging files
 func (fs *FileSystem) CleanupStaging(ctx context.Context) (files int, bytes int64, err error) {
+	fs.writeStagingMu.Lock()
+	defer fs.writeStagingMu.Unlock()
+
 	release, err := fs.beginMutation(ctx)
 	if err != nil {
 		return 0, 0, err
 	}
 	defer release()
 
-	return fs.workspace.CleanupStaging(ctx)
+	writeFiles, writeBytes, err := fs.cleanupWriteStaging(ctx)
+	if err != nil {
+		return writeFiles, writeBytes, err
+	}
+	workspaceFiles, workspaceBytes, err := fs.workspace.CleanupStaging(ctx)
+	if err != nil {
+		recoveryErr := fs.blockRetainedWriteStagesLocked(
+			"/",
+			fmt.Errorf("cleanup workspace staging: %w", err),
+		)
+		return writeFiles + workspaceFiles, writeBytes + workspaceBytes, errors.Join(err, recoveryErr)
+	}
+	if fs.writeStagingBudget != nil {
+		fs.writeStagingBudget.resetAfterVerifiedCleanup()
+	}
+	return writeFiles + workspaceFiles, writeBytes + workspaceBytes, nil
+}
+
+func (fs *FileSystem) cleanupWriteStaging(ctx context.Context) (files int, bytes int64, err error) {
+	blockRecovery := func(stagePath string, cause error) error {
+		recoveryErr := &WriteRecoveryRequiredError{StagePath: stagePath, err: cause}
+		fs.writeMutationBlocked = errors.Join(fs.writeMutationBlocked, recoveryErr)
+		return recoveryErr
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, 0, err
+	}
+	if fs.internalRootHandle == nil {
+		return 0, 0, errors.New("write staging is unavailable")
+	}
+	if fs.writeTransactionJournal != nil {
+		operations, scanErr := fs.writeTransactionJournal.Scan()
+		journalPath := writeTransactionJournalDir
+		if fs.config != nil {
+			journalPath = filepath.Join(fs.config.InternalRoot, writeTransactionJournalDir)
+		}
+		if scanErr != nil {
+			return 0, 0, blockRecovery(
+				journalPath,
+				fmt.Errorf("inspect durable write transactions before staging cleanup: %w", scanErr),
+			)
+		}
+		if len(operations) != 0 {
+			return 0, 0, blockRecovery(
+				journalPath,
+				fmt.Errorf("%d durable write transaction(s) require recovery", len(operations)),
+			)
+		}
+	}
+	dir, err := rootio.OpenDirNoFollow(fs.internalRootHandle, writeStagingDir)
+	if err != nil {
+		return 0, 0, blockRecovery(filepath.Join(fs.config.InternalRoot, writeStagingDir), fmt.Errorf("inspect write staging directory: %w", err))
+	}
+	defer dir.Close()
+	entries, err := dir.ReadDir(-1)
+	if err != nil {
+		return 0, 0, blockRecovery(filepath.Join(fs.config.InternalRoot, writeStagingDir), fmt.Errorf("read write staging directory: %w", err))
+	}
+	// Recovery evidence must win over every removable or unexpected entry. A
+	// cleanup failure must not let startup miss a later recovery marker.
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return files, bytes, err
+		}
+		if isWriteRecoveryStagingName(entry.Name()) {
+			return files, bytes, blockRecovery(
+				filepath.Join(fs.config.InternalRoot, writeStagingDir, entry.Name()),
+				errors.New("interrupted write left recovery evidence"),
+			)
+		}
+	}
+	type removableWriteStage struct {
+		rel      string
+		size     int64
+		info     os.FileInfo
+		identity string
+	}
+	removable := make([]removableWriteStage, 0, len(entries))
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return files, bytes, err
+		}
+		if !isOwnedWriteStagingName(entry.Name()) {
+			return files, bytes, blockRecovery(
+				filepath.Join(fs.config.InternalRoot, writeStagingDir, entry.Name()),
+				fmt.Errorf("unexpected entry in write staging directory: %s", entry.Name()),
+			)
+		}
+		entryRel := filepath.Join(writeStagingDir, entry.Name())
+		info, err := fs.internalRootHandle.Lstat(entryRel)
+		if err != nil {
+			return files, bytes, blockRecovery(
+				filepath.Join(fs.config.InternalRoot, entryRel),
+				fmt.Errorf("inspect write staging entry: %w", err),
+			)
+		}
+		if !info.Mode().IsRegular() {
+			return files, bytes, blockRecovery(
+				filepath.Join(fs.config.InternalRoot, entryRel),
+				fmt.Errorf("write staging entry is not a regular file: %s", entry.Name()),
+			)
+		}
+		expectedPersistentIdentity, ok := ownedWriteStagingPersistentIdentity(entry.Name())
+		entryIdentity := workspace.DeleteIdentityTokenForFileInfo(info)
+		if !ok || workspace.PersistentIdentityTokenForFileInfo(info) != expectedPersistentIdentity || entryIdentity == "" {
+			return files, bytes, blockRecovery(
+				filepath.Join(fs.config.InternalRoot, entryRel),
+				fmt.Errorf("write staging entry identity does not match its name: %s", entry.Name()),
+			)
+		}
+		removable = append(removable, removableWriteStage{rel: entryRel, size: info.Size(), info: info, identity: entryIdentity})
+	}
+	for _, entry := range removable {
+		if err := ctx.Err(); err != nil {
+			return files, bytes, err
+		}
+		if err := removeOwnedStagedWriteFile(fs.internalRootHandle, entry.rel, entry.info, entry.identity, entry.size, ""); err != nil {
+			return files, bytes, blockRecovery(
+				filepath.Join(fs.config.InternalRoot, entry.rel),
+				fmt.Errorf("remove verified write staging entry: %w", err),
+			)
+		}
+		files++
+		bytes += entry.size
+	}
+	if files > 0 {
+		if err := syncWriteStagingDirectory(fs.internalRootHandle); err != nil {
+			return files, bytes, blockRecovery(
+				filepath.Join(fs.config.InternalRoot, writeStagingDir),
+				fmt.Errorf("sync write staging after cleanup: %w", err),
+			)
+		}
+	}
+	finalDir, err := rootio.OpenDirNoFollow(fs.internalRootHandle, writeStagingDir)
+	if err != nil {
+		return files, bytes, blockRecovery(
+			filepath.Join(fs.config.InternalRoot, writeStagingDir),
+			fmt.Errorf("reopen write staging directory after cleanup: %w", err),
+		)
+	}
+	finalEntries, readErr := finalDir.ReadDir(-1)
+	closeErr := finalDir.Close()
+	if readErr != nil || closeErr != nil {
+		return files, bytes, blockRecovery(
+			filepath.Join(fs.config.InternalRoot, writeStagingDir),
+			fmt.Errorf("verify write staging directory after cleanup: %w", errors.Join(readErr, closeErr)),
+		)
+	}
+	if len(finalEntries) > 0 {
+		entry := finalEntries[0]
+		cause := fmt.Errorf("write staging entry appeared during cleanup: %s", entry.Name())
+		if isWriteRecoveryStagingName(entry.Name()) {
+			cause = errors.New("write recovery evidence appeared during cleanup")
+		}
+		return files, bytes, blockRecovery(
+			filepath.Join(fs.config.InternalRoot, writeStagingDir, entry.Name()),
+			cause,
+		)
+	}
+	return files, bytes, nil
+}
+
+func isOwnedWriteStagingName(name string) bool {
+	_, ok := ownedWriteStagingPersistentIdentity(name)
+	return ok
+}
+
+func ownedWriteStagingPersistentIdentity(name string) (string, bool) {
+	if identity, ok := parseWriteStagePersistentIdentity(name, writeSourceStagePrefix, ".tmp"); ok {
+		return identity, true
+	}
+	return parseWriteStagePersistentIdentity(name, writeCommittedStagePrefix, ".tmp")
+}
+
+func isWriteRecoveryStagingName(name string) bool {
+	return strings.HasSuffix(name, ".tmp") && strings.HasPrefix(name, writeExchangeStagePrefix) ||
+		strings.HasSuffix(name, ".tmp") && strings.HasPrefix(name, writeRollbackStagePrefix) ||
+		strings.HasSuffix(name, ".tmp") && strings.HasPrefix(name, writeCapturedStagePrefix) ||
+		strings.HasSuffix(name, ".tmp") && strings.HasPrefix(name, writePublishedStagePrefix) ||
+		strings.HasSuffix(name, ".stage") && strings.HasPrefix(name, writeRecoveryStagePrefix) ||
+		(strings.HasSuffix(name, ".tmp") || strings.HasSuffix(name, ".json")) && strings.HasPrefix(name, writeRecoveryMarkerPrefix)
 }
 
 // AcquireMutationLease serializes a caller-owned metadata decision with
@@ -3569,14 +4684,25 @@ func (fs *FileSystem) beginMutation(ctx context.Context) (func(), error) {
 		fs.gcMu.RUnlock()
 		return nil, err
 	}
-	fs.mutationEpoch++
 	if err := ctx.Err(); err != nil {
 		fs.mu.Unlock()
 		fs.gcMu.RUnlock()
 		return nil, err
 	}
+	if err := fs.validateMutationRootsLocked(); err != nil {
+		fs.mu.Unlock()
+		fs.gcMu.RUnlock()
+		return nil, err
+	}
+	fs.mutationEpoch++
 	if fs.trashMutationBlocked != nil {
 		err := fs.trashMutationBlocked
+		fs.mu.Unlock()
+		fs.gcMu.RUnlock()
+		return nil, err
+	}
+	if fs.writeMutationBlocked != nil {
+		err := fs.writeMutationBlocked
 		fs.mu.Unlock()
 		fs.gcMu.RUnlock()
 		return nil, err
@@ -3739,19 +4865,17 @@ func (fs *FileSystem) shouldForceRetentionSweepLocked() bool {
 		return false
 	}
 
-	stats, err := diskStatsForPath(fs.workspace.Root())
+	dir, err := rootio.OpenDirNoFollow(fs.filesRootHandle, ".")
+	if err != nil {
+		return false
+	}
+	defer dir.Close()
+	stats, err := diskStatsForOpenDirectory(dir, fs.workspace.Root())
 	if err != nil {
 		return false
 	}
 
 	return stats.AvailableBytes < fs.config.MinFreeSpace
-}
-
-func (fs *FileSystem) deleteIndexEntriesForDeleteTarget(ctx context.Context, name string, isDir bool) error {
-	if isDir {
-		return fs.deleteFileIndexPrefix(ctx, name)
-	}
-	return fs.deleteFileIndex(ctx, name)
 }
 
 func (fs *FileSystem) syncRestoredIndexEntries(ctx context.Context, name string, isDir bool) error {
@@ -3796,6 +4920,9 @@ func (fs *FileSystem) syncFileIndexFromWorkspace(ctx context.Context, name strin
 func (fs *FileSystem) GetAllReferencedHashes(ctx context.Context) ([]string, error) {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
+	if err := fs.ensureOpenLocked(); err != nil {
+		return nil, err
+	}
 
 	// In the new architecture, versions are managed by versionstore
 	// Return version hashes from the database
@@ -3805,7 +4932,14 @@ func (fs *FileSystem) GetAllReferencedHashes(ctx context.Context) ([]string, err
 // AcquireGCLock blocks storage mutations for the duration of a GC pass and returns the current referenced hashes.
 func (fs *FileSystem) AcquireGCLock(ctx context.Context) ([]string, func(), error) {
 	fs.gcMu.Lock()
+	fs.mu.RLock()
+	if err := fs.validateOpenLocked(); err != nil {
+		fs.mu.RUnlock()
+		fs.gcMu.Unlock()
+		return nil, nil, err
+	}
 	hashes, err := fs.listReferencedHashes(ctx)
+	fs.mu.RUnlock()
 	if err != nil {
 		fs.gcMu.Unlock()
 		return nil, nil, err
@@ -3936,6 +5070,46 @@ func newStorageTempName(parentName, prefix string) (string, error) {
 		return tempName, nil
 	}
 	return filepath.Join(parentName, tempName), nil
+}
+
+func newIdentifiedWriteStageName(parentName, prefix, persistentIdentity, extension string) (string, error) {
+	if !isWriteStagePersistentIdentity(persistentIdentity) {
+		return "", errors.New("write staging identity is unavailable")
+	}
+	var suffix [8]byte
+	if _, err := storageRandomRead(suffix[:]); err != nil {
+		return "", err
+	}
+	stageName := prefix + persistentIdentity + "-" + hex.EncodeToString(suffix[:]) + extension
+	if parentName == "." {
+		return stageName, nil
+	}
+	return filepath.Join(parentName, stageName), nil
+}
+
+func isWriteStagePersistentIdentity(identity string) bool {
+	decoded, err := hex.DecodeString(identity)
+	return err == nil && len(decoded) == sha256.Size && len(identity) == writeStagePersistentIdentityHexLength && identity == strings.ToLower(identity)
+}
+
+func parseWriteStagePersistentIdentity(name, prefix, extension string) (string, bool) {
+	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, extension) {
+		return "", false
+	}
+	remainder := strings.TrimSuffix(strings.TrimPrefix(name, prefix), extension)
+	if len(remainder) <= writeStagePersistentIdentityHexLength || remainder[writeStagePersistentIdentityHexLength] != '-' {
+		return "", false
+	}
+	identity := remainder[:writeStagePersistentIdentityHexLength]
+	if !isWriteStagePersistentIdentity(identity) {
+		return "", false
+	}
+	if suffix := remainder[writeStagePersistentIdentityHexLength+1:]; len(suffix) != 16 {
+		return "", false
+	} else if decodedSuffix, err := hex.DecodeString(suffix); err != nil || len(decodedSuffix) != 8 || suffix != strings.ToLower(suffix) {
+		return "", false
+	}
+	return identity, true
 }
 
 func createStorageTempFile(root *os.Root, parentName, prefix string) (*os.File, string, error) {
@@ -4411,55 +5585,6 @@ func sameStorageFileObject(expected, actual os.FileInfo) bool {
 	return expected != nil && actual != nil && os.SameFile(expected, actual) && expected.IsDir() == actual.IsDir() && expected.Mode() == actual.Mode() && expected.Size() == actual.Size() && expected.ModTime().Equal(actual.ModTime())
 }
 
-func (fs *FileSystem) readExistingFileForRollback(ctx context.Context, name string) ([]byte, bool, error) {
-	info, err := fs.workspace.Stat(ctx, name)
-	if err != nil {
-		if errors.Is(err, workspace.ErrNotFound) {
-			return nil, false, nil
-		}
-		if errors.Is(err, workspace.ErrNotDir) || isPathNotDirError(err) {
-			return nil, false, ErrNotDir
-		}
-		return nil, false, err
-	}
-	if info.IsDir {
-		return nil, false, ErrIsDir
-	}
-
-	reader, err := fs.workspace.OpenRegularFile(ctx, name)
-	if err != nil {
-		mappedErr := mapWorkspaceReadablePathError(err)
-		if errors.Is(mappedErr, ErrNotDir) || isPathNotDirError(err) {
-			return nil, false, ErrNotDir
-		}
-		return nil, false, mappedErr
-	}
-	defer reader.Close()
-
-	data, err := io.ReadAll(contextCheckingReader{ctx: ctx, reader: reader})
-	if err == nil {
-		err = ctx.Err()
-	}
-	if err != nil {
-		return nil, false, err
-	}
-	return data, true, nil
-}
-
-func (fs *FileSystem) writeWorkspaceFile(ctx context.Context, name string, data []byte) error {
-	_, err := fs.workspace.WriteFileFromReaderWithOptions(ctx, name, bytes.NewReader(data), workspace.WriteFileOptions{
-		SyncParent: syncStoragePathDir,
-	})
-	if err == nil {
-		return nil
-	}
-	mappedErr := mapWorkspaceWritablePathError(unwrapWorkspaceVisibleMutationError(err))
-	if workspace.IsVisibleMutationWarning(err) {
-		return wrapVisibleMutationWarning(mappedErr)
-	}
-	return mappedErr
-}
-
 func (fs *FileSystem) validateWorkspaceParentForWrite(name string) error {
 	parentAbsPath := filepath.Dir(fs.workspace.FullPath(name))
 	if fs.filesRootHandle != nil {
@@ -4478,7 +5603,7 @@ func (fs *FileSystem) validateWorkspaceParentForWrite(name string) error {
 			return errStoragePathSymlink
 		}
 		if errors.Is(err, os.ErrNotExist) {
-			return nil
+			return ErrNotDir
 		}
 		if errors.Is(err, syscall.ENOTDIR) {
 			return ErrNotDir
@@ -4494,76 +5619,12 @@ func (fs *FileSystem) validateWorkspaceParentForWrite(name string) error {
 		return errStoragePathSymlink
 	}
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return ErrNotDir
 	}
 	if errors.Is(err, syscall.ENOTDIR) {
 		return ErrNotDir
 	}
 	return err
-}
-
-func (fs *FileSystem) rollbackCreatedWorkspaceDirs(ctx context.Context, createdDirs []string) error {
-	var rollbackErr error
-	for _, dir := range createdDirs {
-		if filepath.IsAbs(dir) {
-			relDir, ok := storageRelativePath(fs.workspace.Root(), dir)
-			if !ok {
-				rollbackErr = errors.Join(rollbackErr, fmt.Errorf("created directory %s is outside workspace root", dir))
-				break
-			}
-			dir = relDir
-		}
-		if dir == "." {
-			continue
-		}
-		name := "/" + filepath.ToSlash(dir)
-		if err := fs.workspace.Delete(ctx, name); err != nil {
-			if errors.Is(err, workspace.ErrNotFound) {
-				continue
-			}
-			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("remove created directory %s: %w", name, err))
-			break
-		}
-	}
-	return rollbackErr
-}
-
-func (fs *FileSystem) restoreFileAfterIndexFailure(ctx context.Context, name string, hadPreviousFile bool, previousData []byte, createdDirs []string) error {
-	if hadPreviousFile {
-		return fs.workspace.WriteFile(ctx, name, previousData)
-	}
-	if err := fs.workspace.Delete(ctx, name); err != nil {
-		return err
-	}
-	return fs.rollbackCreatedWorkspaceDirs(ctx, createdDirs)
-}
-
-func (fs *FileSystem) rollbackWriteVersion(ctx context.Context, name, hash string, versionRecorded, objectCreated bool) error {
-	if !versionRecorded && !objectCreated {
-		return nil
-	}
-
-	deleteFileVersion := fs.deleteFileVersion
-	if deleteFileVersion == nil {
-		deleteFileVersion = fs.versions.DeleteVersion
-	}
-
-	var rollbackErr error
-	metadataRolledBack := !versionRecorded
-	if versionRecorded {
-		if err := deleteFileVersion(ctx, name, hash); err != nil {
-			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("delete version metadata %s: %w", hash, err))
-		} else {
-			metadataRolledBack = true
-		}
-	}
-	if objectCreated && metadataRolledBack {
-		if err := fs.deleteVersionObject(ctx, hash); err != nil {
-			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("failed to cleanup version object during rollback %s: %w", hash, err))
-		}
-	}
-
-	return rollbackErr
 }
 
 func (fs *FileSystem) restoreDeletedIndexEntries(ctx context.Context, name string, info *FileInfo) error {
@@ -4619,34 +5680,6 @@ func (fs *FileSystem) removeTrashPathDurably(trashPath string) (bool, error) {
 		return true, fmt.Errorf("failed to sync trash delete directory: %w", err)
 	}
 	return true, nil
-}
-
-func (fs *FileSystem) cleanupTrashItemDir(trashItemPath string, expected os.FileInfo) {
-	if fs.captureDeleteMountBoundary(fs.trashRoot).checkHostTree(trashItemPath) != nil {
-		return
-	}
-	root, relPath, _, err := fs.resolveStoragePathRoot(trashItemPath)
-	if err != nil {
-		return
-	}
-	if relPath == "." {
-		return
-	}
-	parent, err := rootio.OpenDirNoFollow(root.handle, filepath.Dir(relPath))
-	if err != nil {
-		return
-	}
-	defer parent.Close()
-	base := filepath.Base(relPath)
-	if err := rootio.RemoveAllFromDirNoFollowChecked(parent, base, func(entryPath string, info os.FileInfo) error {
-		if entryPath != base || expected == nil || info == nil || !info.IsDir() || !os.SameFile(expected, info) {
-			return rootio.ErrEntryChanged
-		}
-		return nil
-	}); err != nil {
-		return
-	}
-	_ = syncManagedStorageDir(root.handle, filepath.Dir(relPath), storageAbsolutePath(root, filepath.Dir(relPath)))
 }
 
 func (fs *FileSystem) movePath(src, dst string) error {

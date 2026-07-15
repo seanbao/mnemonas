@@ -44,6 +44,50 @@ func setupDataplaneClient(t *testing.T) *dataplane.Client {
 	return client
 }
 
+func TestVersionStoreSQLiteDSNAppliesDurablePragmasToEveryConnection(t *testing.T) {
+	dsn := versionStoreSQLiteDSN(filepath.Join(t.TempDir(), "pragmas.db"))
+	if !strings.Contains(dsn, "_txlock=immediate") {
+		t.Fatalf("versionStoreSQLiteDSN() = %q, want immediate transaction locking", dsn)
+	}
+
+	db, err := sql.Open(sqliteDriverName, dsn)
+	if err != nil {
+		t.Fatalf("sql.Open() error: %v", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(2)
+
+	ctx := context.Background()
+	first, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("first Conn() error: %v", err)
+	}
+	defer first.Close()
+	second, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("second Conn() error: %v", err)
+	}
+	defer second.Close()
+
+	for index, conn := range []*sql.Conn{first, second} {
+		var journalMode string
+		if err := conn.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&journalMode); err != nil {
+			t.Fatalf("connection %d journal_mode query error: %v", index+1, err)
+		}
+		if !strings.EqualFold(journalMode, "wal") {
+			t.Fatalf("connection %d journal_mode = %q, want WAL", index+1, journalMode)
+		}
+
+		var synchronous int
+		if err := conn.QueryRowContext(ctx, "PRAGMA synchronous").Scan(&synchronous); err != nil {
+			t.Fatalf("connection %d synchronous query error: %v", index+1, err)
+		}
+		if synchronous != 2 {
+			t.Fatalf("connection %d synchronous = %d, want 2 (FULL)", index+1, synchronous)
+		}
+	}
+}
+
 func TestRollbackRenamedVersionStoreFiles_RestoresInReverseOrder(t *testing.T) {
 	tmpDir := t.TempDir()
 	root, err := os.OpenRoot(tmpDir)
@@ -346,6 +390,87 @@ func TestNew_DoesNotFollowDBDirectorySymlinkInsertedAfterValidation(t *testing.T
 	}
 	if _, err := os.Stat(filepath.Join(outsideDir, "test.db")); !os.IsNotExist(err) {
 		t.Fatalf("expected no outside database file, got %v", err)
+	}
+}
+
+func TestNew_DBRootKeepsDatabaseOnAnchoredDirectoryAfterPathReplacement(t *testing.T) {
+	parent := t.TempDir()
+	dbDir := filepath.Join(parent, "db")
+	if err := os.Mkdir(dbDir, 0o700); err != nil {
+		t.Fatalf("Mkdir(db) error: %v", err)
+	}
+	root, err := os.OpenRoot(dbDir)
+	if err != nil {
+		t.Fatalf("OpenRoot(db) error: %v", err)
+	}
+	defer root.Close()
+
+	heldDir := dbDir + "-held"
+	if err := os.Rename(dbDir, heldDir); err != nil {
+		t.Fatalf("Rename(db) error: %v", err)
+	}
+	if err := os.Mkdir(dbDir, 0o700); err != nil {
+		t.Fatalf("Mkdir(replacement db) error: %v", err)
+	}
+
+	store, err := New(Config{
+		DBRoot:    root,
+		DBName:    "index.db",
+		Dataplane: dataplane.NewClient("unused"),
+	})
+	if err != nil {
+		t.Fatalf("New(DBRoot) error: %v", err)
+	}
+	defer store.Close()
+	if _, err := os.Stat(filepath.Join(heldDir, "index.db")); err != nil {
+		t.Fatalf("anchored database stat error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dbDir, "index.db")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("replacement directory received database, stat error = %v", err)
+	}
+}
+
+func TestNew_DBRootRecoversCorruptDatabaseWithinAnchoredDirectory(t *testing.T) {
+	parent := t.TempDir()
+	dbDir := filepath.Join(parent, "db")
+	if err := os.Mkdir(dbDir, 0o700); err != nil {
+		t.Fatalf("Mkdir(db) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dbDir, "index.db"), []byte("not sqlite"), 0o600); err != nil {
+		t.Fatalf("WriteFile(corrupt db) error: %v", err)
+	}
+	root, err := os.OpenRoot(dbDir)
+	if err != nil {
+		t.Fatalf("OpenRoot(db) error: %v", err)
+	}
+	defer root.Close()
+
+	heldDir := dbDir + "-held"
+	if err := os.Rename(dbDir, heldDir); err != nil {
+		t.Fatalf("Rename(db) error: %v", err)
+	}
+	if err := os.Mkdir(dbDir, 0o700); err != nil {
+		t.Fatalf("Mkdir(replacement db) error: %v", err)
+	}
+
+	store, err := New(Config{
+		DBRoot:    root,
+		DBName:    "index.db",
+		Dataplane: dataplane.NewClient("unused"),
+	})
+	if err != nil {
+		t.Fatalf("New(DBRoot corrupt recovery) error: %v", err)
+	}
+	defer store.Close()
+	if !store.RecoveredFromCorruption() {
+		t.Fatal("DBRoot constructor did not report corrupt database recovery")
+	}
+	matches, err := filepath.Glob(filepath.Join(heldDir, "index.db.corrupt.*"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("anchored corrupt backups = %v, %v; want one", matches, err)
+	}
+	if _, err := os.Stat(filepath.Join(dbDir, "index.db")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("replacement directory received recovered database, stat error = %v", err)
 	}
 }
 

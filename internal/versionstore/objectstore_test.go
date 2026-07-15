@@ -33,6 +33,9 @@ func TestObjectStoreUnavailableWithoutClient(t *testing.T) {
 	if _, err := store.Put(ctx, []byte("data")); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("Put() error = %v, want %v", err, ErrUnavailable)
 	}
+	if result, err := store.PutExpected(ctx, []byte("data"), strings.Repeat("a", 64)); !errors.Is(err, ErrUnavailable) || result != (ObjectPutResult{}) {
+		t.Fatalf("PutExpected() = (%+v, %v), want zero result and %v", result, err, ErrUnavailable)
+	}
 	if _, err := store.Get(ctx, "hash"); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("Get() error = %v, want %v", err, ErrUnavailable)
 	}

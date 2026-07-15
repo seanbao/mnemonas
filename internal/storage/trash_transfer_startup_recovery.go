@@ -51,6 +51,9 @@ func (fs *FileSystem) RecoverTrashTransfers(ctx context.Context) (TrashTransferR
 	var report TrashTransferRecoveryReport
 	release := fs.beginRecoveryMutation()
 	defer release()
+	if err := fs.validateMutationRootsLocked(); err != nil {
+		return report, err
+	}
 	if err := ctx.Err(); err != nil {
 		return report, err
 	}

@@ -80,6 +80,24 @@ func RenameLeafBetweenRootsNoReplace(
 	return rootPathError("rename", targetName, errors.ErrUnsupported)
 }
 
+// ExchangeLeavesBetweenRoots is unsupported without a descriptor-relative
+// atomic exchange primitive. It fails closed instead of composing multiple
+// namespace mutations.
+func ExchangeLeavesBetweenRoots(
+	sourceRoot *os.Root,
+	sourceName string,
+	targetRoot *os.Root,
+	targetName string,
+) error {
+	if _, _, err := splitRelativeParent(sourceName); err != nil {
+		return rootPathError("rename", sourceName, err)
+	}
+	if _, _, err := splitRelativeParent(targetName); err != nil {
+		return rootPathError("rename", targetName, err)
+	}
+	return rootPathError("rename", targetName, errors.ErrUnsupported)
+}
+
 // RenameLeafIntoDirNoReplace is unsupported without descriptor-relative,
 // no-replace rename support.
 func RenameLeafIntoDirNoReplace(sourceRoot *os.Root, sourceName string, targetDir *os.File, targetName string) error {
@@ -103,9 +121,41 @@ func RemoveAllFromDirNoFollowChecked(dir *os.File, name string, verify func(stri
 	return rootPathError("remove", name, errors.ErrUnsupported)
 }
 
+// RemoveAllFromDirNoFollowCheckedWithRegularFile is unsupported without
+// descriptor-relative traversal and removal support.
+func RemoveAllFromDirNoFollowCheckedWithRegularFile(
+	dir *os.File,
+	name string,
+	verify func(string, os.FileInfo) error,
+	verifyFile CheckedRegularFileVerifier,
+) error {
+	return rootPathError("remove", name, errors.ErrUnsupported)
+}
+
 // RemoveAllFromDirNoFollowCheckedInPlace is unsupported without
 // descriptor-relative traversal and removal support.
 func RemoveAllFromDirNoFollowCheckedInPlace(dir *os.File, name string, verify func(string, os.FileInfo) error) error {
+	return rootPathError("remove", name, errors.ErrUnsupported)
+}
+
+// RemoveAllFromDirNoFollowCheckedInPlaceWithRegularFile is unsupported without
+// descriptor-relative traversal and removal support.
+func RemoveAllFromDirNoFollowCheckedInPlaceWithRegularFile(
+	dir *os.File,
+	name string,
+	verify func(string, os.FileInfo) error,
+	verifyFile CheckedRegularFileVerifier,
+) error {
+	return rootPathError("remove", name, errors.ErrUnsupported)
+}
+
+// RemoveEmptyDirNoFollowCheckedInPlace is unsupported without
+// descriptor-relative traversal and removal support.
+func RemoveEmptyDirNoFollowCheckedInPlace(
+	dir *os.File,
+	name string,
+	verify func(string, os.FileInfo) error,
+) error {
 	return rootPathError("remove", name, errors.ErrUnsupported)
 }
 

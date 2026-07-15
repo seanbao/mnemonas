@@ -1084,6 +1084,9 @@ func (fs *FileSystem) RecoverTrashDeletions(ctx context.Context) (TrashRecoveryR
 	var report TrashRecoveryReport
 	release := fs.beginRecoveryMutation()
 	defer release()
+	if err := fs.validateMutationRootsLocked(); err != nil {
+		return report, err
+	}
 	if err := ctx.Err(); err != nil {
 		return report, err
 	}

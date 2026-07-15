@@ -49,18 +49,7 @@ func TestFileSystem_PrepareDeleteIntentsRejectsFIFOWithoutBlocking(t *testing.T)
 		t.Fatalf("FIFO mode = %v, want ModeNamedPipe", info.Mode())
 	}
 
-	writeDone := make(chan error, 1)
-	go func() {
-		writeDone <- fs.WriteFile(context.Background(), "/after-fifo.txt", strings.NewReader("ok"))
-	}()
-	select {
-	case err := <-writeDone:
-		if err != nil {
-			t.Fatalf("WriteFile() after rejected FIFO intent error: %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("filesystem mutation lock remained blocked after rejected FIFO intent")
-	}
+	requireFilesystemMutationGatesReleased(t, fs)
 }
 
 func TestFileSystem_PrepareDeleteIntentsAuthorizesFIFOBeforeRejectingType(t *testing.T) {
@@ -186,18 +175,7 @@ func TestFileSystem_DeleteRejectsFIFOWithoutBlockingOrMutation(t *testing.T) {
 				t.Fatalf("trash after rejected FIFO deletion = %+v, %v; want empty", items, err)
 			}
 
-			writeDone := make(chan error, 1)
-			go func() {
-				writeDone <- fs.WriteFile(context.Background(), "/after-fifo-delete.txt", strings.NewReader("ok"))
-			}()
-			select {
-			case err := <-writeDone:
-				if err != nil {
-					t.Fatalf("WriteFile() after rejected FIFO deletion error: %v", err)
-				}
-			case <-time.After(time.Second):
-				t.Fatal("filesystem mutation lock remained blocked after rejected FIFO deletion")
-			}
+			requireFilesystemMutationGatesReleased(t, fs)
 		})
 	}
 }
@@ -215,18 +193,7 @@ func TestFileSystem_PrepareDeleteIntentsRejectsUnixSocket(t *testing.T) {
 		t.Fatalf("socket after rejected intent mode = %v, error = %v", infoMode(info), statErr)
 	}
 
-	writeDone := make(chan error, 1)
-	go func() {
-		writeDone <- fs.WriteFile(context.Background(), "/after-socket.txt", strings.NewReader("ok"))
-	}()
-	select {
-	case err := <-writeDone:
-		if err != nil {
-			t.Fatalf("WriteFile() after rejected socket intent error: %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("filesystem mutation lock remained blocked after rejected socket intent")
-	}
+	requireFilesystemMutationGatesReleased(t, fs)
 }
 
 func TestFileSystem_DeleteRevalidationRejectsUnixSocket(t *testing.T) {

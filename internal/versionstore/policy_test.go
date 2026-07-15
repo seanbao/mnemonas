@@ -2,6 +2,8 @@ package versionstore
 
 import (
 	"context"
+	"database/sql"
+	"path/filepath"
 	"testing"
 )
 
@@ -59,6 +61,60 @@ func TestVersioningPolicy_DefaultPolicyCoversCommonTextAssets(t *testing.T) {
 				t.Fatalf("ShouldVersion(%q, %d) = %v, want %v", tt.path, tt.fileSize, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestVersioningPolicy_EnforcesDataplaneObjectLimit(t *testing.T) {
+	policy := &VersioningPolicy{
+		AutoVersionedExtensions: []string{".txt"},
+		MaxVersionedSize:        MaxVersionObjectSize * 2,
+	}
+	ctx := context.Background()
+	fileSize := MaxVersionObjectSize + 1
+
+	if policy.ShouldVersion(ctx, "/oversized.txt", fileSize) {
+		t.Fatal("expected object contract limit to disable oversized version")
+	}
+	enabled, reason := policy.GetVersioningStatus(ctx, "/oversized.txt", fileSize)
+	if enabled || reason != "file_too_large" {
+		t.Fatalf("GetVersioningStatus() = (%v, %q), want (false, file_too_large)", enabled, reason)
+	}
+}
+
+func TestVersioningPolicy_OverrideBypassesAutomaticThresholdButNotObjectLimit(t *testing.T) {
+	db, err := sql.Open(sqliteDriverName, filepath.Join(t.TempDir(), "policy.db"))
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := createTables(db); err != nil {
+		t.Fatalf("createTables() error = %v", err)
+	}
+	store := &Store{db: db}
+	ctx := context.Background()
+	const path = "/archive.bin"
+	if err := store.SetVersioningOverride(ctx, path, true); err != nil {
+		t.Fatalf("SetVersioningOverride() error = %v", err)
+	}
+	policy := &VersioningPolicy{
+		MaxVersionedSize: 1024,
+		store:            store,
+	}
+
+	if !policy.ShouldVersion(ctx, path, 2048) {
+		t.Fatal("enabled override did not bypass the automatic-versioning threshold")
+	}
+	if enabled, reason := policy.GetVersioningStatus(ctx, path, 2048); !enabled || reason != "user_override_enabled" {
+		t.Fatalf("GetVersioningStatus() = (%v, %q), want (true, user_override_enabled)", enabled, reason)
+	}
+	if !policy.ShouldVersion(ctx, path, MaxVersionObjectSize) {
+		t.Fatal("enabled override rejected the exact object-size limit")
+	}
+	if policy.ShouldVersion(ctx, path, MaxVersionObjectSize+1) {
+		t.Fatal("enabled override bypassed the object-size limit")
+	}
+	if enabled, reason := policy.GetVersioningStatus(ctx, path, MaxVersionObjectSize+1); enabled || reason != "file_too_large" {
+		t.Fatalf("GetVersioningStatus(over limit) = (%v, %q), want (false, file_too_large)", enabled, reason)
 	}
 }
 

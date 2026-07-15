@@ -224,6 +224,7 @@ func TestFileSystem_DeleteMountBoundaryFailsClosedAndReleasesLock(t *testing.T) 
 		t.Fatalf("Delete(mount table failure) error = %v, want ErrNotRegular", err)
 	}
 	assertWorkspaceTreeAndTrashUnchanged(t, fs, "/tree/keep.txt", "keep")
+	fs.readDeleteMountPoints = fixedDeleteMountPoints()
 	if err := fs.WriteFile(ctx, "/after-mount-table-failure.txt", strings.NewReader("ok")); err != nil {
 		t.Fatalf("WriteFile() after rejected deletion error: %v", err)
 	}

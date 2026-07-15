@@ -162,6 +162,25 @@ func (c *Client) Stats(ctx context.Context) (*StorageStats, error) {
 
 // PutChunk stores a data chunk
 func (c *Client) PutChunk(ctx context.Context, data []byte) (*ChunkInfo, error) {
+	return c.putChunk(ctx, data, nil)
+}
+
+// PutChunkExpected stores a data chunk only when the data-plane hash matches
+// expectedHash and returns whether the operation deduplicated an existing
+// object.
+func (c *Client) PutChunkExpected(
+	ctx context.Context,
+	data []byte,
+	expectedHash string,
+) (*ChunkInfo, error) {
+	return c.putChunk(ctx, data, &expectedHash)
+}
+
+func (c *Client) putChunk(
+	ctx context.Context,
+	data []byte,
+	expectedHash *string,
+) (*ChunkInfo, error) {
 	c.mu.RLock()
 	client := c.client
 	c.mu.RUnlock()
@@ -170,7 +189,10 @@ func (c *Client) PutChunk(ctx context.Context, data []byte) (*ChunkInfo, error) 
 		return nil, fmt.Errorf("not connected")
 	}
 
-	resp, err := client.PutChunk(ctx, &pb.PutChunkRequest{Data: data})
+	resp, err := client.PutChunk(ctx, &pb.PutChunkRequest{
+		Data:         data,
+		ExpectedHash: expectedHash,
+	})
 	if err != nil {
 		return nil, err
 	}

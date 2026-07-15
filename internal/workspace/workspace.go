@@ -32,6 +32,47 @@ var finalizeWorkspaceCopyTemp = func(root *os.Root, tmpPath string) error {
 var syncWorkspaceDir = syncWorkspaceParentDir
 var afterValidateWorkspacePaths = func() error { return nil }
 var beforeWorkspaceRename = func() error { return nil }
+var afterWorkspaceFilePublish = func() error { return nil }
+var afterWorkspaceCreatedDirTempOpen = func(string, string) error { return nil }
+var afterWorkspaceCreatedDirPublish = func(string) error { return nil }
+var beforeWorkspaceCreatedDirRemoval = func(string) error { return nil }
+
+var errWorkspaceTempOwnershipChanged = errors.New("workspace temp file ownership changed")
+var errWorkspaceCreatedDirOwnershipChanged = errors.New("workspace created directory ownership changed")
+
+// IsCreatedDirOwnershipChanged reports whether a write observed a created
+// directory that can no longer be safely treated as workspace-owned.
+func IsCreatedDirOwnershipChanged(err error) bool {
+	return errors.Is(err, errWorkspaceCreatedDirOwnershipChanged)
+}
+
+type ownedWorkspaceFileSnapshot struct {
+	info               os.FileInfo
+	deleteIdentity     string
+	persistentIdentity string
+}
+
+// CreatedDir records the identity of a workspace directory created for one
+// write. The private evidence fields prevent callers from manufacturing
+// ownership proof for an unrelated directory.
+type CreatedDir struct {
+	Path               string
+	relativePath       string
+	info               os.FileInfo
+	persistentIdentity string
+	mode               os.FileMode
+	handle             *os.File
+}
+
+// CreatedDirEvidence is a serializable snapshot of one directory that the
+// current write created and still owns.
+type CreatedDirEvidence struct {
+	Path               string
+	RelativePath       string
+	PersistentIdentity string
+	DeleteIdentity     string
+	Mode               os.FileMode
+}
 
 const workspaceRootEscapeError = "path escapes from parent"
 
@@ -88,22 +129,292 @@ func removeWorkspaceTempPath(root *os.Root, tmpPath string) error {
 	return nil
 }
 
-func cleanupWorkspaceCreatedDirs(rootPath string, root *os.Root, createdDirs []string, operationErr error) error {
-	rollbackErr := operationErr
-	for _, dir := range createdDirs {
-		relDir, err := filepath.Rel(rootPath, dir)
-		if err != nil {
-			return errors.Join(rollbackErr, fmt.Errorf("cleanup created directory %s: %w", dir, err))
+func newOwnedWorkspaceFileSnapshot(info os.FileInfo) ownedWorkspaceFileSnapshot {
+	return ownedWorkspaceFileSnapshot{
+		info:               info,
+		deleteIdentity:     DeleteIdentityTokenForFileInfo(info),
+		persistentIdentity: PersistentIdentityTokenForFileInfo(info),
+	}
+}
+
+func readOwnedWorkspaceFileSnapshot(root *os.Root, name string, expected ownedWorkspaceFileSnapshot, verifyDeleteIdentity bool) (ownedWorkspaceFileSnapshot, error) {
+	if expected.info == nil || !expected.info.Mode().IsRegular() {
+		return ownedWorkspaceFileSnapshot{}, errWorkspaceTempOwnershipChanged
+	}
+
+	file, err := rootio.OpenRegularFileNoFollow(root, name)
+	if err != nil {
+		return ownedWorkspaceFileSnapshot{}, errors.Join(errWorkspaceTempOwnershipChanged, err)
+	}
+	defer file.Close()
+
+	current, err := file.Stat()
+	if err != nil {
+		return ownedWorkspaceFileSnapshot{}, errors.Join(errWorkspaceTempOwnershipChanged, err)
+	}
+	if !current.Mode().IsRegular() || !os.SameFile(expected.info, current) ||
+		current.Mode() != expected.info.Mode() || current.Size() != expected.info.Size() ||
+		!current.ModTime().Equal(expected.info.ModTime()) {
+		return ownedWorkspaceFileSnapshot{}, errWorkspaceTempOwnershipChanged
+	}
+	if expected.persistentIdentity != "" &&
+		PersistentIdentityTokenForFileInfo(current) != expected.persistentIdentity {
+		return ownedWorkspaceFileSnapshot{}, errWorkspaceTempOwnershipChanged
+	}
+	if verifyDeleteIdentity && expected.deleteIdentity != "" &&
+		DeleteIdentityTokenForFileInfo(current) != expected.deleteIdentity {
+		return ownedWorkspaceFileSnapshot{}, errWorkspaceTempOwnershipChanged
+	}
+	return newOwnedWorkspaceFileSnapshot(current), nil
+}
+
+func verifyOwnedWorkspaceFile(root *os.Root, name string, expected ownedWorkspaceFileSnapshot, verifyDeleteIdentity bool) error {
+	_, err := readOwnedWorkspaceFileSnapshot(root, name, expected, verifyDeleteIdentity)
+	return err
+}
+
+func removeOwnedWorkspaceTempPath(root *os.Root, tmpPath string, expected os.FileInfo) error {
+	if expected == nil || !expected.Mode().IsRegular() {
+		return errWorkspaceTempOwnershipChanged
+	}
+
+	parentName := path.Dir(tmpPath)
+	parent, err := rootio.OpenDirNoFollow(root, parentName)
+	if err != nil {
+		return err
+	}
+	defer parent.Close()
+
+	return rootio.RemoveAllFromDirNoFollowChecked(parent, path.Base(tmpPath), func(_ string, current os.FileInfo) error {
+		if !current.Mode().IsRegular() || !os.SameFile(expected, current) {
+			return errWorkspaceTempOwnershipChanged
 		}
-		if relDir == "." {
+		return nil
+	})
+}
+
+func cleanupOwnedWorkspaceTempPath(root *os.Root, tmpPath string, expected os.FileInfo, operationErr error) error {
+	if removeErr := removeOwnedWorkspaceTempPath(root, tmpPath, expected); removeErr != nil {
+		return errors.Join(operationErr, fmt.Errorf("cleanup owned temp file %s: %w", tmpPath, removeErr))
+	}
+	return operationErr
+}
+
+func workspaceCreatedDirMatches(expected CreatedDir, current os.FileInfo) bool {
+	if expected.info == nil || current == nil || !current.IsDir() || current.Mode()&os.ModeSymlink != 0 ||
+		!os.SameFile(expected.info, current) || current.Mode() != expected.mode {
+		return false
+	}
+	return expected.persistentIdentity == "" ||
+		PersistentIdentityTokenForFileInfo(current) == expected.persistentIdentity
+}
+
+func workspaceCreatedDirHandleMatches(expected CreatedDir, current os.FileInfo) bool {
+	if expected.handle == nil || !workspaceCreatedDirMatches(expected, current) {
+		return false
+	}
+	held, err := expected.handle.Stat()
+	return err == nil && workspaceCreatedDirMatches(expected, held) &&
+		os.SameFile(held, current) && held.Mode() == current.Mode()
+}
+
+// ReleaseCreatedDirs releases identity handles held by directory evidence.
+// It is safe to call after CleanupCreatedDirs or more than once.
+func ReleaseCreatedDirs(createdDirs []CreatedDir) error {
+	var releaseErr error
+	for i := range createdDirs {
+		if createdDirs[i].handle == nil {
 			continue
 		}
-		if removeErr := root.Remove(relDir); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("cleanup created directory %s: %w", dir, removeErr))
+		if err := createdDirs[i].handle.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+			releaseErr = errors.Join(releaseErr, fmt.Errorf("close created directory evidence %s: %w", createdDirs[i].Path, err))
+		}
+	}
+	return releaseErr
+}
+
+// SnapshotCreatedDirs revalidates each created directory against its retained
+// handle and returns deepest-first durable ownership evidence.
+func (w *Workspace) SnapshotCreatedDirs(createdDirs []CreatedDir) ([]CreatedDirEvidence, error) {
+	if w == nil || w.rootHandle == nil {
+		return nil, errWorkspaceCreatedDirOwnershipChanged
+	}
+	evidence := make([]CreatedDirEvidence, 0, len(createdDirs))
+	for _, created := range createdDirs {
+		expectedPath := filepath.Join(w.root, filepath.FromSlash(created.relativePath))
+		if created.Path == "" ||
+			filepath.Clean(created.Path) != filepath.Clean(expectedPath) {
+			return nil, errWorkspaceCreatedDirOwnershipChanged
+		}
+		info, err := readWorkspaceCreatedDirEntry(w.rootHandle, created)
+		if err != nil {
+			return nil, err
+		}
+		persistentIdentity := PersistentIdentityTokenForFileInfo(info)
+		deleteIdentity := DeleteIdentityTokenForFileInfo(info)
+		if persistentIdentity == "" ||
+			deleteIdentity == "" ||
+			persistentIdentity != created.persistentIdentity ||
+			info.Mode() != created.mode {
+			return nil, errWorkspaceCreatedDirOwnershipChanged
+		}
+		evidence = append(evidence, CreatedDirEvidence{
+			Path:               created.Path,
+			RelativePath:       created.relativePath,
+			PersistentIdentity: persistentIdentity,
+			DeleteIdentity:     deleteIdentity,
+			Mode:               info.Mode(),
+		})
+	}
+	return evidence, nil
+}
+
+func removeOwnedWorkspaceCreatedDir(root *os.Root, created CreatedDir) error {
+	if root == nil || created.relativePath == "" || created.relativePath == "." ||
+		created.info == nil || created.handle == nil {
+		return errWorkspaceCreatedDirOwnershipChanged
+	}
+	directory, err := rootio.OpenDirNoFollow(root, created.relativePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return errors.Join(errWorkspaceCreatedDirOwnershipChanged, err)
+	}
+	defer directory.Close()
+
+	finalInfo, err := directory.Stat()
+	if err != nil || !workspaceCreatedDirHandleMatches(created, finalInfo) {
+		return errors.Join(errWorkspaceCreatedDirOwnershipChanged, err)
+	}
+	entries, readErr := directory.ReadDir(1)
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return errors.Join(errWorkspaceCreatedDirOwnershipChanged, readErr)
+	}
+	if len(entries) != 0 {
+		return errWorkspaceCreatedDirOwnershipChanged
+	}
+	finalDeleteIdentity := DeleteIdentityTokenForFileInfo(finalInfo)
+	if finalDeleteIdentity == "" {
+		return errWorkspaceCreatedDirOwnershipChanged
+	}
+	if err := beforeWorkspaceCreatedDirRemoval(created.Path); err != nil {
+		return err
+	}
+
+	parentName := path.Dir(created.relativePath)
+	parent, err := rootio.OpenDirNoFollow(root, parentName)
+	if err != nil {
+		return errors.Join(errWorkspaceCreatedDirOwnershipChanged, err)
+	}
+	defer parent.Close()
+
+	base := path.Base(created.relativePath)
+	removeErr := rootio.RemoveAllFromDirNoFollowChecked(parent, base, func(name string, current os.FileInfo) error {
+		if path.Clean(strings.ReplaceAll(name, "\\", "/")) != base ||
+			!workspaceCreatedDirHandleMatches(created, current) || !os.SameFile(finalInfo, current) ||
+			DeleteIdentityTokenForFileInfo(current) != finalDeleteIdentity {
+			return errWorkspaceCreatedDirOwnershipChanged
+		}
+		return nil
+	})
+	if removeErr != nil {
+		return errors.Join(errWorkspaceCreatedDirOwnershipChanged, removeErr)
+	}
+	return nil
+}
+
+func cleanupWorkspaceCreatedDirsWithRetention(
+	rootPath string,
+	root *os.Root,
+	createdDirs []CreatedDir,
+	operationErr error,
+	retainOnOwnershipChange bool,
+) (rollbackErr error) {
+	rollbackErr = operationErr
+	defer func() {
+		if retainOnOwnershipChange && IsCreatedDirOwnershipChanged(rollbackErr) {
+			return
+		}
+		if releaseErr := ReleaseCreatedDirs(createdDirs); releaseErr != nil {
+			rollbackErr = errors.Join(rollbackErr, releaseErr)
+		}
+	}()
+	for _, dir := range createdDirs {
+		expectedPath := filepath.Join(rootPath, filepath.FromSlash(dir.relativePath))
+		if dir.Path == "" || filepath.Clean(dir.Path) != filepath.Clean(expectedPath) {
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("cleanup created directory %s: %w", dir.Path, errWorkspaceCreatedDirOwnershipChanged))
+			break
+		}
+		if removeErr := removeOwnedWorkspaceCreatedDir(root, dir); removeErr != nil {
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("cleanup created directory %s: %w", dir.Path, removeErr))
 			break
 		}
 	}
 	return rollbackErr
+}
+
+func cleanupWorkspaceCreatedDirs(rootPath string, root *os.Root, createdDirs []CreatedDir, operationErr error) error {
+	return cleanupWorkspaceCreatedDirsWithRetention(rootPath, root, createdDirs, operationErr, false)
+}
+
+// CleanupCreatedDirs removes only empty directories whose identity still
+// matches evidence returned by a prior write in this workspace.
+func (w *Workspace) CleanupCreatedDirs(ctx context.Context, createdDirs []CreatedDir) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		if releaseErr := ReleaseCreatedDirs(createdDirs); releaseErr != nil {
+			return errors.Join(err, releaseErr)
+		}
+		return err
+	}
+	return cleanupWorkspaceCreatedDirs(w.root, w.rootHandle, createdDirs, nil)
+}
+
+// PrepareWriteParent creates missing parent directories for a later
+// descriptor-relative publish and returns identity evidence for rollback.
+// The caller must release the evidence and remove the directories when the
+// publish does not commit.
+func (w *Workspace) PrepareWriteParent(
+	ctx context.Context,
+	name string,
+	syncParent func(string) error,
+) ([]CreatedDir, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := validateWorkspaceMutationName(name); err != nil {
+		return nil, err
+	}
+	fullPath := w.FullPath(name)
+	if err := w.validatePath(fullPath); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := afterValidateWorkspacePaths(); err != nil {
+		return nil, err
+	}
+
+	createdDirs, err := ensureWorkspaceDirsTracked(
+		w.root,
+		w.rootHandle,
+		workspaceParentRelativeName(name),
+		0o755,
+	)
+	if err != nil {
+		return createdDirs, w.mapWorkspaceCreatePathError(filepath.Dir(fullPath), err)
+	}
+	if syncParent == nil {
+		syncParent = syncWorkspaceDir
+	}
+	if err := syncCreatedWorkspaceDirEvidenceWith(createdDirs, syncParent); err != nil {
+		return createdDirs, fmt.Errorf("sync created directory tree: %w", err)
+	}
+	return createdDirs, nil
 }
 
 func syncWorkspaceParentDir(dir string) error {
@@ -141,7 +452,143 @@ func syncCreatedWorkspaceDirsWith(createdDirs []string, syncDir func(string) err
 	return nil
 }
 
-func ensureWorkspaceDirsTracked(rootPath string, root *os.Root, relDir string, perm os.FileMode) ([]string, error) {
+func syncCreatedWorkspaceDirEvidenceWith(createdDirs []CreatedDir, syncDir func(string) error) error {
+	for i := 0; i < len(createdDirs); i++ {
+		if err := syncDir(filepath.Dir(createdDirs[i].Path)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func newWorkspaceCreatedDirTempName(parentName string) (string, error) {
+	var suffix [16]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		return "", err
+	}
+	tempName := ".workspace-dir-" + hex.EncodeToString(suffix[:]) + ".tmp"
+	if parentName == "." {
+		return tempName, nil
+	}
+	return path.Join(parentName, tempName), nil
+}
+
+func readWorkspaceCreatedDirEntry(root *os.Root, created CreatedDir) (os.FileInfo, error) {
+	if root == nil || created.relativePath == "" || created.relativePath == "." ||
+		created.info == nil || created.handle == nil {
+		return nil, errWorkspaceCreatedDirOwnershipChanged
+	}
+	current, err := rootio.OpenDirNoFollow(root, created.relativePath)
+	if err != nil {
+		return nil, errors.Join(errWorkspaceCreatedDirOwnershipChanged, err)
+	}
+	defer current.Close()
+
+	info, err := current.Stat()
+	if err != nil || !workspaceCreatedDirHandleMatches(created, info) {
+		return nil, errors.Join(errWorkspaceCreatedDirOwnershipChanged, err)
+	}
+	return info, nil
+}
+
+func cleanupUnpublishedWorkspaceCreatedDir(root *os.Root, created CreatedDir, operationErr error) error {
+	removeErr := removeOwnedWorkspaceCreatedDir(root, created)
+	releaseErr := ReleaseCreatedDirs([]CreatedDir{created})
+	if removeErr != nil {
+		removeErr = fmt.Errorf("cleanup unpublished directory %s: %w", created.Path, removeErr)
+	}
+	return errors.Join(operationErr, removeErr, releaseErr)
+}
+
+func publishWorkspaceCreatedDir(rootPath string, root *os.Root, currentRel string, perm os.FileMode) (CreatedDir, bool, error) {
+	parentRel := path.Dir(currentRel)
+	for range 32 {
+		tempRel, err := newWorkspaceCreatedDirTempName(parentRel)
+		if err != nil {
+			return CreatedDir{}, false, err
+		}
+		if err := rootio.MkdirNoFollow(root, tempRel, perm); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				continue
+			}
+			return CreatedDir{}, false, mapWorkspaceRootPathError(err)
+		}
+
+		tempInfo, statErr := root.Lstat(tempRel)
+		if statErr != nil || tempInfo == nil || !tempInfo.IsDir() || tempInfo.Mode()&os.ModeSymlink != 0 {
+			return CreatedDir{}, false, errors.Join(errWorkspaceCreatedDirOwnershipChanged, statErr)
+		}
+		handle, openErr := rootio.OpenDirNoFollow(root, tempRel)
+		if openErr != nil {
+			// No identity handle is available, so the uncertain path must be
+			// preserved instead of deleting an object that may be a replacement.
+			return CreatedDir{}, false, errors.Join(errWorkspaceCreatedDirOwnershipChanged, openErr)
+		}
+		heldInfo, heldStatErr := handle.Stat()
+		if heldStatErr != nil || !heldInfo.IsDir() || heldInfo.Mode()&os.ModeSymlink != 0 ||
+			!os.SameFile(tempInfo, heldInfo) || tempInfo.Mode() != heldInfo.Mode() {
+			_ = handle.Close()
+			return CreatedDir{}, false, errors.Join(errWorkspaceCreatedDirOwnershipChanged, heldStatErr)
+		}
+
+		created := CreatedDir{
+			Path:               filepath.Join(rootPath, filepath.FromSlash(tempRel)),
+			relativePath:       tempRel,
+			info:               heldInfo,
+			persistentIdentity: PersistentIdentityTokenForFileInfo(heldInfo),
+			mode:               heldInfo.Mode(),
+			handle:             handle,
+		}
+		targetPath := filepath.Join(rootPath, filepath.FromSlash(currentRel))
+		if err := afterWorkspaceCreatedDirTempOpen(created.Path, targetPath); err != nil {
+			return CreatedDir{}, false, cleanupUnpublishedWorkspaceCreatedDir(root, created, err)
+		}
+		if _, err := readWorkspaceCreatedDirEntry(root, created); err != nil {
+			return CreatedDir{}, false, cleanupUnpublishedWorkspaceCreatedDir(root, created, err)
+		}
+
+		renameErr := rootio.RenameLeafNoReplace(root, tempRel, currentRel)
+		if renameErr != nil {
+			cleanupErr := cleanupUnpublishedWorkspaceCreatedDir(root, created, nil)
+			if errors.Is(renameErr, os.ErrExist) && cleanupErr == nil {
+				info, statErr := root.Lstat(currentRel)
+				if statErr == nil && info.Mode()&os.ModeSymlink == 0 && info.IsDir() {
+					return CreatedDir{}, false, nil
+				}
+				if statErr == nil {
+					if info.Mode()&os.ModeSymlink != 0 {
+						return CreatedDir{}, false, ErrNotFound
+					}
+					return CreatedDir{}, false, ErrNotDir
+				}
+				return CreatedDir{}, false, mapWorkspaceRootPathError(statErr)
+			}
+			return CreatedDir{}, false, errors.Join(mapWorkspaceRootPathError(renameErr), cleanupErr)
+		}
+
+		created.Path = targetPath
+		created.relativePath = currentRel
+		hookErr := afterWorkspaceCreatedDirPublish(targetPath)
+		publishedInfo, verifyErr := readWorkspaceCreatedDirEntry(root, created)
+		if verifyErr != nil {
+			// The target no longer names the held object. Preserve both the
+			// current target and the displaced object, and return the held
+			// evidence so the transaction owner can classify the failure.
+			return created, true, errors.Join(hookErr, verifyErr)
+		}
+		created.info = publishedInfo
+		created.persistentIdentity = PersistentIdentityTokenForFileInfo(publishedInfo)
+		created.mode = publishedInfo.Mode()
+		if hookErr != nil {
+			return created, true, hookErr
+		}
+		return created, true, nil
+	}
+
+	return CreatedDir{}, false, errors.New("failed to allocate unique workspace directory")
+}
+
+func ensureWorkspaceDirsTracked(rootPath string, root *os.Root, relDir string, perm os.FileMode) ([]CreatedDir, error) {
 	cleanRel := path.Clean(strings.ReplaceAll(relDir, "\\", "/"))
 	if cleanRel == "." || cleanRel == "/" {
 		return nil, nil
@@ -150,14 +597,14 @@ func ensureWorkspaceDirsTracked(rootPath string, root *os.Root, relDir string, p
 		return nil, ErrNotFound
 	}
 
-	createdDirs := make([]string, 0)
+	createdDirs := make([]CreatedDir, 0)
 	currentRel := "."
 	for _, part := range strings.Split(cleanRel, "/") {
 		if part == "" || part == "." {
 			continue
 		}
 		if part == ".." {
-			return nil, cleanupWorkspaceCreatedDirs(rootPath, root, createdDirs, ErrNotFound)
+			return createdDirs, ErrNotFound
 		}
 		if currentRel == "." {
 			currentRel = part
@@ -168,39 +615,25 @@ func ensureWorkspaceDirsTracked(rootPath string, root *os.Root, relDir string, p
 		info, err := root.Lstat(currentRel)
 		if err == nil {
 			if info.Mode()&os.ModeSymlink != 0 {
-				return nil, cleanupWorkspaceCreatedDirs(rootPath, root, createdDirs, ErrNotFound)
+				return createdDirs, ErrNotFound
 			}
 			if !info.IsDir() {
-				return nil, cleanupWorkspaceCreatedDirs(rootPath, root, createdDirs, ErrNotDir)
+				return createdDirs, ErrNotDir
 			}
 			continue
 		}
 		if !errors.Is(err, os.ErrNotExist) {
 			mappedErr := mapWorkspaceRootPathError(err)
-			return nil, cleanupWorkspaceCreatedDirs(rootPath, root, createdDirs, mappedErr)
+			return createdDirs, mappedErr
 		}
 
-		if err := rootio.MkdirNoFollow(root, currentRel, perm); err != nil {
-			if errors.Is(err, os.ErrExist) {
-				info, statErr := root.Lstat(currentRel)
-				if statErr == nil && info.Mode()&os.ModeSymlink == 0 && info.IsDir() {
-					continue
-				}
-				if statErr == nil {
-					if info.Mode()&os.ModeSymlink != 0 {
-						err = ErrNotFound
-					} else {
-						err = ErrNotDir
-					}
-				} else {
-					err = statErr
-				}
-			}
-			return nil, cleanupWorkspaceCreatedDirs(rootPath, root, createdDirs, mapWorkspaceRootPathError(err))
+		created, published, err := publishWorkspaceCreatedDir(rootPath, root, currentRel, perm)
+		if published {
+			createdDirs = append([]CreatedDir{created}, createdDirs...)
 		}
-
-		absDir := filepath.Join(rootPath, filepath.FromSlash(currentRel))
-		createdDirs = append([]string{absDir}, createdDirs...)
+		if err != nil {
+			return createdDirs, err
+		}
 	}
 
 	return createdDirs, nil
@@ -303,9 +736,13 @@ var (
 )
 
 type WriteFileOptions struct {
-	MaxBytes    int64
-	SyncParent  func(string) error
-	CreatedDirs *[]string
+	MaxBytes          int64
+	SyncParent        func(string) error
+	CreatedDirs       *[]CreatedDir
+	Mode              *os.FileMode
+	PublishNoReplace  bool
+	BeforePublish     func() error
+	PublishedIdentity *string
 }
 
 // VisibleMutationWarningError reports that a workspace mutation is already
@@ -454,6 +891,9 @@ func isWorkspaceRootEscapeError(err error) bool {
 func mapWorkspaceRootPathError(err error) error {
 	if err == nil {
 		return nil
+	}
+	if IsCreatedDirOwnershipChanged(err) {
+		return err
 	}
 	if isWorkspaceRootEscapeError(err) || rootio.IsSymlinkError(err) || errors.Is(err, os.ErrNotExist) {
 		return ErrNotFound
@@ -796,7 +1236,13 @@ func (w *Workspace) WriteFile(ctx context.Context, name string, data []byte) err
 	return err
 }
 
-func (w *Workspace) WriteFileFromReaderWithOptions(ctx context.Context, name string, r io.Reader, options WriteFileOptions) (int64, error) {
+func (w *Workspace) WriteFileFromReaderWithOptions(ctx context.Context, name string, r io.Reader, options WriteFileOptions) (written int64, resultErr error) {
+	if options.CreatedDirs != nil {
+		if err := ReleaseCreatedDirs(*options.CreatedDirs); err != nil {
+			return 0, err
+		}
+		*options.CreatedDirs = (*options.CreatedDirs)[:0]
+	}
 	if err := validateWorkspaceMutationName(name); err != nil {
 		return 0, err
 	}
@@ -816,21 +1262,52 @@ func (w *Workspace) WriteFileFromReaderWithOptions(ctx context.Context, name str
 
 	// Ensure parent directory exists
 	createdDirs, err := ensureWorkspaceDirsTracked(w.root, w.rootHandle, parentName, 0755)
-	if err != nil {
-		return 0, w.mapWorkspaceCreatePathError(filepath.Dir(fullPath), err)
-	}
 	if options.CreatedDirs != nil {
 		*options.CreatedDirs = append((*options.CreatedDirs)[:0], createdDirs...)
+	}
+	cleanupCreatedDirs := func(operationErr error) error {
+		return cleanupWorkspaceCreatedDirsWithRetention(
+			w.root,
+			w.rootHandle,
+			createdDirs,
+			operationErr,
+			options.CreatedDirs != nil,
+		)
+	}
+	if err != nil {
+		return 0, w.mapWorkspaceCreatePathError(filepath.Dir(fullPath), cleanupCreatedDirs(err))
+	}
+	mutationVisible := false
+	if options.CreatedDirs == nil {
+		defer func() {
+			releaseErr := ReleaseCreatedDirs(createdDirs)
+			if releaseErr == nil {
+				return
+			}
+			if mutationVisible {
+				releaseErr = WrapVisibleMutationWarning(releaseErr)
+			}
+			resultErr = errors.Join(resultErr, releaseErr)
+		}()
 	}
 
 	// Atomic write: write to temp file then rename
 	tmpFile, tmpPath, err := createWorkspaceTempFile(w.rootHandle, parentName)
 	if err != nil {
-		return 0, err
+		return 0, cleanupCreatedDirs(err)
 	}
-	if err := tmpFile.Chmod(0644); err != nil {
+	ownedTempInfo, err := tmpFile.Stat()
+	if err != nil {
+		closeErr := tmpFile.Close()
+		return 0, cleanupCreatedDirs(errors.Join(err, closeErr))
+	}
+	mode := os.FileMode(0644)
+	if options.Mode != nil {
+		mode = *options.Mode
+	}
+	if err := tmpFile.Chmod(mode); err != nil {
 		_ = tmpFile.Close()
-		return 0, cleanupWorkspaceCreatedDirs(w.root, w.rootHandle, createdDirs, cleanupWorkspaceTempPath(w.rootHandle, tmpPath, err))
+		return 0, cleanupCreatedDirs(cleanupOwnedWorkspaceTempPath(w.rootHandle, tmpPath, ownedTempInfo, err))
 	}
 
 	copyReader := r
@@ -840,26 +1317,94 @@ func (w *Workspace) WriteFileFromReaderWithOptions(ctx context.Context, name str
 
 	written, writeErr := copyWorkspaceData(ctx, tmpFile, copyReader)
 	syncErr := tmpFile.Sync()
+	publishedIdentity := ""
+	var publishSnapshot ownedWorkspaceFileSnapshot
+	var tempStatErr error
+	if writeErr == nil && syncErr == nil {
+		var finalTempInfo os.FileInfo
+		finalTempInfo, tempStatErr = tmpFile.Stat()
+		if tempStatErr == nil {
+			ownedTempInfo = finalTempInfo
+			publishSnapshot = newOwnedWorkspaceFileSnapshot(finalTempInfo)
+		}
+		if tempStatErr == nil && options.PublishedIdentity != nil {
+			publishedIdentity = publishSnapshot.persistentIdentity
+			if publishedIdentity == "" {
+				tempStatErr = errors.New("published file identity is unavailable")
+			}
+		}
+	}
 	closeErr := tmpFile.Close()
 
 	if writeErr != nil {
-		return written, cleanupWorkspaceCreatedDirs(w.root, w.rootHandle, createdDirs, cleanupWorkspaceTempPath(w.rootHandle, tmpPath, writeErr))
+		return written, cleanupCreatedDirs(cleanupOwnedWorkspaceTempPath(w.rootHandle, tmpPath, ownedTempInfo, writeErr))
 	}
 	if syncErr != nil {
-		return written, cleanupWorkspaceCreatedDirs(w.root, w.rootHandle, createdDirs, cleanupWorkspaceTempPath(w.rootHandle, tmpPath, syncErr))
+		return written, cleanupCreatedDirs(cleanupOwnedWorkspaceTempPath(w.rootHandle, tmpPath, ownedTempInfo, syncErr))
+	}
+	if tempStatErr != nil {
+		return written, cleanupCreatedDirs(cleanupOwnedWorkspaceTempPath(w.rootHandle, tmpPath, ownedTempInfo, tempStatErr))
 	}
 	if closeErr != nil {
-		return written, cleanupWorkspaceCreatedDirs(w.root, w.rootHandle, createdDirs, cleanupWorkspaceTempPath(w.rootHandle, tmpPath, closeErr))
+		return written, cleanupCreatedDirs(cleanupOwnedWorkspaceTempPath(w.rootHandle, tmpPath, ownedTempInfo, closeErr))
 	}
 	if options.MaxBytes > 0 && written > options.MaxBytes {
-		return written, cleanupWorkspaceCreatedDirs(w.root, w.rootHandle, createdDirs, cleanupWorkspaceTempPath(w.rootHandle, tmpPath, ErrFileTooLarge))
+		return written, cleanupCreatedDirs(cleanupOwnedWorkspaceTempPath(w.rootHandle, tmpPath, ownedTempInfo, ErrFileTooLarge))
+	}
+	if err := ctx.Err(); err != nil {
+		return written, cleanupCreatedDirs(cleanupOwnedWorkspaceTempPath(w.rootHandle, tmpPath, ownedTempInfo, err))
+	}
+	if options.BeforePublish != nil {
+		if err := options.BeforePublish(); err != nil {
+			return written, cleanupCreatedDirs(cleanupOwnedWorkspaceTempPath(w.rootHandle, tmpPath, ownedTempInfo, err))
+		}
+		if err := ctx.Err(); err != nil {
+			return written, cleanupCreatedDirs(cleanupOwnedWorkspaceTempPath(w.rootHandle, tmpPath, ownedTempInfo, err))
+		}
+	}
+	if err := verifyOwnedWorkspaceFile(w.rootHandle, tmpPath, publishSnapshot, true); err != nil {
+		verifyErr := fmt.Errorf("verify temp file ownership before publish: %w", err)
+		return written, cleanupCreatedDirs(cleanupOwnedWorkspaceTempPath(w.rootHandle, tmpPath, ownedTempInfo, verifyErr))
 	}
 
-	if err := w.rootHandle.Rename(tmpPath, rootName); err != nil {
-		if mappedErr := mapWorkspaceRootPathError(err); mappedErr != err {
-			return written, cleanupWorkspaceCreatedDirs(w.root, w.rootHandle, createdDirs, cleanupWorkspaceTempPath(w.rootHandle, tmpPath, mappedErr))
+	var renameErr error
+	if options.PublishNoReplace {
+		renameErr = rootio.RenameLeafNoReplace(w.rootHandle, tmpPath, rootName)
+	} else {
+		renameErr = w.rootHandle.Rename(tmpPath, rootName)
+	}
+	if renameErr != nil {
+		if options.PublishNoReplace && errors.Is(renameErr, os.ErrExist) {
+			return written, cleanupCreatedDirs(cleanupOwnedWorkspaceTempPath(w.rootHandle, tmpPath, ownedTempInfo, ErrAlreadyExists))
 		}
-		return written, cleanupWorkspaceCreatedDirs(w.root, w.rootHandle, createdDirs, cleanupWorkspaceTempPath(w.rootHandle, tmpPath, err))
+		if mappedErr := mapWorkspaceRootPathError(renameErr); mappedErr != renameErr {
+			return written, cleanupCreatedDirs(cleanupOwnedWorkspaceTempPath(w.rootHandle, tmpPath, ownedTempInfo, mappedErr))
+		}
+		return written, cleanupCreatedDirs(cleanupOwnedWorkspaceTempPath(w.rootHandle, tmpPath, ownedTempInfo, renameErr))
+	}
+	mutationVisible = true
+	if options.PublishedIdentity != nil {
+		*options.PublishedIdentity = publishedIdentity
+	}
+	// Renaming may update ctime. Establish a new deletion-identity baseline
+	// immediately after the namespace mutation, before any later work can
+	// modify the published object in place.
+	postRenameSnapshot, err := readOwnedWorkspaceFileSnapshot(w.rootHandle, rootName, publishSnapshot, false)
+	if err != nil {
+		return written, WrapVisibleMutationWarning(fmt.Errorf("verify published file ownership after rename: %w", err))
+	}
+	hookErr := afterWorkspaceFilePublish()
+	verifyErr := verifyOwnedWorkspaceFile(w.rootHandle, rootName, postRenameSnapshot, true)
+	if hookErr != nil || verifyErr != nil {
+		var hookWarning error
+		if hookErr != nil {
+			hookWarning = fmt.Errorf("after publishing file: %w", hookErr)
+		}
+		var verifyWarning error
+		if verifyErr != nil {
+			verifyWarning = fmt.Errorf("verify published file ownership: %w", verifyErr)
+		}
+		return written, WrapVisibleMutationWarning(errors.Join(hookWarning, verifyWarning))
 	}
 	syncParent := options.SyncParent
 	if syncParent == nil {
@@ -868,7 +1413,7 @@ func (w *Workspace) WriteFileFromReaderWithOptions(ctx context.Context, name str
 	if err := syncParent(filepath.Dir(fullPath)); err != nil {
 		return written, WrapVisibleMutationWarning(fmt.Errorf("sync parent directory: %w", err))
 	}
-	if err := syncCreatedWorkspaceDirsWith(createdDirs, syncParent); err != nil {
+	if err := syncCreatedWorkspaceDirEvidenceWith(createdDirs, syncParent); err != nil {
 		return written, WrapVisibleMutationWarning(fmt.Errorf("sync created directory tree: %w", err))
 	}
 

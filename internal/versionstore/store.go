@@ -9,7 +9,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +28,7 @@ var (
 	errInvalidStorePath    = errors.New("invalid path")
 	errInvalidStoreID      = errors.New("invalid ID")
 	errVersionStoreSymlink = errors.New("version store path must not traverse a symlink")
+	errVersionStoreAnchor  = errors.New("version store directory cannot be safely addressed on this platform")
 )
 
 const sqliteDriverName = "sqlite"
@@ -92,6 +92,10 @@ type Store struct {
 type Config struct {
 	DBPath    string            // Path to SQLite database file
 	Dataplane *dataplane.Client // Rust dataplane client (required)
+	// DBRoot and DBName select an already anchored database directory. When
+	// DBRoot is set, DBPath is ignored and DBName must be one leaf name.
+	DBRoot *os.Root
+	DBName string
 }
 
 // New creates a new version store
@@ -100,21 +104,34 @@ func New(cfg Config) (*Store, error) {
 		return nil, errors.New("dataplane client is required")
 	}
 
-	normalizedPath, err := normalizeVersionStoreFilePath(cfg.DBPath)
-	if err != nil {
-		return nil, err
+	var (
+		anchoredDBPath string
+		dirHandle      *os.File
+		recoverDB      func(error) error
+		err            error
+	)
+	if cfg.DBRoot != nil {
+		anchoredDBPath, dirHandle, err = prepareVersionStoreAtRoot(cfg.DBRoot, cfg.DBName)
+		recoverDB = func(initErr error) error {
+			return recoverCorruptVersionStoreDatabaseAtRoot(cfg.DBRoot, dirHandle, cfg.DBName, initErr)
+		}
+	} else {
+		var normalizedPath string
+		normalizedPath, err = normalizeVersionStoreFilePath(cfg.DBPath)
+		if err == nil {
+			err = validateVersionStoreFilePath(normalizedPath)
+		}
+		if err == nil {
+			dbDir := filepath.Dir(normalizedPath)
+			err = ensureVersionStoreDir(dbDir, 0700)
+		}
+		if err == nil {
+			anchoredDBPath, dirHandle, err = prepareAnchoredVersionStorePath(normalizedPath)
+		}
+		recoverDB = func(initErr error) error {
+			return recoverCorruptVersionStoreDatabase(normalizedPath, initErr)
+		}
 	}
-	if err := validateVersionStoreFilePath(normalizedPath); err != nil {
-		return nil, err
-	}
-
-	// Ensure database directory exists
-	dbDir := filepath.Dir(normalizedPath)
-	if err := ensureVersionStoreDir(dbDir, 0700); err != nil {
-		return nil, err
-	}
-
-	anchoredDBPath, dirHandle, err := prepareAnchoredVersionStorePath(normalizedPath)
 	if err != nil {
 		return nil, err
 	}
@@ -130,18 +147,14 @@ func New(cfg Config) (*Store, error) {
 	recoveredFromCorruption := false
 	if err := createTables(db); err != nil {
 		_ = db.Close()
-		_ = dirHandle.Close()
-		if recoverErr := recoverCorruptVersionStoreDatabase(normalizedPath, err); recoverErr != nil {
+		if recoverErr := recoverDB(err); recoverErr != nil {
+			_ = dirHandle.Close()
 			return nil, errors.Join(
 				fmt.Errorf("initialize version store schema: %w", err),
 				fmt.Errorf("recover corrupt version store database: %w", recoverErr),
 			)
 		}
 
-		anchoredDBPath, dirHandle, err = prepareAnchoredVersionStorePath(normalizedPath)
-		if err != nil {
-			return nil, err
-		}
 		db, err = sql.Open(sqliteDriverName, versionStoreSQLiteDSN(anchoredDBPath))
 		if err != nil {
 			_ = dirHandle.Close()
@@ -195,7 +208,39 @@ func recoverCorruptVersionStoreDatabase(dbPath string, initErr error) error {
 	}
 	defer root.Close()
 
-	base := filepath.Base(dbPath)
+	return recoverCorruptVersionStoreDatabaseWith(
+		root,
+		filepath.Base(dbPath),
+		func() error { return syncVersionStoreDir(filepath.Dir(dbPath)) },
+		initErr,
+	)
+}
+
+func recoverCorruptVersionStoreDatabaseAtRoot(
+	root *os.Root,
+	dirHandle *os.File,
+	dbName string,
+	initErr error,
+) error {
+	if root == nil || dirHandle == nil {
+		return errors.New("anchored version store directory is unavailable")
+	}
+	return recoverCorruptVersionStoreDatabaseWith(root, dbName, dirHandle.Sync, initErr)
+}
+
+func recoverCorruptVersionStoreDatabaseWith(
+	root *os.Root,
+	base string,
+	syncDir func() error,
+	initErr error,
+) error {
+	if !isRecoverableVersionStoreInitError(initErr) {
+		return initErr
+	}
+	if root == nil || syncDir == nil || !validVersionStoreDBName(base) {
+		return errInvalidStorePath
+	}
+
 	backupBase := fmt.Sprintf("%s.corrupt.%d", base, time.Now().UnixNano())
 	renamed := make([][2]string, 0, 3)
 
@@ -217,7 +262,7 @@ func recoverCorruptVersionStoreDatabase(dbPath string, initErr error) error {
 					fmt.Errorf("rollback corrupt version store backup: %w", rollbackErr),
 				)
 			}
-			if rollbackSyncErr := syncVersionStoreDir(filepath.Dir(dbPath)); rollbackSyncErr != nil {
+			if rollbackSyncErr := syncDir(); rollbackSyncErr != nil {
 				return errors.Join(
 					fmt.Errorf("backup corrupt version store sidecar %s: %w", oldName, err),
 					fmt.Errorf("sync corrupt version store rollback: %w", rollbackSyncErr),
@@ -228,14 +273,14 @@ func recoverCorruptVersionStoreDatabase(dbPath string, initErr error) error {
 		renamed = append(renamed, [2]string{oldName, newName})
 	}
 
-	if err := syncVersionStoreDir(filepath.Dir(dbPath)); err != nil {
+	if err := syncDir(); err != nil {
 		if rollbackErr := rollbackRenamedVersionStoreFiles(root, renamed); rollbackErr != nil {
 			return errors.Join(
 				fmt.Errorf("sync corrupt version store directory: %w", err),
 				fmt.Errorf("rollback corrupt version store backup: %w", rollbackErr),
 			)
 		}
-		if rollbackSyncErr := syncVersionStoreDir(filepath.Dir(dbPath)); rollbackSyncErr != nil {
+		if rollbackSyncErr := syncDir(); rollbackSyncErr != nil {
 			return errors.Join(
 				fmt.Errorf("sync corrupt version store directory: %w", err),
 				fmt.Errorf("sync corrupt version store rollback: %w", rollbackSyncErr),
@@ -340,7 +385,51 @@ func prepareAnchoredVersionStorePath(dbPath string) (string, *os.File, error) {
 		_ = dirHandle.Close()
 		return "", nil, err
 	}
-	return anchoredFDPath(dirHandle.Fd(), filepath.Base(dbPath)), dirHandle, nil
+	anchoredPath, err := anchoredVersionStorePath(dirHandle, filepath.Base(dbPath))
+	if err != nil {
+		_ = dirHandle.Close()
+		return "", nil, err
+	}
+	return anchoredPath, dirHandle, nil
+}
+
+func prepareVersionStoreAtRoot(root *os.Root, dbName string) (string, *os.File, error) {
+	if root == nil || !validVersionStoreDBName(dbName) {
+		return "", nil, errInvalidStorePath
+	}
+	dirHandle, err := rootio.OpenDirNoFollow(root, ".")
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to anchor version store directory: %w", err)
+	}
+
+	heldInfo, heldErr := dirHandle.Stat()
+	rootedInfo, rootedErr := root.Lstat(".")
+	if heldErr != nil || rootedErr != nil ||
+		!heldInfo.IsDir() || !rootedInfo.IsDir() ||
+		!os.SameFile(heldInfo, rootedInfo) {
+		_ = dirHandle.Close()
+		return "", nil, fmt.Errorf("validate anchored version store directory: %w", errors.Join(errInvalidStorePath, heldErr, rootedErr))
+	}
+
+	afterValidateVersionStorePath()
+	if err := rejectAnchoredVersionStoreFileSymlink(root, dbName); err != nil {
+		_ = dirHandle.Close()
+		return "", nil, err
+	}
+	anchoredPath, err := anchoredVersionStorePath(dirHandle, dbName)
+	if err != nil {
+		_ = dirHandle.Close()
+		return "", nil, err
+	}
+	return anchoredPath, dirHandle, nil
+}
+
+func validVersionStoreDBName(name string) bool {
+	return name != "" &&
+		name != "." &&
+		name != ".." &&
+		filepath.Base(name) == name &&
+		!strings.ContainsAny(name, `/\`)
 }
 
 func rejectAnchoredVersionStoreFileSymlink(root *os.Root, name string) error {
@@ -361,15 +450,7 @@ func rejectAnchoredVersionStoreFileSymlink(root *os.Root, name string) error {
 }
 
 func versionStoreSQLiteDSN(path string) string {
-	return path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
-}
-
-func anchoredFDPath(fd uintptr, name string) string {
-	fdRoot := "/proc/self/fd"
-	if runtime.GOOS == "darwin" {
-		fdRoot = "/dev/fd"
-	}
-	return fmt.Sprintf("%s/%d/%s", fdRoot, fd, name)
+	return path + "?_txlock=immediate&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)"
 }
 
 func syncCreatedVersionStoreDirs(createdDirs []string) error {
@@ -1549,6 +1630,16 @@ func escapeSQLiteLikeLiteral(value string) string {
 // PutObject stores version content and returns its hash.
 func (s *Store) PutObject(ctx context.Context, data []byte) (string, error) {
 	return s.objects.Put(ctx, data)
+}
+
+// PutObjectExpected stores version content while requiring its expected hash
+// and returns the exact data-plane deduplication result.
+func (s *Store) PutObjectExpected(
+	ctx context.Context,
+	data []byte,
+	expectedHash string,
+) (ObjectPutResult, error) {
+	return s.objects.PutExpected(ctx, data, expectedHash)
 }
 
 // GetObject retrieves version content by hash.

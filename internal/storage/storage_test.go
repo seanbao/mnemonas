@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -59,6 +60,18 @@ func TestWarningWrappersPreserveErrorSemantics(t *testing.T) {
 	}
 	if got := wrapVisibleMutationWarning(visibleErr); got != visibleErr {
 		t.Fatal("expected existing visible mutation warning to be reused")
+	}
+	if !isOnlyVisibleMutationWarning(visibleErr) {
+		t.Fatal("expected direct visible mutation warning to be warning-only")
+	}
+	if !isOnlyVisibleMutationWarning(fmt.Errorf("wrapped: %w", visibleErr)) {
+		t.Fatal("expected wrapped visible mutation warning to be warning-only")
+	}
+	if !isOnlyVisibleMutationWarning(errors.Join(visibleErr, wrapVisibleMutationWarning(errors.New("second warning")))) {
+		t.Fatal("expected joined visible mutation warnings to be warning-only")
+	}
+	if isOnlyVisibleMutationWarning(errors.Join(baseErr, visibleErr)) {
+		t.Fatal("expected mixed raw and visible mutation errors not to be warning-only")
 	}
 
 	if got := wrapTrashDeleteWarningWithPartial(nil, true); got != nil {
@@ -796,27 +809,30 @@ func TestFileSystem_WriteFile_DoesNotFollowSymlinkInsertedBeforeManagedWrite(t *
 	}
 	outsideDir := t.TempDir()
 
-	originalBeforeStorageWorkspaceWrite := beforeStorageWorkspaceWrite
-	beforeStorageWorkspaceWrite = func() error {
+	originalRuntimeHook := writeTransactionRuntimeFaultHook
+	writeTransactionRuntimeFaultHook = func(point string) error {
+		if point != "before-plan" {
+			return nil
+		}
 		if err := os.Remove(safeDir); err != nil {
 			return err
 		}
 		return os.Symlink(outsideDir, safeDir)
 	}
 	t.Cleanup(func() {
-		beforeStorageWorkspaceWrite = originalBeforeStorageWorkspaceWrite
+		writeTransactionRuntimeFaultHook = originalRuntimeHook
 	})
 
 	err := fs.WriteFile(ctx, "/safe/child.txt", bytes.NewReader([]byte("blocked")))
-	if err != ErrNotFound {
-		t.Fatalf("WriteFile() error = %v, want ErrNotFound", err)
+	if !errors.Is(err, errStoragePathSymlink) {
+		t.Fatalf("WriteFile() error = %v, want errStoragePathSymlink", err)
 	}
 	if _, statErr := os.Stat(filepath.Join(outsideDir, "child.txt")); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("expected external target file to remain absent, got %v", statErr)
 	}
 }
 
-func TestFileSystem_WriteFile_VersionsOriginalContentWhenWorkspaceChangesDuringUpload(t *testing.T) {
+func TestFileSystem_WriteFile_RejectsWorkspaceChangesDuringUploadWithoutRecordingStaleVersion(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 
@@ -840,32 +856,16 @@ func TestFileSystem_WriteFile_VersionsOriginalContentWhenWorkspaceChangesDuringU
 	}
 	close(reader.release)
 
-	if err := <-errCh; err != nil {
-		t.Fatalf("race WriteFile() error: %v", err)
+	if err := <-errCh; !errors.Is(err, ErrWriteConflict) {
+		t.Fatalf("race WriteFile() error = %v, want ErrWriteConflict", err)
 	}
 
-	versions, err := fs.ListVersions(ctx, "/version-race.txt")
+	versions, err := fs.versions.GetVersions(ctx, "/version-race.txt")
 	if err != nil {
-		t.Fatalf("ListVersions() error: %v", err)
+		t.Fatalf("GetVersions() error: %v", err)
 	}
-	if len(versions) < 2 {
-		t.Fatalf("expected current version plus one historical version, got %d entries", len(versions))
-	}
-
-	var historicalHash string
-	for _, version := range versions {
-		if version.Comment != "(current)" {
-			historicalHash = version.Hash
-			break
-		}
-	}
-	if historicalHash == "" {
-		t.Fatal("expected historical version hash")
-	}
-
-	wantHistoricalHash := computeHash(originalContent)
-	if historicalHash != wantHistoricalHash {
-		t.Fatalf("expected historical version hash %q, got %q", wantHistoricalHash, historicalHash)
+	if len(versions) != 0 {
+		t.Fatalf("historical versions after rejected conflict = %+v, want none", versions)
 	}
 
 	readerAfter, err := fs.OpenFile(ctx, "/version-race.txt")
@@ -878,8 +878,1653 @@ func TestFileSystem_WriteFile_VersionsOriginalContentWhenWorkspaceChangesDuringU
 	if err != nil {
 		t.Fatalf("ReadAll() error: %v", err)
 	}
-	if string(currentData) != "new content" {
-		t.Fatalf("expected current content %q, got %q", "new content", string(currentData))
+	if string(currentData) != "mutated externally" {
+		t.Fatalf("expected current content %q, got %q", "mutated externally", string(currentData))
+	}
+}
+
+func TestFileSystem_WriteFile_DoesNotHoldMutationLockWhileReadingSource(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+
+	reader := &blockingOnceReader{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		data:    []byte("uploaded content"),
+	}
+	writeErr := make(chan error, 1)
+	go func() {
+		writeErr <- fs.WriteFile(ctx, "/slow-upload.bin", reader)
+	}()
+	<-reader.started
+
+	mkdirErr := make(chan error, 1)
+	go func() {
+		mkdirErr <- fs.Mkdir(ctx, "/unrelated")
+	}()
+
+	select {
+	case err := <-mkdirErr:
+		if err != nil {
+			t.Fatalf("Mkdir() during upload staging error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		close(reader.release)
+		t.Fatal("unrelated mutation remained blocked while upload source was stalled")
+	}
+
+	close(reader.release)
+	if err := <-writeErr; err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+}
+
+func TestFileSystem_WriteFile_StagingIsNotVisibleInWorkspace(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/uploads"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+
+	reader := &blockingOnceReader{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		data:    []byte("uploaded content"),
+	}
+	writeErr := make(chan error, 1)
+	go func() {
+		writeErr <- fs.WriteFile(ctx, "/uploads/file.bin", reader)
+	}()
+	<-reader.started
+
+	entries, err := fs.ReadDir(ctx, "/uploads")
+	if err != nil {
+		close(reader.release)
+		t.Fatalf("ReadDir() error: %v", err)
+	}
+	if len(entries) != 0 {
+		close(reader.release)
+		t.Fatalf("workspace entries during staging = %+v, want none", entries)
+	}
+
+	close(reader.release)
+	if err := <-writeErr; err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+}
+
+func TestFileSystem_WriteFile_EnforcesStagingAdmissionLimit(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+
+	readers := make([]*blockingOnceReader, maxConcurrentWriteStaging)
+	errs := make(chan error, maxConcurrentWriteStaging)
+	for i := range readers {
+		readers[i] = &blockingOnceReader{
+			started: make(chan struct{}),
+			release: make(chan struct{}),
+			data:    []byte("content"),
+		}
+		go func(index int) {
+			errs <- fs.WriteFile(ctx, fmt.Sprintf("/staged-%d.bin", index), readers[index])
+		}(i)
+	}
+	for _, reader := range readers {
+		<-reader.started
+	}
+
+	if err := fs.WriteFile(ctx, "/over-capacity.bin", strings.NewReader("rejected")); !errors.Is(err, ErrWriteBusy) {
+		t.Fatalf("WriteFile() over staging limit error = %v, want ErrWriteBusy", err)
+	}
+
+	for _, reader := range readers {
+		close(reader.release)
+	}
+	for range readers {
+		if err := <-errs; err != nil {
+			t.Fatalf("admitted WriteFile() error: %v", err)
+		}
+	}
+}
+
+func TestFileSystem_WriteFile_RecoveryGateFailsBeforeBusyAndBodyRead(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	recoveryCause := errors.New("manual write recovery is pending")
+	fs.lockMutation()
+	fs.writeMutationBlocked = &WriteRecoveryRequiredError{TargetPath: "/blocked.bin", err: recoveryCause}
+	fs.mu.Unlock()
+	for i := 0; i < cap(fs.writeStageGate); i++ {
+		fs.writeStageGate <- struct{}{}
+	}
+	t.Cleanup(func() {
+		for len(fs.writeStageGate) > 0 {
+			<-fs.writeStageGate
+		}
+	})
+	readCalled := false
+	reader := readerFunc(func([]byte) (int, error) {
+		readCalled = true
+		return 0, errors.New("request body must not be read")
+	})
+
+	err := fs.WriteFile(context.Background(), "/blocked.bin", reader)
+	if !errors.Is(err, ErrWriteRecoveryRequired) || !errors.Is(err, recoveryCause) {
+		t.Fatalf("WriteFile() error = %v, want pending recovery error", err)
+	}
+	if errors.Is(err, ErrWriteBusy) {
+		t.Fatalf("WriteFile() error = %v, recovery gate must take precedence over busy", err)
+	}
+	if readCalled {
+		t.Fatal("WriteFile() read request body while recovery gate was already active")
+	}
+	entries, readErr := os.ReadDir(filepath.Join(fs.config.InternalRoot, writeStagingDir))
+	if readErr != nil {
+		t.Fatalf("ReadDir(write staging) error: %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("write staging entries = %v, want none for fail-fast recovery gate", entries)
+	}
+}
+
+func TestFileSystem_WriteFile_RechecksRecoveryGateAfterStagingCleanupLock(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	recoveryCause := errors.New("cleanup discovered write recovery evidence")
+	readCalled := make(chan struct{}, 1)
+	reader := readerFunc(func([]byte) (int, error) {
+		readCalled <- struct{}{}
+		return 0, errors.New("request body must not be read")
+	})
+
+	fs.writeStagingMu.Lock()
+	writeErr := make(chan error, 1)
+	go func() {
+		writeErr <- fs.WriteFile(context.Background(), "/blocked-after-cleanup.bin", reader)
+	}()
+
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	for len(fs.writeStageGate) == 0 {
+		select {
+		case <-deadline.C:
+			fs.writeStagingMu.Unlock()
+			t.Fatal("WriteFile() did not reach staging admission")
+		default:
+			runtime.Gosched()
+		}
+	}
+
+	fs.lockMutation()
+	fs.writeMutationBlocked = &WriteRecoveryRequiredError{
+		TargetPath: "/blocked-after-cleanup.bin",
+		err:        recoveryCause,
+	}
+	fs.mu.Unlock()
+	fs.writeStagingMu.Unlock()
+
+	select {
+	case err := <-writeErr:
+		if !errors.Is(err, ErrWriteRecoveryRequired) || !errors.Is(err, recoveryCause) {
+			t.Fatalf("WriteFile() error = %v, want recovery error published by cleanup", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WriteFile() remained blocked after staging cleanup released its lock")
+	}
+	select {
+	case <-readCalled:
+		t.Fatal("WriteFile() read request body after cleanup published recovery")
+	default:
+	}
+	entries, err := os.ReadDir(filepath.Join(fs.config.InternalRoot, writeStagingDir))
+	if err != nil {
+		t.Fatalf("ReadDir(write staging) error: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("write staging entries = %v, want none after lock-bound recovery rejection", entries)
+	}
+}
+
+func TestFileSystem_WriteFileIfUnchangedRejectsReplacedObservedTargetBeforeReading(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	if err := fs.WriteFile(ctx, "/conditional.bin", strings.NewReader("observed")); err != nil {
+		t.Fatalf("WriteFile(observed) error: %v", err)
+	}
+	observed, err := fs.Stat(ctx, "/conditional.bin")
+	if err != nil {
+		t.Fatalf("Stat(observed) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/conditional.bin", strings.NewReader("replacement")); err != nil {
+		t.Fatalf("WriteFile(replacement) error: %v", err)
+	}
+	readCalled := false
+	err = fs.WriteFileIfUnchanged(ctx, "/conditional.bin", readerFunc(func([]byte) (int, error) {
+		readCalled = true
+		return 0, errors.New("stale body must not be read")
+	}), WriteFileCondition{
+		ExpectedExists:      true,
+		DeleteIdentityToken: observed.DeleteIdentityToken,
+	})
+	if !errors.Is(err, ErrWriteConflict) {
+		t.Fatalf("WriteFileIfUnchanged() error = %v, want ErrWriteConflict", err)
+	}
+	if readCalled {
+		t.Fatal("WriteFileIfUnchanged() read body for stale observed target")
+	}
+	file, err := fs.OpenFile(ctx, "/conditional.bin")
+	if err != nil {
+		t.Fatalf("OpenFile(conditional.bin) error: %v", err)
+	}
+	data, readErr := io.ReadAll(file)
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil {
+		t.Fatalf("read replacement error: %v", errors.Join(readErr, closeErr))
+	}
+	if string(data) != "replacement" {
+		t.Fatalf("stored content = %q, want replacement", data)
+	}
+}
+
+func TestFileSystem_WriteFileIfUnchangedRejectsTargetCreatedAfterAbsenceObservation(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	if err := fs.WriteFile(ctx, "/conditional-create.bin", strings.NewReader("concurrent create")); err != nil {
+		t.Fatalf("WriteFile(concurrent create) error: %v", err)
+	}
+	readCalled := false
+	err := fs.WriteFileIfUnchanged(ctx, "/conditional-create.bin", readerFunc(func([]byte) (int, error) {
+		readCalled = true
+		return 0, errors.New("stale create body must not be read")
+	}), WriteFileCondition{ExpectedExists: false})
+	if !errors.Is(err, ErrWriteConflict) {
+		t.Fatalf("WriteFileIfUnchanged() error = %v, want ErrWriteConflict", err)
+	}
+	if readCalled {
+		t.Fatal("WriteFileIfUnchanged() read body after absent target was created")
+	}
+	file, err := fs.OpenFile(ctx, "/conditional-create.bin")
+	if err != nil {
+		t.Fatalf("OpenFile(conditional-create.bin) error: %v", err)
+	}
+	data, readErr := io.ReadAll(file)
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil {
+		t.Fatalf("read concurrent create error: %v", errors.Join(readErr, closeErr))
+	}
+	if string(data) != "concurrent create" {
+		t.Fatalf("stored content = %q, want concurrent create", data)
+	}
+}
+
+func TestFileSystem_WriteFile_EarlySourceStageReplacementPublishesRecoveryGate(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	readerErr := errors.New("source reader failed after stage replacement")
+	replaced := false
+	reader := readerFunc(func([]byte) (int, error) {
+		if replaced {
+			return 0, readerErr
+		}
+		entries, err := os.ReadDir(filepath.Join(fs.config.InternalRoot, writeStagingDir))
+		if err != nil {
+			return 0, err
+		}
+		for _, entry := range entries {
+			if !strings.HasPrefix(entry.Name(), writeSourceStagePrefix) {
+				continue
+			}
+			rel := filepath.Join(writeStagingDir, entry.Name())
+			if err := rootio.RenameNoFollow(fs.internalRootHandle, rel, rel+".original"); err != nil {
+				return 0, err
+			}
+			replacement, err := rootio.OpenFileNoFollow(fs.internalRootHandle, rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+			if err != nil {
+				return 0, err
+			}
+			_, writeErr := replacement.WriteString("unknown source replacement")
+			if closeErr := replacement.Close(); writeErr != nil || closeErr != nil {
+				return 0, errors.Join(writeErr, closeErr)
+			}
+			replaced = true
+			return 0, readerErr
+		}
+		return 0, errors.New("source stage was not found")
+	})
+
+	err := fs.WriteFile(ctx, "/early-source-stage.bin", reader)
+	if !errors.Is(err, readerErr) || !errors.Is(err, errWriteStageChanged) || !errors.Is(err, ErrWriteRecoveryRequired) {
+		t.Fatalf("WriteFile() error = %v, want reader failure, stage change, and ErrWriteRecoveryRequired", err)
+	}
+	if !replaced {
+		t.Fatal("source stage was not replaced")
+	}
+	var recoveryErr *WriteRecoveryRequiredError
+	if !errors.As(err, &recoveryErr) || len(recoveryErr.InspectionPaths) == 0 {
+		t.Fatalf("WriteFile() recovery error = %+v, want source-stage inspection path", recoveryErr)
+	}
+	data, readErr := os.ReadFile(recoveryErr.InspectionPaths[0])
+	if readErr != nil || string(data) != "unknown source replacement" {
+		t.Fatalf("retained source replacement = %q, %v", data, readErr)
+	}
+	if _, statErr := os.Stat(fs.workspace.FullPath("/early-source-stage.bin")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("visible target after source failure stat error = %v, want absent", statErr)
+	}
+	if blockedErr := fs.Mkdir(ctx, "/blocked-after-early-source-stage"); !errors.Is(blockedErr, ErrWriteRecoveryRequired) {
+		t.Fatalf("Mkdir() after early source-stage replacement error = %v, want ErrWriteRecoveryRequired", blockedErr)
+	}
+}
+
+func TestFileSystem_WriteFile_RejectsTargetChangedWhileReadingSource(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	filePath := "/conflict.txt"
+
+	if err := fs.WriteFile(ctx, filePath, strings.NewReader("original")); err != nil {
+		t.Fatalf("initial WriteFile() error: %v", err)
+	}
+
+	reader := &blockingOnceReader{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		data:    []byte("stale upload"),
+	}
+	writeErr := make(chan error, 1)
+	go func() {
+		writeErr <- fs.WriteFile(ctx, filePath, reader)
+	}()
+	<-reader.started
+
+	if err := os.WriteFile(fs.workspace.FullPath(filePath), []byte("newer external content"), 0o644); err != nil {
+		close(reader.release)
+		t.Fatalf("external WriteFile() error: %v", err)
+	}
+	close(reader.release)
+
+	if err := <-writeErr; !errors.Is(err, ErrWriteConflict) {
+		t.Fatalf("WriteFile() error = %v, want ErrWriteConflict", err)
+	}
+	data, err := os.ReadFile(fs.workspace.FullPath(filePath))
+	if err != nil {
+		t.Fatalf("ReadFile() after conflict error: %v", err)
+	}
+	if string(data) != "newer external content" {
+		t.Fatalf("content after conflict = %q, want newer external content", data)
+	}
+}
+
+func TestFileSystem_WriteFile_RejectsSymlinkInsertedWhileReadingSource(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	filePath := "/symlink-conflict.txt"
+	outsidePath := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outsidePath, []byte("outside"), 0o600); err != nil {
+		t.Fatalf("WriteFile(outside) error: %v", err)
+	}
+
+	reader := &blockingOnceReader{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		data:    []byte("uploaded content"),
+	}
+	writeErr := make(chan error, 1)
+	go func() {
+		writeErr <- fs.WriteFile(ctx, filePath, reader)
+	}()
+	<-reader.started
+	if err := os.Symlink(outsidePath, fs.workspace.FullPath(filePath)); err != nil {
+		close(reader.release)
+		t.Fatalf("Symlink(target) error: %v", err)
+	}
+	close(reader.release)
+
+	if err := <-writeErr; !errors.Is(err, ErrWriteConflict) {
+		t.Fatalf("WriteFile() error = %v, want ErrWriteConflict", err)
+	}
+	info, err := os.Lstat(fs.workspace.FullPath(filePath))
+	if err != nil {
+		t.Fatalf("Lstat(target) error: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("target mode = %v, want preserved symlink", info.Mode())
+	}
+	outsideData, err := os.ReadFile(outsidePath)
+	if err != nil {
+		t.Fatalf("ReadFile(outside) error: %v", err)
+	}
+	if string(outsideData) != "outside" {
+		t.Fatalf("outside content = %q, want outside", outsideData)
+	}
+}
+
+func TestFileSystem_WriteFile_PreservesAbsentTargetCreatedBeforePublish(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	filePath := "/late-target.bin"
+	targetPath := fs.workspace.FullPath(filePath)
+
+	originalRuntimeHook := writeTransactionRuntimeFaultHook
+	writeTransactionRuntimeFaultHook = func(point string) error {
+		if point != "before-plan" {
+			return nil
+		}
+		return os.WriteFile(targetPath, []byte("raced content"), 0o600)
+	}
+	t.Cleanup(func() { writeTransactionRuntimeFaultHook = originalRuntimeHook })
+
+	err := fs.WriteFile(ctx, filePath, strings.NewReader("caller content"))
+	if !errors.Is(err, ErrWriteConflict) {
+		t.Fatalf("WriteFile() error = %v, want ErrWriteConflict", err)
+	}
+	data, readErr := os.ReadFile(targetPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(late target) error = %v", readErr)
+	}
+	if got := string(data); got != "raced content" {
+		t.Fatalf("late target content = %q, want raced content", got)
+	}
+}
+
+func TestFileSystem_WriteFile_PreservesExistingTargetReplacedAfterWitness(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	filePath := "/existing-late-target.bin"
+	targetPath := fs.workspace.FullPath(filePath)
+	originalAside := targetPath + ".original"
+	if err := fs.WriteFile(ctx, filePath, strings.NewReader("old content")); err != nil {
+		t.Fatalf("initial WriteFile() error: %v", err)
+	}
+
+	originalRuntimeHook := writeTransactionRuntimeFaultHook
+	writeTransactionRuntimeFaultHook = func(point string) error {
+		if point != "before-plan" {
+			return nil
+		}
+		if err := os.Rename(targetPath, originalAside); err != nil {
+			return err
+		}
+		return os.WriteFile(targetPath, []byte("raced content"), 0o600)
+	}
+	t.Cleanup(func() { writeTransactionRuntimeFaultHook = originalRuntimeHook })
+
+	err := fs.WriteFile(ctx, filePath, strings.NewReader("caller content"))
+	if !errors.Is(err, ErrWriteConflict) {
+		t.Fatalf("WriteFile() error = %v, want ErrWriteConflict", err)
+	}
+	data, readErr := os.ReadFile(targetPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(late target) error: %v", readErr)
+	}
+	if got := string(data); got != "raced content" {
+		t.Fatalf("late target content = %q, want raced content", got)
+	}
+}
+
+func TestFileSystem_WriteFile_LateTargetAfterCapturePreservesOriginalForRecovery(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	filePath := "/captured-late-target.bin"
+	targetPath := fs.workspace.FullPath(filePath)
+	if err := fs.WriteFile(ctx, filePath, strings.NewReader("old content")); err != nil {
+		t.Fatalf("initial WriteFile() error: %v", err)
+	}
+
+	originalRuntimeHook := writeTransactionRuntimeFaultHook
+	writeTransactionRuntimeFaultHook = func(point string) error {
+		if point != "after-visible-publish" {
+			return nil
+		}
+		return errors.Join(
+			ErrWriteConflict,
+			os.WriteFile(targetPath, []byte("raced content"), 0o600),
+		)
+	}
+	t.Cleanup(func() { writeTransactionRuntimeFaultHook = originalRuntimeHook })
+
+	err := fs.WriteFile(ctx, filePath, strings.NewReader("caller content"))
+	if !errors.Is(err, ErrWriteConflict) || !errors.Is(err, ErrWriteRecoveryRequired) {
+		t.Fatalf("WriteFile() error = %v, want conflict and recovery required", err)
+	}
+	data, readErr := os.ReadFile(targetPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(late target) error: %v", readErr)
+	}
+	if got := string(data); got != "raced content" {
+		t.Fatalf("late target content = %q, want raced content", got)
+	}
+	var recoveryErr *writeTransactionRecoveryBlockedError
+	if !errors.As(err, &recoveryErr) {
+		t.Fatalf("WriteFile() recovery error = %+v, want preserved original stage", recoveryErr)
+	}
+	var stagePath string
+	for _, candidate := range recoveryErr.inspectionPaths {
+		if strings.Contains(candidate, writeStagingDir) {
+			stagePath = candidate
+			break
+		}
+	}
+	if !filepath.IsAbs(stagePath) {
+		stagePath = filepath.Join(fs.config.InternalRoot, stagePath)
+	}
+	originalData, readErr := os.ReadFile(stagePath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(recovery stage) error: %v", readErr)
+	}
+	if got := string(originalData); got != "old content" {
+		t.Fatalf("recovery stage content = %q, want old content", got)
+	}
+	if err := fs.Mkdir(ctx, "/blocked-after-capture-conflict"); !errors.Is(err, ErrWriteRecoveryRequired) {
+		t.Fatalf("Mkdir() after capture conflict error = %v, want ErrWriteRecoveryRequired", err)
+	}
+}
+
+func TestFileSystem_WriteFile_SyncsSourceAndExchangeStagesBeforePublish(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	filePath := "/durable-stages.bin"
+	if err := fs.WriteFile(ctx, filePath, strings.NewReader("old content")); err != nil {
+		t.Fatalf("initial WriteFile() error: %v", err)
+	}
+
+	var events []string
+	originalJournalHook := writeTransactionJournalFaultHook
+	originalRecoveryHook := writeTransactionRecoveryFaultHook
+	originalRuntimeHook := writeTransactionRuntimeFaultHook
+	writeTransactionJournalFaultHook = func(point string) error {
+		if point == "checkpoint:prepared:directory_synced" {
+			events = append(events, "prepared")
+		}
+		return originalJournalHook(point)
+	}
+	writeTransactionRecoveryFaultHook = func(point string) error {
+		switch point {
+		case "namespace:before-source-parent-sync":
+			events = append(events, "source-parent")
+		case "namespace:before-target-parent-sync":
+			events = append(events, "target-parent")
+		}
+		return originalRecoveryHook(point)
+	}
+	writeTransactionRuntimeFaultHook = func(point string) error {
+		if point == "after-visible-publish" {
+			events = append(events, "visible")
+		}
+		return originalRuntimeHook(point)
+	}
+	t.Cleanup(func() {
+		writeTransactionJournalFaultHook = originalJournalHook
+		writeTransactionRecoveryFaultHook = originalRecoveryHook
+		writeTransactionRuntimeFaultHook = originalRuntimeHook
+	})
+
+	if err := fs.WriteFile(ctx, filePath, strings.NewReader("new content")); err != nil {
+		t.Fatalf("replacement WriteFile() error: %v", err)
+	}
+	if len(events) < 4 {
+		t.Fatalf("write durability events=%v, want at least four events", events)
+	}
+	if got, want := strings.Join(events[:4], ","), "prepared,source-parent,target-parent,visible"; got != want {
+		t.Fatalf("write durability events=%q, want prefix %q; all=%v", got, want, events)
+	}
+}
+
+func TestFileSystem_WriteFile_RollbackSurvivesRequestCancellation(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	filePath := "/cancel-after-publish.bin"
+
+	if err := fs.WriteFile(context.Background(), filePath, strings.NewReader("old content")); err != nil {
+		t.Fatalf("initial WriteFile() error: %v", err)
+	}
+
+	indexErr := errors.New("index update failed after cancellation")
+	originalRuntimeHook := writeTransactionRuntimeFaultHook
+	writeTransactionRuntimeFaultHook = func(point string) error {
+		if point == "after-visible-publish" {
+			cancel()
+			return indexErr
+		}
+		return nil
+	}
+	t.Cleanup(func() { writeTransactionRuntimeFaultHook = originalRuntimeHook })
+
+	err := fs.WriteFile(ctx, filePath, strings.NewReader("new content"))
+	if !errors.Is(err, indexErr) {
+		t.Fatalf("WriteFile() error = %v, want %v", err, indexErr)
+	}
+
+	data, readErr := os.ReadFile(fs.workspace.FullPath(filePath))
+	if readErr != nil {
+		t.Fatalf("ReadFile() after rollback error: %v", readErr)
+	}
+	if string(data) != "old content" {
+		t.Fatalf("content after canceled rollback = %q, want old content", data)
+	}
+}
+
+func TestFileSystem_WriteFile_OverwriteCommitSurvivesCancellationAfterExchange(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	filePath := "/cancel-after-exchange.bin"
+	if err := fs.WriteFile(context.Background(), filePath, strings.NewReader("old content")); err != nil {
+		t.Fatalf("WriteFile(initial) error: %v", err)
+	}
+
+	originalRuntimeHook := writeTransactionRuntimeFaultHook
+	exchangeObserved := false
+	writeTransactionRuntimeFaultHook = func(point string) error {
+		if point == "after-visible-publish" {
+			exchangeObserved = true
+			cancel()
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		writeTransactionRuntimeFaultHook = originalRuntimeHook
+		cancel()
+	})
+
+	if err := fs.WriteFile(ctx, filePath, strings.NewReader("new content")); err != nil {
+		t.Fatalf("WriteFile(overwrite after cancellation) error: %v", err)
+	}
+	if !exchangeObserved {
+		t.Fatal("overwrite did not reach the atomic-exchange boundary")
+	}
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatalf("request context error = %v, want context.Canceled", ctx.Err())
+	}
+	data, err := os.ReadFile(fs.workspace.FullPath(filePath))
+	if err != nil {
+		t.Fatalf("ReadFile(committed target) error: %v", err)
+	}
+	if string(data) != "new content" {
+		t.Fatalf("content after post-exchange cancellation = %q, want new content", data)
+	}
+}
+
+func TestFileSystem_WriteFile_RollbackRestoresOriginalMode(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	filePath := "/private.bin"
+	if err := fs.WriteFile(ctx, filePath, strings.NewReader("old content")); err != nil {
+		t.Fatalf("initial WriteFile() error: %v", err)
+	}
+	if err := os.Chmod(fs.workspace.FullPath(filePath), 0o600); err != nil {
+		t.Fatalf("Chmod() error: %v", err)
+	}
+
+	indexErr := errors.New("index update failed")
+	originalRuntimeHook := writeTransactionRuntimeFaultHook
+	writeTransactionRuntimeFaultHook = func(point string) error {
+		if point == "after-visible-publish" {
+			return indexErr
+		}
+		return nil
+	}
+	t.Cleanup(func() { writeTransactionRuntimeFaultHook = originalRuntimeHook })
+	if err := fs.WriteFile(ctx, filePath, strings.NewReader("new content")); !errors.Is(err, indexErr) {
+		t.Fatalf("WriteFile() error = %v, want %v", err, indexErr)
+	}
+
+	data, err := os.ReadFile(fs.workspace.FullPath(filePath))
+	if err != nil {
+		t.Fatalf("ReadFile() error: %v", err)
+	}
+	if string(data) != "old content" {
+		t.Fatalf("content after rollback = %q, want old content", data)
+	}
+	info, err := os.Stat(fs.workspace.FullPath(filePath))
+	if err != nil {
+		t.Fatalf("Stat() error: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("mode after rollback = %o, want 600", got)
+	}
+}
+
+func TestFileSystem_WriteFile_RollbackFailurePreservesRecoveryEvidenceAndBlocksMutations(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	filePath := "/rollback-recovery.md"
+	oldContent := []byte("old recoverable content")
+	if err := fs.WriteFile(ctx, filePath, bytes.NewReader(oldContent)); err != nil {
+		t.Fatalf("initial WriteFile() error: %v", err)
+	}
+	fs.writeTransactionStore = newWriteTransactionRuntimeTestStore(fs)
+
+	indexErr := errors.New("index update failed")
+	publishedAside := fs.workspace.FullPath(filePath) + ".published"
+	originalRuntimeHook := writeTransactionRuntimeFaultHook
+	writeTransactionRuntimeFaultHook = func(point string) error {
+		if point != "after-visible-publish" {
+			return originalRuntimeHook(point)
+		}
+		if err := os.Rename(fs.workspace.FullPath(filePath), publishedAside); err != nil {
+			return err
+		}
+		if err := os.Mkdir(fs.workspace.FullPath(filePath), 0o700); err != nil {
+			return err
+		}
+		return indexErr
+	}
+	t.Cleanup(func() { writeTransactionRuntimeFaultHook = originalRuntimeHook })
+
+	err := fs.WriteFile(ctx, filePath, strings.NewReader("new content"))
+	if !errors.Is(err, indexErr) || !errors.Is(err, ErrWriteRecoveryRequired) {
+		t.Fatalf("WriteFile() error = %v, want index error and ErrWriteRecoveryRequired", err)
+	}
+	var recoveryErr *writeTransactionRecoveryBlockedError
+	if !errors.As(err, &recoveryErr) {
+		t.Fatalf("WriteFile() error type = %T, want writeTransactionRecoveryBlockedError", err)
+	}
+	var stagePath string
+	for _, candidate := range recoveryErr.inspectionPaths {
+		if strings.Contains(candidate, writeStagingDir) {
+			stagePath = candidate
+			break
+		}
+	}
+	if stagePath == "" {
+		t.Fatalf("recovery error = %+v, want staging inspection path", recoveryErr)
+	}
+	stagedData, readErr := os.ReadFile(stagePath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(recovery stage) error: %v", readErr)
+	}
+	if !bytes.Equal(stagedData, oldContent) {
+		t.Fatalf("recovery stage content = %q, want %q", stagedData, oldContent)
+	}
+
+	versions, versionErr := fs.versions.GetVersions(ctx, filePath)
+	if versionErr != nil {
+		t.Fatalf("GetVersions() error: %v", versionErr)
+	}
+	if len(versions) != 0 {
+		t.Fatalf("versions before CAS publication = %+v, want none", versions)
+	}
+	if blockedErr := fs.Mkdir(ctx, "/blocked-after-write-recovery"); !errors.Is(blockedErr, ErrWriteRecoveryRequired) {
+		t.Fatalf("Mkdir() after rollback failure error = %v, want ErrWriteRecoveryRequired", blockedErr)
+	}
+}
+
+func TestFileSystem_WriteFile_IndexFailureRollsBackExchangeAndVersion(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	filePath := "/exchange-index-rollback.md"
+	oldContent := []byte("old recoverable content")
+	newContent := []byte("new content")
+	if err := fs.WriteFile(ctx, filePath, bytes.NewReader(oldContent)); err != nil {
+		t.Fatalf("initial WriteFile() error: %v", err)
+	}
+
+	store := newWriteTransactionRuntimeTestStore(fs)
+	fs.writeTransactionStore = store
+	indexErr := errors.New("index update failed")
+	store.ensureWriteMetadataFn = func(context.Context, versionstore.WriteMetadataPlan) error {
+		return indexErr
+	}
+	rollbackMetadataCalls := 0
+	store.rollbackWriteMetadataFn = func(
+		callCtx context.Context,
+		plan versionstore.WriteMetadataPlan,
+	) error {
+		rollbackMetadataCalls++
+		return store.Store.RollbackWriteMetadata(callCtx, plan)
+	}
+	deleteObjectCalls := 0
+	store.deleteObjectFn = func(callCtx context.Context, hash string) error {
+		if err := callCtx.Err(); err != nil {
+			return err
+		}
+		deleteObjectCalls++
+		if _, ok := store.objects[hash]; !ok {
+			return versionstore.ErrNotFound
+		}
+		delete(store.objects, hash)
+		return nil
+	}
+
+	targetPath := fs.workspace.FullPath(filePath)
+	err := fs.WriteFile(ctx, filePath, bytes.NewReader(newContent))
+	if !errors.Is(err, indexErr) {
+		t.Fatalf("WriteFile() error = %v, want index failure", err)
+	}
+	if errors.Is(err, ErrWriteRecoveryRequired) {
+		t.Fatalf("WriteFile() error = %v, successful exchange rollback must not require recovery", err)
+	}
+	if rollbackMetadataCalls != 1 {
+		t.Fatalf("metadata rollback calls = %d, want one", rollbackMetadataCalls)
+	}
+	if deleteObjectCalls != 1 {
+		t.Fatalf("CAS object delete calls = %d, want one", deleteObjectCalls)
+	}
+	if _, ok := store.objects[computeHash(oldContent)]; ok {
+		t.Fatal("old-content CAS object remains after rollback")
+	}
+	versions, versionErr := fs.versions.GetVersions(ctx, filePath)
+	if versionErr != nil {
+		t.Fatalf("GetVersions() error: %v", versionErr)
+	}
+	if len(versions) != 0 {
+		t.Fatalf("versions after rollback = %+v, want none", versions)
+	}
+	data, readErr := os.ReadFile(targetPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(restored target) error: %v", readErr)
+	}
+	if !bytes.Equal(data, oldContent) {
+		t.Fatalf("restored target content = %q, want %q", data, oldContent)
+	}
+	if err := fs.Mkdir(ctx, "/writable-after-exchange-rollback"); err != nil {
+		t.Fatalf("Mkdir() after successful rollback error: %v", err)
+	}
+}
+
+func TestFileSystem_WriteFile_TargetMutationDuringIndexUpdateRestoresIndexAndBlocksMutations(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	filePath := "/post-index-evidence.bin"
+	oldContent := []byte("old-content")
+	newContent := []byte("new-content")
+	tamperedContent := []byte("tamper-data")
+	if len(oldContent) != len(newContent) || len(newContent) != len(tamperedContent) {
+		t.Fatal("test contents must have equal lengths")
+	}
+	if err := fs.WriteFile(ctx, filePath, bytes.NewReader(oldContent)); err != nil {
+		t.Fatalf("initial WriteFile() error: %v", err)
+	}
+	fs.writeTransactionStore = newWriteTransactionRuntimeTestStore(fs)
+
+	oldSize, oldModTime, oldHash, err := fs.versions.GetFileIndex(ctx, filePath)
+	if err != nil {
+		t.Fatalf("GetFileIndex(before mutation) error: %v", err)
+	}
+	targetPath := fs.workspace.FullPath(filePath)
+	originalRuntimeHook := writeTransactionRuntimeFaultHook
+	writeTransactionRuntimeFaultHook = func(point string) error {
+		if point != "after-visible-publish" {
+			return originalRuntimeHook(point)
+		}
+		before, statErr := os.Stat(targetPath)
+		if statErr != nil {
+			return statErr
+		}
+		if writeErr := os.WriteFile(targetPath, tamperedContent, before.Mode().Perm()); writeErr != nil {
+			return writeErr
+		}
+		if timeErr := os.Chtimes(targetPath, before.ModTime(), before.ModTime()); timeErr != nil {
+			return timeErr
+		}
+		return ErrWriteConflict
+	}
+	t.Cleanup(func() { writeTransactionRuntimeFaultHook = originalRuntimeHook })
+
+	err = fs.WriteFile(ctx, filePath, bytes.NewReader(newContent))
+	if !errors.Is(err, ErrWriteConflict) || !errors.Is(err, ErrWriteRecoveryRequired) {
+		t.Fatalf("WriteFile() error = %v, want conflict and recovery required", err)
+	}
+	data, readErr := os.ReadFile(targetPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(tampered target) error: %v", readErr)
+	}
+	if !bytes.Equal(data, tamperedContent) {
+		t.Fatalf("target content = %q, want preserved tampered content %q", data, tamperedContent)
+	}
+
+	indexedSize, indexedModTime, indexedHash, indexErr := fs.versions.GetFileIndex(ctx, filePath)
+	if indexErr != nil {
+		t.Fatalf("GetFileIndex(after rollback) error: %v", indexErr)
+	}
+	if indexedSize != oldSize || indexedHash != oldHash || !indexedModTime.Equal(oldModTime) {
+		t.Fatalf(
+			"file index after rollback = (%d, %v, %q), want (%d, %v, %q)",
+			indexedSize,
+			indexedModTime,
+			indexedHash,
+			oldSize,
+			oldModTime,
+			oldHash,
+		)
+	}
+	var recoveryErr *writeTransactionRecoveryBlockedError
+	if !errors.As(err, &recoveryErr) {
+		t.Fatalf("WriteFile() recovery error = %+v, want preserved old-content stage", recoveryErr)
+	}
+	var stagePath string
+	for _, candidate := range recoveryErr.inspectionPaths {
+		if strings.Contains(candidate, writeStagingDir) {
+			stagePath = candidate
+			break
+		}
+	}
+	if stagePath == "" {
+		t.Fatalf("WriteFile() recovery error = %+v, want staging inspection path", recoveryErr)
+	}
+	recoveryData, recoveryReadErr := os.ReadFile(stagePath)
+	if recoveryReadErr != nil {
+		t.Fatalf("ReadFile(recovery stage) error: %v", recoveryReadErr)
+	}
+	if !bytes.Equal(recoveryData, oldContent) {
+		t.Fatalf("recovery stage content = %q, want %q", recoveryData, oldContent)
+	}
+	if blockedErr := fs.Mkdir(ctx, "/blocked-after-post-index-drift"); !errors.Is(blockedErr, ErrWriteRecoveryRequired) {
+		t.Fatalf("Mkdir() after post-index drift error = %v, want ErrWriteRecoveryRequired", blockedErr)
+	}
+}
+
+func TestFileSystem_WriteFile_RejectsChangedVersionStageBeforeMetadataMutation(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	filePath := "/changed-version-stage.md"
+	oldContent := []byte("old-content")
+	newContent := []byte("new-content")
+	tamperedContent := []byte("tamper-data")
+	if len(oldContent) != len(tamperedContent) {
+		t.Fatal("test old and tampered contents must have equal lengths")
+	}
+	if err := fs.WriteFile(ctx, filePath, bytes.NewReader(oldContent)); err != nil {
+		t.Fatalf("initial WriteFile() error: %v", err)
+	}
+	fs.writeTransactionStore = newWriteTransactionRuntimeTestStore(fs)
+
+	originalRuntimeHook := writeTransactionRuntimeFaultHook
+	stageChanged := false
+	changedStagePath := ""
+	writeTransactionRuntimeFaultHook = func(point string) error {
+		if point != "after-visible-publish" {
+			return originalRuntimeHook(point)
+		}
+		entries, err := os.ReadDir(filepath.Join(fs.config.InternalRoot, writeStagingDir))
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			if !strings.HasPrefix(entry.Name(), writeSourceStagePrefix) {
+				continue
+			}
+			stagePath := filepath.Join(fs.config.InternalRoot, writeStagingDir, entry.Name())
+			before, err := os.Stat(stagePath)
+			if err != nil {
+				return err
+			}
+			if err := os.WriteFile(stagePath, tamperedContent, before.Mode().Perm()); err != nil {
+				return err
+			}
+			if err := os.Chtimes(stagePath, before.ModTime(), before.ModTime()); err != nil {
+				return err
+			}
+			changedStagePath = stagePath
+			stageChanged = true
+			return errWriteStageChanged
+		}
+		return errors.New("source stage was not found")
+	}
+	t.Cleanup(func() { writeTransactionRuntimeFaultHook = originalRuntimeHook })
+
+	err := fs.WriteFile(ctx, filePath, bytes.NewReader(newContent))
+	if !errors.Is(err, errWriteStageChanged) || !errors.Is(err, ErrWriteRecoveryRequired) {
+		t.Fatalf("WriteFile() error = %v, want stage change and ErrWriteRecoveryRequired", err)
+	}
+	if !stageChanged {
+		t.Fatal("version stage was not changed after target capture")
+	}
+	data, readErr := os.ReadFile(fs.workspace.FullPath(filePath))
+	if readErr != nil || !bytes.Equal(data, newContent) {
+		t.Fatalf("visible target after unsafe rollback rejection = %q, %v; want %q", data, readErr, newContent)
+	}
+	versions, versionErr := fs.versions.GetVersions(ctx, filePath)
+	if versionErr != nil {
+		t.Fatalf("GetVersions() error: %v", versionErr)
+	}
+	if len(versions) != 0 {
+		t.Fatalf("versions after rejected stage = %+v, want none", versions)
+	}
+	_, _, indexedHash, indexErr := fs.versions.GetFileIndex(ctx, filePath)
+	if indexErr != nil || indexedHash != computeHash(oldContent) {
+		t.Fatalf("file index after rollback = %q, %v; want old hash", indexedHash, indexErr)
+	}
+	var recoveryErr *writeTransactionRecoveryBlockedError
+	if !errors.As(err, &recoveryErr) || changedStagePath == "" {
+		t.Fatalf("WriteFile() recovery error = %+v, want changed stage path", recoveryErr)
+	}
+	if !slices.Contains(recoveryErr.inspectionPaths, changedStagePath) {
+		t.Fatalf(
+			"WriteFile() inspection paths = %v, want %q",
+			recoveryErr.inspectionPaths,
+			changedStagePath,
+		)
+	}
+	retainedData, retainedErr := os.ReadFile(changedStagePath)
+	if retainedErr != nil || !bytes.Equal(retainedData, tamperedContent) {
+		t.Fatalf("retained changed stage = %q, %v; want %q", retainedData, retainedErr, tamperedContent)
+	}
+	if blockedErr := fs.Mkdir(ctx, "/blocked-after-version-stage-change"); !errors.Is(blockedErr, ErrWriteRecoveryRequired) {
+		t.Fatalf("Mkdir() after version stage change error = %v, want ErrWriteRecoveryRequired", blockedErr)
+	}
+}
+
+func TestFileSystem_WriteFile_AppliesVersionSizeLimitToReplacedContent(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+	filePath := "/version-size-limit.txt"
+
+	fs.policy.MaxVersionedSize = 8
+	if err := fs.WriteFile(ctx, filePath, strings.NewReader("old content exceeds limit")); err != nil {
+		t.Fatalf("initial WriteFile() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, filePath, strings.NewReader("small")); err != nil {
+		t.Fatalf("replacement WriteFile() error: %v", err)
+	}
+
+	versions, err := fs.versions.GetVersions(ctx, filePath)
+	if err != nil {
+		t.Fatalf("GetVersions() error: %v", err)
+	}
+	if len(versions) != 0 {
+		t.Fatalf("historical versions = %+v, want none for replaced content above the size limit", versions)
+	}
+}
+
+func TestFileSystem_CleanupStaging_RemovesInternalWriteStages(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	staged, err := fs.stageWriteReader(ctx, strings.NewReader("orphaned"), defaultMaxWriteSize, writeSourceStagePrefix)
+	if err != nil {
+		t.Fatalf("stageWriteReader() error: %v", err)
+	}
+	stageName := staged.rel
+	if err := staged.file.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+	staged.file = nil
+
+	files, bytes, err := fs.CleanupStaging(ctx)
+	if err != nil {
+		t.Fatalf("CleanupStaging() error: %v", err)
+	}
+	if files != 1 || bytes != int64(len("orphaned")) {
+		t.Fatalf("CleanupStaging() = (%d, %d), want (1, %d)", files, bytes, len("orphaned"))
+	}
+	if _, err := fs.internalRootHandle.Stat(stageName); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("orphan stage remains after cleanup: %v", err)
+	}
+}
+
+func TestFileSystem_WriteFile_ReturnsVisibleWarningWhenCommittedStageCleanupFails(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	filePath := "/committed-with-warning.bin"
+	if err := fs.WriteFile(ctx, filePath, strings.NewReader("old content")); err != nil {
+		t.Fatalf("WriteFile(old) error: %v", err)
+	}
+	cleanupErr := errors.New("remove committed old-content stage failed")
+	originalRecoveryHook := writeTransactionRecoveryFaultHook
+	writeTransactionRecoveryFaultHook = func(point string) error {
+		if strings.HasPrefix(point, "remove-stage:") &&
+			!strings.HasPrefix(point, "remove-stage:after-unlink:") {
+			return cleanupErr
+		}
+		return originalRecoveryHook(point)
+	}
+	t.Cleanup(func() { writeTransactionRecoveryFaultHook = originalRecoveryHook })
+
+	err := fs.WriteFile(ctx, filePath, strings.NewReader("content"))
+	var warningErr *VisibleMutationWarningError
+	if !errors.As(err, &warningErr) || !errors.Is(err, cleanupErr) ||
+		!errors.Is(err, ErrWriteRecoveryRequired) {
+		t.Fatalf("WriteFile() error = %v, want visible cleanup warning and recovery gate", err)
+	}
+	data, readErr := os.ReadFile(fs.workspace.FullPath(filePath))
+	if readErr != nil {
+		t.Fatalf("ReadFile() error: %v", readErr)
+	}
+	if string(data) != "content" {
+		t.Fatalf("committed content = %q, want content", data)
+	}
+	indexedSize, _, indexedHash, indexErr := fs.versions.GetFileIndex(ctx, "/committed-with-warning.bin")
+	if indexErr != nil {
+		t.Fatalf("GetFileIndex() error: %v", indexErr)
+	}
+	if indexedSize != int64(len("content")) || indexedHash != computeHash([]byte("content")) {
+		t.Fatalf("file index = (%d, %q), want committed content", indexedSize, indexedHash)
+	}
+	if err := fs.WriteFile(ctx, "/blocked-after-committed-residue.bin", strings.NewReader("blocked")); !errors.Is(err, ErrWriteRecoveryRequired) {
+		t.Fatalf("WriteFile(after committed residue) error = %v, want ErrWriteRecoveryRequired", err)
+	}
+}
+
+func TestFileSystem_WriteFile_BlocksConcurrentMutationBeforeStageDriftGateIsPublished(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	filePath := "/cleanup-gate-lock.bin"
+	if err := fs.WriteFile(ctx, filePath, strings.NewReader("old content")); err != nil {
+		t.Fatalf("WriteFile(old) error: %v", err)
+	}
+	cleanupStarted := make(chan struct{})
+	allowCleanup := make(chan struct{})
+	cleanupErr := errors.New("remove committed old-content stage failed")
+	originalRecoveryHook := writeTransactionRecoveryFaultHook
+	var cleanupOnce sync.Once
+	writeTransactionRecoveryFaultHook = func(point string) error {
+		if !strings.HasPrefix(point, "remove-stage:") ||
+			strings.HasPrefix(point, "remove-stage:after-unlink:") {
+			return originalRecoveryHook(point)
+		}
+		injected := false
+		cleanupOnce.Do(func() {
+			injected = true
+			close(cleanupStarted)
+			<-allowCleanup
+		})
+		if injected {
+			return cleanupErr
+		}
+		return originalRecoveryHook(point)
+	}
+	t.Cleanup(func() { writeTransactionRecoveryFaultHook = originalRecoveryHook })
+
+	writeResult := make(chan error, 1)
+	go func() {
+		writeResult <- fs.WriteFile(ctx, filePath, strings.NewReader("committed content"))
+	}()
+	select {
+	case <-cleanupStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for staged-write cleanup")
+	}
+
+	mkdirCalled := make(chan struct{})
+	originalMkdirWorkspacePath := fs.mkdirWorkspacePath
+	fs.mkdirWorkspacePath = func(callCtx context.Context, name string) error {
+		close(mkdirCalled)
+		return originalMkdirWorkspacePath(callCtx, name)
+	}
+	mkdirStarted := make(chan struct{})
+	mkdirResult := make(chan error, 1)
+	go func() {
+		close(mkdirStarted)
+		mkdirResult <- fs.Mkdir(ctx, "/must-not-slip-before-write-gate")
+	}()
+	<-mkdirStarted
+	select {
+	case err := <-mkdirResult:
+		t.Fatalf("concurrent mutation completed before cleanup gate publication: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(allowCleanup)
+
+	writeErr := <-writeResult
+	if !errors.Is(writeErr, ErrWriteRecoveryRequired) || !errors.Is(writeErr, cleanupErr) {
+		t.Fatalf("WriteFile() error = %v, want cleanup error and ErrWriteRecoveryRequired", writeErr)
+	}
+	mkdirErr := <-mkdirResult
+	if !errors.Is(mkdirErr, ErrWriteRecoveryRequired) {
+		t.Fatalf("concurrent Mkdir() error = %v, want ErrWriteRecoveryRequired", mkdirErr)
+	}
+	select {
+	case <-mkdirCalled:
+		t.Fatal("concurrent mutation reached workspace after write recovery gate")
+	default:
+	}
+	data, readErr := os.ReadFile(fs.workspace.FullPath(filePath))
+	if readErr != nil || string(data) != "committed content" {
+		t.Fatalf("committed target = %q, %v; want committed content", data, readErr)
+	}
+}
+
+func TestFileSystem_WriteFile_CapturedStageMutationAfterPublishActivatesRecoveryGate(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	filePath := "/captured-stage-drift.bin"
+	oldContent := []byte("old-content")
+	sourceContent := []byte("source-data")
+	tamperedContent := []byte("tamper-data")
+	if len(oldContent) != len(tamperedContent) {
+		t.Fatal("test old and tampered contents must have equal lengths")
+	}
+	if err := fs.WriteFile(ctx, filePath, bytes.NewReader(oldContent)); err != nil {
+		t.Fatalf("WriteFile(old) error: %v", err)
+	}
+	originalRuntimeHook := writeTransactionRuntimeFaultHook
+	stageChanged := false
+	changedStagePath := ""
+	writeTransactionRuntimeFaultHook = func(point string) error {
+		if point != "after-metadata" {
+			return originalRuntimeHook(point)
+		}
+		entries, err := os.ReadDir(filepath.Join(fs.config.InternalRoot, writeStagingDir))
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			if !strings.HasPrefix(entry.Name(), writeSourceStagePrefix) {
+				continue
+			}
+			stagePath := filepath.Join(fs.config.InternalRoot, writeStagingDir, entry.Name())
+			before, err := os.Stat(stagePath)
+			if err != nil {
+				return err
+			}
+			if err := os.WriteFile(stagePath, tamperedContent, before.Mode().Perm()); err != nil {
+				return err
+			}
+			if err := os.Chtimes(stagePath, before.ModTime(), before.ModTime()); err != nil {
+				return err
+			}
+			stageChanged = true
+			changedStagePath = stagePath
+			break
+		}
+		if !stageChanged {
+			return errors.New("captured source stage was not found")
+		}
+		return nil
+	}
+	t.Cleanup(func() { writeTransactionRuntimeFaultHook = originalRuntimeHook })
+
+	err := fs.WriteFile(ctx, filePath, bytes.NewReader(sourceContent))
+	if !errors.Is(err, ErrWriteRecoveryRequired) {
+		t.Fatalf("WriteFile() error = %v, want ErrWriteRecoveryRequired", err)
+	}
+	data, readErr := os.ReadFile(fs.workspace.FullPath(filePath))
+	if readErr != nil || !bytes.Equal(data, sourceContent) {
+		t.Fatalf("committed target = %q, %v; want %q", data, readErr, sourceContent)
+	}
+	_, _, indexedHash, indexErr := fs.versions.GetFileIndex(ctx, filePath)
+	if indexErr != nil || indexedHash != computeHash(sourceContent) {
+		t.Fatalf("file index = %q, %v; want committed source hash", indexedHash, indexErr)
+	}
+	var recoveryErr *writeTransactionRecoveryBlockedError
+	if !errors.As(err, &recoveryErr) || len(recoveryErr.inspectionPaths) == 0 {
+		t.Fatalf("WriteFile() recovery error = %+v, want captured-stage inspection path", recoveryErr)
+	}
+	if !slices.Contains(recoveryErr.inspectionPaths, changedStagePath) {
+		t.Fatalf(
+			"WriteFile() inspection paths = %v, want %q",
+			recoveryErr.inspectionPaths,
+			changedStagePath,
+		)
+	}
+	retainedData, retainedErr := os.ReadFile(changedStagePath)
+	if retainedErr != nil || !bytes.Equal(retainedData, tamperedContent) {
+		t.Fatalf("retained changed captured target = %q, %v; want %q", retainedData, retainedErr, tamperedContent)
+	}
+	if blockedErr := fs.Mkdir(ctx, "/blocked-after-captured-stage-drift"); !errors.Is(blockedErr, ErrWriteRecoveryRequired) {
+		t.Fatalf("Mkdir() after captured stage drift error = %v, want ErrWriteRecoveryRequired", blockedErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(fs.config.InternalRoot, writeTransactionJournalDir)); statErr != nil {
+		t.Fatalf("Stat(recovery journal) error: %v", statErr)
+	}
+
+	restartedConfig := *fs.config
+	if closeErr := fs.Close(); closeErr != nil {
+		t.Fatalf("Close(before restart) error: %v", closeErr)
+	}
+	restarted, restartErr := New(&restartedConfig)
+	if !errors.Is(restartErr, ErrWriteRecoveryRequired) {
+		if restarted != nil {
+			_ = restarted.Close()
+		}
+		t.Fatalf("New(restarted) error = %v, want ErrWriteRecoveryRequired", restartErr)
+	}
+	if restarted != nil {
+		_ = restarted.Close()
+		t.Fatal("New(restarted) returned a filesystem despite blocked recovery")
+	}
+	retainedData, retainedErr = os.ReadFile(changedStagePath)
+	if retainedErr != nil || !bytes.Equal(retainedData, tamperedContent) {
+		t.Fatalf("restarted cleanup changed retained source = %q, %v; want %q", retainedData, retainedErr, tamperedContent)
+	}
+}
+
+func TestFileSystem_WriteFile_KeepsVisibleWarningWhenCommitAndCleanupBarriersFail(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	filePath := "/combined-commit-warning.bin"
+	if err := fs.WriteFile(ctx, filePath, strings.NewReader("old content")); err != nil {
+		t.Fatalf("initial WriteFile() error: %v", err)
+	}
+
+	commitBarrierErr := errors.New("committed stage sync failed")
+	cleanupErr := errors.New("committed stage cleanup failed")
+	originalJournalHook := writeTransactionJournalFaultHook
+	writeTransactionJournalFaultHook = func(point string) error {
+		if point == "checkpoint:committed:directory_sync" {
+			return commitBarrierErr
+		}
+		return originalJournalHook(point)
+	}
+	originalRecoveryHook := writeTransactionRecoveryFaultHook
+	writeTransactionRecoveryFaultHook = func(point string) error {
+		if strings.HasPrefix(point, "remove-stage:") &&
+			!strings.HasPrefix(point, "remove-stage:after-unlink:") {
+			return cleanupErr
+		}
+		return originalRecoveryHook(point)
+	}
+	t.Cleanup(func() {
+		writeTransactionJournalFaultHook = originalJournalHook
+		writeTransactionRecoveryFaultHook = originalRecoveryHook
+	})
+
+	err := fs.WriteFile(ctx, filePath, strings.NewReader("new content"))
+	if _, ok := err.(*VisibleMutationWarningError); !ok {
+		t.Fatalf("WriteFile() error type = %T, want top-level VisibleMutationWarningError; error=%v", err, err)
+	}
+	if !errors.Is(err, commitBarrierErr) || !errors.Is(err, cleanupErr) {
+		t.Fatalf("WriteFile() error = %v, want both committed barrier and cleanup failures", err)
+	}
+}
+
+func TestFileSystem_WriteFile_CommittedRollbackResidueRecoversAfterRestart(t *testing.T) {
+	tmpDir := t.TempDir()
+	client := dataplane.NewClient("unused")
+	t.Cleanup(func() { _ = client.Close() })
+	cfg := &Config{
+		FilesRoot:          filepath.Join(tmpDir, "files"),
+		InternalRoot:       filepath.Join(tmpDir, ".mnemonas"),
+		TrashRoot:          filepath.Join(tmpDir, ".mnemonas", "trash"),
+		Dataplane:          client,
+		MaxVersions:        10,
+		MaxVersionAge:      30 * 24 * time.Hour,
+		TrashRetentionDays: 30,
+	}
+	fs, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	closed := false
+	t.Cleanup(func() {
+		if !closed {
+			_ = fs.Close()
+		}
+	})
+
+	ctx := context.Background()
+	filePath := "/committed-overwrite.bin"
+	if err := fs.WriteFile(ctx, filePath, strings.NewReader("old content")); err != nil {
+		t.Fatalf("initial WriteFile() error: %v", err)
+	}
+	cleanupErr := errors.New("remove committed rollback residue failed")
+	originalRecoveryHook := writeTransactionRecoveryFaultHook
+	writeTransactionRecoveryFaultHook = func(point string) error {
+		if strings.HasPrefix(point, "remove-stage:") &&
+			!strings.HasPrefix(point, "remove-stage:after-unlink:") {
+			return cleanupErr
+		}
+		return originalRecoveryHook(point)
+	}
+	t.Cleanup(func() { writeTransactionRecoveryFaultHook = originalRecoveryHook })
+
+	err = fs.WriteFile(ctx, filePath, strings.NewReader("new content"))
+	writeTransactionRecoveryFaultHook = originalRecoveryHook
+	if !isVisibleMutationWarning(err) || !errors.Is(err, cleanupErr) ||
+		!errors.Is(err, ErrWriteRecoveryRequired) {
+		t.Fatalf("replacement WriteFile() error = %v, want committed cleanup warning and recovery gate", err)
+	}
+	if err := fs.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+	closed = true
+
+	restarted, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New(restart) error: %v", err)
+	}
+	t.Cleanup(func() { _ = restarted.Close() })
+	data, readErr := os.ReadFile(restarted.workspace.FullPath(filePath))
+	if readErr != nil || string(data) != "new content" {
+		t.Fatalf("recovered target = %q, %v; want new content", data, readErr)
+	}
+	operations, scanErr := restarted.writeTransactionJournal.Scan()
+	if scanErr != nil || len(operations) != 0 {
+		t.Fatalf("recovered journal operations = %+v, %v; want empty", operations, scanErr)
+	}
+	if err := restarted.Mkdir(ctx, "/writable-after-committed-recovery"); err != nil {
+		t.Fatalf("Mkdir() after committed recovery error: %v", err)
+	}
+}
+
+func TestFileSystem_WriteFile_NewTargetRollbackFailureBlocksAfterRestart(t *testing.T) {
+	tmpDir := t.TempDir()
+	client := dataplane.NewClient("unused")
+	t.Cleanup(func() { _ = client.Close() })
+	cfg := &Config{
+		FilesRoot:          filepath.Join(tmpDir, "files"),
+		InternalRoot:       filepath.Join(tmpDir, ".mnemonas"),
+		TrashRoot:          filepath.Join(tmpDir, ".mnemonas", "trash"),
+		Dataplane:          client,
+		MaxVersions:        10,
+		MaxVersionAge:      30 * 24 * time.Hour,
+		TrashRetentionDays: 30,
+	}
+	fs, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	closed := false
+	t.Cleanup(func() {
+		if !closed {
+			_ = fs.Close()
+		}
+	})
+
+	ctx := context.Background()
+	filePath := "/new-target-rollback.bin"
+	indexErr := errors.New("index update failed")
+	originalRuntimeHook := writeTransactionRuntimeFaultHook
+	writeTransactionRuntimeFaultHook = func(point string) error {
+		if point != "after-visible-publish" {
+			return originalRuntimeHook(point)
+		}
+		publishedAside := fs.workspace.FullPath(filePath) + ".published"
+		if err := os.Rename(fs.workspace.FullPath(filePath), publishedAside); err != nil {
+			return err
+		}
+		if err := os.Mkdir(fs.workspace.FullPath(filePath), 0o700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(fs.workspace.FullPath(filePath), "unknown"), []byte("unknown"), 0o600); err != nil {
+			return err
+		}
+		return indexErr
+	}
+	t.Cleanup(func() { writeTransactionRuntimeFaultHook = originalRuntimeHook })
+
+	err = fs.WriteFile(ctx, filePath, strings.NewReader("new content"))
+	if !errors.Is(err, indexErr) || !errors.Is(err, ErrWriteRecoveryRequired) {
+		t.Fatalf("WriteFile() error = %v, want index failure and ErrWriteRecoveryRequired", err)
+	}
+	var recoveryErr *writeTransactionRecoveryBlockedError
+	if !errors.As(err, &recoveryErr) || len(recoveryErr.inspectionPaths) == 0 {
+		t.Fatalf("WriteFile() recovery error = %+v, want persistent inspection paths", recoveryErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(fs.config.InternalRoot, writeTransactionJournalDir)); statErr != nil {
+		t.Fatalf("Stat(recovery journal) error = %v", statErr)
+	}
+	if err := fs.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+	closed = true
+
+	restarted, err := New(cfg)
+	if !errors.Is(err, ErrWriteRecoveryRequired) {
+		if restarted != nil {
+			_ = restarted.Close()
+		}
+		t.Fatalf("New(restart) error = %v, want ErrWriteRecoveryRequired", err)
+	}
+	if restarted != nil {
+		_ = restarted.Close()
+		t.Fatal("New(restart) returned a filesystem despite blocked recovery")
+	}
+}
+
+func TestFileSystem_RetainWriteRecoveryEvidenceMarkerSyncsTemporaryEntryBeforeContent(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	originalSyncWriteStagingDirectory := syncWriteStagingDirectory
+	syncCalls := 0
+	firstSyncSawEmptyTemp := false
+	secondSyncSawFinalMarker := false
+	syncWriteStagingDirectory = func(root *os.Root) error {
+		syncCalls++
+		dir, err := rootio.OpenDirNoFollow(root, writeStagingDir)
+		if err != nil {
+			return err
+		}
+		entries, readErr := dir.ReadDir(-1)
+		closeErr := dir.Close()
+		if readErr != nil || closeErr != nil {
+			return errors.Join(readErr, closeErr)
+		}
+		for _, entry := range entries {
+			if !strings.HasPrefix(entry.Name(), writeRecoveryMarkerPrefix) {
+				continue
+			}
+			if syncCalls == 1 && strings.HasSuffix(entry.Name(), ".tmp") {
+				info, infoErr := root.Lstat(filepath.Join(writeStagingDir, entry.Name()))
+				if infoErr != nil {
+					return infoErr
+				}
+				firstSyncSawEmptyTemp = info.Size() == 0
+			}
+			if syncCalls == 2 && strings.HasSuffix(entry.Name(), ".json") {
+				secondSyncSawFinalMarker = true
+			}
+		}
+		return originalSyncWriteStagingDirectory(root)
+	}
+	t.Cleanup(func() { syncWriteStagingDirectory = originalSyncWriteStagingDirectory })
+
+	markerPath, err := fs.retainWriteRecoveryEvidenceMarker(
+		"/marker-target.bin",
+		"staging_cleanup_failed",
+		[]string{"/inspection/stage"},
+	)
+	if err != nil {
+		t.Fatalf("retainWriteRecoveryEvidenceMarker() error: %v", err)
+	}
+	if syncCalls != 2 || !firstSyncSawEmptyTemp || !secondSyncSawFinalMarker {
+		t.Fatalf("marker barriers = calls:%d empty-temp:%t final:%t, want 2/true/true", syncCalls, firstSyncSawEmptyTemp, secondSyncSawFinalMarker)
+	}
+	if _, err := os.Stat(markerPath); err != nil {
+		t.Fatalf("Stat(marker) error: %v", err)
+	}
+}
+
+func TestFileSystem_CleanupStaging_PreservesRollbackEvidenceAndBlocksMutations(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	stageName := filepath.Join(writeStagingDir, writeRollbackStagePrefix+"interrupted.tmp")
+	stage, err := rootio.OpenFileNoFollow(fs.internalRootHandle, stageName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatalf("OpenFileNoFollow() error: %v", err)
+	}
+	if _, err := stage.WriteString("old content"); err != nil {
+		_ = stage.Close()
+		t.Fatalf("WriteString() error: %v", err)
+	}
+	if err := stage.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+
+	if _, _, err := fs.CleanupStaging(ctx); !errors.Is(err, ErrWriteRecoveryRequired) {
+		t.Fatalf("CleanupStaging() error = %v, want ErrWriteRecoveryRequired", err)
+	}
+	if _, err := fs.internalRootHandle.Stat(stageName); err != nil {
+		t.Fatalf("rollback recovery stage was removed: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/blocked.bin", strings.NewReader("blocked")); !errors.Is(err, ErrWriteRecoveryRequired) {
+		t.Fatalf("WriteFile() after recovery evidence error = %v, want ErrWriteRecoveryRequired", err)
+	}
+}
+
+func TestFileSystem_CleanupStaging_RecoveryEvidencePrecedesCommittedCleanupFailure(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	committedRel := filepath.Join(writeStagingDir, writeCommittedStagePrefix+"cleanup-failure.tmp")
+	markerRel := filepath.Join(writeStagingDir, writeRecoveryMarkerPrefix+"required.json")
+	for rel, content := range map[string]string{
+		committedRel: "committed residue",
+		markerRel:    `{"version":1}`,
+	} {
+		file, err := rootio.OpenFileNoFollow(fs.internalRootHandle, rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			t.Fatalf("OpenFileNoFollow(%s) error: %v", rel, err)
+		}
+		if _, err := file.WriteString(content); err != nil {
+			_ = file.Close()
+			t.Fatalf("WriteString(%s) error: %v", rel, err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatalf("Close(%s) error: %v", rel, err)
+		}
+	}
+
+	cleanupErr := errors.New("committed cleanup failed")
+	originalRemoveStagedWriteFile := removeStagedWriteFile
+	removeCalls := 0
+	removeStagedWriteFile = func(root *os.Root, rel string) error {
+		removeCalls++
+		if rel == committedRel {
+			return cleanupErr
+		}
+		return originalRemoveStagedWriteFile(root, rel)
+	}
+	t.Cleanup(func() { removeStagedWriteFile = originalRemoveStagedWriteFile })
+
+	if _, _, err := fs.CleanupStaging(ctx); !errors.Is(err, ErrWriteRecoveryRequired) {
+		t.Fatalf("CleanupStaging() error = %v, want ErrWriteRecoveryRequired", err)
+	}
+	if removeCalls != 0 {
+		t.Fatalf("cleanup remove calls = %d, want none before recovery gate", removeCalls)
+	}
+	if err := fs.Mkdir(ctx, "/blocked-by-mixed-recovery"); !errors.Is(err, ErrWriteRecoveryRequired) {
+		t.Fatalf("Mkdir() after mixed recovery evidence error = %v, want ErrWriteRecoveryRequired", err)
+	}
+}
+
+func TestFileSystem_CleanupStaging_FinalRescanPublishesRecoveryGate(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	staged, err := fs.stageWriteReader(ctx, strings.NewReader("removable source"), defaultMaxWriteSize, writeSourceStagePrefix)
+	if err != nil {
+		t.Fatalf("stageWriteReader() error: %v", err)
+	}
+	if err := staged.file.Close(); err != nil {
+		t.Fatalf("Close(staged source) error: %v", err)
+	}
+	staged.file = nil
+
+	recoveryRel := filepath.Join(writeStagingDir, writeRecoveryStagePrefix+"injected.stage")
+	originalRemoveStagedWriteFile := removeStagedWriteFile
+	injected := false
+	removeStagedWriteFile = func(root *os.Root, rel string) error {
+		if !injected {
+			recovery, createErr := rootio.OpenFileNoFollow(root, recoveryRel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+			if createErr != nil {
+				return createErr
+			}
+			_, writeErr := recovery.WriteString("recovery evidence")
+			if closeErr := recovery.Close(); writeErr != nil || closeErr != nil {
+				return errors.Join(writeErr, closeErr)
+			}
+			injected = true
+		}
+		return originalRemoveStagedWriteFile(root, rel)
+	}
+	t.Cleanup(func() { removeStagedWriteFile = originalRemoveStagedWriteFile })
+
+	files, _, err := fs.CleanupStaging(ctx)
+	if !errors.Is(err, ErrWriteRecoveryRequired) {
+		t.Fatalf("CleanupStaging() error = %v, want ErrWriteRecoveryRequired", err)
+	}
+	if files != 1 || !injected {
+		t.Fatalf("CleanupStaging() files=%d injected=%t, want 1/true", files, injected)
+	}
+	if _, statErr := fs.internalRootHandle.Stat(recoveryRel); statErr != nil {
+		t.Fatalf("Stat(injected recovery evidence) error: %v", statErr)
+	}
+	if blockedErr := fs.Mkdir(ctx, "/blocked-after-final-staging-rescan"); !errors.Is(blockedErr, ErrWriteRecoveryRequired) {
+		t.Fatalf("Mkdir() after final staging rescan error = %v, want ErrWriteRecoveryRequired", blockedErr)
 	}
 }
 
@@ -992,10 +2637,16 @@ func TestFileSystem_WriteFile_RollsBackCreatedDirectoriesWhenIndexUpdateFails(t 
 	}
 }
 
-func TestFileSystem_WriteFile_CleansCreatedDirectoriesWhenReaderFailsBeforeRename(t *testing.T) {
-	fs := setupFileSystem(t)
+func TestFileSystem_WriteFile_ReaderFailureLeavesExistingDirectories(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
 	ctx := context.Background()
 	readerErr := errors.New("reader failed")
+	if err := fs.Mkdir(ctx, "/deep"); err != nil {
+		t.Fatalf("Mkdir(/deep) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/deep/path"); err != nil {
+		t.Fatalf("Mkdir(/deep/path) error: %v", err)
+	}
 
 	err := fs.WriteFile(ctx, "/deep/path/reader-fail.bin", &partialErrorReader{data: []byte("partial"), err: readerErr})
 	if !errors.Is(err, readerErr) {
@@ -1004,11 +2655,112 @@ func TestFileSystem_WriteFile_CleansCreatedDirectoriesWhenReaderFailsBeforeRenam
 	if _, statErr := fs.Stat(ctx, "/deep/path/reader-fail.bin"); statErr != ErrNotFound {
 		t.Fatalf("Expected failed write file to remain absent, got %v", statErr)
 	}
-	if _, statErr := os.Stat(fs.workspace.FullPath("/deep/path")); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("Expected created nested directory to be removed after failed write, got %v", statErr)
+	if info, statErr := os.Stat(fs.workspace.FullPath("/deep/path")); statErr != nil || !info.IsDir() {
+		t.Fatalf("existing nested directory = %v, %v; want preserved", info, statErr)
 	}
-	if _, statErr := os.Stat(fs.workspace.FullPath("/deep")); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("Expected created parent directory to be removed after failed write, got %v", statErr)
+	if info, statErr := os.Stat(fs.workspace.FullPath("/deep")); statErr != nil || !info.IsDir() {
+		t.Fatalf("existing parent directory = %v, %v; want preserved", info, statErr)
+	}
+}
+
+func TestFileSystem_WriteFile_ParentOwnershipChangeBeforePlanPreservesReplacement(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/suspicious-parent"); err != nil {
+		t.Fatalf("Mkdir(parent) error: %v", err)
+	}
+	hookErr := errors.New("stop before file publication")
+	parentPath := fs.workspace.FullPath("/suspicious-parent")
+	displacedPath := parentPath + ".displaced"
+	unknownPath := fs.workspace.FullPath("/suspicious-parent/unknown.txt")
+	originalRuntimeHook := writeTransactionRuntimeFaultHook
+	writeTransactionRuntimeFaultHook = func(point string) error {
+		if point != "before-plan" {
+			return originalRuntimeHook(point)
+		}
+		if err := os.Rename(parentPath, displacedPath); err != nil {
+			return err
+		}
+		if err := os.Mkdir(parentPath, 0o700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(unknownPath, []byte("external child"), 0o600); err != nil {
+			return err
+		}
+		return hookErr
+	}
+	t.Cleanup(func() { writeTransactionRuntimeFaultHook = originalRuntimeHook })
+
+	err := fs.WriteFile(ctx, "/suspicious-parent/upload.bin", strings.NewReader("content"))
+	if !errors.Is(err, hookErr) || errors.Is(err, ErrWriteRecoveryRequired) {
+		t.Fatalf("WriteFile() error = %v, want pre-publication hook without recovery gate", err)
+	}
+	if info, statErr := os.Stat(displacedPath); statErr != nil || !info.IsDir() {
+		t.Fatalf("displaced original parent = %v, %v; want preserved", info, statErr)
+	}
+	data, readErr := os.ReadFile(unknownPath)
+	if readErr != nil || string(data) != "external child" {
+		t.Fatalf("unknown child after rejected cleanup = %q, %v; want preserved", data, readErr)
+	}
+	if _, statErr := os.Stat(fs.workspace.FullPath("/suspicious-parent/upload.bin")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("unpublished target stat error = %v, want not exist", statErr)
+	}
+	operations, scanErr := fs.writeTransactionJournal.Scan()
+	if scanErr != nil || len(operations) != 0 {
+		t.Fatalf("journal after pre-publication abort = %+v, %v; want empty", operations, scanErr)
+	}
+	if mkdirErr := fs.Mkdir(ctx, "/writable-after-prepublication-abort"); mkdirErr != nil {
+		t.Fatalf("Mkdir() after pre-publication abort error: %v", mkdirErr)
+	}
+}
+
+func TestWorkspaceCleanupCreatedDirsPreservesReplacement(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	var createdDirs []workspace.CreatedDir
+
+	_, err := fs.workspace.WriteFileFromReaderWithOptions(
+		ctx,
+		"/deep/path/published.bin",
+		strings.NewReader("content"),
+		workspace.WriteFileOptions{CreatedDirs: &createdDirs},
+	)
+	if err != nil {
+		t.Fatalf("WriteFileFromReaderWithOptions() error: %v", err)
+	}
+	if len(createdDirs) != 2 {
+		t.Fatalf("created directory evidence count = %d, want 2", len(createdDirs))
+	}
+
+	targetPath := fs.workspace.FullPath("/deep/path/published.bin")
+	replacementPath := filepath.Dir(targetPath)
+	displacedPath := fs.workspace.FullPath("/deep/owned-path")
+	if err := os.Remove(targetPath); err != nil {
+		t.Fatalf("Remove(published target) error: %v", err)
+	}
+	if err := os.Rename(replacementPath, displacedPath); err != nil {
+		t.Fatalf("Rename(created directory) error: %v", err)
+	}
+	if err := os.Mkdir(replacementPath, 0o755); err != nil {
+		t.Fatalf("Mkdir(replacement directory) error: %v", err)
+	}
+
+	err = fs.workspace.CleanupCreatedDirs(ctx, createdDirs)
+	if err == nil {
+		t.Fatal("CleanupCreatedDirs() error = nil, want ownership rejection")
+	}
+	if !strings.Contains(err.Error(), "ownership changed") {
+		t.Fatalf("CleanupCreatedDirs() error = %v, want ownership rejection", err)
+	}
+	entries, readDirErr := os.ReadDir(replacementPath)
+	if readDirErr != nil {
+		t.Fatalf("ReadDir(replacement directory) error: %v", readDirErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("replacement directory entries = %v, want empty replacement preserved", entries)
+	}
+	if displacedInfo, statErr := os.Stat(displacedPath); statErr != nil || !displacedInfo.IsDir() {
+		t.Fatalf("displaced owned directory = %v, %v; want preserved directory", displacedInfo, statErr)
 	}
 }
 
@@ -1045,23 +2797,30 @@ func TestFileSystem_WriteFile_RollsBackOverwriteWhenIndexUpdateFails(t *testing.
 }
 
 func TestFileSystem_WriteFile_RollsBackVersionMetadataWhenIndexUpdateFails(t *testing.T) {
-	fs := setupFileSystem(t)
+	fs := setupStandaloneFileSystem(t)
 	ctx := context.Background()
+	filePath := "/rollback-version.md"
 
-	if err := fs.WriteFile(ctx, "/rollback-version.md", bytes.NewReader([]byte("old content"))); err != nil {
+	if err := fs.WriteFile(ctx, filePath, bytes.NewReader([]byte("old content"))); err != nil {
 		t.Fatalf("Initial WriteFile() error: %v", err)
 	}
 
-	fs.updateFileIndex = func(ctx context.Context, path string, size int64, modTime time.Time, hash string) error {
-		return errors.New("index update failed")
+	store := newWriteTransactionRuntimeTestStore(fs)
+	fs.writeTransactionStore = store
+	indexErr := errors.New("index update failed")
+	store.ensureWriteMetadataFn = func(context.Context, versionstore.WriteMetadataPlan) error {
+		return indexErr
 	}
 
-	err := fs.WriteFile(ctx, "/rollback-version.md", bytes.NewReader([]byte("new content")))
-	if err == nil {
-		t.Fatal("Expected WriteFile() overwrite to fail when file index update fails")
+	err := fs.WriteFile(ctx, filePath, bytes.NewReader([]byte("new content")))
+	if !errors.Is(err, indexErr) {
+		t.Fatalf("WriteFile() error = %v, want %v", err, indexErr)
+	}
+	if errors.Is(err, ErrWriteRecoveryRequired) {
+		t.Fatalf("WriteFile() error = %v, successful rollback must not require recovery", err)
 	}
 
-	versions, versionErr := fs.versions.GetVersions(ctx, "/rollback-version.md")
+	versions, versionErr := fs.versions.GetVersions(ctx, filePath)
 	if versionErr != nil {
 		t.Fatalf("GetVersions() after rollback error: %v", versionErr)
 	}
@@ -1069,7 +2828,7 @@ func TestFileSystem_WriteFile_RollsBackVersionMetadataWhenIndexUpdateFails(t *te
 		t.Fatalf("Expected no historical version metadata after rollback, got %d entries", len(versions))
 	}
 
-	f, openErr := fs.OpenFile(ctx, "/rollback-version.md")
+	f, openErr := fs.OpenFile(ctx, filePath)
 	if openErr != nil {
 		t.Fatalf("OpenFile() after rollback error: %v", openErr)
 	}
@@ -1084,8 +2843,65 @@ func TestFileSystem_WriteFile_RollsBackVersionMetadataWhenIndexUpdateFails(t *te
 	}
 }
 
+func TestFileSystem_WriteFile_CommitsWhenMetadataApplyReturnsPostCommitError(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+	filePath := "/version-add-post-commit.md"
+	oldContent := []byte("old content")
+	oldHash := computeHash(oldContent)
+	if err := fs.WriteFile(ctx, filePath, bytes.NewReader(oldContent)); err != nil {
+		t.Fatalf("initial WriteFile() error: %v", err)
+	}
+
+	store := newWriteTransactionRuntimeTestStore(fs)
+	fs.writeTransactionStore = store
+	addErr := errors.New("version metadata post-commit error")
+	store.ensureWriteMetadataFn = func(
+		callCtx context.Context,
+		plan versionstore.WriteMetadataPlan,
+	) error {
+		if store.ensureCalls > 1 {
+			return store.Store.EnsureWriteMetadataCommitted(callCtx, plan)
+		}
+		return errors.Join(
+			store.Store.EnsureWriteMetadataCommitted(callCtx, plan),
+			addErr,
+			versionstore.ErrWriteMetadataOutcomeUnknown,
+		)
+	}
+
+	err := fs.WriteFile(ctx, filePath, strings.NewReader("new content"))
+	if !errors.Is(err, addErr) ||
+		!errors.Is(err, versionstore.ErrWriteMetadataOutcomeUnknown) ||
+		!isVisibleMutationWarning(err) {
+		t.Fatalf("WriteFile() error = %v, want visible post-commit metadata warning", err)
+	}
+	if errors.Is(err, ErrWriteRecoveryRequired) {
+		t.Fatalf("WriteFile() error = %v, did not want recovery gate after observed metadata commit", err)
+	}
+	versions, versionErr := fs.versions.GetVersions(ctx, filePath)
+	if versionErr != nil {
+		t.Fatalf("GetVersions() error: %v", versionErr)
+	}
+	if len(versions) != 1 || versions[0].Hash != oldHash {
+		t.Fatalf("versions after metadata commit = %+v, want old-content version", versions)
+	}
+	if _, ok := store.objects[oldHash]; !ok {
+		t.Fatalf("version object %s missing after committed metadata outcome", oldHash)
+	}
+	data, readErr := os.ReadFile(fs.workspace.FullPath(filePath))
+	if readErr != nil || string(data) != "new content" {
+		t.Fatalf("visible target after commit = %q, %v; want new content", data, readErr)
+	}
+	_, _, indexedHash, indexErr := fs.versions.GetFileIndex(ctx, filePath)
+	newHash := computeHash([]byte("new content"))
+	if indexErr != nil || indexedHash != newHash {
+		t.Fatalf("file index after commit = %q, %v; want %q", indexedHash, indexErr, newHash)
+	}
+}
+
 func TestFileSystem_WriteFile_KeepsHistoricalObjectWhenVersionMetadataRollbackFails(t *testing.T) {
-	fs := setupFileSystem(t)
+	fs := setupStandaloneFileSystem(t)
 	ctx := context.Background()
 	originalContent := []byte("old content")
 	path := "/rollback-version-delete-fail.md"
@@ -1094,31 +2910,34 @@ func TestFileSystem_WriteFile_KeepsHistoricalObjectWhenVersionMetadataRollbackFa
 	if err := fs.WriteFile(ctx, path, bytes.NewReader(originalContent)); err != nil {
 		t.Fatalf("Initial WriteFile() error: %v", err)
 	}
-
-	deleteVersionCalled := false
-	fs.updateFileIndex = func(ctx context.Context, path string, size int64, modTime time.Time, hash string) error {
-		return errors.New("index update failed")
+	store := newWriteTransactionRuntimeTestStore(fs)
+	fs.writeTransactionStore = store
+	rollbackErr := errors.New("rollback write metadata failed")
+	rollbackCalls := 0
+	store.rollbackWriteMetadataFn = func(
+		context.Context,
+		versionstore.WriteMetadataPlan,
+	) error {
+		rollbackCalls++
+		return rollbackErr
 	}
-	fs.deleteFileVersion = func(ctx context.Context, versionPath, hash string) error {
-		deleteVersionCalled = true
-		if versionPath != path {
-			t.Fatalf("deleteFileVersion() path = %q, want %q", versionPath, path)
+	metadataAppliedErr := errors.New("stop after metadata apply")
+	originalRuntimeHook := writeTransactionRuntimeFaultHook
+	writeTransactionRuntimeFaultHook = func(point string) error {
+		if point == "after-metadata" {
+			return metadataAppliedErr
 		}
-		if hash != originalHash {
-			t.Fatalf("deleteFileVersion() hash = %q, want %q", hash, originalHash)
-		}
-		return errors.New("delete version metadata failed")
+		return originalRuntimeHook(point)
 	}
+	t.Cleanup(func() { writeTransactionRuntimeFaultHook = originalRuntimeHook })
 
 	err := fs.WriteFile(ctx, path, bytes.NewReader([]byte("new content")))
-	if err == nil {
-		t.Fatal("Expected WriteFile() overwrite to fail when version metadata rollback fails")
+	if !errors.Is(err, metadataAppliedErr) || !errors.Is(err, rollbackErr) ||
+		!errors.Is(err, ErrWriteRecoveryRequired) {
+		t.Fatalf("WriteFile() error = %v, want trigger, rollback failure, and recovery gate", err)
 	}
-	if !strings.Contains(err.Error(), "failed to rollback version metadata") {
-		t.Fatalf("expected rollback version metadata failure in error, got %v", err)
-	}
-	if !deleteVersionCalled {
-		t.Fatal("expected rollback to attempt deleting version metadata")
+	if rollbackCalls != 1 {
+		t.Fatalf("metadata rollback calls = %d, want one", rollbackCalls)
 	}
 
 	versions, versionErr := fs.versions.GetVersions(ctx, path)
@@ -1132,11 +2951,7 @@ func TestFileSystem_WriteFile_KeepsHistoricalObjectWhenVersionMetadataRollbackFa
 		t.Fatalf("expected remaining historical version hash %q, got %q", originalHash, versions[0].Hash)
 	}
 
-	hasObject, objectErr := fs.hasVersionObject(ctx, originalHash)
-	if objectErr != nil {
-		t.Fatalf("hasVersionObject() error: %v", objectErr)
-	}
-	if !hasObject {
+	if _, ok := store.objects[originalHash]; !ok {
 		t.Fatal("expected historical version object to remain when metadata rollback fails")
 	}
 
@@ -1153,25 +2968,35 @@ func TestFileSystem_WriteFile_KeepsHistoricalObjectWhenVersionMetadataRollbackFa
 	if string(data) != string(originalContent) {
 		t.Fatalf("Expected original content after rollback, got %q", string(data))
 	}
+	if blockedErr := fs.Mkdir(ctx, "/blocked-after-version-metadata-rollback"); !errors.Is(blockedErr, ErrWriteRecoveryRequired) {
+		t.Fatalf("Mkdir() after version metadata rollback failure error = %v, want ErrWriteRecoveryRequired", blockedErr)
+	}
 }
 
 func TestFileSystem_WriteFile_RollsBackNewFileWhenDirectorySyncFails(t *testing.T) {
-	fs := setupFileSystem(t)
+	fs := setupStandaloneFileSystem(t)
 	ctx := context.Background()
-	originalSyncStoragePathDir := syncStoragePathDir
-	syncStoragePathDir = func(dir string) error {
-		return errors.New("sync dir failed")
+	syncErr := errors.New("sync dir failed")
+	originalRecoveryHook := writeTransactionRecoveryFaultHook
+	var injectOnce sync.Once
+	writeTransactionRecoveryFaultHook = func(point string) error {
+		injected := false
+		if point == "namespace:before-target-parent-sync" {
+			injectOnce.Do(func() { injected = true })
+		}
+		if injected {
+			return syncErr
+		}
+		return originalRecoveryHook(point)
 	}
-	t.Cleanup(func() {
-		syncStoragePathDir = originalSyncStoragePathDir
-	})
+	t.Cleanup(func() { writeTransactionRecoveryFaultHook = originalRecoveryHook })
 
 	err := fs.WriteFile(ctx, "/rollback-sync-new.bin", bytes.NewReader([]byte("new content")))
-	if err == nil {
-		t.Fatal("Expected WriteFile() to fail when parent directory sync fails")
+	if !errors.Is(err, syncErr) {
+		t.Fatalf("WriteFile() error = %v, want parent sync failure", err)
 	}
-	if !strings.Contains(err.Error(), "sync parent directory") {
-		t.Fatalf("expected parent directory sync failure in error, got %v", err)
+	if errors.Is(err, ErrWriteRecoveryRequired) {
+		t.Fatalf("WriteFile() error = %v, successful rollback must not require recovery", err)
 	}
 
 	if _, statErr := fs.Stat(ctx, "/rollback-sync-new.bin"); statErr != ErrNotFound {
@@ -1180,27 +3005,34 @@ func TestFileSystem_WriteFile_RollsBackNewFileWhenDirectorySyncFails(t *testing.
 }
 
 func TestFileSystem_WriteFile_RollsBackOverwriteWhenDirectorySyncFails(t *testing.T) {
-	fs := setupFileSystem(t)
+	fs := setupStandaloneFileSystem(t)
 	ctx := context.Background()
 
 	if err := fs.WriteFile(ctx, "/rollback-sync-existing.bin", bytes.NewReader([]byte("old content"))); err != nil {
 		t.Fatalf("Initial WriteFile() error: %v", err)
 	}
 
-	originalSyncStoragePathDir := syncStoragePathDir
-	syncStoragePathDir = func(dir string) error {
-		return errors.New("sync dir failed")
+	syncErr := errors.New("sync dir failed")
+	originalRecoveryHook := writeTransactionRecoveryFaultHook
+	var injectOnce sync.Once
+	writeTransactionRecoveryFaultHook = func(point string) error {
+		injected := false
+		if point == "namespace:before-source-parent-sync" {
+			injectOnce.Do(func() { injected = true })
+		}
+		if injected {
+			return syncErr
+		}
+		return originalRecoveryHook(point)
 	}
-	t.Cleanup(func() {
-		syncStoragePathDir = originalSyncStoragePathDir
-	})
+	t.Cleanup(func() { writeTransactionRecoveryFaultHook = originalRecoveryHook })
 
 	err := fs.WriteFile(ctx, "/rollback-sync-existing.bin", bytes.NewReader([]byte("new content")))
-	if err == nil {
-		t.Fatal("Expected WriteFile() overwrite to fail when parent directory sync fails")
+	if !errors.Is(err, syncErr) {
+		t.Fatalf("WriteFile() error = %v, want atomic exchange sync failure", err)
 	}
-	if !strings.Contains(err.Error(), "sync parent directory") {
-		t.Fatalf("expected parent directory sync failure in error, got %v", err)
+	if errors.Is(err, ErrWriteRecoveryRequired) {
+		t.Fatalf("WriteFile() error = %v, successful rollback must not require recovery", err)
 	}
 
 	f, openErr := fs.OpenFile(ctx, "/rollback-sync-existing.bin")
@@ -1219,27 +3051,35 @@ func TestFileSystem_WriteFile_RollsBackOverwriteWhenDirectorySyncFails(t *testin
 }
 
 func TestFileSystem_WriteFile_RollsBackVersionMetadataWhenDirectorySyncFails(t *testing.T) {
-	fs := setupFileSystem(t)
+	fs := setupStandaloneFileSystem(t)
 	ctx := context.Background()
 
 	if err := fs.WriteFile(ctx, "/rollback-sync-version.md", bytes.NewReader([]byte("old content"))); err != nil {
 		t.Fatalf("Initial WriteFile() error: %v", err)
 	}
 
-	originalSyncStoragePathDir := syncStoragePathDir
-	syncStoragePathDir = func(dir string) error {
-		return errors.New("sync dir failed")
+	fs.writeTransactionStore = newWriteTransactionRuntimeTestStore(fs)
+	syncErr := errors.New("sync dir failed")
+	originalRecoveryHook := writeTransactionRecoveryFaultHook
+	var injectOnce sync.Once
+	writeTransactionRecoveryFaultHook = func(point string) error {
+		injected := false
+		if point == "namespace:before-source-parent-sync" {
+			injectOnce.Do(func() { injected = true })
+		}
+		if injected {
+			return syncErr
+		}
+		return originalRecoveryHook(point)
 	}
-	t.Cleanup(func() {
-		syncStoragePathDir = originalSyncStoragePathDir
-	})
+	t.Cleanup(func() { writeTransactionRecoveryFaultHook = originalRecoveryHook })
 
 	err := fs.WriteFile(ctx, "/rollback-sync-version.md", bytes.NewReader([]byte("new content")))
-	if err == nil {
-		t.Fatal("Expected WriteFile() overwrite to fail when parent directory sync fails")
+	if !errors.Is(err, syncErr) {
+		t.Fatalf("WriteFile() error = %v, want atomic exchange sync failure", err)
 	}
-	if !strings.Contains(err.Error(), "sync parent directory") {
-		t.Fatalf("expected parent directory sync failure in error, got %v", err)
+	if errors.Is(err, ErrWriteRecoveryRequired) {
+		t.Fatalf("WriteFile() error = %v, successful rollback must not require recovery", err)
 	}
 
 	versions, versionErr := fs.versions.GetVersions(ctx, "/rollback-sync-version.md")
@@ -1265,87 +3105,85 @@ func TestFileSystem_WriteFile_RollsBackVersionMetadataWhenDirectorySyncFails(t *
 	}
 }
 
-func TestFileSystem_WriteFile_RollsBackNewFileWhenCreatedDirectoryTreeSyncFails(t *testing.T) {
-	fs := setupFileSystem(t)
+func TestFileSystem_WriteFile_RollsBackNewFileWhenDeepTargetParentSyncFails(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
 	ctx := context.Background()
-	blockedDir := fs.workspace.FullPath("/deep")
-	originalSyncStoragePathDir := syncStoragePathDir
-	syncStoragePathDir = func(dir string) error {
-		if dir == blockedDir {
-			return errors.New("sync dir failed")
-		}
-		return nil
+	if err := fs.Mkdir(ctx, "/deep"); err != nil {
+		t.Fatalf("Mkdir(/deep) error: %v", err)
 	}
-	t.Cleanup(func() {
-		syncStoragePathDir = originalSyncStoragePathDir
-	})
+	if err := fs.Mkdir(ctx, "/deep/path"); err != nil {
+		t.Fatalf("Mkdir(/deep/path) error: %v", err)
+	}
+	syncErr := errors.New("sync dir failed")
+	originalRecoveryHook := writeTransactionRecoveryFaultHook
+	var injectOnce sync.Once
+	writeTransactionRecoveryFaultHook = func(point string) error {
+		injected := false
+		if point == "namespace:before-target-parent-sync" {
+			injectOnce.Do(func() { injected = true })
+		}
+		if injected {
+			return syncErr
+		}
+		return originalRecoveryHook(point)
+	}
+	t.Cleanup(func() { writeTransactionRecoveryFaultHook = originalRecoveryHook })
 
 	err := fs.WriteFile(ctx, "/deep/path/rollback-sync-tree.bin", bytes.NewReader([]byte("new content")))
-	if err == nil {
-		t.Fatal("Expected WriteFile() to fail when created directory tree sync fails")
+	if !errors.Is(err, syncErr) {
+		t.Fatalf("WriteFile() error = %v, want deep target parent sync failure", err)
 	}
-	if !strings.Contains(err.Error(), "sync created directory tree") {
-		t.Fatalf("expected created directory tree sync failure in error, got %v", err)
+	if errors.Is(err, ErrWriteRecoveryRequired) {
+		t.Fatalf("WriteFile() error = %v, successful rollback must not require recovery", err)
 	}
 
 	if _, statErr := fs.Stat(ctx, "/deep/path/rollback-sync-tree.bin"); statErr != ErrNotFound {
 		t.Fatalf("Expected new file to be removed after rollback, got %v", statErr)
 	}
-	if _, statErr := os.Stat(fs.workspace.FullPath("/deep/path")); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("Expected created nested directory to be removed after rollback, got %v", statErr)
+	if info, statErr := os.Stat(fs.workspace.FullPath("/deep/path")); statErr != nil || !info.IsDir() {
+		t.Fatalf("existing nested directory = %v, %v; want preserved", info, statErr)
 	}
-	if _, statErr := os.Stat(fs.workspace.FullPath("/deep")); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("Expected created parent directory to be removed after rollback, got %v", statErr)
+	if info, statErr := os.Stat(fs.workspace.FullPath("/deep")); statErr != nil || !info.IsDir() {
+		t.Fatalf("existing parent directory = %v, %v; want preserved", info, statErr)
 	}
 }
 
-func TestFileSystem_WriteFile_ReturnsRollbackCleanupFailureWhenVersionRecordFails(t *testing.T) {
-	fs := setupFileSystem(t)
+func TestFileSystem_WriteFile_ReturnsRecoveryGateWhenCASRollbackCleanupFails(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
 	ctx := context.Background()
 	oldContent := []byte("old content " + mustGenerateStorageID(t))
 	oldHash := computeHash(oldContent)
-	exists, err := fs.versions.HasObject(ctx, oldHash)
-	if err != nil {
-		t.Fatalf("HasObject(oldHash) error: %v", err)
-	}
-	if exists {
-		t.Fatalf("expected unique test hash %s to be absent before write", oldHash)
-	}
 
 	if err := fs.WriteFile(ctx, "/rollback-cleanup.md", bytes.NewReader(oldContent)); err != nil {
 		t.Fatalf("Initial WriteFile() error: %v", err)
 	}
 
-	deleteCalls := 0
-	fs.addFileVersion = func(ctx context.Context, path, hash string, size int64, comment string) error {
-		if path != "/rollback-cleanup.md" {
-			t.Fatalf("unexpected path %q", path)
-		}
-		if hash != oldHash {
-			t.Fatalf("unexpected hash %q", hash)
-		}
-		return errors.New("record version failed")
+	store := newWriteTransactionRuntimeTestStore(fs)
+	fs.writeTransactionStore = store
+	recordErr := errors.New("record version failed")
+	store.ensureWriteMetadataFn = func(context.Context, versionstore.WriteMetadataPlan) error {
+		return recordErr
 	}
-	fs.deleteVersionObject = func(ctx context.Context, hash string) error {
+	deleteCalls := 0
+	deleteErr := errors.New("delete object failed")
+	store.deleteObjectFn = func(_ context.Context, hash string) error {
 		deleteCalls++
 		if hash != oldHash {
 			t.Fatalf("unexpected delete hash %q", hash)
 		}
-		return errors.New("delete object failed")
+		return deleteErr
 	}
 
-	err = fs.WriteFile(ctx, "/rollback-cleanup.md", bytes.NewReader([]byte("new content")))
-	if err == nil {
-		t.Fatal("Expected WriteFile() to fail when version rollback cleanup fails")
-	}
-	if !strings.Contains(err.Error(), "failed to record version") {
-		t.Fatalf("expected version record failure in error, got %v", err)
-	}
-	if !strings.Contains(err.Error(), "failed to cleanup version object during rollback") {
-		t.Fatalf("expected rollback cleanup failure in error, got %v", err)
+	err := fs.WriteFile(ctx, "/rollback-cleanup.md", bytes.NewReader([]byte("new content")))
+	if !errors.Is(err, recordErr) || !errors.Is(err, deleteErr) ||
+		!errors.Is(err, ErrWriteRecoveryRequired) {
+		t.Fatalf("WriteFile() error = %v, want metadata, CAS cleanup, and recovery errors", err)
 	}
 	if deleteCalls != 1 {
-		t.Fatalf("expected deleteVersionObject to be attempted once, got %d", deleteCalls)
+		t.Fatalf("expected DeleteObject to be attempted once, got %d", deleteCalls)
+	}
+	if _, ok := store.objects[oldHash]; !ok {
+		t.Fatalf("CAS object %s missing after failed rollback cleanup", oldHash)
 	}
 
 	versions, versionErr := fs.versions.GetVersions(ctx, "/rollback-cleanup.md")
@@ -1368,6 +3206,9 @@ func TestFileSystem_WriteFile_ReturnsRollbackCleanupFailureWhenVersionRecordFail
 	}
 	if string(data) != string(oldContent) {
 		t.Fatalf("Expected original content after rollback, got %q", string(data))
+	}
+	if mkdirErr := fs.Mkdir(ctx, "/blocked-after-object-cleanup-failure"); !errors.Is(mkdirErr, ErrWriteRecoveryRequired) {
+		t.Fatalf("Mkdir() after CAS rollback cleanup failure error = %v, want recovery gate", mkdirErr)
 	}
 }
 
@@ -2207,6 +4048,10 @@ func TestFileSystem_DeleteAuthorizationLinearizesConcurrentDescendantWrite(t *te
 	writeDone := make(chan error, 1)
 	go func() {
 		close(writeStarted)
+		if err := fs.Mkdir(ctx, "/authorized-delete"); err != nil {
+			writeDone <- err
+			return
+		}
 		writeDone <- fs.WriteFile(ctx, "/authorized-delete/denied.txt", bytes.NewReader([]byte("denied")))
 	}()
 	<-writeStarted
@@ -4411,6 +6256,9 @@ func TestFileSystem_PermanentDelete_DoesNotDeleteSharedVersionObject(t *testing.
 		t.Fatalf("expected unique shared hash %s to be absent before writes", sharedHash)
 	}
 
+	if err := fs.Mkdir(ctx, "/permanent-shared"); err != nil {
+		t.Fatalf("Mkdir(parent) error: %v", err)
+	}
 	if err := fs.WriteFile(ctx, "/permanent-shared/a.txt", bytes.NewReader(sharedContent)); err != nil {
 		t.Fatalf("WriteFile(a v1) error: %v", err)
 	}
@@ -5062,6 +6910,12 @@ func TestFileSystem_RestoreFromTrash_RejectsSymlinkParentWithoutCreatingOutsideD
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 
+	if err := fs.Mkdir(ctx, "/restore-link"); err != nil {
+		t.Fatalf("Mkdir(parent) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/restore-link/nested"); err != nil {
+		t.Fatalf("Mkdir(nested) error: %v", err)
+	}
 	if err := fs.WriteFile(ctx, "/restore-link/nested/original.txt", bytes.NewReader([]byte("restore me"))); err != nil {
 		t.Fatalf("WriteFile() error: %v", err)
 	}
@@ -8595,9 +10449,209 @@ func TestFileSystem_RestoreVersion_RollsBackWhenIndexUpdateFails(t *testing.T) {
 	}
 }
 
+func TestFileSystem_RestoreVersion_CommitsWhenMetadataApplyReturnsPostCommitError(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+	historicalContent := []byte("restore-historical")
+	currentContent := []byte("restore-current")
+	if err := fs.WriteFile(ctx, "/restore-post-commit.txt", bytes.NewReader(historicalContent)); err != nil {
+		t.Fatalf("WriteFile(historical) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/restore-post-commit.txt", bytes.NewReader(currentContent)); err != nil {
+		t.Fatalf("WriteFile(current) error: %v", err)
+	}
+	versionsBefore, err := fs.ListVersions(ctx, "/restore-post-commit.txt")
+	if err != nil {
+		t.Fatalf("ListVersions(before) error: %v", err)
+	}
+	historicalHash := ""
+	for _, version := range versionsBefore {
+		if version.Comment != "(current)" {
+			historicalHash = version.Hash
+			break
+		}
+	}
+	if historicalHash == "" {
+		t.Fatal("historical version hash is unavailable")
+	}
+
+	postCommitErr := errors.New("index committed before transport error")
+	store := newWriteTransactionRuntimeTestStore(fs)
+	fs.writeTransactionStore = store
+	store.ensureWriteMetadataFn = func(
+		callCtx context.Context,
+		plan versionstore.WriteMetadataPlan,
+	) error {
+		if store.ensureCalls > 1 {
+			return store.Store.EnsureWriteMetadataCommitted(callCtx, plan)
+		}
+		return errors.Join(
+			store.Store.EnsureWriteMetadataCommitted(callCtx, plan),
+			postCommitErr,
+			versionstore.ErrWriteMetadataOutcomeUnknown,
+		)
+	}
+
+	err = fs.RestoreVersion(ctx, "/restore-post-commit.txt", historicalHash)
+	if !errors.Is(err, postCommitErr) ||
+		!errors.Is(err, versionstore.ErrWriteMetadataOutcomeUnknown) ||
+		!isVisibleMutationWarning(err) {
+		t.Fatalf("RestoreVersion() error = %v, want visible post-commit metadata warning", err)
+	}
+	if errors.Is(err, ErrWriteRecoveryRequired) {
+		t.Fatalf("RestoreVersion() error = %v, did not want recovery gate", err)
+	}
+	file, err := fs.OpenFile(ctx, "/restore-post-commit.txt")
+	if err != nil {
+		t.Fatalf("OpenFile(after rollback) error: %v", err)
+	}
+	data, readErr := io.ReadAll(file)
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil {
+		t.Fatalf("read current content error: %v", errors.Join(readErr, closeErr))
+	}
+	if !bytes.Equal(data, historicalContent) {
+		t.Fatalf("content after commit = %q, want %q", data, historicalContent)
+	}
+	indexedSize, _, indexedHash, indexErr := fs.versions.GetFileIndex(ctx, "/restore-post-commit.txt")
+	if indexErr != nil {
+		t.Fatalf("GetFileIndex(after rollback) error: %v", indexErr)
+	}
+	if indexedSize != int64(len(historicalContent)) || indexedHash != computeHash(historicalContent) {
+		t.Fatalf(
+			"index after commit = (%d, %q), want (%d, %q)",
+			indexedSize,
+			indexedHash,
+			len(historicalContent),
+			computeHash(historicalContent),
+		)
+	}
+	versionsAfter, err := fs.ListVersions(ctx, "/restore-post-commit.txt")
+	if err != nil {
+		t.Fatalf("ListVersions(after) error: %v", err)
+	}
+	if len(versionsAfter) != len(versionsBefore)+1 {
+		t.Fatalf("version count after commit = %d, want %d", len(versionsAfter), len(versionsBefore)+1)
+	}
+	foundSafetySnapshot := false
+	for _, version := range versionsAfter {
+		if version.Comment == "before restore" && version.Hash == computeHash(currentContent) {
+			foundSafetySnapshot = true
+		}
+	}
+	if !foundSafetySnapshot {
+		t.Fatal("committed restore is missing the current-content safety snapshot")
+	}
+}
+
+func TestFileSystem_RestoreVersion_PreservesExternalReplacementBeforeTargetCapture(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+	filePath := "/restore-external-replacement.txt"
+	if err := fs.WriteFile(ctx, filePath, strings.NewReader("historical")); err != nil {
+		t.Fatalf("WriteFile(historical) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, filePath, strings.NewReader("current")); err != nil {
+		t.Fatalf("WriteFile(current) error: %v", err)
+	}
+	versions, err := fs.ListVersions(ctx, filePath)
+	if err != nil {
+		t.Fatalf("ListVersions() error: %v", err)
+	}
+	historicalHash := ""
+	for _, version := range versions {
+		if version.Comment != "(current)" {
+			historicalHash = version.Hash
+			break
+		}
+	}
+	if historicalHash == "" {
+		t.Fatal("historical version hash is unavailable")
+	}
+
+	targetPath := fs.workspace.FullPath(filePath)
+	displacedPath := fs.workspace.FullPath("/restore-displaced-current.txt")
+	originalRuntimeHook := writeTransactionRuntimeFaultHook
+	replaced := false
+	writeTransactionRuntimeFaultHook = func(point string) error {
+		if replaced || point != "before-plan" {
+			return originalRuntimeHook(point)
+		}
+		replaced = true
+		if err := os.Rename(targetPath, displacedPath); err != nil {
+			return err
+		}
+		return os.WriteFile(targetPath, []byte("external replacement"), 0o644)
+	}
+	t.Cleanup(func() { writeTransactionRuntimeFaultHook = originalRuntimeHook })
+
+	err = fs.RestoreVersion(ctx, filePath, historicalHash)
+	if !errors.Is(err, ErrWriteConflict) {
+		t.Fatalf("RestoreVersion() error = %v, want ErrWriteConflict", err)
+	}
+	if !replaced {
+		t.Fatal("external replacement hook did not run")
+	}
+	data, readErr := os.ReadFile(targetPath)
+	if readErr != nil || string(data) != "external replacement" {
+		t.Fatalf("target after conflict = %q, %v; want external replacement", data, readErr)
+	}
+	displaced, readErr := os.ReadFile(displacedPath)
+	if readErr != nil || string(displaced) != "current" {
+		t.Fatalf("displaced current content = %q, %v; want current", displaced, readErr)
+	}
+}
+
+func TestFileSystem_RestoreVersion_RejectsCurrentFileAboveSafetySnapshotLimit(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+	filePath := "/restore-large-current.bin"
+	historicalData := []byte("historical")
+	historicalHash, err := fs.versions.PutObject(ctx, historicalData)
+	if err != nil {
+		t.Fatalf("PutObject() error: %v", err)
+	}
+	if err := fs.versions.AddVersion(ctx, filePath, historicalHash, int64(len(historicalData)), "historical"); err != nil {
+		t.Fatalf("AddVersion() error: %v", err)
+	}
+	currentPath := fs.workspace.FullPath(filePath)
+	current, err := os.OpenFile(currentPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatalf("OpenFile(current) error: %v", err)
+	}
+	oversized := versionstore.MaxVersionObjectSize + 1
+	truncateErr := current.Truncate(oversized)
+	closeErr := current.Close()
+	if truncateErr != nil || closeErr != nil {
+		t.Fatalf("create sparse current error: %v", errors.Join(truncateErr, closeErr))
+	}
+
+	err = fs.RestoreVersion(ctx, filePath, historicalHash)
+	if !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("RestoreVersion() error = %v, want ErrFileTooLarge", err)
+	}
+	info, statErr := os.Stat(currentPath)
+	if statErr != nil {
+		t.Fatalf("Stat(current) error: %v", statErr)
+	}
+	if info.Size() != oversized {
+		t.Fatalf("current size after rejected restore = %d, want %d", info.Size(), oversized)
+	}
+	entries, readErr := os.ReadDir(filepath.Join(fs.config.InternalRoot, writeStagingDir))
+	if readErr != nil {
+		t.Fatalf("ReadDir(write staging) error: %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("write staging after oversized rejection = %v, want empty", entries)
+	}
+}
+
 func TestFileSystem_GetVersion_RejectsHashFromDifferentPath(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/docs"); err != nil {
+		t.Fatalf("Mkdir(/docs) error: %v", err)
+	}
 
 	if err := fs.WriteFile(ctx, "/docs/a.txt", bytes.NewReader([]byte("a-v1"))); err != nil {
 		t.Fatalf("WriteFile(a v1) error: %v", err)
@@ -8669,6 +10723,9 @@ func TestFileSystem_GetVersion_PropagatesCurrentFileReadError(t *testing.T) {
 func TestFileSystem_RestoreVersion_RejectsHashFromDifferentPath(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/docs"); err != nil {
+		t.Fatalf("Mkdir(/docs) error: %v", err)
+	}
 
 	if err := fs.WriteFile(ctx, "/docs/a.txt", bytes.NewReader([]byte("a-v1"))); err != nil {
 		t.Fatalf("WriteFile(a v1) error: %v", err)
@@ -8718,6 +10775,9 @@ func TestFileSystem_RestoreVersion_RejectsHashFromDifferentPath(t *testing.T) {
 func TestFileSystem_RestoreVersion_AllowsCurrentHashWithoutStoredObject(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/docs"); err != nil {
+		t.Fatalf("Mkdir(/docs) error: %v", err)
+	}
 
 	if err := fs.WriteFile(ctx, "/docs/current.txt", bytes.NewReader([]byte("current-content"))); err != nil {
 		t.Fatalf("WriteFile() error: %v", err)
@@ -8752,6 +10812,9 @@ func TestFileSystem_RestoreVersion_AllowsCurrentHashWithoutStoredObject(t *testi
 func TestFileSystem_RestoreVersion_PreservesReadableFilePermissions(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/docs"); err != nil {
+		t.Fatalf("Mkdir(/docs) error: %v", err)
+	}
 
 	if err := fs.WriteFile(ctx, "/docs/perm.txt", bytes.NewReader([]byte("v1"))); err != nil {
 		t.Fatalf("WriteFile(v1) error: %v", err)
@@ -8921,22 +10984,33 @@ func TestFileSystem_RestoreVersion_ReturnsErrNotDirWhenParentIsFile(t *testing.T
 func TestFileSystem_RestoreVersion_FailsWhenCurrentSnapshotCannotBeRecorded(t *testing.T) {
 	tests := []struct {
 		name   string
-		inject func(fs *FileSystem)
+		inject func(*writeTransactionRuntimeMetadataFaultStore) error
 	}{
 		{
 			name: "put object failure",
-			inject: func(fs *FileSystem) {
-				fs.putVersionObject = func(ctx context.Context, data []byte) (string, error) {
-					return "", errors.New("store current version failed")
+			inject: func(store *writeTransactionRuntimeMetadataFaultStore) error {
+				fault := errors.New("store current version failed")
+				store.putObjectExpectedFn = func(
+					context.Context,
+					[]byte,
+					string,
+				) (versionstore.ObjectPutResult, error) {
+					return versionstore.ObjectPutResult{}, fault
 				}
+				return fault
 			},
 		},
 		{
 			name: "add version failure",
-			inject: func(fs *FileSystem) {
-				fs.addFileVersion = func(ctx context.Context, path, hash string, size int64, comment string) error {
-					return errors.New("record current version failed")
+			inject: func(store *writeTransactionRuntimeMetadataFaultStore) error {
+				fault := errors.New("record current version failed")
+				store.ensureWriteMetadataFn = func(
+					context.Context,
+					versionstore.WriteMetadataPlan,
+				) error {
+					return fault
 				}
+				return fault
 			},
 		},
 	}
@@ -8969,11 +11043,16 @@ func TestFileSystem_RestoreVersion_FailsWhenCurrentSnapshotCannotBeRecorded(t *t
 				t.Fatal("Expected at least one historical version")
 			}
 
-			tt.inject(fs)
+			store := newWriteTransactionRuntimeTestStore(fs)
+			fs.writeTransactionStore = store
+			wantErr := tt.inject(store)
 
 			err = fs.RestoreVersion(ctx, "/restore-snapshot.txt", historicalHash)
-			if err == nil {
-				t.Fatal("Expected RestoreVersion() to fail when current snapshot cannot be recorded")
+			if !errors.Is(err, wantErr) {
+				t.Fatalf("RestoreVersion() error = %v, want %v", err, wantErr)
+			}
+			if errors.Is(err, ErrWriteRecoveryRequired) {
+				t.Fatalf("RestoreVersion() error = %v, successful rollback must not require recovery", err)
 			}
 
 			f, openErr := fs.OpenFile(ctx, "/restore-snapshot.txt")
@@ -9038,20 +11117,28 @@ func TestFileSystem_RestoreVersion_CleansUpCurrentSnapshotObjectWhenVersionRecor
 		t.Fatal("Expected at least one historical version")
 	}
 
-	fs.addFileVersion = func(ctx context.Context, path, hash string, size int64, comment string) error {
-		return errors.New("record current version failed")
+	store := newWriteTransactionRuntimeTestStore(fs)
+	fs.writeTransactionStore = store
+	recordErr := errors.New("record current version failed")
+	store.ensureWriteMetadataFn = func(
+		_ context.Context,
+		plan versionstore.WriteMetadataPlan,
+	) error {
+		if plan.VersionAfter == nil || plan.VersionAfter.Comment != "before restore" {
+			t.Fatalf("version metadata plan = %+v, want before restore version", plan.VersionAfter)
+		}
+		return recordErr
 	}
 
 	err = fs.RestoreVersion(ctx, "/restore-cleanup.txt", historicalHash)
-	if err == nil {
-		t.Fatal("Expected RestoreVersion() to fail when current snapshot record fails")
+	if !errors.Is(err, recordErr) {
+		t.Fatalf("RestoreVersion() error = %v, want %v", err, recordErr)
+	}
+	if errors.Is(err, ErrWriteRecoveryRequired) {
+		t.Fatalf("RestoreVersion() error = %v, successful rollback must not require recovery", err)
 	}
 
-	exists, err = fs.versions.HasObject(ctx, currentHash)
-	if err != nil {
-		t.Fatalf("HasObject(currentHash) after failed restore error: %v", err)
-	}
-	if exists {
+	if _, exists := store.objects[currentHash]; exists {
 		t.Fatalf("expected current snapshot object %s to be cleaned up after failed restore", currentHash)
 	}
 
@@ -9097,6 +11184,13 @@ func TestFileSystem_RestoreVersion_RollsBackCurrentSnapshotVersionWhenIndexUpdat
 	if err != nil {
 		t.Fatalf("ListVersions() before restore error: %v", err)
 	}
+	indexSizeBefore, indexModTimeBefore, indexHashBefore, err := fs.versions.GetFileIndex(
+		ctx,
+		"/restore-index-cleanup.txt",
+	)
+	if err != nil {
+		t.Fatalf("GetFileIndex() before restore error: %v", err)
+	}
 
 	var historicalHash string
 	for _, version := range versionsBefore {
@@ -9109,20 +11203,47 @@ func TestFileSystem_RestoreVersion_RollsBackCurrentSnapshotVersionWhenIndexUpdat
 		t.Fatal("Expected at least one historical version")
 	}
 
-	fs.updateFileIndex = func(ctx context.Context, path string, size int64, modTime time.Time, hash string) error {
-		return errors.New("index update failed")
+	store := newWriteTransactionRuntimeTestStore(fs)
+	fs.writeTransactionStore = store
+	indexErr := errors.New("index update failed")
+	store.ensureWriteMetadataFn = func(
+		callCtx context.Context,
+		plan versionstore.WriteMetadataPlan,
+	) error {
+		if plan.IndexAfter.Path != "/restore-index-cleanup.txt" {
+			t.Fatalf("index metadata path = %q, want restore target", plan.IndexAfter.Path)
+		}
+		return store.Store.EnsureWriteMetadataCommitted(callCtx, plan)
 	}
+	rollbackCalls := 0
+	store.rollbackWriteMetadataFn = func(
+		callCtx context.Context,
+		plan versionstore.WriteMetadataPlan,
+	) error {
+		rollbackCalls++
+		return store.Store.RollbackWriteMetadata(callCtx, plan)
+	}
+	originalRuntimeHook := writeTransactionRuntimeFaultHook
+	writeTransactionRuntimeFaultHook = func(point string) error {
+		if point == "after-metadata" {
+			return indexErr
+		}
+		return originalRuntimeHook(point)
+	}
+	t.Cleanup(func() { writeTransactionRuntimeFaultHook = originalRuntimeHook })
 
 	err = fs.RestoreVersion(ctx, "/restore-index-cleanup.txt", historicalHash)
-	if err == nil {
-		t.Fatal("Expected RestoreVersion() to fail when file index update fails")
+	if !errors.Is(err, indexErr) {
+		t.Fatalf("RestoreVersion() error = %v, want %v", err, indexErr)
+	}
+	if errors.Is(err, ErrWriteRecoveryRequired) {
+		t.Fatalf("RestoreVersion() error = %v, successful rollback must not require recovery", err)
+	}
+	if rollbackCalls != 1 {
+		t.Fatalf("metadata rollback calls = %d, want one", rollbackCalls)
 	}
 
-	exists, err = fs.versions.HasObject(ctx, currentHash)
-	if err != nil {
-		t.Fatalf("HasObject(currentHash) after failed restore error: %v", err)
-	}
-	if exists {
+	if _, exists := store.objects[currentHash]; exists {
 		t.Fatalf("expected current snapshot object %s to be cleaned up after failed restore", currentHash)
 	}
 
@@ -9133,10 +11254,33 @@ func TestFileSystem_RestoreVersion_RollsBackCurrentSnapshotVersionWhenIndexUpdat
 	if len(versionsAfter) != len(versionsBefore) {
 		t.Fatalf("expected version count to remain %d after failed restore, got %d", len(versionsBefore), len(versionsAfter))
 	}
+	if !slices.Equal(versionsAfter, versionsBefore) {
+		t.Fatalf("versions after rollback = %+v, want before-state %+v", versionsAfter, versionsBefore)
+	}
 	for _, version := range versionsAfter {
 		if version.Comment == "before restore" {
 			t.Fatalf("expected failed restore not to leave before restore version, got %#v", version)
 		}
+	}
+	indexSizeAfter, indexModTimeAfter, indexHashAfter, indexErr := fs.versions.GetFileIndex(
+		ctx,
+		"/restore-index-cleanup.txt",
+	)
+	if indexErr != nil {
+		t.Fatalf("GetFileIndex() after rollback error: %v", indexErr)
+	}
+	if indexSizeAfter != indexSizeBefore ||
+		!indexModTimeAfter.Equal(indexModTimeBefore) ||
+		indexHashAfter != indexHashBefore {
+		t.Fatalf(
+			"index after rollback = (%d, %v, %q), want before-state (%d, %v, %q)",
+			indexSizeAfter,
+			indexModTimeAfter,
+			indexHashAfter,
+			indexSizeBefore,
+			indexModTimeBefore,
+			indexHashBefore,
+		)
 	}
 
 	reader, err := fs.OpenFile(ctx, "/restore-index-cleanup.txt")
@@ -9154,7 +11298,7 @@ func TestFileSystem_RestoreVersion_RollsBackCurrentSnapshotVersionWhenIndexUpdat
 	}
 }
 
-func TestFileSystem_RestoreVersion_ReturnsWarningWhenWorkspaceSyncFailsAfterVisibleRestore(t *testing.T) {
+func TestFileSystem_RestoreVersion_RollsBackWhenWorkspaceSyncFailsAfterVisiblePublish(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 
@@ -9184,17 +11328,29 @@ func TestFileSystem_RestoreVersion_ReturnsWarningWhenWorkspaceSyncFailsAfterVisi
 		t.Fatal("expected at least one historical version")
 	}
 
-	fs.writeWorkspacePath = func(ctx context.Context, name string, data []byte) error {
-		if err := os.WriteFile(fs.workspace.FullPath(name), data, 0644); err != nil {
-			return err
+	syncErr := errors.New("failed to sync parent directory")
+	store := newWriteTransactionRuntimeTestStore(fs)
+	fs.writeTransactionStore = store
+	originalRecoveryHook := writeTransactionRecoveryFaultHook
+	var injectOnce sync.Once
+	writeTransactionRecoveryFaultHook = func(point string) error {
+		injected := false
+		if point == "namespace:before-source-parent-sync" {
+			injectOnce.Do(func() { injected = true })
 		}
-		return workspace.WrapVisibleMutationWarning(errors.New("failed to sync parent directory"))
+		if injected {
+			return syncErr
+		}
+		return originalRecoveryHook(point)
 	}
+	t.Cleanup(func() { writeTransactionRecoveryFaultHook = originalRecoveryHook })
 
 	err = fs.RestoreVersion(ctx, "/restore-warning.txt", historicalHash)
-	var warningErr *VisibleMutationWarningError
-	if !errors.As(err, &warningErr) {
-		t.Fatalf("RestoreVersion() error = %v, want VisibleMutationWarningError", err)
+	if !errors.Is(err, syncErr) {
+		t.Fatalf("RestoreVersion() error = %v, want sync failure", err)
+	}
+	if errors.Is(err, ErrWriteRecoveryRequired) {
+		t.Fatalf("RestoreVersion() error = %v, successful rollback must not require recovery", err)
 	}
 
 	reader, err := fs.OpenFile(ctx, "/restore-warning.txt")
@@ -9207,23 +11363,21 @@ func TestFileSystem_RestoreVersion_ReturnsWarningWhenWorkspaceSyncFailsAfterVisi
 	if err != nil {
 		t.Fatalf("ReadAll() after warning error: %v", err)
 	}
-	if !bytes.Equal(data, historicalContent) {
-		t.Fatalf("expected restored content after warning, got %q", string(data))
+	if !bytes.Equal(data, currentContent) {
+		t.Fatalf("expected pre-restore content after rollback, got %q", string(data))
 	}
 
 	versionsAfter, err := fs.ListVersions(ctx, "/restore-warning.txt")
 	if err != nil {
 		t.Fatalf("ListVersions() after warning error: %v", err)
 	}
-	currentVersionHash := ""
-	for _, version := range versionsAfter {
-		if version.Comment == "(current)" {
-			currentVersionHash = version.Hash
-			break
-		}
+	if len(versionsAfter) != len(versionsBefore) {
+		t.Fatalf("version count after rollback = %d, want %d", len(versionsAfter), len(versionsBefore))
 	}
-	if currentVersionHash != historicalHash {
-		t.Fatalf("expected current version hash %q after warning, got %q", historicalHash, currentVersionHash)
+	for _, version := range versionsAfter {
+		if version.Comment == "before restore" {
+			t.Fatalf("failed restore retained safety snapshot metadata: %#v", version)
+		}
 	}
 }
 
@@ -9267,13 +11421,26 @@ func TestFileSystem_RestoreVersion_DoesNotDeletePreExistingCurrentSnapshotVersio
 		t.Fatal("expected current snapshot hash to already exist in historical versions")
 	}
 
-	fs.updateFileIndex = func(ctx context.Context, path string, size int64, modTime time.Time, hash string) error {
-		return errors.New("index update failed")
+	store := newWriteTransactionRuntimeTestStore(fs)
+	store.objects[currentHash] = append([]byte(nil), firstContent...)
+	fs.writeTransactionStore = store
+	indexErr := errors.New("index update failed")
+	store.ensureWriteMetadataFn = func(
+		_ context.Context,
+		plan versionstore.WriteMetadataPlan,
+	) error {
+		if plan.IndexAfter.Path != "/restore-existing-snapshot.txt" {
+			t.Fatalf("index metadata path = %q, want restore target", plan.IndexAfter.Path)
+		}
+		return indexErr
 	}
 
 	err = fs.RestoreVersion(ctx, "/restore-existing-snapshot.txt", historicalHash)
-	if err == nil {
-		t.Fatal("expected RestoreVersion() to fail when file index update fails")
+	if !errors.Is(err, indexErr) {
+		t.Fatalf("RestoreVersion() error = %v, want %v", err, indexErr)
+	}
+	if errors.Is(err, ErrWriteRecoveryRequired) {
+		t.Fatalf("RestoreVersion() error = %v, successful rollback must not require recovery", err)
 	}
 
 	versionsAfter, err := fs.ListVersions(ctx, "/restore-existing-snapshot.txt")
@@ -9295,6 +11462,9 @@ func TestFileSystem_RestoreVersion_DoesNotDeletePreExistingCurrentSnapshotVersio
 	}
 	if historicalCurrentCountAfter != historicalCurrentCount {
 		t.Fatalf("expected pre-existing historical snapshot count %d to remain after rollback, got %d", historicalCurrentCount, historicalCurrentCountAfter)
+	}
+	if retained, ok := store.objects[currentHash]; !ok || !bytes.Equal(retained, firstContent) {
+		t.Fatalf("pre-existing current snapshot object = %q, present=%v; want preserved", retained, ok)
 	}
 
 	reader, err := fs.OpenFile(ctx, "/restore-existing-snapshot.txt")
@@ -9361,6 +11531,9 @@ func TestFileSystem_WriteFile_CleanupVersionsDoesNotDeleteSharedVersionObject(t 
 
 	fs.config.MaxVersions = 1
 	fs.config.MaxVersionAge = 365 * 24 * time.Hour
+	if err := fs.Mkdir(ctx, "/docs"); err != nil {
+		t.Fatalf("Mkdir(/docs) error: %v", err)
+	}
 
 	sharedContent := []byte("shared-old-" + mustGenerateStorageID(t))
 	sharedHash := computeHash(sharedContent)
@@ -9418,6 +11591,7 @@ func TestFileSystem_WriteFile_ForcesRetentionSweepWhenFreeSpaceBelowThreshold(t 
 	fs.config.MaxVersions = 3
 	fs.config.MaxVersionAge = 365 * 24 * time.Hour
 	fs.config.MinFreeSpace = ^uint64(0)
+	fs.writeStagingBudget.minFreeBytes = func() uint64 { return 0 }
 
 	for _, content := range []string{"v1", "v2", "v3", "v4"} {
 		if err := fs.WriteFile(ctx, "/retention-sweep.txt", bytes.NewReader([]byte(content))); err != nil {
@@ -9446,6 +11620,7 @@ func TestFileSystem_WriteFile_DoesNotFailWhenForcedRetentionSweepFailsAfterCommi
 	fs.config.MaxVersions = 3
 	fs.config.MaxVersionAge = 365 * 24 * time.Hour
 	fs.config.MinFreeSpace = ^uint64(0)
+	fs.writeStagingBudget.minFreeBytes = func() uint64 { return 0 }
 
 	for _, content := range []string{"v1", "v2", "v3", "v4"} {
 		if err := fs.WriteFile(ctx, "/retention-sweep.txt", bytes.NewReader([]byte(content))); err != nil {
@@ -9491,38 +11666,55 @@ func TestFileSystem_WriteFile_DoesNotFailWhenForcedRetentionSweepFailsAfterCommi
 type storageContextKey string
 
 func TestFileSystem_WriteFile_PropagatesContextToVersionObjectOperations(t *testing.T) {
-	fs := setupFileSystem(t)
+	fs := setupStandaloneFileSystem(t)
 	baseCtx := context.Background()
 	if err := fs.WriteFile(baseCtx, "/ctx-write.txt", bytes.NewReader([]byte("v1"))); err != nil {
 		t.Fatalf("WriteFile(v1) error: %v", err)
 	}
 
 	ctx := context.WithValue(baseCtx, storageContextKey("key"), "write-value")
-	hasSeenCtx := false
+	store := newWriteTransactionRuntimeTestStore(fs)
+	fs.writeTransactionStore = store
+	getSeenCtx := false
 	putSeenCtx := false
-	fs.hasVersionObject = func(callCtx context.Context, hash string) (bool, error) {
+	store.getObjectFn = func(callCtx context.Context, hash string) ([]byte, error) {
 		if got := callCtx.Value(storageContextKey("key")); got != "write-value" {
-			t.Fatalf("hasVersionObject() context value = %v, want write-value", got)
+			t.Fatalf("GetObject() context value = %v, want write-value", got)
 		}
-		hasSeenCtx = true
-		return false, nil
+		getSeenCtx = true
+		data, ok := store.objects[hash]
+		if !ok {
+			return nil, versionstore.ErrNotFound
+		}
+		return append([]byte(nil), data...), nil
 	}
-	fs.putVersionObject = func(callCtx context.Context, data []byte) (string, error) {
+	store.putObjectExpectedFn = func(
+		callCtx context.Context,
+		data []byte,
+		expectedHash string,
+	) (versionstore.ObjectPutResult, error) {
 		if got := callCtx.Value(storageContextKey("key")); got != "write-value" {
-			t.Fatalf("putVersionObject() context value = %v, want write-value", got)
+			t.Fatalf("PutObjectExpected() context value = %v, want write-value", got)
+		}
+		if hash := computeHash(data); hash != expectedHash {
+			t.Fatalf("PutObjectExpected() hash = %q, want %q", hash, expectedHash)
 		}
 		putSeenCtx = true
-		return computeHash(data), nil
+		store.objects[expectedHash] = append([]byte(nil), data...)
+		return versionstore.ObjectPutResult{
+			Hash: expectedHash,
+			Size: int64(len(data)),
+		}, nil
 	}
 
 	if err := fs.WriteFile(ctx, "/ctx-write.txt", bytes.NewReader([]byte("v2"))); err != nil {
 		t.Fatalf("WriteFile(v2) error: %v", err)
 	}
-	if !hasSeenCtx {
-		t.Fatal("expected hasVersionObject() to receive caller context")
+	if !getSeenCtx {
+		t.Fatal("expected GetObject() to receive caller context")
 	}
 	if !putSeenCtx {
-		t.Fatal("expected putVersionObject() to receive caller context")
+		t.Fatal("expected PutObjectExpected() to receive caller context")
 	}
 }
 

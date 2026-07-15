@@ -89,18 +89,7 @@ func TestFileSystem_PermanentDeleteRejectsSpecialRootWithoutBlockingOrMutation(t
 				t.Fatalf("trash after rejected PermanentDelete(%s) = %+v, %v; want empty", testCase.name, items, err)
 			}
 
-			writeDone := make(chan error, 1)
-			go func() {
-				writeDone <- fs.WriteFile(ctx, "/after-permanent-special.txt", strings.NewReader("ok"))
-			}()
-			select {
-			case err := <-writeDone:
-				if err != nil {
-					t.Fatalf("WriteFile() after rejected PermanentDelete(%s) error: %v", testCase.name, err)
-				}
-			case <-time.After(time.Second):
-				t.Fatalf("filesystem mutation lock remained blocked after rejected PermanentDelete(%s)", testCase.name)
-			}
+			requireFilesystemMutationGatesReleased(t, fs)
 		})
 	}
 }

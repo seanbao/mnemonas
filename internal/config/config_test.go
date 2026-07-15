@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/seanbao/mnemonas/internal/versionstore"
 )
 
 func TestCleanupManagedTempPath_ReturnsOperationError(t *testing.T) {
@@ -376,6 +378,11 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name:    "Invalid versioning max size",
 			modify:  func(c *Config) { c.Storage.Versioning.MaxVersionedSize = 0 },
+			wantErr: true,
+		},
+		{
+			name:    "Versioning max size exceeds object contract",
+			modify:  func(c *Config) { c.Storage.Versioning.MaxVersionedSize = versionstore.MaxVersionObjectSize + 1 },
 			wantErr: true,
 		},
 		{

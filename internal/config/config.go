@@ -23,6 +23,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 
 	"github.com/seanbao/mnemonas/internal/rootio"
+	"github.com/seanbao/mnemonas/internal/versionstore"
 )
 
 var errConfigFileSymlink = errors.New("config file path must not be a symlink")
@@ -430,7 +431,7 @@ func Default() *Config {
 					"LICENSE", "README", "CHANGELOG",
 					".gitignore", ".dockerignore", ".editorconfig",
 				},
-				MaxVersionedSize: 100 * 1024 * 1024, // 100MB
+				MaxVersionedSize: versionstore.MaxVersionObjectSize,
 			},
 			Trash: TrashConfig{
 				Enabled:       true,
@@ -1593,6 +1594,8 @@ func (c *Config) Validate() error {
 	}
 	if c.Storage.Versioning.MaxVersionedSize <= 0 {
 		errs = append(errs, errors.New("storage.versioning.max_versioned_size must be positive"))
+	} else if c.Storage.Versioning.MaxVersionedSize > versionstore.MaxVersionObjectSize {
+		errs = append(errs, fmt.Errorf("storage.versioning.max_versioned_size must not exceed %d", versionstore.MaxVersionObjectSize))
 	}
 	if err := validateDirectoryQuotas(c.Storage.DirectoryQuotas); err != nil {
 		errs = append(errs, err)

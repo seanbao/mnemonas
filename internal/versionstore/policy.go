@@ -21,6 +21,10 @@ type VersioningPolicy struct {
 	store *Store
 }
 
+// MaxVersionObjectSize is the largest whole-file version object supported by
+// the current unary dataplane object contract.
+const MaxVersionObjectSize int64 = 100 * 1024 * 1024
+
 func normalizeConfiguredVersionedExtension(ext string) string {
 	return strings.ToLower(strings.TrimSpace(ext))
 }
@@ -64,31 +68,37 @@ func DefaultVersioningPolicy(store *Store) *VersioningPolicy {
 			"requirements.txt", "Pipfile", "Pipfile.lock", "poetry.lock",
 			"composer.json", "composer.lock",
 		},
-		MaxVersionedSize: 100 * 1024 * 1024, // 100MB
+		MaxVersionedSize: MaxVersionObjectSize,
 		store:            store,
 	}
 }
 
 // ShouldVersion determines if a file should have version management
 // Logic:
-// 1. Check user override (highest priority, ignores size limit)
-// 2. Check file size limit
-// 3. Check extension
-// 4. Check filename
+// 1. Check the storage contract size limit
+// 2. Check user override
+// 3. Check the automatic-versioning size threshold
+// 4. Check extension
+// 5. Check filename
 func (p *VersioningPolicy) ShouldVersion(ctx context.Context, path string, fileSize int64) bool {
-	// 1. Check user override (highest priority)
+	// Whole-file objects currently use one bounded unary dataplane message.
+	if fileSize < 0 || fileSize > MaxVersionObjectSize {
+		return false
+	}
+
+	// User overrides select files inside the supported size boundary.
 	if p.store != nil {
 		if enabled, exists := p.store.GetVersioningOverride(ctx, path); exists {
-			return enabled // User override ignores size limit
+			return enabled
 		}
 	}
 
-	// 2. Check file size limit (skip large files)
+	// The configured threshold applies only to automatic version selection.
 	if p.MaxVersionedSize > 0 && fileSize > p.MaxVersionedSize {
 		return false
 	}
 
-	// 3. Check extension
+	// 4. Check extension
 	ext := normalizeConfiguredVersionedExtension(filepath.Ext(path))
 	for _, versionedExt := range p.AutoVersionedExtensions {
 		if ext == normalizeConfiguredVersionedExtension(versionedExt) {
@@ -96,7 +106,7 @@ func (p *VersioningPolicy) ShouldVersion(ctx context.Context, path string, fileS
 		}
 	}
 
-	// 4. Check filename (for files without extension)
+	// 5. Check filename (for files without extension)
 	filename := normalizeConfiguredVersionedFilename(filepath.Base(path))
 	for _, versionedName := range p.AutoVersionedFilenames {
 		if filename == normalizeConfiguredVersionedFilename(versionedName) {
@@ -132,6 +142,10 @@ func (p *VersioningPolicy) IsVersionedFilename(filename string) bool {
 // GetVersioningStatus returns the versioning status for a file
 // Returns: (enabled, reason)
 func (p *VersioningPolicy) GetVersioningStatus(ctx context.Context, path string, fileSize int64) (bool, string) {
+	if fileSize < 0 || fileSize > MaxVersionObjectSize {
+		return false, "file_too_large"
+	}
+
 	// Check user override
 	if p.store != nil {
 		if enabled, exists := p.store.GetVersioningOverride(ctx, path); exists {
@@ -142,7 +156,6 @@ func (p *VersioningPolicy) GetVersioningStatus(ctx context.Context, path string,
 		}
 	}
 
-	// Check file size
 	if p.MaxVersionedSize > 0 && fileSize > p.MaxVersionedSize {
 		return false, "file_too_large"
 	}

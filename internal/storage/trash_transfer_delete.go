@@ -198,7 +198,7 @@ func (fs *FileSystem) commitJournaledTrashDeleteLocked(ctx context.Context, name
 
 	committedRecord := *record
 	committedRecord.Decision = trashTransferCommitted
-	published, err = fs.publishTrashTransferJournalRecord(&committedRecord)
+	_, err = fs.publishTrashTransferJournalRecord(&committedRecord)
 	if err != nil {
 		return fs.blockTrashTransferLocked(&committedRecord, fmt.Errorf("persist committed delete-to-Trash journal: %w", err))
 	}
@@ -219,7 +219,7 @@ func (fs *FileSystem) commitJournaledTrashDeleteLocked(ctx context.Context, name
 
 	completedRecord := *record
 	completedRecord.Decision = trashTransferCompleted
-	published, err = fs.publishTrashTransferJournalRecord(&completedRecord)
+	_, err = fs.publishTrashTransferJournalRecord(&completedRecord)
 	if err != nil {
 		return fs.blockTrashTransferLocked(&completedRecord, fmt.Errorf("persist completed delete-to-Trash journal: %w", err))
 	}

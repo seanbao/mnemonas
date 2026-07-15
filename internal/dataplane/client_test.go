@@ -407,8 +407,25 @@ func TestUnaryChunkRPCsMapRequestsAndResponses(t *testing.T) {
 	if fake.putChunkReq == nil || string(fake.putChunkReq.Data) != "data" {
 		t.Fatalf("PutChunk request = %#v", fake.putChunkReq)
 	}
+	if fake.putChunkReq.ExpectedHash != nil {
+		t.Fatalf("PutChunk expected hash = %q, want nil", fake.putChunkReq.GetExpectedHash())
+	}
 	if chunkInfo.Hash != "hash-1" || chunkInfo.Size != 4 || !chunkInfo.Deduplicated {
 		t.Fatalf("unexpected PutChunk() response: %#v", chunkInfo)
+	}
+
+	chunkInfo, err = client.PutChunkExpected(context.Background(), []byte("data"), "hash-1")
+	if err != nil {
+		t.Fatalf("PutChunkExpected() error: %v", err)
+	}
+	if fake.putChunkReq == nil || string(fake.putChunkReq.Data) != "data" {
+		t.Fatalf("PutChunkExpected request = %#v", fake.putChunkReq)
+	}
+	if fake.putChunkReq.ExpectedHash == nil || fake.putChunkReq.GetExpectedHash() != "hash-1" {
+		t.Fatalf("PutChunkExpected expected hash = %#v, want hash-1", fake.putChunkReq.ExpectedHash)
+	}
+	if chunkInfo.Hash != "hash-1" || chunkInfo.Size != 4 || !chunkInfo.Deduplicated {
+		t.Fatalf("unexpected PutChunkExpected() response: %#v", chunkInfo)
 	}
 
 	data, err := client.GetChunk(context.Background(), "hash-1")

@@ -9,6 +9,20 @@ import (
 	"time"
 )
 
+func requireFilesystemMutationGatesReleased(t *testing.T, fs *FileSystem) {
+	t.Helper()
+
+	if !fs.gcMu.TryLock() {
+		t.Fatal("filesystem GC gate remained held after rejected mutation")
+	}
+	defer fs.gcMu.Unlock()
+
+	if !fs.mu.TryLock() {
+		t.Fatal("filesystem mutation lock remained held after rejected mutation")
+	}
+	fs.mu.Unlock()
+}
+
 func TestMutationLeaseStatSkipsVersionPolicyAndContentHash(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()

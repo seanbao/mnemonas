@@ -2,15 +2,18 @@
 
 package storage
 
-import "syscall"
+import (
+	"os"
+	"syscall"
+)
 
-func diskStatsForHostPath(root string) (*DiskStats, error) {
+func diskStatsForOpenDirectory(dir *os.File, displayPath string) (*DiskStats, error) {
 	var stat syscall.Statfs_t
-	if err := syscall.Statfs(root, &stat); err != nil {
+	if err := syscall.Fstatfs(int(dir.Fd()), &stat); err != nil {
 		return nil, err
 	}
 
-	mountDetails := diskMountDetailsForPath(root, uint64(stat.Type))
+	mountDetails := diskMountDetailsForPath(displayPath, uint64(stat.Type))
 	stats, err := diskStatsFromStatfsBlocks(uint64(stat.Blocks), uint64(stat.Bfree), uint64(stat.Bavail), int64(stat.Bsize), mountDetails)
 	if err != nil {
 		return nil, err

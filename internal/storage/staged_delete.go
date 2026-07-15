@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 
 	"github.com/seanbao/mnemonas/internal/rootio"
 	"github.com/seanbao/mnemonas/internal/workspace"
@@ -23,8 +22,6 @@ var (
 	afterDeleteStageCapture      = func(string, string) error { return nil }
 	afterDeleteTrashCopy         = func(string, string) error { return nil }
 	afterDeleteTrashContentHash  = func(string, string, string) error { return nil }
-	beforeTrashRollbackCapture   = func(string, string) error { return nil }
-	afterTrashRollbackCapture    = func(string, string) error { return nil }
 	beforeDeleteStageRemoval     = func(string, string) error { return nil }
 	afterDeleteQuarantineCapture = func(string, string) error { return nil }
 	syncDeleteWitnessRecoveryDir = func(root *os.Root, relName, absPath string) error {
@@ -757,8 +754,4 @@ func projectDeleteTargetSnapshot(snapshot DeleteTargetSnapshot, options DeleteTa
 		}
 	}
 	return projected
-}
-
-func isCrossDeviceError(err error) bool {
-	return errors.Is(err, syscall.EXDEV)
 }

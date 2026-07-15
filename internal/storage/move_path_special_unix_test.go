@@ -80,16 +80,8 @@ func TestFileSystem_DeleteRejectsFileReplacedByFIFOBeforeTrashCopy(t *testing.T)
 		t.Fatalf("trash content after rejected FIFO replacement = %+v, %v; want only transaction evidence", entries, err)
 	}
 
-	writeDone := make(chan error, 1)
-	go func() {
-		writeDone <- fs.WriteFile(ctx, "/after-trash-copy-special.txt", strings.NewReader("ok"))
-	}()
-	select {
-	case err := <-writeDone:
-		if !errors.Is(err, ErrTrashRecoveryRequired) {
-			t.Fatalf("WriteFile() after rejected FIFO replacement error = %v, want recovery gate", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("filesystem mutation lock remained blocked after rejected FIFO replacement")
+	requireFilesystemMutationGatesReleased(t, fs)
+	if err := fs.WriteFile(ctx, "/after-trash-copy-special.txt", strings.NewReader("ok")); !errors.Is(err, ErrTrashRecoveryRequired) {
+		t.Fatalf("WriteFile() after rejected FIFO replacement error = %v, want recovery gate", err)
 	}
 }

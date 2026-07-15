@@ -5,6 +5,7 @@ package rootio
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -117,6 +118,30 @@ func TestRenameLeafNoReplaceRejectsExistingTarget(t *testing.T) {
 		if string(data) != want {
 			t.Fatalf("%s content = %q, want %q", name, data, want)
 		}
+	}
+}
+
+func TestRenameLeafBetweenRootsNoReplaceRejectsSameEntryThroughDistinctRoots(t *testing.T) {
+	rootPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(rootPath, "item.txt"), []byte("stable"), 0o600); err != nil {
+		t.Fatalf("WriteFile(item) error: %v", err)
+	}
+	firstRoot, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatalf("OpenRoot(first) error: %v", err)
+	}
+	defer firstRoot.Close()
+	secondRoot, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatalf("OpenRoot(second) error: %v", err)
+	}
+	defer secondRoot.Close()
+
+	if err := RenameLeafBetweenRootsNoReplace(firstRoot, "item.txt", secondRoot, "item.txt"); err == nil {
+		t.Fatal("RenameLeafBetweenRootsNoReplace(same entry via distinct roots) error = nil, want rejection")
+	}
+	if data, readErr := os.ReadFile(filepath.Join(rootPath, "item.txt")); readErr != nil || string(data) != "stable" {
+		t.Fatalf("same entry after rejected no-replace rename = %q, %v; want stable", data, readErr)
 	}
 }
 
@@ -603,6 +628,225 @@ func TestRemoveAllFromDirNoFollowCheckedRestoresDirectoryReplacementCapturedDuri
 	data, readErr := os.ReadFile(filepath.Join(targetPath, "unknown.txt"))
 	if readErr != nil || string(data) != "replacement" {
 		t.Fatalf("replacement content = %q, %v; want replacement", data, readErr)
+	}
+}
+
+func TestRemoveAllFromDirNoFollowCheckedRejectsSameDirectoryMetadataDriftBeforeIsolation(t *testing.T) {
+	rootPath := t.TempDir()
+	targetPath := filepath.Join(rootPath, "tree")
+	if err := os.Mkdir(targetPath, 0o700); err != nil {
+		t.Fatalf("Mkdir(target) error: %v", err)
+	}
+	rootDir, err := os.Open(rootPath)
+	if err != nil {
+		t.Fatalf("Open(root) error: %v", err)
+	}
+	defer rootDir.Close()
+
+	originalHook := beforeCheckedRemovalIsolation
+	mutated := false
+	beforeCheckedRemovalIsolation = func(name string) error {
+		if name != "tree" {
+			return nil
+		}
+		mutated = true
+		info, err := os.Stat(targetPath)
+		if err != nil {
+			return err
+		}
+		initialEvidence := newCheckedDirectoryEvidence(info)
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			if err := os.Chmod(targetPath, 0o500); err != nil {
+				return err
+			}
+			if err := os.Chmod(targetPath, info.Mode().Perm()); err != nil {
+				return err
+			}
+			changed, err := os.Stat(targetPath)
+			if err != nil {
+				return err
+			}
+			if !checkedDirectoryEvidenceMatches(initialEvidence, newCheckedDirectoryEvidence(changed), false, false, false) {
+				return nil
+			}
+			if time.Now().After(deadline) {
+				return errors.New("failed to advance directory status-change identity")
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	t.Cleanup(func() { beforeCheckedRemovalIsolation = originalHook })
+
+	err = RemoveAllFromDirNoFollowChecked(rootDir, "tree", func(string, os.FileInfo) error { return nil })
+	if !errors.Is(err, ErrEntryChanged) {
+		t.Fatalf("RemoveAllFromDirNoFollowChecked() error = %v, want ErrEntryChanged", err)
+	}
+	if !mutated {
+		t.Fatal("isolation hook did not mutate the directory")
+	}
+	info, statErr := os.Stat(targetPath)
+	if statErr != nil || !info.IsDir() {
+		t.Fatalf("target after rejected removal = %+v, %v; want preserved directory", info, statErr)
+	}
+}
+
+func TestRemoveAllFromDirNoFollowCheckedRejectsSameDirectoryMetadataDriftAfterIsolation(t *testing.T) {
+	rootPath := t.TempDir()
+	targetPath := filepath.Join(rootPath, "tree")
+	if err := os.Mkdir(targetPath, 0o700); err != nil {
+		t.Fatalf("Mkdir(target) error: %v", err)
+	}
+	rootDir, err := os.Open(rootPath)
+	if err != nil {
+		t.Fatalf("Open(root) error: %v", err)
+	}
+	defer rootDir.Close()
+
+	originalHook := afterCheckedDirectoryRemovalIsolation
+	mutated := false
+	afterCheckedDirectoryRemovalIsolation = func(name, isolatedName string) error {
+		if name != "tree" {
+			return nil
+		}
+		mutated = true
+		return os.Chmod(filepath.Join(rootPath, isolatedName), 0o500)
+	}
+	t.Cleanup(func() { afterCheckedDirectoryRemovalIsolation = originalHook })
+
+	err = RemoveAllFromDirNoFollowChecked(rootDir, "tree", func(string, os.FileInfo) error { return nil })
+	if !errors.Is(err, ErrEntryChanged) {
+		t.Fatalf("RemoveAllFromDirNoFollowChecked() error = %v, want ErrEntryChanged", err)
+	}
+	if !mutated {
+		t.Fatal("post-isolation hook did not mutate the directory")
+	}
+	info, statErr := os.Stat(targetPath)
+	if statErr != nil || !info.IsDir() {
+		t.Fatalf("target after rejected removal = %+v, %v; want preserved directory", info, statErr)
+	}
+	if got := info.Mode().Perm(); got != 0o500 {
+		t.Fatalf("target mode after rejected removal = %#o, want %#o", got, os.FileMode(0o500))
+	}
+}
+
+func TestRemoveAllFromDirNoFollowCheckedRejectsSameFileMetadataDriftDuringIsolation(t *testing.T) {
+	rootPath := t.TempDir()
+	targetPath := filepath.Join(rootPath, "target.txt")
+	if err := os.WriteFile(targetPath, []byte("original"), 0o600); err != nil {
+		t.Fatalf("WriteFile(target) error: %v", err)
+	}
+	initialInfo, err := os.Stat(targetPath)
+	if err != nil {
+		t.Fatalf("Stat(target) error: %v", err)
+	}
+	rootDir, err := os.Open(rootPath)
+	if err != nil {
+		t.Fatalf("Open(root) error: %v", err)
+	}
+	defer rootDir.Close()
+
+	originalHook := afterCheckedFileRemovalIsolation
+	mutated := false
+	afterCheckedFileRemovalIsolation = func(name, isolatedName string) error {
+		if name != "target.txt" {
+			return nil
+		}
+		mutated = true
+		isolatedPath := filepath.Join(rootPath, isolatedName)
+		if err := os.WriteFile(isolatedPath, []byte("replaced"), initialInfo.Mode().Perm()); err != nil {
+			return err
+		}
+		return os.Chtimes(isolatedPath, initialInfo.ModTime(), initialInfo.ModTime())
+	}
+	t.Cleanup(func() { afterCheckedFileRemovalIsolation = originalHook })
+
+	verifyCalls := 0
+	err = RemoveAllFromDirNoFollowChecked(rootDir, "target.txt", func(_ string, _ os.FileInfo) error {
+		verifyCalls++
+		return nil
+	})
+	if !errors.Is(err, ErrEntryChanged) {
+		t.Fatalf("RemoveAllFromDirNoFollowChecked() error = %v, want ErrEntryChanged", err)
+	}
+	if !mutated {
+		t.Fatal("isolation hook did not mutate the file")
+	}
+	if verifyCalls < 3 {
+		t.Fatalf("verify calls = %d, want post-isolation verification", verifyCalls)
+	}
+	data, readErr := os.ReadFile(targetPath)
+	if readErr != nil || string(data) != "replaced" {
+		t.Fatalf("target after rejected removal = %q, %v; want preserved replacement content", data, readErr)
+	}
+	entries, readErr := os.ReadDir(rootPath)
+	if readErr != nil {
+		t.Fatalf("ReadDir(root) error: %v", readErr)
+	}
+	if len(entries) != 1 || entries[0].Name() != "target.txt" {
+		t.Fatalf("root entries after rollback = %v, want only target.txt", entries)
+	}
+}
+
+func TestRemoveAllFromDirNoFollowCheckedWithRegularFileRejectsContentDriftBeforeRebaseline(t *testing.T) {
+	rootPath := t.TempDir()
+	targetPath := filepath.Join(rootPath, "target.txt")
+	if err := os.WriteFile(targetPath, []byte("original"), 0o600); err != nil {
+		t.Fatalf("WriteFile(target) error: %v", err)
+	}
+	initialInfo, err := os.Stat(targetPath)
+	if err != nil {
+		t.Fatalf("Stat(target) error: %v", err)
+	}
+	rootDir, err := os.Open(rootPath)
+	if err != nil {
+		t.Fatalf("Open(root) error: %v", err)
+	}
+	defer rootDir.Close()
+
+	originalHook := beforeCheckedFileRemovalRebaseline
+	mutated := false
+	beforeCheckedFileRemovalRebaseline = func(name, isolatedName string) error {
+		if name != "target.txt" {
+			return nil
+		}
+		mutated = true
+		isolatedPath := filepath.Join(rootPath, isolatedName)
+		if err := os.WriteFile(isolatedPath, []byte("replaced"), initialInfo.Mode().Perm()); err != nil {
+			return err
+		}
+		return os.Chtimes(isolatedPath, initialInfo.ModTime(), initialInfo.ModTime())
+	}
+	t.Cleanup(func() { beforeCheckedFileRemovalRebaseline = originalHook })
+
+	contentErr := errors.New("isolated file content changed")
+	err = RemoveAllFromDirNoFollowCheckedWithRegularFile(
+		rootDir,
+		"target.txt",
+		func(string, os.FileInfo) error { return nil },
+		func(_ string, file *os.File, _ os.FileInfo) error {
+			if _, err := file.Seek(0, io.SeekStart); err != nil {
+				return err
+			}
+			data, err := io.ReadAll(file)
+			if err != nil {
+				return err
+			}
+			if string(data) != "original" {
+				return contentErr
+			}
+			return nil
+		},
+	)
+	if !errors.Is(err, contentErr) {
+		t.Fatalf("checked removal error = %v, want content drift error", err)
+	}
+	if !mutated {
+		t.Fatal("pre-rebaseline hook did not mutate the isolated file")
+	}
+	data, readErr := os.ReadFile(targetPath)
+	if readErr != nil || string(data) != "replaced" {
+		t.Fatalf("target after rejected removal = %q, %v; want preserved replacement", data, readErr)
 	}
 }
 

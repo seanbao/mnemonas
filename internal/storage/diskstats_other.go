@@ -2,8 +2,11 @@
 
 package storage
 
-import "errors"
+import (
+	"errors"
+	"os"
+)
 
-func diskStatsForHostPath(root string) (*DiskStats, error) {
+func diskStatsForOpenDirectory(*os.File, string) (*DiskStats, error) {
 	return nil, errors.New("disk stats are not available on this platform")
 }

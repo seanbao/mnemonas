@@ -4,6 +4,7 @@ package rootio
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -78,6 +79,161 @@ func TestRemoveAllFromDirNoFollowCheckedInPlaceRejectsInitiallyMissingEntry(t *t
 	}
 	if verifyCalled {
 		t.Fatal("verify called for an initially missing entry")
+	}
+}
+
+func TestRemoveAllFromDirNoFollowCheckedInPlaceWithRegularFileVerifiesExactContent(t *testing.T) {
+	rootPath := t.TempDir()
+	targetPath := filepath.Join(rootPath, "target.txt")
+	if err := os.WriteFile(targetPath, []byte("expected"), 0o600); err != nil {
+		t.Fatalf("WriteFile(target) error: %v", err)
+	}
+	rootDir, err := os.Open(rootPath)
+	if err != nil {
+		t.Fatalf("Open(root) error: %v", err)
+	}
+	defer rootDir.Close()
+
+	verifyCalls := 0
+	err = RemoveAllFromDirNoFollowCheckedInPlaceWithRegularFile(
+		rootDir,
+		"target.txt",
+		func(path string, info os.FileInfo) error {
+			if path != "target.txt" || info == nil || !info.Mode().IsRegular() {
+				return errors.New("entry evidence mismatch")
+			}
+			return nil
+		},
+		func(path string, file *os.File, info os.FileInfo) error {
+			verifyCalls++
+			if path != "target.txt" || info == nil || !info.Mode().IsRegular() {
+				return errors.New("opened evidence mismatch")
+			}
+			data, readErr := io.ReadAll(file)
+			if readErr != nil {
+				return readErr
+			}
+			if string(data) != "expected" {
+				return errors.New("content mismatch")
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("RemoveAllFromDirNoFollowCheckedInPlaceWithRegularFile() error: %v", err)
+	}
+	if verifyCalls != 1 {
+		t.Fatalf("regular-file verifier calls = %d, want 1", verifyCalls)
+	}
+	if _, err := os.Lstat(targetPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("target Lstat error = %v, want not exist", err)
+	}
+}
+
+func TestRemoveAllFromDirNoFollowCheckedInPlaceWithRegularFileRetainsRejectedContent(t *testing.T) {
+	rootPath := t.TempDir()
+	targetPath := filepath.Join(rootPath, "target.txt")
+	if err := os.WriteFile(targetPath, []byte("unexpected"), 0o600); err != nil {
+		t.Fatalf("WriteFile(target) error: %v", err)
+	}
+	rootDir, err := os.Open(rootPath)
+	if err != nil {
+		t.Fatalf("Open(root) error: %v", err)
+	}
+	defer rootDir.Close()
+
+	wantErr := errors.New("journal content mismatch")
+	err = RemoveAllFromDirNoFollowCheckedInPlaceWithRegularFile(
+		rootDir,
+		"target.txt",
+		func(string, os.FileInfo) error { return nil },
+		func(string, *os.File, os.FileInfo) error { return wantErr },
+	)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("RemoveAllFromDirNoFollowCheckedInPlaceWithRegularFile() error = %v, want %v", err, wantErr)
+	}
+	data, readErr := os.ReadFile(targetPath)
+	if readErr != nil || string(data) != "unexpected" {
+		t.Fatalf("target content = %q, %v; want retained", data, readErr)
+	}
+	entries, readErr := os.ReadDir(rootPath)
+	if readErr != nil {
+		t.Fatalf("ReadDir(root) error: %v", readErr)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".mnemonas-remove-") {
+			t.Fatalf("unexpected checked-removal isolation residue %q", entry.Name())
+		}
+	}
+}
+
+func TestRemoveEmptyDirNoFollowCheckedInPlacePreservesModeOnRejectedNonemptyDirectory(t *testing.T) {
+	rootPath := t.TempDir()
+	targetPath := filepath.Join(rootPath, "owned")
+	if err := os.Mkdir(targetPath, 0o700); err != nil {
+		t.Fatalf("Mkdir(target) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(targetPath, "foreign.txt"), []byte("foreign"), 0o600); err != nil {
+		t.Fatalf("WriteFile(foreign) error: %v", err)
+	}
+	if err := os.Chmod(targetPath, 0o500); err != nil {
+		t.Fatalf("Chmod(target) error: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(targetPath, 0o700) })
+	rootDir, err := os.Open(rootPath)
+	if err != nil {
+		t.Fatalf("Open(root) error: %v", err)
+	}
+	defer rootDir.Close()
+
+	err = RemoveEmptyDirNoFollowCheckedInPlace(
+		rootDir,
+		"owned",
+		func(path string, info os.FileInfo) error {
+			if path != "owned" || info == nil || !info.IsDir() || info.Mode().Perm() != 0o500 {
+				return errors.New("directory evidence mismatch")
+			}
+			return nil
+		},
+	)
+	if !errors.Is(err, ErrEntryChanged) {
+		t.Fatalf("RemoveEmptyDirNoFollowCheckedInPlace() error = %v, want ErrEntryChanged", err)
+	}
+	info, err := os.Stat(targetPath)
+	if err != nil {
+		t.Fatalf("Stat(target) error: %v", err)
+	}
+	if info.Mode().Perm() != 0o500 {
+		t.Fatalf("target mode = %o, want unchanged 500", info.Mode().Perm())
+	}
+	if data, err := os.ReadFile(filepath.Join(targetPath, "foreign.txt")); err != nil ||
+		string(data) != "foreign" {
+		t.Fatalf("foreign content = %q, %v; want retained", data, err)
+	}
+}
+
+func TestRemoveEmptyDirNoFollowCheckedInPlaceRemovesVerifiedEmptyDirectory(t *testing.T) {
+	rootPath := t.TempDir()
+	targetPath := filepath.Join(rootPath, "owned")
+	if err := os.Mkdir(targetPath, 0o500); err != nil {
+		t.Fatalf("Mkdir(target) error: %v", err)
+	}
+	rootDir, err := os.Open(rootPath)
+	if err != nil {
+		t.Fatalf("Open(root) error: %v", err)
+	}
+	defer rootDir.Close()
+
+	err = RemoveEmptyDirNoFollowCheckedInPlace(
+		rootDir,
+		"owned",
+		func(string, os.FileInfo) error { return nil },
+	)
+	if err != nil {
+		t.Fatalf("RemoveEmptyDirNoFollowCheckedInPlace() error: %v", err)
+	}
+	if _, err := os.Lstat(targetPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("target Lstat error = %v, want not exist", err)
 	}
 }
 

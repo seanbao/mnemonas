@@ -19,6 +19,13 @@ type ObjectStore struct {
 	client *dataplane.Client
 }
 
+// ObjectPutResult reports the exact CAS outcome of one object write.
+type ObjectPutResult struct {
+	Hash         string
+	Size         int64
+	Deduplicated bool
+}
+
 // NewObjectStore creates an object store using dataplane client
 func NewObjectStore(client *dataplane.Client) *ObjectStore {
 	return &ObjectStore{client: client}
@@ -39,20 +46,46 @@ func (s *ObjectStore) getClient() *dataplane.Client {
 
 // Put stores data via dataplane and returns its hash
 func (s *ObjectStore) Put(ctx context.Context, data []byte) (string, error) {
+	result, err := s.PutExpected(ctx, data, "")
+	return result.Hash, err
+}
+
+// PutExpected stores data while requiring the data plane to verify its
+// content hash. An empty expectedHash keeps the legacy unrestricted behavior.
+func (s *ObjectStore) PutExpected(
+	ctx context.Context,
+	data []byte,
+	expectedHash string,
+) (ObjectPutResult, error) {
 	client := s.getClient()
 	if client == nil || !client.IsConnected() {
-		return "", fmt.Errorf("%w: dataplane not connected", ErrUnavailable)
+		return ObjectPutResult{}, fmt.Errorf("%w: dataplane not connected", ErrUnavailable)
 	}
 
-	info, err := client.PutChunk(ctx, data)
+	var (
+		info *dataplane.ChunkInfo
+		err  error
+	)
+	if expectedHash == "" {
+		info, err = client.PutChunk(ctx, data)
+	} else {
+		info, err = client.PutChunkExpected(ctx, data, expectedHash)
+	}
 	if err != nil {
 		if status.Code(err) == codes.Unavailable {
-			return "", fmt.Errorf("%w: %v", ErrUnavailable, err)
+			return ObjectPutResult{}, fmt.Errorf("%w: %v", ErrUnavailable, err)
 		}
-		return "", fmt.Errorf("failed to put chunk: %w", err)
+		return ObjectPutResult{}, fmt.Errorf("failed to put chunk: %w", err)
 	}
 
-	return info.Hash, nil
+	if info.Size > uint64(^uint64(0)>>1) {
+		return ObjectPutResult{}, fmt.Errorf("stored object size exceeds int64")
+	}
+	return ObjectPutResult{
+		Hash:         info.Hash,
+		Size:         int64(info.Size),
+		Deduplicated: info.Deduplicated,
+	}, nil
 }
 
 // Get retrieves data via dataplane by hash

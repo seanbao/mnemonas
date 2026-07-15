@@ -3,14 +3,39 @@ package workspace
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/seanbao/mnemonas/internal/rootio"
 )
+
+type readerFunc func([]byte) (int, error)
+
+func (f readerFunc) Read(buffer []byte) (int, error) {
+	return f(buffer)
+}
+
+func TestIsCreatedDirOwnershipChangedPreservesWrappedErrorSemantics(t *testing.T) {
+	if IsCreatedDirOwnershipChanged(nil) {
+		t.Fatal("IsCreatedDirOwnershipChanged(nil) = true, want false")
+	}
+	if IsCreatedDirOwnershipChanged(errors.New("unrelated")) {
+		t.Fatal("IsCreatedDirOwnershipChanged(unrelated) = true, want false")
+	}
+	wrapped := fmt.Errorf("workspace cleanup failed: %w", errWorkspaceCreatedDirOwnershipChanged)
+	if !IsCreatedDirOwnershipChanged(wrapped) {
+		t.Fatalf("IsCreatedDirOwnershipChanged(%v) = false, want true", wrapped)
+	}
+	joined := errors.Join(errors.New("write failed"), wrapped)
+	if !IsCreatedDirOwnershipChanged(joined) {
+		t.Fatalf("IsCreatedDirOwnershipChanged(joined error) = false, want true")
+	}
+}
 
 func TestVisibleMutationWarningWrapperPreservesErrorSemantics(t *testing.T) {
 	baseErr := errors.New("sync failed")
@@ -172,6 +197,812 @@ func TestWorkspace_WriteFileFromReader_CleansCreatedDirectoriesWhenWriteFailsBef
 	}
 	if _, statErr := os.Stat(filepath.Join(w.Root(), "deep")); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("expected parent directory to be removed after failed write, got %v", statErr)
+	}
+}
+
+func TestWorkspace_WriteFileFromReader_PreservesReplacedUnpublishedDirectory(t *testing.T) {
+	w := setupWorkspace(t)
+	targetPath := filepath.Join(w.Root(), "deep")
+	displacedPath := filepath.Join(w.Root(), "displaced-created-directory")
+	var replacementPath string
+	replaced := false
+
+	originalAfterWorkspaceCreatedDirTempOpen := afterWorkspaceCreatedDirTempOpen
+	afterWorkspaceCreatedDirTempOpen = func(tempPath, publishPath string) error {
+		if replaced || publishPath != targetPath {
+			return nil
+		}
+		replaced = true
+		replacementPath = tempPath
+		if err := os.Rename(tempPath, displacedPath); err != nil {
+			return err
+		}
+		return os.Mkdir(tempPath, 0o755)
+	}
+	t.Cleanup(func() {
+		afterWorkspaceCreatedDirTempOpen = originalAfterWorkspaceCreatedDirTempOpen
+	})
+
+	_, err := w.WriteFileFromReaderWithOptions(
+		context.Background(),
+		"/deep/path/replaced-temp.txt",
+		strings.NewReader("content"),
+		WriteFileOptions{},
+	)
+	if !errors.Is(err, errWorkspaceCreatedDirOwnershipChanged) {
+		t.Fatalf("WriteFileFromReaderWithOptions() error = %v, want created-directory ownership error", err)
+	}
+	if !replaced {
+		t.Fatal("unpublished directory replacement hook was not called")
+	}
+	if base := filepath.Base(replacementPath); !strings.HasPrefix(base, ".workspace-dir-") || !strings.HasSuffix(base, ".tmp") {
+		t.Fatalf("temporary directory name = %q, want unpredictable workspace directory name", base)
+	}
+	if info, statErr := os.Stat(replacementPath); statErr != nil || !info.IsDir() {
+		t.Fatalf("replacement temporary directory = %v, %v; want preserved directory", info, statErr)
+	}
+	if info, statErr := os.Stat(displacedPath); statErr != nil || !info.IsDir() {
+		t.Fatalf("displaced owned directory = %v, %v; want preserved directory", info, statErr)
+	}
+	if _, statErr := os.Stat(targetPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("published target after rejected replacement = %v, want absent", statErr)
+	}
+}
+
+func TestWorkspace_WriteFileFromReader_PreservesReplacementAfterDirectoryPublish(t *testing.T) {
+	w := setupWorkspace(t)
+	targetPath := filepath.Join(w.Root(), "deep")
+	displacedPath := filepath.Join(w.Root(), "displaced-published-directory")
+	replaced := false
+	var createdDirs []CreatedDir
+	t.Cleanup(func() {
+		_ = ReleaseCreatedDirs(createdDirs)
+	})
+
+	originalAfterWorkspaceCreatedDirPublish := afterWorkspaceCreatedDirPublish
+	afterWorkspaceCreatedDirPublish = func(publishPath string) error {
+		if replaced || publishPath != targetPath {
+			return nil
+		}
+		replaced = true
+		if err := os.Rename(publishPath, displacedPath); err != nil {
+			return err
+		}
+		return os.Mkdir(publishPath, 0o755)
+	}
+	t.Cleanup(func() {
+		afterWorkspaceCreatedDirPublish = originalAfterWorkspaceCreatedDirPublish
+	})
+
+	_, err := w.WriteFileFromReaderWithOptions(
+		context.Background(),
+		"/deep/path/replaced-published.txt",
+		strings.NewReader("content"),
+		WriteFileOptions{CreatedDirs: &createdDirs},
+	)
+	if !IsCreatedDirOwnershipChanged(err) {
+		t.Fatalf("WriteFileFromReaderWithOptions() error = %v, want created-directory ownership error", err)
+	}
+	if !replaced {
+		t.Fatal("published directory replacement hook was not called")
+	}
+	if len(createdDirs) != 1 {
+		t.Fatalf("created directory evidence count = %d, want 1", len(createdDirs))
+	}
+	if createdDirs[0].Path != targetPath {
+		t.Fatalf("created directory evidence path = %q, want %q", createdDirs[0].Path, targetPath)
+	}
+	heldInfo, heldStatErr := createdDirs[0].handle.Stat()
+	if heldStatErr != nil {
+		t.Fatalf("Stat(retained created directory handle) error: %v", heldStatErr)
+	}
+	if info, statErr := os.Stat(targetPath); statErr != nil || !info.IsDir() {
+		t.Fatalf("replacement published directory = %v, %v; want preserved directory", info, statErr)
+	}
+	if info, statErr := os.Stat(displacedPath); statErr != nil || !info.IsDir() {
+		t.Fatalf("displaced owned directory = %v, %v; want preserved directory", info, statErr)
+	} else if !os.SameFile(heldInfo, info) {
+		t.Fatal("retained created directory handle does not identify displaced owned directory")
+	}
+}
+
+func TestWorkspace_CreatedDirEvidenceHandlesRemainHeldUntilReleased(t *testing.T) {
+	w := setupWorkspace(t)
+	var createdDirs []CreatedDir
+	t.Cleanup(func() {
+		_ = ReleaseCreatedDirs(createdDirs)
+	})
+
+	_, err := w.WriteFileFromReaderWithOptions(
+		context.Background(),
+		"/deep/path/held-evidence.txt",
+		strings.NewReader("content"),
+		WriteFileOptions{CreatedDirs: &createdDirs},
+	)
+	if err != nil {
+		t.Fatalf("WriteFileFromReaderWithOptions() error: %v", err)
+	}
+	if len(createdDirs) != 2 {
+		t.Fatalf("created directory evidence count = %d, want 2", len(createdDirs))
+	}
+	for _, created := range createdDirs {
+		if created.handle == nil {
+			t.Fatalf("created directory %s has no held identity handle", created.Path)
+		}
+		if _, statErr := created.handle.Stat(); statErr != nil {
+			t.Fatalf("Stat(created directory handle %s) error: %v", created.Path, statErr)
+		}
+	}
+
+	if err := ReleaseCreatedDirs(createdDirs); err != nil {
+		t.Fatalf("ReleaseCreatedDirs() error: %v", err)
+	}
+	for _, created := range createdDirs {
+		if _, statErr := created.handle.Stat(); !errors.Is(statErr, os.ErrClosed) {
+			t.Fatalf("Stat(released directory handle %s) error = %v, want os.ErrClosed", created.Path, statErr)
+		}
+	}
+	if err := ReleaseCreatedDirs(createdDirs); err != nil {
+		t.Fatalf("second ReleaseCreatedDirs() error: %v", err)
+	}
+}
+
+func TestWorkspace_SnapshotCreatedDirsReturnsDeepestFirstDurableEvidence(t *testing.T) {
+	w := setupWorkspace(t)
+	createdDirs, err := w.PrepareWriteParent(
+		context.Background(),
+		"/deep/path/file.txt",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("PrepareWriteParent() error: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = w.CleanupCreatedDirs(context.Background(), createdDirs)
+	})
+
+	evidence, err := w.SnapshotCreatedDirs(createdDirs)
+	if err != nil {
+		t.Fatalf("SnapshotCreatedDirs() error: %v", err)
+	}
+	if len(evidence) != 2 {
+		t.Fatalf("SnapshotCreatedDirs() count = %d, want 2", len(evidence))
+	}
+	for index, wantRelativePath := range []string{"deep/path", "deep"} {
+		got := evidence[index]
+		if got.RelativePath != wantRelativePath {
+			t.Fatalf("evidence[%d].RelativePath = %q, want %q", index, got.RelativePath, wantRelativePath)
+		}
+		if got.Path != filepath.Join(w.Root(), filepath.FromSlash(wantRelativePath)) {
+			t.Fatalf("evidence[%d].Path = %q", index, got.Path)
+		}
+		if got.PersistentIdentity == "" || got.DeleteIdentity == "" {
+			t.Fatalf("evidence[%d] lacks stable identities: %+v", index, got)
+		}
+		if !got.Mode.IsDir() || got.Mode.Perm() != 0o755 {
+			t.Fatalf("evidence[%d].Mode = %v, want directory 0755", index, got.Mode)
+		}
+	}
+}
+
+func TestWorkspace_SnapshotCreatedDirsRejectsNamespaceReplacement(t *testing.T) {
+	w := setupWorkspace(t)
+	createdDirs, err := w.PrepareWriteParent(
+		context.Background(),
+		"/owned/file.txt",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("PrepareWriteParent() error: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = ReleaseCreatedDirs(createdDirs)
+	})
+
+	ownedPath := filepath.Join(w.Root(), "owned")
+	displacedPath := filepath.Join(w.Root(), "owned-held")
+	if err := os.Rename(ownedPath, displacedPath); err != nil {
+		t.Fatalf("Rename(owned, held) error: %v", err)
+	}
+	if err := os.Mkdir(ownedPath, 0o755); err != nil {
+		t.Fatalf("Mkdir(replacement) error: %v", err)
+	}
+	if _, err := w.SnapshotCreatedDirs(createdDirs); !IsCreatedDirOwnershipChanged(err) {
+		t.Fatalf("SnapshotCreatedDirs() error = %v, want ownership change", err)
+	}
+	if info, err := os.Stat(ownedPath); err != nil || !info.IsDir() {
+		t.Fatalf("replacement directory = (%v, %v), want preserved", info, err)
+	}
+	if info, err := os.Stat(displacedPath); err != nil || !info.IsDir() {
+		t.Fatalf("displaced owned directory = (%v, %v), want preserved", info, err)
+	}
+}
+
+func TestWorkspace_WriteFileFromReader_RetainsSuspiciousCreatedDirEvidenceBeforeFilePublish(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(parentPath, displacedPath string) error
+		verify func(t *testing.T, parentPath, displacedPath string, heldInfo os.FileInfo)
+	}{
+		{
+			name: "replacement",
+			mutate: func(parentPath, displacedPath string) error {
+				if err := os.Rename(parentPath, displacedPath); err != nil {
+					return err
+				}
+				return os.Mkdir(parentPath, 0o755)
+			},
+			verify: func(t *testing.T, parentPath, displacedPath string, heldInfo os.FileInfo) {
+				t.Helper()
+				replacementInfo, err := os.Stat(parentPath)
+				if err != nil {
+					t.Fatalf("Stat(replacement parent) error: %v", err)
+				}
+				if os.SameFile(heldInfo, replacementInfo) {
+					t.Fatal("retained handle unexpectedly identifies replacement parent")
+				}
+				displacedInfo, err := os.Stat(displacedPath)
+				if err != nil {
+					t.Fatalf("Stat(displaced parent) error: %v", err)
+				}
+				if !os.SameFile(heldInfo, displacedInfo) {
+					t.Fatal("retained handle does not identify displaced created parent")
+				}
+			},
+		},
+		{
+			name: "mode drift",
+			mutate: func(parentPath, _ string) error {
+				return os.Chmod(parentPath, 0o700)
+			},
+			verify: func(t *testing.T, parentPath, _ string, heldInfo os.FileInfo) {
+				t.Helper()
+				currentInfo, err := os.Stat(parentPath)
+				if err != nil {
+					t.Fatalf("Stat(drifted parent) error: %v", err)
+				}
+				if !os.SameFile(heldInfo, currentInfo) {
+					t.Fatal("retained handle does not identify drifted created parent")
+				}
+				if currentInfo.Mode().Perm() != 0o700 {
+					t.Fatalf("drifted parent permissions = %o, want 700", currentInfo.Mode().Perm())
+				}
+			},
+		},
+		{
+			name: "new child",
+			mutate: func(parentPath, _ string) error {
+				return os.WriteFile(filepath.Join(parentPath, "external-child"), []byte("external"), 0o600)
+			},
+			verify: func(t *testing.T, parentPath, _ string, heldInfo os.FileInfo) {
+				t.Helper()
+				currentInfo, err := os.Stat(parentPath)
+				if err != nil {
+					t.Fatalf("Stat(parent with new child) error: %v", err)
+				}
+				if !os.SameFile(heldInfo, currentInfo) {
+					t.Fatal("retained handle does not identify parent with new child")
+				}
+				if _, err := os.Stat(filepath.Join(parentPath, "external-child")); err != nil {
+					t.Fatalf("Stat(external child) error: %v", err)
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			w := setupWorkspace(t)
+			parentPath := filepath.Join(w.Root(), "suspicious-parent")
+			displacedPath := filepath.Join(w.Root(), "displaced-suspicious-parent")
+			var createdDirs []CreatedDir
+			t.Cleanup(func() {
+				_ = ReleaseCreatedDirs(createdDirs)
+			})
+			stopErr := errors.New("stop before file publish")
+
+			_, err := w.WriteFileFromReaderWithOptions(
+				context.Background(),
+				"/suspicious-parent/file.txt",
+				strings.NewReader("content"),
+				WriteFileOptions{
+					CreatedDirs: &createdDirs,
+					BeforePublish: func() error {
+						if err := test.mutate(parentPath, displacedPath); err != nil {
+							return err
+						}
+						return stopErr
+					},
+				},
+			)
+			if !errors.Is(err, stopErr) {
+				t.Fatalf("WriteFileFromReaderWithOptions() error = %v, want stop error", err)
+			}
+			if !IsCreatedDirOwnershipChanged(err) {
+				t.Fatalf("WriteFileFromReaderWithOptions() error = %v, want created-directory ownership change", err)
+			}
+			if len(createdDirs) != 1 {
+				t.Fatalf("created directory evidence count = %d, want 1", len(createdDirs))
+			}
+			if createdDirs[0].Path != parentPath {
+				t.Fatalf("created directory evidence path = %q, want %q", createdDirs[0].Path, parentPath)
+			}
+			heldInfo, statErr := createdDirs[0].handle.Stat()
+			if statErr != nil {
+				t.Fatalf("Stat(retained created directory handle) error: %v", statErr)
+			}
+			test.verify(t, parentPath, displacedPath, heldInfo)
+			if _, statErr := os.Stat(filepath.Join(parentPath, "file.txt")); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("file target before publish = %v, want absent", statErr)
+			}
+
+			if releaseErr := ReleaseCreatedDirs(createdDirs); releaseErr != nil {
+				t.Fatalf("ReleaseCreatedDirs() error: %v", releaseErr)
+			}
+			if _, statErr := createdDirs[0].handle.Stat(); !errors.Is(statErr, os.ErrClosed) {
+				t.Fatalf("Stat(released evidence handle) error = %v, want os.ErrClosed", statErr)
+			}
+		})
+	}
+}
+
+func TestWorkspace_CleanupCreatedDirsRemovesOwnedTreeAndReleasesHandles(t *testing.T) {
+	w := setupWorkspace(t)
+	var createdDirs []CreatedDir
+	t.Cleanup(func() {
+		_ = ReleaseCreatedDirs(createdDirs)
+	})
+
+	_, err := w.WriteFileFromReaderWithOptions(
+		context.Background(),
+		"/deep/path/cleanup-evidence.txt",
+		strings.NewReader("content"),
+		WriteFileOptions{CreatedDirs: &createdDirs},
+	)
+	if err != nil {
+		t.Fatalf("WriteFileFromReaderWithOptions() error: %v", err)
+	}
+	if err := os.Remove(filepath.Join(w.Root(), "deep", "path", "cleanup-evidence.txt")); err != nil {
+		t.Fatalf("Remove(published file) error: %v", err)
+	}
+	if err := w.CleanupCreatedDirs(context.Background(), createdDirs); err != nil {
+		t.Fatalf("CleanupCreatedDirs() error: %v", err)
+	}
+	for _, created := range createdDirs {
+		if _, statErr := created.handle.Stat(); !errors.Is(statErr, os.ErrClosed) {
+			t.Fatalf("Stat(cleaned directory handle %s) error = %v, want os.ErrClosed", created.Path, statErr)
+		}
+		if _, statErr := os.Stat(created.Path); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("Stat(cleaned directory %s) error = %v, want os.ErrNotExist", created.Path, statErr)
+		}
+	}
+}
+
+func TestWorkspace_WriteFileFromReader_UsesNoReplaceForCreatedDirectoryPublish(t *testing.T) {
+	w := setupWorkspace(t)
+	targetPath := filepath.Join(w.Root(), "concurrent-parent")
+	publishedConcurrentTarget := false
+
+	originalAfterWorkspaceCreatedDirTempOpen := afterWorkspaceCreatedDirTempOpen
+	afterWorkspaceCreatedDirTempOpen = func(_, publishPath string) error {
+		if publishedConcurrentTarget || publishPath != targetPath {
+			return nil
+		}
+		publishedConcurrentTarget = true
+		return os.Mkdir(publishPath, 0o700)
+	}
+	t.Cleanup(func() {
+		afterWorkspaceCreatedDirTempOpen = originalAfterWorkspaceCreatedDirTempOpen
+	})
+
+	_, err := w.WriteFileFromReaderWithOptions(
+		context.Background(),
+		"/concurrent-parent/file.txt",
+		strings.NewReader("content"),
+		WriteFileOptions{},
+	)
+	if err != nil {
+		t.Fatalf("WriteFileFromReaderWithOptions() error: %v", err)
+	}
+	if !publishedConcurrentTarget {
+		t.Fatal("concurrent target hook was not called")
+	}
+	info, statErr := os.Stat(targetPath)
+	if statErr != nil {
+		t.Fatalf("Stat(concurrent target) error: %v", statErr)
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Fatalf("concurrent target permissions = %o, want 700", info.Mode().Perm())
+	}
+	data, readErr := os.ReadFile(filepath.Join(targetPath, "file.txt"))
+	if readErr != nil {
+		t.Fatalf("ReadFile(published file) error: %v", readErr)
+	}
+	if got := string(data); got != "content" {
+		t.Fatalf("published content = %q, want content", got)
+	}
+	matches, globErr := filepath.Glob(filepath.Join(w.Root(), ".workspace-dir-*.tmp"))
+	if globErr != nil {
+		t.Fatalf("Glob(workspace directory temp) error: %v", globErr)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("workspace directory temps remain after no-replace conflict: %v", matches)
+	}
+}
+
+func TestWorkspace_WriteFileFromReader_PreservesReplacedCreatedDirectoryOnCleanup(t *testing.T) {
+	w := setupWorkspace(t)
+	replacementPath := filepath.Join(w.Root(), "deep", "path")
+	displacedPath := filepath.Join(w.Root(), "deep", "owned-path")
+	readerErr := errors.New("reader failed after directory replacement")
+	replaced := false
+
+	reader := readerFunc(func([]byte) (int, error) {
+		if replaced {
+			return 0, readerErr
+		}
+		replaced = true
+		if err := os.Rename(replacementPath, displacedPath); err != nil {
+			return 0, err
+		}
+		if err := os.Mkdir(replacementPath, 0o755); err != nil {
+			return 0, err
+		}
+		return 0, readerErr
+	})
+
+	_, err := w.WriteFileFromReaderWithOptions(
+		context.Background(),
+		"/deep/path/replaced-dir.txt",
+		reader,
+		WriteFileOptions{},
+	)
+	if !errors.Is(err, readerErr) {
+		t.Fatalf("WriteFileFromReaderWithOptions() error = %v, want reader failure", err)
+	}
+	if !errors.Is(err, errWorkspaceCreatedDirOwnershipChanged) {
+		t.Fatalf("WriteFileFromReaderWithOptions() error = %v, want created-directory ownership error", err)
+	}
+
+	info, statErr := os.Stat(replacementPath)
+	if statErr != nil {
+		t.Fatalf("Stat(replacement directory) error: %v", statErr)
+	}
+	if !info.IsDir() {
+		t.Fatalf("replacement path mode = %v, want directory", info.Mode())
+	}
+	entries, readDirErr := os.ReadDir(replacementPath)
+	if readDirErr != nil {
+		t.Fatalf("ReadDir(replacement directory) error: %v", readDirErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("replacement directory entries = %v, want empty replacement preserved", entries)
+	}
+	if displacedInfo, displacedStatErr := os.Stat(displacedPath); displacedStatErr != nil || !displacedInfo.IsDir() {
+		t.Fatalf("displaced owned directory = %v, %v; want preserved directory", displacedInfo, displacedStatErr)
+	}
+}
+
+func TestWorkspace_WriteFileFromReader_PreservesCreatedDirectoryChangedAfterFinalBinding(t *testing.T) {
+	w := setupWorkspace(t)
+	createdPath := filepath.Join(w.Root(), "deep", "path")
+	originalBeforeWorkspaceCreatedDirRemoval := beforeWorkspaceCreatedDirRemoval
+	changed := false
+	beforeWorkspaceCreatedDirRemoval = func(path string) error {
+		if path != createdPath {
+			return nil
+		}
+		changed = true
+		changedTime := time.Unix(1_700_000_000, 123_456_789)
+		return os.Chtimes(path, changedTime, changedTime)
+	}
+	t.Cleanup(func() { beforeWorkspaceCreatedDirRemoval = originalBeforeWorkspaceCreatedDirRemoval })
+
+	_, err := w.WriteFileFromReaderWithOptions(
+		context.Background(),
+		"/deep/path/toolarge.txt",
+		strings.NewReader("too much data"),
+		WriteFileOptions{MaxBytes: 4},
+	)
+	if !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("WriteFileFromReaderWithOptions() error = %v, want ErrFileTooLarge", err)
+	}
+	if !errors.Is(err, errWorkspaceCreatedDirOwnershipChanged) {
+		t.Fatalf("WriteFileFromReaderWithOptions() error = %v, want created-directory ownership error", err)
+	}
+	if !changed {
+		t.Fatal("created directory was not changed after its final identity binding")
+	}
+	info, statErr := os.Stat(createdPath)
+	if statErr != nil || !info.IsDir() {
+		t.Fatalf("created directory after rejected cleanup = %v, %v; want preserved directory", info, statErr)
+	}
+}
+
+func TestWorkspace_WriteFileFromReader_PublishNoReplacePreservesLateTarget(t *testing.T) {
+	w := setupWorkspace(t)
+	targetPath := filepath.Join(w.Root(), "late-target.txt")
+
+	_, err := w.WriteFileFromReaderWithOptions(
+		context.Background(),
+		"/late-target.txt",
+		strings.NewReader("caller content"),
+		WriteFileOptions{
+			PublishNoReplace: true,
+			BeforePublish: func() error {
+				return os.WriteFile(targetPath, []byte("raced content"), 0o600)
+			},
+		},
+	)
+	if !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("WriteFileFromReaderWithOptions() error = %v, want ErrAlreadyExists", err)
+	}
+	data, readErr := os.ReadFile(targetPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(late target) error = %v", readErr)
+	}
+	if got := string(data); got != "raced content" {
+		t.Fatalf("late target content = %q, want raced content", got)
+	}
+	entries, readDirErr := os.ReadDir(w.Root())
+	if readDirErr != nil {
+		t.Fatalf("ReadDir(workspace) error = %v", readDirErr)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".workspace-") {
+			t.Fatalf("workspace temp remains after no-replace conflict: %s", entry.Name())
+		}
+	}
+}
+
+func TestWorkspace_WriteFileFromReader_RejectsReplacedTempWithoutDeletingReplacement(t *testing.T) {
+	w := setupWorkspace(t)
+	targetPath := filepath.Join(w.Root(), "target.txt")
+	displacedPath := filepath.Join(w.Root(), "displaced-owned-temp")
+	var replacementPath string
+	publishedIdentity := ""
+
+	_, err := w.WriteFileFromReaderWithOptions(
+		context.Background(),
+		"/target.txt",
+		strings.NewReader("caller content"),
+		WriteFileOptions{
+			PublishNoReplace:  true,
+			PublishedIdentity: &publishedIdentity,
+			BeforePublish: func() error {
+				matches, globErr := filepath.Glob(filepath.Join(w.Root(), ".workspace-*.tmp"))
+				if globErr != nil {
+					return globErr
+				}
+				if len(matches) != 1 {
+					return fmt.Errorf("workspace temp matches = %v, want exactly one", matches)
+				}
+				replacementPath = matches[0]
+				if renameErr := os.Rename(replacementPath, displacedPath); renameErr != nil {
+					return renameErr
+				}
+				return os.WriteFile(replacementPath, []byte("unknown replacement"), 0o600)
+			},
+		},
+	)
+	if !errors.Is(err, errWorkspaceTempOwnershipChanged) {
+		t.Fatalf("WriteFileFromReaderWithOptions() error = %v, want temp ownership change", err)
+	}
+	if publishedIdentity != "" {
+		t.Fatalf("PublishedIdentity = %q, want empty before rename", publishedIdentity)
+	}
+	if _, statErr := os.Stat(targetPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("replaced temp was published: %v", statErr)
+	}
+	replacement, readErr := os.ReadFile(replacementPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(replacement) error = %v", readErr)
+	}
+	if got := string(replacement); got != "unknown replacement" {
+		t.Fatalf("replacement content = %q, want unknown replacement", got)
+	}
+	displaced, readErr := os.ReadFile(displacedPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(displaced temp) error = %v", readErr)
+	}
+	if got := string(displaced); got != "caller content" {
+		t.Fatalf("displaced temp content = %q, want caller content", got)
+	}
+}
+
+func TestWorkspace_WriteFileFromReader_RejectsInPlaceTempMutation(t *testing.T) {
+	w := setupWorkspace(t)
+	probePath := filepath.Join(w.Root(), "identity-probe")
+	if err := os.WriteFile(probePath, []byte("probe"), 0o600); err != nil {
+		t.Fatalf("WriteFile(identity probe) error = %v", err)
+	}
+	probeInfo, err := os.Stat(probePath)
+	if err != nil {
+		t.Fatalf("Stat(identity probe) error = %v", err)
+	}
+	if DeleteIdentityTokenForFileInfo(probeInfo) == "" {
+		t.Skip("platform does not expose deletion identity")
+	}
+	if err := os.Remove(probePath); err != nil {
+		t.Fatalf("Remove(identity probe) error = %v", err)
+	}
+
+	targetPath := filepath.Join(w.Root(), "target.txt")
+	_, err = w.WriteFileFromReaderWithOptions(
+		context.Background(),
+		"/target.txt",
+		strings.NewReader("caller content"),
+		WriteFileOptions{
+			PublishNoReplace: true,
+			BeforePublish: func() error {
+				matches, globErr := filepath.Glob(filepath.Join(w.Root(), ".workspace-*.tmp"))
+				if globErr != nil {
+					return globErr
+				}
+				if len(matches) != 1 {
+					return fmt.Errorf("workspace temp matches = %v, want exactly one", matches)
+				}
+				tempInfo, statErr := os.Stat(matches[0])
+				if statErr != nil {
+					return statErr
+				}
+				originalToken := DeleteIdentityTokenForFileInfo(tempInfo)
+				time.Sleep(2 * time.Millisecond)
+				if writeErr := os.WriteFile(matches[0], []byte("tamper content"), tempInfo.Mode().Perm()); writeErr != nil {
+					return writeErr
+				}
+				if timeErr := os.Chtimes(matches[0], tempInfo.ModTime(), tempInfo.ModTime()); timeErr != nil {
+					return timeErr
+				}
+				mutatedInfo, statErr := os.Stat(matches[0])
+				if statErr != nil {
+					return statErr
+				}
+				if mutatedInfo.Mode() != tempInfo.Mode() || mutatedInfo.Size() != tempInfo.Size() ||
+					!mutatedInfo.ModTime().Equal(tempInfo.ModTime()) {
+					return errors.New("test mutation did not restore visible metadata")
+				}
+				if DeleteIdentityTokenForFileInfo(mutatedInfo) == originalToken {
+					return errors.New("test mutation did not change deletion identity")
+				}
+				return nil
+			},
+		},
+	)
+	if !errors.Is(err, errWorkspaceTempOwnershipChanged) {
+		t.Fatalf("WriteFileFromReaderWithOptions() error = %v, want temp ownership change", err)
+	}
+	if _, statErr := os.Stat(targetPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("mutated temp was published: %v", statErr)
+	}
+	matches, globErr := filepath.Glob(filepath.Join(w.Root(), ".workspace-*.tmp"))
+	if globErr != nil {
+		t.Fatalf("Glob(workspace temp) error = %v", globErr)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("owned mutated temp was not cleaned: %v", matches)
+	}
+}
+
+func TestWorkspace_WriteFileFromReader_ReportsPublishedTargetIdentityDrift(t *testing.T) {
+	w := setupWorkspace(t)
+	targetPath := filepath.Join(w.Root(), "target.txt")
+	displacedPath := filepath.Join(w.Root(), "displaced-published-temp")
+	publishedIdentity := ""
+
+	originalAfterWorkspaceFilePublish := afterWorkspaceFilePublish
+	afterWorkspaceFilePublish = func() error {
+		if err := os.Rename(targetPath, displacedPath); err != nil {
+			return err
+		}
+		return os.WriteFile(targetPath, []byte("unknown replacement"), 0o600)
+	}
+	t.Cleanup(func() {
+		afterWorkspaceFilePublish = originalAfterWorkspaceFilePublish
+	})
+
+	_, err := w.WriteFileFromReaderWithOptions(
+		context.Background(),
+		"/target.txt",
+		strings.NewReader("caller content"),
+		WriteFileOptions{
+			PublishNoReplace:  true,
+			PublishedIdentity: &publishedIdentity,
+		},
+	)
+	if !IsVisibleMutationWarning(err) || !errors.Is(err, errWorkspaceTempOwnershipChanged) {
+		t.Fatalf("WriteFileFromReaderWithOptions() error = %v, want visible ownership warning", err)
+	}
+	if publishedIdentity == "" {
+		t.Fatal("PublishedIdentity is empty after rename")
+	}
+	replacement, readErr := os.ReadFile(targetPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(replacement target) error = %v", readErr)
+	}
+	if got := string(replacement); got != "unknown replacement" {
+		t.Fatalf("replacement target content = %q, want unknown replacement", got)
+	}
+	displaced, readErr := os.ReadFile(displacedPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(displaced published temp) error = %v", readErr)
+	}
+	if got := string(displaced); got != "caller content" {
+		t.Fatalf("displaced published content = %q, want caller content", got)
+	}
+}
+
+func TestWorkspace_WriteFileFromReader_ReportsInPlacePublishedTargetMutation(t *testing.T) {
+	w := setupWorkspace(t)
+	probePath := filepath.Join(w.Root(), "identity-probe")
+	if err := os.WriteFile(probePath, []byte("probe"), 0o600); err != nil {
+		t.Fatalf("WriteFile(identity probe) error = %v", err)
+	}
+	probeInfo, err := os.Stat(probePath)
+	if err != nil {
+		t.Fatalf("Stat(identity probe) error = %v", err)
+	}
+	if DeleteIdentityTokenForFileInfo(probeInfo) == "" {
+		t.Skip("platform does not expose deletion identity")
+	}
+	if err := os.Remove(probePath); err != nil {
+		t.Fatalf("Remove(identity probe) error = %v", err)
+	}
+
+	targetPath := filepath.Join(w.Root(), "target.txt")
+	publishedIdentity := ""
+	originalAfterWorkspaceFilePublish := afterWorkspaceFilePublish
+	afterWorkspaceFilePublish = func() error {
+		targetInfo, statErr := os.Stat(targetPath)
+		if statErr != nil {
+			return statErr
+		}
+		originalToken := DeleteIdentityTokenForFileInfo(targetInfo)
+		time.Sleep(2 * time.Millisecond)
+		if writeErr := os.WriteFile(targetPath, []byte("tamper content"), targetInfo.Mode().Perm()); writeErr != nil {
+			return writeErr
+		}
+		if timeErr := os.Chtimes(targetPath, targetInfo.ModTime(), targetInfo.ModTime()); timeErr != nil {
+			return timeErr
+		}
+		mutatedInfo, statErr := os.Stat(targetPath)
+		if statErr != nil {
+			return statErr
+		}
+		if mutatedInfo.Mode() != targetInfo.Mode() || mutatedInfo.Size() != targetInfo.Size() ||
+			!mutatedInfo.ModTime().Equal(targetInfo.ModTime()) {
+			return errors.New("test mutation did not restore visible metadata")
+		}
+		if DeleteIdentityTokenForFileInfo(mutatedInfo) == originalToken {
+			return errors.New("test mutation did not change deletion identity")
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		afterWorkspaceFilePublish = originalAfterWorkspaceFilePublish
+	})
+
+	_, err = w.WriteFileFromReaderWithOptions(
+		context.Background(),
+		"/target.txt",
+		strings.NewReader("caller content"),
+		WriteFileOptions{
+			PublishNoReplace:  true,
+			PublishedIdentity: &publishedIdentity,
+		},
+	)
+	if !IsVisibleMutationWarning(err) || !errors.Is(err, errWorkspaceTempOwnershipChanged) {
+		t.Fatalf("WriteFileFromReaderWithOptions() error = %v, want visible ownership warning", err)
+	}
+	if publishedIdentity == "" {
+		t.Fatal("PublishedIdentity is empty after rename")
+	}
+	mutated, readErr := os.ReadFile(targetPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(mutated target) error = %v", readErr)
+	}
+	if got := string(mutated); got != "tamper content" {
+		t.Fatalf("mutated target content = %q, want tamper content", got)
 	}
 }
 
@@ -1464,6 +2295,35 @@ func TestWorkspace_WriteFileFromReader_StopsWhenContextIsCanceled(t *testing.T) 
 	}
 	if _, statErr := os.Stat(filepath.Join(w.Root(), "stream.txt")); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("expected no destination file after canceled write, got %v", statErr)
+	}
+}
+
+func TestWorkspace_WriteFileFromReader_RejectsCancellationObservedAtEOFBeforeRename(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	reads := 0
+	reader := readerFunc(func(buffer []byte) (int, error) {
+		reads++
+		if reads == 1 {
+			return copy(buffer, "complete payload"), nil
+		}
+		cancel()
+		return 0, io.EOF
+	})
+
+	err := w.WriteFileFromReader(ctx, "/cancel-at-eof.txt", reader)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("WriteFileFromReader() error = %v, want context.Canceled", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(w.Root(), "cancel-at-eof.txt")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("canceled write published destination: %v", statErr)
+	}
+	matches, globErr := filepath.Glob(filepath.Join(w.Root(), ".workspace-*.tmp"))
+	if globErr != nil {
+		t.Fatalf("Glob() error = %v", globErr)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("canceled write left temp files: %v", matches)
 	}
 }
 

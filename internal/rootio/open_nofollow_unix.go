@@ -14,6 +14,166 @@ import (
 )
 
 var beforeCheckedRemovalIsolation = func(string) error { return nil }
+var afterCheckedDirectoryRemovalIsolation = func(string, string) error { return nil }
+var beforeCheckedFileRemovalRebaseline = func(string, string) error { return nil }
+var afterCheckedFileRemovalIsolation = func(string, string) error { return nil }
+
+type checkedDirectorySystemMetadata struct {
+	uid       uint64
+	gid       uint64
+	nlink     uint64
+	ctimeSec  int64
+	ctimeNsec int64
+}
+
+type checkedDirectoryEvidence struct {
+	info      os.FileInfo
+	system    checkedDirectorySystemMetadata
+	hasSystem bool
+}
+
+type checkedFileEvidence struct {
+	info      os.FileInfo
+	system    checkedDirectorySystemMetadata
+	hasSystem bool
+}
+
+func newCheckedDirectoryEvidence(info os.FileInfo) checkedDirectoryEvidence {
+	system, ok := platformCheckedDirectorySystemMetadata(info)
+	return checkedDirectoryEvidence{info: info, system: system, hasSystem: ok}
+}
+
+func readCheckedDirectoryEvidence(dir *os.File, display string) (checkedDirectoryEvidence, error) {
+	info, err := dir.Stat()
+	if err != nil {
+		return checkedDirectoryEvidence{}, rootPathError("fstat", display, err)
+	}
+	if !info.IsDir() {
+		return checkedDirectoryEvidence{}, rootPathError("fstat", display, ErrEntryChanged)
+	}
+	return newCheckedDirectoryEvidence(info), nil
+}
+
+func newCheckedFileEvidence(info os.FileInfo) checkedFileEvidence {
+	system, ok := platformCheckedDirectorySystemMetadata(info)
+	return checkedFileEvidence{info: info, system: system, hasSystem: ok}
+}
+
+func readCheckedFileEvidence(file *os.File, display string) (checkedFileEvidence, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return checkedFileEvidence{}, rootPathError("fstat", display, err)
+	}
+	if !info.Mode().IsRegular() {
+		return checkedFileEvidence{}, rootPathError("fstat", display, ErrEntryChanged)
+	}
+	return newCheckedFileEvidence(info), nil
+}
+
+func checkedFileEvidenceMatches(expected, actual checkedFileEvidence, allowChangeTime bool) bool {
+	if expected.info == nil || actual.info == nil ||
+		!expected.info.Mode().IsRegular() || !actual.info.Mode().IsRegular() ||
+		!os.SameFile(expected.info, actual.info) ||
+		expected.info.Mode() != actual.info.Mode() ||
+		expected.info.Size() != actual.info.Size() ||
+		!expected.info.ModTime().Equal(actual.info.ModTime()) {
+		return false
+	}
+	if expected.hasSystem != actual.hasSystem {
+		return false
+	}
+	if !expected.hasSystem {
+		return true
+	}
+	if expected.system.uid != actual.system.uid ||
+		expected.system.gid != actual.system.gid ||
+		expected.system.nlink != actual.system.nlink {
+		return false
+	}
+	return allowChangeTime ||
+		(expected.system.ctimeSec == actual.system.ctimeSec && expected.system.ctimeNsec == actual.system.ctimeNsec)
+}
+
+func checkedDirectoryEvidenceMatches(
+	expected, actual checkedDirectoryEvidence,
+	allowModeChange, allowNamespaceChange, allowChangeTime bool,
+) bool {
+	if expected.info == nil || actual.info == nil || !expected.info.IsDir() || !actual.info.IsDir() ||
+		!os.SameFile(expected.info, actual.info) {
+		return false
+	}
+	if !allowModeChange && expected.info.Mode() != actual.info.Mode() {
+		return false
+	}
+	if !allowNamespaceChange &&
+		(expected.info.Size() != actual.info.Size() || !expected.info.ModTime().Equal(actual.info.ModTime())) {
+		return false
+	}
+	if expected.hasSystem != actual.hasSystem {
+		return false
+	}
+	if !expected.hasSystem {
+		return true
+	}
+	if expected.system.uid != actual.system.uid || expected.system.gid != actual.system.gid {
+		return false
+	}
+	if !allowNamespaceChange && expected.system.nlink != actual.system.nlink {
+		return false
+	}
+	return allowChangeTime ||
+		(expected.system.ctimeSec == actual.system.ctimeSec && expected.system.ctimeNsec == actual.system.ctimeNsec)
+}
+
+func verifyCurrentDirectoryEntryMatchesEvidence(
+	parentFD int,
+	name, display string,
+	expected checkedDirectoryEvidence,
+) error {
+	fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return noFollowPathError("openat", display, parentFD, name, checkedRemovalLookupError(err))
+	}
+	current := os.NewFile(uintptr(fd), display)
+	actual, evidenceErr := readCheckedDirectoryEvidence(current, display)
+	closeErr := current.Close()
+	if evidenceErr != nil || closeErr != nil {
+		var wrappedCloseErr error
+		if closeErr != nil {
+			wrappedCloseErr = rootPathError("close", display, closeErr)
+		}
+		return errors.Join(evidenceErr, wrappedCloseErr)
+	}
+	if !checkedDirectoryEvidenceMatches(expected, actual, false, false, false) {
+		return rootPathError("unlinkat", display, ErrEntryChanged)
+	}
+	return nil
+}
+
+func verifyCurrentFileEntryMatchesEvidence(
+	parentFD int,
+	name, display string,
+	expected checkedFileEvidence,
+) error {
+	fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return noFollowPathError("openat", display, parentFD, name, checkedRemovalLookupError(err))
+	}
+	current := os.NewFile(uintptr(fd), display)
+	actual, evidenceErr := readCheckedFileEvidence(current, display)
+	closeErr := current.Close()
+	if evidenceErr != nil || closeErr != nil {
+		var wrappedCloseErr error
+		if closeErr != nil {
+			wrappedCloseErr = rootPathError("close", display, closeErr)
+		}
+		return errors.Join(evidenceErr, wrappedCloseErr)
+	}
+	if !checkedFileEvidenceMatches(expected, actual, false) {
+		return rootPathError("unlinkat", display, ErrEntryChanged)
+	}
+	return nil
+}
 
 // OpenFileNoFollow opens name relative to root without following symlinks in
 // any path component.
@@ -74,6 +234,9 @@ func RenameLeafBetweenRootsNoReplace(
 	if err != nil {
 		return rootPathError("renameat", targetName, err)
 	}
+	if sourceRoot == targetRoot && sourceParent == targetParent && sourceBase == targetBase {
+		return rootPathError("renameat", targetName, unix.EINVAL)
+	}
 
 	sourceDir, err := openDirFDFromRootNoFollow(sourceRoot, sourceParent, sourceName)
 	if err != nil {
@@ -86,6 +249,18 @@ func RenameLeafBetweenRootsNoReplace(
 		return err
 	}
 	defer targetDir.Close()
+	if sourceBase == targetBase {
+		var sourceStat unix.Stat_t
+		var targetStat unix.Stat_t
+		sourceStatErr := unix.Fstat(sourceDir.fd, &sourceStat)
+		targetStatErr := unix.Fstat(targetDir.fd, &targetStat)
+		if sourceStatErr != nil || targetStatErr != nil {
+			return rootPathError("fstat", targetName, errors.Join(sourceStatErr, targetStatErr))
+		}
+		if sourceStat.Dev == targetStat.Dev && sourceStat.Ino == targetStat.Ino {
+			return rootPathError("renameat", targetName, unix.EINVAL)
+		}
+	}
 
 	if err := renameNoReplaceAt(sourceDir.fd, sourceBase, targetDir.fd, targetBase); err != nil {
 		if err == unix.EXDEV {
@@ -96,6 +271,65 @@ func RenameLeafBetweenRootsNoReplace(
 		}
 		if err == unix.ENOENT {
 			return rootPathError("renameat", sourceName, err)
+		}
+		return rootPathError("renameat", targetName, err)
+	}
+	return nil
+}
+
+// ExchangeLeavesBetweenRoots atomically swaps two existing leaf entries
+// between open roots without following symlinks in either parent path. Both
+// entries must reside in one filesystem rename domain. Platforms or
+// filesystems without a descriptor-relative atomic exchange primitive fail
+// closed with an unsupported error.
+func ExchangeLeavesBetweenRoots(
+	sourceRoot *os.Root,
+	sourceName string,
+	targetRoot *os.Root,
+	targetName string,
+) error {
+	sourceParent, sourceBase, err := splitRelativeParent(sourceName)
+	if err != nil {
+		return rootPathError("renameat", sourceName, err)
+	}
+	targetParent, targetBase, err := splitRelativeParent(targetName)
+	if err != nil {
+		return rootPathError("renameat", targetName, err)
+	}
+	if sourceRoot == targetRoot && sourceParent == targetParent && sourceBase == targetBase {
+		return rootPathError("renameat", targetName, unix.EINVAL)
+	}
+
+	sourceDir, err := openDirFDFromRootNoFollow(sourceRoot, sourceParent, sourceName)
+	if err != nil {
+		return err
+	}
+	defer sourceDir.Close()
+
+	targetDir, err := openDirFDFromRootNoFollow(targetRoot, targetParent, targetName)
+	if err != nil {
+		return err
+	}
+	defer targetDir.Close()
+	if sourceBase == targetBase {
+		var sourceStat unix.Stat_t
+		var targetStat unix.Stat_t
+		sourceStatErr := unix.Fstat(sourceDir.fd, &sourceStat)
+		targetStatErr := unix.Fstat(targetDir.fd, &targetStat)
+		if sourceStatErr != nil || targetStatErr != nil {
+			return rootPathError("fstat", targetName, errors.Join(sourceStatErr, targetStatErr))
+		}
+		if sourceStat.Dev == targetStat.Dev && sourceStat.Ino == targetStat.Ino {
+			return rootPathError("renameat", targetName, unix.EINVAL)
+		}
+	}
+
+	if err := exchangeAt(sourceDir.fd, sourceBase, targetDir.fd, targetBase); err != nil {
+		if err == unix.EXDEV {
+			return err
+		}
+		if err == unix.ENOENT {
+			return rootPathError("renameat", targetName, os.ErrNotExist)
 		}
 		return rootPathError("renameat", targetName, err)
 	}
@@ -199,6 +433,26 @@ func OpenDirEntryNoFollow(dir *os.File, name string) (*os.File, error) {
 // opened directory. verify is called for every exact entry immediately before
 // it is removed or traversed.
 func RemoveAllFromDirNoFollowChecked(dir *os.File, name string, verify func(string, os.FileInfo) error) error {
+	return removeAllFromDirNoFollowChecked(dir, name, verify, nil)
+}
+
+// RemoveAllFromDirNoFollowCheckedWithRegularFile also verifies the exact
+// opened contents of every isolated regular file before unlinking it.
+func RemoveAllFromDirNoFollowCheckedWithRegularFile(
+	dir *os.File,
+	name string,
+	verify func(string, os.FileInfo) error,
+	verifyFile CheckedRegularFileVerifier,
+) error {
+	return removeAllFromDirNoFollowChecked(dir, name, verify, verifyFile)
+}
+
+func removeAllFromDirNoFollowChecked(
+	dir *os.File,
+	name string,
+	verify func(string, os.FileInfo) error,
+	verifyFile CheckedRegularFileVerifier,
+) error {
 	if dir == nil {
 		return rootPathError("unlinkat", name, unix.EBADF)
 	}
@@ -209,7 +463,7 @@ func RemoveAllFromDirNoFollowChecked(dir *os.File, name string, verify func(stri
 		}
 		return rootPathError("unlinkat", name, err)
 	}
-	return removeAllAtNoFollowChecked(int(dir.Fd()), name, name, verify)
+	return removeAllAtNoFollowChecked(int(dir.Fd()), name, name, verify, verifyFile)
 }
 
 // RemoveAllFromDirNoFollowCheckedInPlace removes one tree relative to an
@@ -219,6 +473,19 @@ func RemoveAllFromDirNoFollowChecked(dir *os.File, name string, verify func(stri
 // every exact entry before mutation, and each opened entry is matched against
 // its current directory entry immediately before unlink or traversal.
 func RemoveAllFromDirNoFollowCheckedInPlace(dir *os.File, name string, verify func(string, os.FileInfo) error) error {
+	return RemoveAllFromDirNoFollowCheckedInPlaceWithRegularFile(dir, name, verify, nil)
+}
+
+// RemoveAllFromDirNoFollowCheckedInPlaceWithRegularFile removes one tree
+// without isolation renames and verifies the exact opened contents of every
+// regular file immediately before unlinking it. It is intended for durable
+// recovery flows where an interrupted unlink is retried from a journal.
+func RemoveAllFromDirNoFollowCheckedInPlaceWithRegularFile(
+	dir *os.File,
+	name string,
+	verify func(string, os.FileInfo) error,
+	verifyFile CheckedRegularFileVerifier,
+) error {
 	if dir == nil {
 		return rootPathError("unlinkat", name, unix.EBADF)
 	}
@@ -229,7 +496,85 @@ func RemoveAllFromDirNoFollowCheckedInPlace(dir *os.File, name string, verify fu
 		}
 		return rootPathError("unlinkat", name, err)
 	}
-	return removeAllAtNoFollowCheckedInPlace(int(dir.Fd()), name, name, verify)
+	return removeAllAtNoFollowCheckedInPlace(int(dir.Fd()), name, name, verify, verifyFile)
+}
+
+// RemoveEmptyDirNoFollowCheckedInPlace removes one verified empty directory
+// without changing its mode or first renaming it to an isolation name.
+func RemoveEmptyDirNoFollowCheckedInPlace(
+	dir *os.File,
+	name string,
+	verify func(string, os.FileInfo) error,
+) error {
+	if dir == nil {
+		return rootPathError("unlinkat", name, unix.EBADF)
+	}
+	parts, err := splitRelativeName(name)
+	if err != nil || len(parts) != 1 || parts[0] == "." {
+		if err == nil {
+			err = errEscape
+		}
+		return rootPathError("unlinkat", name, err)
+	}
+
+	var stat unix.Stat_t
+	if err := unix.Fstatat(int(dir.Fd()), name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return noFollowPathError("fstatat", name, int(dir.Fd()), name, checkedRemovalLookupError(err))
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
+		return rootPathError("unlinkat", name, ErrEntryChanged)
+	}
+	fd, err := unix.Openat(
+		int(dir.Fd()),
+		name,
+		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW,
+		0,
+	)
+	if err != nil {
+		return noFollowPathError("openat", name, int(dir.Fd()), name, checkedRemovalLookupError(err))
+	}
+	opened := os.NewFile(uintptr(fd), name)
+	defer opened.Close()
+	openedInfo, err := opened.Stat()
+	if err != nil {
+		return rootPathError("fstat", name, err)
+	}
+	if verify != nil {
+		if err := verify(name, openedInfo); err != nil {
+			return err
+		}
+	}
+	if err := verifyCurrentEntryMatchesOpened(
+		int(dir.Fd()),
+		name,
+		name,
+		openedInfo,
+		true,
+		verify,
+	); err != nil {
+		return err
+	}
+	entries, readErr := opened.ReadDir(1)
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return rootPathError("readdir", name, readErr)
+	}
+	if len(entries) != 0 {
+		return rootPathError("unlinkat", name, ErrEntryChanged)
+	}
+	if err := verifyCurrentEntryMatchesOpened(
+		int(dir.Fd()),
+		name,
+		name,
+		openedInfo,
+		true,
+		nil,
+	); err != nil {
+		return err
+	}
+	if err := unix.Unlinkat(int(dir.Fd()), name, unix.AT_REMOVEDIR); err != nil {
+		return rootPathError("unlinkat", name, checkedRemovalMutationError(err))
+	}
+	return nil
 }
 
 // RenameNoFollow renames sourceName to targetName relative to root without
@@ -418,10 +763,15 @@ func RemoveAllNoFollow(root *os.Root, name string) error {
 }
 
 func removeAllAtNoFollow(parentFD int, name, display string) error {
-	return removeAllAtNoFollowChecked(parentFD, name, display, nil)
+	return removeAllAtNoFollowChecked(parentFD, name, display, nil, nil)
 }
 
-func removeAllAtNoFollowChecked(parentFD int, name, display string, verify func(string, os.FileInfo) error) error {
+func removeAllAtNoFollowChecked(
+	parentFD int,
+	name, display string,
+	verify func(string, os.FileInfo) error,
+	verifyFile CheckedRegularFileVerifier,
+) error {
 	var stat unix.Stat_t
 	if err := unix.Fstatat(parentFD, name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		if err == unix.ENOENT {
@@ -437,7 +787,7 @@ func removeAllAtNoFollowChecked(parentFD int, name, display string, verify func(
 		if verify == nil {
 			return finishRemoveAllFileUnlink(nil, display, false, unix.Unlinkat(parentFD, name, 0))
 		}
-		return removeVerifiedFileAt(parentFD, name, display, verify)
+		return removeVerifiedFileAt(parentFD, name, display, verify, verifyFile)
 	}
 
 	dirFD, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
@@ -455,6 +805,7 @@ func removeAllAtNoFollowChecked(parentFD int, name, display string, verify func(
 		}
 	}()
 	var openedDirInfo os.FileInfo
+	var preparedDirEvidence checkedDirectoryEvidence
 	isolatedName := ""
 	abortCheckedDirectoryRemoval := func(cause error) error {
 		if isolatedName == "" {
@@ -479,18 +830,50 @@ func removeAllAtNoFollowChecked(parentFD int, name, display string, verify func(
 		if err := beforeCheckedRemovalIsolation(display); err != nil {
 			return err
 		}
+		beforeIsolation, err := readCheckedDirectoryEvidence(dirFile, display)
+		if err != nil {
+			return err
+		}
+		openedEvidence := newCheckedDirectoryEvidence(openedDirInfo)
+		if !checkedDirectoryEvidenceMatches(openedEvidence, beforeIsolation, false, false, false) {
+			return rootPathError("renameat", display, ErrEntryChanged)
+		}
+		if err := verifyCurrentDirectoryEntryMatchesEvidence(parentFD, name, display, beforeIsolation); err != nil {
+			return err
+		}
 		isolatedName, err = isolateCheckedRemovalAt(parentFD, name, display)
 		if err != nil {
 			return err
 		}
+		if err := afterCheckedDirectoryRemovalIsolation(display, isolatedName); err != nil {
+			return abortCheckedDirectoryRemoval(err)
+		}
 		if err := verifyCurrentEntryMatchesOpened(parentFD, isolatedName, display, openedDirInfo, true, nil); err != nil {
 			return abortCheckedDirectoryRemoval(err)
 		}
+		afterIsolation, evidenceErr := readCheckedDirectoryEvidence(dirFile, display)
+		if evidenceErr != nil || !checkedDirectoryEvidenceMatches(beforeIsolation, afterIsolation, false, false, true) {
+			return abortCheckedDirectoryRemoval(errors.Join(evidenceErr, rootPathError("renameat", display, ErrEntryChanged)))
+		}
+		if err := verifyCurrentDirectoryEntryMatchesEvidence(parentFD, isolatedName, display, afterIsolation); err != nil {
+			return abortCheckedDirectoryRemoval(err)
+		}
+		preparedDirEvidence = afterIsolation
 	}
 	if err := unix.Fchmod(dirFD, uint32((stat.Mode&07777)|0700)); err != nil {
 		return abortCheckedDirectoryRemoval(rootPathError("chmod", display, err))
 	}
+	if verify != nil {
+		afterChmod, evidenceErr := readCheckedDirectoryEvidence(dirFile, display)
+		expectedMode := preparedDirEvidence.info.Mode() | 0o700
+		if evidenceErr != nil || afterChmod.info == nil || afterChmod.info.Mode() != expectedMode ||
+			!checkedDirectoryEvidenceMatches(preparedDirEvidence, afterChmod, true, false, true) {
+			return abortCheckedDirectoryRemoval(errors.Join(evidenceErr, rootPathError("chmod", display, ErrEntryChanged)))
+		}
+		preparedDirEvidence = afterChmod
+	}
 
+	removedChild := false
 	for {
 		entries, err := dirFile.ReadDir(100)
 		for _, entry := range entries {
@@ -498,9 +881,10 @@ func removeAllAtNoFollowChecked(parentFD int, name, display string, verify func(
 			if childName == "." || childName == ".." {
 				continue
 			}
-			if err := removeAllAtNoFollowChecked(dirFD, childName, filepath.Join(display, childName), verify); err != nil {
+			if err := removeAllAtNoFollowChecked(dirFD, childName, filepath.Join(display, childName), verify, verifyFile); err != nil {
 				return abortCheckedDirectoryRemoval(err)
 			}
+			removedChild = true
 		}
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
@@ -513,7 +897,17 @@ func removeAllAtNoFollowChecked(parentFD int, name, display string, verify func(
 		}
 	}
 	if verify != nil {
-		if err := verifyCurrentEntryMatchesOpened(parentFD, isolatedName, display, openedDirInfo, true, nil); err != nil {
+		finalEvidence, evidenceErr := readCheckedDirectoryEvidence(dirFile, display)
+		if evidenceErr != nil || !checkedDirectoryEvidenceMatches(
+			preparedDirEvidence,
+			finalEvidence,
+			false,
+			removedChild,
+			removedChild,
+		) {
+			return abortCheckedDirectoryRemoval(errors.Join(evidenceErr, rootPathError("unlinkat", display, ErrEntryChanged)))
+		}
+		if err := verifyCurrentDirectoryEntryMatchesEvidence(parentFD, isolatedName, display, finalEvidence); err != nil {
 			return abortCheckedDirectoryRemoval(err)
 		}
 	}
@@ -538,7 +932,12 @@ func removeAllAtNoFollowChecked(parentFD int, name, display string, verify func(
 	return nil
 }
 
-func removeAllAtNoFollowCheckedInPlace(parentFD int, name, display string, verify func(string, os.FileInfo) error) error {
+func removeAllAtNoFollowCheckedInPlace(
+	parentFD int,
+	name, display string,
+	verify func(string, os.FileInfo) error,
+	verifyFile CheckedRegularFileVerifier,
+) error {
 	var stat unix.Stat_t
 	if err := unix.Fstatat(parentFD, name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		if err == unix.ENOENT {
@@ -548,7 +947,7 @@ func removeAllAtNoFollowCheckedInPlace(parentFD int, name, display string, verif
 	}
 
 	if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
-		return removeVerifiedFileAtInPlace(parentFD, name, display, verify)
+		return removeVerifiedFileAtInPlace(parentFD, name, display, verify, verifyFile)
 	}
 
 	dirFD, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
@@ -586,7 +985,13 @@ func removeAllAtNoFollowCheckedInPlace(parentFD int, name, display string, verif
 			if childName == "." || childName == ".." {
 				continue
 			}
-			if err := removeAllAtNoFollowCheckedInPlace(dirFD, childName, filepath.Join(display, childName), verify); err != nil {
+			if err := removeAllAtNoFollowCheckedInPlace(
+				dirFD,
+				childName,
+				filepath.Join(display, childName),
+				verify,
+				verifyFile,
+			); err != nil {
 				return err
 			}
 		}
@@ -612,7 +1017,12 @@ func removeAllAtNoFollowCheckedInPlace(parentFD int, name, display string, verif
 	return nil
 }
 
-func removeVerifiedFileAtInPlace(parentFD int, name, display string, verify func(string, os.FileInfo) error) error {
+func removeVerifiedFileAtInPlace(
+	parentFD int,
+	name, display string,
+	verify func(string, os.FileInfo) error,
+	verifyFile CheckedRegularFileVerifier,
+) error {
 	fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return noFollowPathError("openat", display, parentFD, name, checkedRemovalLookupError(err))
@@ -633,6 +1043,28 @@ func removeVerifiedFileAtInPlace(parentFD int, name, display string, verify func
 		_ = opened.Close()
 		return err
 	}
+	evidence, evidenceErr := readCheckedFileEvidence(opened, display)
+	if evidenceErr != nil ||
+		!checkedFileEvidenceMatches(newCheckedFileEvidence(openedInfo), evidence, false) {
+		_ = opened.Close()
+		return errors.Join(evidenceErr, rootPathError("unlinkat", display, ErrEntryChanged))
+	}
+	if verifyFile != nil {
+		if err := verifyFile(display, opened, evidence.info); err != nil {
+			_ = opened.Close()
+			return err
+		}
+		verifiedEvidence, err := readCheckedFileEvidence(opened, display)
+		if err != nil || !checkedFileEvidenceMatches(evidence, verifiedEvidence, false) {
+			_ = opened.Close()
+			return errors.Join(err, rootPathError("unlinkat", display, ErrEntryChanged))
+		}
+		evidence = verifiedEvidence
+	}
+	if err := verifyCurrentFileEntryMatchesEvidence(parentFD, name, display, evidence); err != nil {
+		_ = opened.Close()
+		return err
+	}
 	unlinkErr := unix.Unlinkat(parentFD, name, 0)
 	_ = opened.Close()
 	if unlinkErr == nil {
@@ -641,7 +1073,12 @@ func removeVerifiedFileAtInPlace(parentFD int, name, display string, verify func
 	return rootPathError("unlinkat", display, checkedRemovalMutationError(unlinkErr))
 }
 
-func removeVerifiedFileAt(parentFD int, name, display string, verify func(string, os.FileInfo) error) error {
+func removeVerifiedFileAt(
+	parentFD int,
+	name, display string,
+	verify func(string, os.FileInfo) error,
+	verifyFile CheckedRegularFileVerifier,
+) error {
 	fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return noFollowPathError("openat", display, parentFD, name, checkedRemovalLookupError(err))
@@ -664,6 +1101,15 @@ func removeVerifiedFileAt(parentFD int, name, display string, verify func(string
 		_ = opened.Close()
 		return err
 	}
+	if err := verifyCurrentEntryMatchesOpened(parentFD, name, display, openedInfo, false, verify); err != nil {
+		_ = opened.Close()
+		return err
+	}
+	beforeIsolation, evidenceErr := readCheckedFileEvidence(opened, display)
+	if evidenceErr != nil || !checkedFileEvidenceMatches(newCheckedFileEvidence(openedInfo), beforeIsolation, false) {
+		_ = opened.Close()
+		return errors.Join(evidenceErr, rootPathError("renameat", display, ErrEntryChanged))
+	}
 
 	isolatedName, err := isolateCheckedRemovalAt(parentFD, name, display)
 	if err != nil {
@@ -675,7 +1121,34 @@ func removeVerifiedFileAt(parentFD int, name, display string, verify func(string
 		_ = opened.Close()
 		return errors.Join(cause, rollbackErr)
 	}
+	if err := beforeCheckedFileRemovalRebaseline(display, isolatedName); err != nil {
+		return rollback(err)
+	}
 	if err := verifyCurrentEntryMatchesOpened(parentFD, isolatedName, display, openedInfo, false, nil); err != nil {
+		return rollback(err)
+	}
+	afterIsolation, evidenceErr := readCheckedFileEvidence(opened, display)
+	if evidenceErr != nil || !checkedFileEvidenceMatches(beforeIsolation, afterIsolation, true) {
+		return rollback(errors.Join(evidenceErr, rootPathError("renameat", display, ErrEntryChanged)))
+	}
+	if verifyFile != nil {
+		if err := verifyFile(display, opened, afterIsolation.info); err != nil {
+			return rollback(err)
+		}
+		verifiedEvidence, evidenceErr := readCheckedFileEvidence(opened, display)
+		if evidenceErr != nil || !checkedFileEvidenceMatches(afterIsolation, verifiedEvidence, false) {
+			return rollback(errors.Join(evidenceErr, rootPathError("unlinkat", display, ErrEntryChanged)))
+		}
+		afterIsolation = verifiedEvidence
+	}
+	if err := afterCheckedFileRemovalIsolation(display, isolatedName); err != nil {
+		return rollback(err)
+	}
+	finalEvidence, evidenceErr := readCheckedFileEvidence(opened, display)
+	if evidenceErr != nil || !checkedFileEvidenceMatches(afterIsolation, finalEvidence, false) {
+		return rollback(errors.Join(evidenceErr, rootPathError("unlinkat", display, ErrEntryChanged)))
+	}
+	if err := verifyCurrentFileEntryMatchesEvidence(parentFD, isolatedName, display, finalEvidence); err != nil {
 		return rollback(err)
 	}
 	unlinkErr := unix.Unlinkat(parentFD, isolatedName, 0)
