@@ -183,6 +183,7 @@ describe('parseByteSize', () => {
     expect(parseByteSize('1 KB')).toBe(1024)
     expect(parseByteSize('1.5MB')).toBe(1572864)
     expect(parseByteSize('2 GB')).toBe(2147483648)
+    expect(parseByteSize('100 MiB')).toBe(104857600)
   })
 
   it('rejects invalid sizes', () => {

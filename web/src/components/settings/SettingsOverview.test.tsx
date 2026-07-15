@@ -31,7 +31,8 @@ describe('SettingsOverview', () => {
 
     const destinations: Array<[string, SettingsDestination]> = [
       ['账户与远程访问：检查登录会话、HTTPS 和公网访问边界。', 'general'],
-      ['数据保护与权限：管理回收站、版本保留、目录配额和访问权限。', 'retention'],
+      ['数据保护：管理回收站、版本保留和自动版本化。', 'retention'],
+      ['目录与访问：管理目录配额、访问规则和有效权限复核。', 'users-access'],
       ['分享与协作：设置分享默认策略，并复核已经创建的访问链接。', 'shares'],
       ['设备挂载：查看 WebDAV 挂载地址，并选择适合的认证方式。', 'webdav'],
       ['设备状态与通知：查看磁盘健康、数据校验和异常通知。', 'device-care'],

@@ -39,7 +39,8 @@ test.describe('设置页面', () => {
   test('应显示任务导向的设置入口', async ({ page }) => {
     const tasks = [
       /账户与远程访问/i,
-      /数据保护与权限/i,
+      /数据保护/i,
+      /目录与访问/i,
       /设备挂载/i,
       /设备状态与通知/i,
       /分享与协作/i,
@@ -54,7 +55,7 @@ test.describe('设置页面', () => {
     await page.setViewportSize({ width: 390, height: 844 })
     await ensureAuthenticatedAt(page, '/settings')
 
-    const taskNames = ['账户与远程访问', '数据保护与权限', '设备挂载', '设备状态与通知', '分享与协作']
+    const taskNames = ['账户与远程访问', '数据保护', '目录与访问', '设备挂载', '设备状态与通知', '分享与协作']
     for (const taskName of taskNames) {
       const task = page.getByRole('button', { name: new RegExp(taskName) })
       await task.scrollIntoViewIfNeeded()
@@ -99,157 +100,11 @@ test.describe('设置选项卡切换', () => {
   test('点击版本保留选项卡应显示版本设置', async ({ page }) => {
     await selectSettingsCategory(page, 'retention', /数据保护/i)
 
-    const maxVersions = page.getByText(/最大版本数/i)
-    await expect(maxVersions).toBeVisible({ timeout: 5000 })
-    await expect(page.getByText('路径直接填写 MnemoNAS 逻辑路径')).toBeVisible()
-  })
-
-  test('目录权限矩阵复核记录应写入近期历史', async ({ page }) => {
-    await page.route('**/api/v1/settings/access-report', async (route) => {
-      expect(route.request().method()).toBe('POST')
-      expect(JSON.parse(route.request().postData() || '{}')).toMatchObject({ path: '/team/readme.txt' })
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          success: true,
-          data: {
-            path: '/team/readme.txt',
-            summary: {
-              users: 2,
-              read_allowed: 1,
-              read_denied: 1,
-              write_allowed: 1,
-              write_denied: 1,
-              related_shares: 1,
-              active_related_shares: 1,
-              password_protected_shares: 1,
-            },
-            users: [
-              {
-                username: 'alice',
-                user_id: 'u1',
-                role: 'user',
-                groups: ['family'],
-                home_dir: '/users/alice',
-                path: '/team/readme.txt',
-                read: {
-                  mode: 'read',
-                  allowed: true,
-                  source: 'directory_access_rule',
-                  matched_rule: {
-                    path: '/team',
-                    read_groups: ['family'],
-                  },
-                },
-                write: {
-                  mode: 'write',
-                  allowed: true,
-                  source: 'directory_access_rule',
-                  matched_rule: {
-                    path: '/team',
-                    write_groups: ['family'],
-                  },
-                },
-              },
-              {
-                username: 'bob',
-                user_id: 'u2',
-                role: 'user',
-                groups: [],
-                home_dir: '/users/bob',
-                path: '/team/readme.txt',
-                read: {
-                  mode: 'read',
-                  allowed: false,
-                  source: 'home_dir',
-                },
-                write: {
-                  mode: 'write',
-                  allowed: false,
-                  source: 'home_dir',
-                },
-              },
-            ],
-            rule_effects: [
-              {
-                path: '/team',
-                index: 0,
-                read_allowed: 1,
-                read_denied: 0,
-                write_allowed: 1,
-                write_denied: 0,
-                user_samples: ['alice'],
-              },
-            ],
-            shares: [
-              {
-                id: 'share-1',
-                path: '/team',
-                type: 'folder',
-                created_by: 'u1',
-                relation: 'covers_path',
-                enabled: true,
-                active: true,
-                has_password: true,
-                access_count: 0,
-                max_access: 0,
-                url: '/s/share-1',
-              },
-            ],
-          },
-        }),
-      })
-    })
-
-    await selectSettingsCategory(page, 'retention', /数据保护/i)
-    await page.getByLabel('检查路径').fill('/team/readme.txt')
-    await page.getByRole('button', { name: '用户矩阵' }).click()
-
-    const matrix = page.getByLabel('目录权限用户矩阵')
-    await expect(matrix).toBeVisible({ timeout: 5000 })
-    await expect(matrix.getByText('/team/readme.txt')).toBeVisible()
-    await expect(matrix.getByText('用户 2')).toBeVisible()
-    const ruleEffects = matrix.getByLabel('用户矩阵规则生效明细')
-    await expect(ruleEffects.getByText('规则 1 · /team')).toBeVisible()
-    await expect(ruleEffects.getByText('读允许 1')).toBeVisible()
-    await expect(ruleEffects.getByText('写允许 1')).toBeVisible()
-
-    await page.evaluate(() => {
-      Object.defineProperty(navigator, 'clipboard', {
-        configurable: true,
-        value: { writeText: async () => undefined },
-      })
-    })
-    await page.getByRole('button', { name: '复制复核记录' }).click()
-
-    const history = page.getByLabel('目录权限近期复核历史')
-    await expect(history.getByText('/team/readme.txt')).toBeVisible({ timeout: 5000 })
-    await expect(history.getByText('用户矩阵')).toBeVisible()
-    await expect(history.getByText('用户 2')).toBeVisible()
-    await expect(history.getByText('可读 1')).toBeVisible()
-    await expect(history.getByText('可写 1')).toBeVisible()
-
-    const storedHistory = await page.evaluate(() => {
-      const storageKey = Object.keys(window.localStorage).find((key) => (
-        key.startsWith('mnemonas_directory_access_review_history:')
-      ))
-      return storageKey ? JSON.parse(window.localStorage.getItem(storageKey) || '[]') : []
-    })
-    expect(storedHistory).toEqual([
-      expect.objectContaining({
-        title: '用户矩阵',
-        path: '/team/readme.txt',
-        preview: false,
-        users: 2,
-        readAllowed: 1,
-        writeAllowed: 1,
-        relatedShares: 1,
-      }),
-    ])
-
-    await history.getByRole('button', { name: '清空近期记录' }).click()
-    await expect(history.getByText('暂无近期目录权限复核记录。')).toBeVisible({ timeout: 5000 })
+    const retention = page.getByRole('tabpanel', { name: '数据保护' })
+    await expect(retention.getByRole('heading', { name: '版本策略' })).toBeVisible({ timeout: 5000 })
+    await expect(retention.getByRole('spinbutton', { name: '最大版本数' })).toHaveValue('50')
+    await expect(retention.getByRole('heading', { name: '自动版本化' })).toBeVisible()
+    await expect(retention.getByRole('textbox', { name: '最大自动版本化文件大小' })).toHaveValue('100 MB')
   })
 
   test('点击分享选项卡应显示分享策略覆盖摘要', async ({ page }) => {

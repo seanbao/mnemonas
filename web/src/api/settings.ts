@@ -11,6 +11,7 @@ import { hasControlCharacter, normalizePath } from '@/lib/utils'
 const API_BASE = '/api/v1/settings'
 const MIN_CDC_CHUNK_SIZE = 64 * 1024
 const MAX_CDC_CHUNK_SIZE = 64 * 1024 * 1024
+export const MAX_VERSIONED_FILE_SIZE_BYTES = 100 * 1024 * 1024
 const SETTINGS_ERROR_MESSAGES = {
   get: '获取设置失败',
   securityCheck: '获取安全检查失败',
@@ -671,8 +672,12 @@ function validateCapacitySettingsUpdateRequest(data: UpdateSettingsRequest): voi
   if (data.trash?.max_size !== undefined && !isPositiveSafeInteger(data.trash.max_size)) {
     throw new SettingsError('回收站容量上限必须是不超过安全范围的正整数', 0, 'INVALID_TRASH_MAX_SIZE')
   }
-  if (data.versioning?.max_versioned_size !== undefined && !isPositiveSafeInteger(data.versioning.max_versioned_size)) {
-    throw new SettingsError('自动版本文件大小上限必须是不超过安全范围的正整数', 0, 'INVALID_VERSIONING_MAX_VERSIONED_SIZE')
+  if (
+    data.versioning?.max_versioned_size !== undefined
+    && (!isPositiveSafeInteger(data.versioning.max_versioned_size)
+      || data.versioning.max_versioned_size > MAX_VERSIONED_FILE_SIZE_BYTES)
+  ) {
+    throw new SettingsError('自动版本文件大小上限必须是 100 MiB 以内的正整数', 0, 'INVALID_VERSIONING_MAX_VERSIONED_SIZE')
   }
   if (data.alerts?.min_free_bytes !== undefined && !isNonNegativeSafeInteger(data.alerts.min_free_bytes)) {
     throw new SettingsError('告警最小剩余空间必须是 0 或不超过安全范围的正整数', 0, 'INVALID_ALERTS_MIN_FREE_BYTES')
@@ -1079,7 +1084,8 @@ function isValidSettingsData(value: unknown): value is SettingsData {
     if (!isRecord(value.versioning)
       || !isStringArray(value.versioning.auto_versioned_extensions)
       || !isStringArray(value.versioning.auto_versioned_filenames)
-      || !isPositiveSafeInteger(value.versioning.max_versioned_size)) {
+      || !isPositiveSafeInteger(value.versioning.max_versioned_size)
+      || value.versioning.max_versioned_size > MAX_VERSIONED_FILE_SIZE_BYTES) {
       return false
     }
   }

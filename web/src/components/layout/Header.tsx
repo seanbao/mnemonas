@@ -7,6 +7,7 @@ import { useSettingsDraftStore } from '@/stores/settingsDraft'
 import { useQueryClient } from '@tanstack/react-query'
 import { ThemeToggle } from '@/components/ThemeToggle'
 import { openUrlInNewTab } from '@/lib/utils'
+import { confirmDiscardUnsavedChanges } from '@/lib/unsavedChanges'
 
 interface HeaderProps {
   onMenuClick?: () => void
@@ -25,14 +26,26 @@ export function Header({ onMenuClick }: HeaderProps) {
   const authEnabled = useAuthStore((state) => state.authEnabled)
   const logout = useAuthStore((state) => state.logout)
   const hasPendingSettingsChanges = useSettingsDraftStore((state) => state.hasPendingChanges)
+  const setHasPendingSettingsChanges = useSettingsDraftStore((state) => state.setHasPendingChanges)
   const queryClient = useQueryClient()
   const [searchQuery, setSearchQuery] = useState('')
   const [isRefreshing, setIsRefreshing] = useState(false)
+  const [isLoggingOut, setIsLoggingOut] = useState(false)
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false)
 
   const handleLogout = async () => {
+    if (isLoggingOut) {
+      return
+    }
+    if (hasPendingSettingsChanges && !confirmDiscardUnsavedChanges()) {
+      return
+    }
+    setIsLoggingOut(true)
     try {
       const result = await logout()
+      if (hasPendingSettingsChanges) {
+        setHasPendingSettingsChanges(false)
+      }
       queryClient.clear()
       addToast(result.warning
         ? { title: logoutWarningTitle, color: 'warning' }
@@ -44,6 +57,8 @@ export function Header({ onMenuClick }: HeaderProps) {
         description: logoutFailureDescription,
         color: 'danger',
       })
+    } finally {
+      setIsLoggingOut(false)
     }
   }
 
@@ -52,14 +67,6 @@ export function Header({ onMenuClick }: HeaderProps) {
   }
 
   const handleAccountSecurity = () => {
-    if (hasPendingSettingsChanges) {
-      addToast({
-        title: '设置尚未保存',
-        description: '请先保存设置或重置当前更改，再修改账户密码。',
-        color: 'warning',
-      })
-      return
-    }
     const returnTo = `${location.pathname}${location.search}${location.hash}`
     navigate('/account/security', { state: { returnTo } })
   }
@@ -218,8 +225,12 @@ export function Header({ onMenuClick }: HeaderProps) {
             {authEnabled ? <DropdownItem key="security">账户安全</DropdownItem> : null}
             {isAdmin ? <DropdownItem key="settings">设置</DropdownItem> : null}
             <DropdownItem key="help" onPress={handleHelp}>帮助文档</DropdownItem>
-            <DropdownItem key="logout" className="text-rose data-[hover=true]:text-rose data-[hover=true]:bg-rose/10">
-              退出登录
+            <DropdownItem
+              key="logout"
+              isDisabled={isLoggingOut}
+              className="text-rose data-[hover=true]:text-rose data-[hover=true]:bg-rose/10"
+            >
+              {isLoggingOut ? '正在退出登录…' : '退出登录'}
             </DropdownItem>
           </DropdownMenu>
         </Dropdown>

@@ -2,13 +2,14 @@ import {
   ArrowRight,
   BellRing,
   Cable,
+  FolderLock,
   History,
   Share2,
   ShieldCheck,
   type LucideIcon,
 } from 'lucide-react'
 
-export type SettingsDestination = 'general' | 'retention' | 'webdav' | 'device-care' | 'shares'
+export type SettingsDestination = 'general' | 'retention' | 'webdav' | 'device-care' | 'shares' | 'users-access'
 
 interface SettingsOverviewProps {
   trashEnabled: boolean
@@ -126,11 +127,19 @@ export function SettingsOverview({
     },
     {
       destination: 'retention',
-      title: '数据保护与权限',
-      description: '管理回收站、版本保留、目录配额和访问权限。',
+      title: '数据保护',
+      description: '管理回收站、版本保留和自动版本化。',
       status: formatProtectionStatus(trashEnabled),
       tone: trashEnabled ? 'success' : 'warning',
       icon: History,
+    },
+    {
+      destination: 'users-access',
+      title: '目录与访问',
+      description: '管理目录配额、访问规则和有效权限复核。',
+      status: '用户管理',
+      tone: 'neutral',
+      icon: FolderLock,
     },
     {
       destination: 'shares',

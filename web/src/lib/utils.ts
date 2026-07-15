@@ -411,7 +411,7 @@ export function parseByteSize(value: string): number {
   }
 
   const normalized = trimmed.replace(/\s+/g, '').toUpperCase()
-  const match = normalized.match(/^(\d+(?:\.\d+)?)(B|KB|MB|GB|TB|PB)?$/)
+  const match = normalized.match(/^(\d+(?:\.\d+)?)(B|KIB|MIB|GIB|TIB|PIB|KB|MB|GB|TB|PB)?$/)
   if (!match) {
     throw new Error('无效的大小格式')
   }
@@ -421,10 +421,15 @@ export function parseByteSize(value: string): number {
   const multipliers: Record<string, number> = {
     B: 1,
     KB: 1024,
+    KIB: 1024,
     MB: 1024 ** 2,
+    MIB: 1024 ** 2,
     GB: 1024 ** 3,
+    GIB: 1024 ** 3,
     TB: 1024 ** 4,
+    TIB: 1024 ** 4,
     PB: 1024 ** 5,
+    PIB: 1024 ** 5,
   }
 
   const multiplier = multipliers[unit]

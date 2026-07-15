@@ -181,6 +181,7 @@ vi.mock('@/stores/auth', async (importOriginal) => {
 
 // Mock the settings API
 vi.mock('@/api/settings', () => ({
+  MAX_VERSIONED_FILE_SIZE_BYTES: 100 * 1024 * 1024,
   SettingsError: class SettingsError extends Error {
     status: number
     code?: string
@@ -672,7 +673,8 @@ describe('SettingsPage', () => {
       expect(await screen.findByRole('heading', { name: '按使用目标调整设备' })).toBeTruthy()
       expect(screen.getByText('按目标管理访问、保护和设备服务')).toBeTruthy()
       expect(screen.getByRole('button', { name: '账户与远程访问：检查登录会话、HTTPS 和公网访问边界。' })).toBeTruthy()
-      expect(screen.getByRole('button', { name: '数据保护与权限：管理回收站、版本保留、目录配额和访问权限。' })).toBeTruthy()
+      expect(screen.getByRole('button', { name: '数据保护：管理回收站、版本保留和自动版本化。' })).toBeTruthy()
+      expect(screen.getByRole('button', { name: '目录与访问：管理目录配额、访问规则和有效权限复核。' })).toBeTruthy()
       expect(screen.getByRole('button', { name: '分享与协作：设置分享默认策略，并复核已经创建的访问链接。' })).toBeTruthy()
       expect(screen.queryByRole('button', { name: '保存设置' })).toBeNull()
       expect(screen.queryByRole('button', { name: '重置' })).toBeNull()
@@ -692,6 +694,19 @@ describe('SettingsPage', () => {
         expect(screen.getByText('WebDAV 服务')).toBeTruthy()
         expect(screen.getByRole('button', { name: '保存设置' })).toBeTruthy()
       })
+    })
+
+    it('opens directory access management from the overview', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      window.history.pushState({}, '', '/settings')
+      render(<SettingsPage />)
+
+      await user.click(await screen.findByRole('button', {
+        name: '目录与访问：管理目录配额、访问规则和有效权限复核。',
+      }))
+
+      expect(window.location.pathname).toBe('/users')
+      expect(window.location.search).toBe('?view=access')
     })
 
     it('reads the disk health status directly from the server settings response', async () => {
@@ -4085,7 +4100,7 @@ describe('SettingsPage', () => {
       fireEvent.change(filenamesInput, { target: { value: 'README\nDockerfile\nCargo.toml' } })
 
       const maxSizeInput = await screen.findByLabelText('最大自动版本化文件大小')
-      fireEvent.change(maxSizeInput, { target: { value: '256MB' } })
+      fireEvent.change(maxSizeInput, { target: { value: '64MB' } })
 
       await user.click(screen.getByText('保存设置'))
 
@@ -4094,900 +4109,28 @@ describe('SettingsPage', () => {
           versioning: expect.objectContaining({
             auto_versioned_extensions: ['.md', '.txt', '.rs'],
             auto_versioned_filenames: ['README', 'Dockerfile', 'Cargo.toml'],
-            max_versioned_size: 268435456,
+            max_versioned_size: 67108864,
           }),
         }))
       })
     })
-  })
 
-  describe('directory quota settings', () => {
-    it('allows editing directory quotas and saves them', async () => {
+    it('rejects a version object size above the supported dataplane limit', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
-      mockGetSettings.mockResolvedValueOnce({
-        ...defaultSettingsResponse,
-        data: {
-          ...defaultSettingsResponse.data,
-          storage: {
-            root: '~/.mnemonas',
-            directory_quotas: [{ path: '/team', quota_bytes: 1073741824 }],
-          },
-        },
-      } as ReturnType<typeof getSettings>)
       render(<SettingsPage />)
 
       await openTab(user, '版本保留')
-
-      const quotasInput = await screen.findByLabelText('目录配额')
-      expect(quotasInput).toHaveValue('/team 1 GB')
-
-      await user.clear(quotasInput)
-      await user.type(quotasInput, '/team 2 GB{enter}/media 512 MB')
+      fireEvent.change(await screen.findByLabelText('最大自动版本化文件大小'), { target: { value: '101 MB' } })
       await user.click(screen.getByText('保存设置'))
 
       await waitFor(() => {
-        expectUpdateSettingsCalledWith(expect.objectContaining({
-          storage: expect.objectContaining({
-            directory_quotas: [
-              { path: '/team', quota_bytes: 2147483648 },
-              { path: '/media', quota_bytes: 536870912 },
-            ],
-          }),
-        }))
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '大小格式无效',
+          description: '最大自动版本化文件大小必须是大于 0 且不超过 100 MiB 的整数',
+          color: 'danger',
+        })
       })
-    })
-
-    it('allows quoted directory quota paths with spaces', async () => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      mockGetSettings.mockResolvedValueOnce({
-        ...defaultSettingsResponse,
-        data: {
-          ...defaultSettingsResponse.data,
-          storage: {
-            root: '~/.mnemonas',
-            directory_quotas: [{ path: '/Family Photos', quota_bytes: 1073741824 }],
-          },
-        },
-      } as ReturnType<typeof getSettings>)
-      render(<SettingsPage />)
-
-      await openTab(user, '版本保留')
-
-      const quotasInput = await screen.findByLabelText('目录配额')
-      expect(quotasInput).toHaveValue('"/Family Photos" 1 GB')
-      expect(screen.getByText(/路径含空格或双引号时使用双引号/)).toBeTruthy()
-
-      fireEvent.change(quotasInput, {
-        target: { value: '"/Family Photos" 2 GB\n"/Media Archive" 512 MB' },
-      })
-      await user.click(screen.getByText('保存设置'))
-
-      await waitFor(() => {
-        expectUpdateSettingsCalledWith(expect.objectContaining({
-          storage: expect.objectContaining({
-            directory_quotas: [
-              { path: '/Family Photos', quota_bytes: 2147483648 },
-              { path: '/Media Archive', quota_bytes: 536870912 },
-            ],
-          }),
-        }))
-      })
-    })
-
-    it('escapes directory quota paths with literal quotes', async () => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      mockGetSettings.mockResolvedValueOnce({
-        ...defaultSettingsResponse,
-        data: {
-          ...defaultSettingsResponse.data,
-          storage: {
-            root: '~/.mnemonas',
-            directory_quotas: [{ path: '/Family "Photos"', quota_bytes: 1073741824 }],
-          },
-        },
-      } as ReturnType<typeof getSettings>)
-      render(<SettingsPage />)
-
-      await openTab(user, '版本保留')
-
-      const quotasInput = await screen.findByLabelText('目录配额')
-      expect(quotasInput).toHaveValue('"/Family \\"Photos\\"" 1 GB')
-
-      fireEvent.change(quotasInput, {
-        target: { value: '"/Family \\"Photos\\"" 2 GB' },
-      })
-      await user.click(screen.getByText('保存设置'))
-
-      await waitFor(() => {
-        expectUpdateSettingsCalledWith(expect.objectContaining({
-          storage: expect.objectContaining({
-            directory_quotas: [
-              { path: '/Family "Photos"', quota_bytes: 2147483648 },
-            ],
-          }),
-        }))
-      })
-    })
-
-    it('summarizes unsaved directory quota additions, updates, and removals', async () => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      mockGetSettings.mockResolvedValueOnce({
-        ...defaultSettingsResponse,
-        data: {
-          ...defaultSettingsResponse.data,
-          storage: {
-            root: '~/.mnemonas',
-            directory_quotas: [
-              { path: '/team', quota_bytes: 1073741824 },
-              { path: '/archive', quota_bytes: 10737418240 },
-            ],
-          },
-        },
-      } as ReturnType<typeof getSettings>)
-
-      render(<SettingsPage />)
-
-      await openTab(user, '版本保留')
-
-      const review = await screen.findByLabelText('目录配额变更复核')
-      expect(within(review).getByText('目录配额与已保存配置一致。')).toBeTruthy()
-
-      const quotasInput = screen.getByLabelText('目录配额')
-      fireEvent.change(quotasInput, { target: { value: '/team 2 GB\n/media 512 MB' } })
-
-      expect(within(review).getByText('新增 1')).toBeTruthy()
-      expect(within(review).getByText('修改 1')).toBeTruthy()
-      expect(within(review).getByText('删除 1')).toBeTruthy()
-      expect(within(review).getByText('/team')).toBeTruthy()
-      expect(within(review).getByText('/media')).toBeTruthy()
-      expect(within(review).getByText('/archive')).toBeTruthy()
-      expect(within(review).getByText('配额从 1 GB 调整为 2 GB')).toBeTruthy()
-      expect(within(review).getByText('容量 512 MB')).toBeTruthy()
-      expect(within(review).getByText('容量 10 GB')).toBeTruthy()
-    })
-
-    it('normalizes duplicate and trailing slashes in scoped storage paths before saving', async () => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      render(<SettingsPage />)
-
-      await openTab(user, '版本保留')
-
-      const quotasInput = await screen.findByLabelText('目录配额')
-      await user.clear(quotasInput)
-      await user.type(quotasInput, '/team// 2 GB')
-      fireEvent.change(await screen.findByLabelText('目录权限路径 1'), { target: { value: '/team//public/' } })
-      fireEvent.change(screen.getByLabelText('读组 1'), { target: { value: 'family' } })
-      await user.click(screen.getByText('保存设置'))
-
-      await waitFor(() => {
-        expectUpdateSettingsCalledWith(expect.objectContaining({
-          storage: expect.objectContaining({
-            directory_quotas: [{ path: '/team', quota_bytes: 2147483648 }],
-            directory_access_rules: [{ path: '/team/public', read_groups: ['family'] }],
-          }),
-        }))
-      })
-    })
-
-    it('rejects invalid directory quota lines before saving', async () => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      render(<SettingsPage />)
-
-      await openTab(user, '版本保留')
-
-      const quotasInput = await screen.findByLabelText('目录配额')
-      await user.type(quotasInput, 'team 1 GB')
-      await user.click(screen.getByText('保存设置'))
-
       expect(mockUpdateSettings).not.toHaveBeenCalled()
-      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
-        title: '目录配额格式无效',
-      }))
-    })
-
-    it('rejects Unicode control characters in directory quota paths before saving', async () => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      render(<SettingsPage />)
-
-      await openTab(user, '版本保留')
-
-      const quotasInput = await screen.findByLabelText('目录配额')
-      fireEvent.change(quotasInput, { target: { value: '/team\u0081private 1 GB' } })
-      await user.click(screen.getByText('保存设置'))
-
-      expect(mockUpdateSettings).not.toHaveBeenCalled()
-      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
-        title: '目录配额格式无效',
-        description: '第 1 行路径无效',
-      }))
-    })
-
-    it('rejects unclosed quoted directory quota paths before saving', async () => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      render(<SettingsPage />)
-
-      await openTab(user, '版本保留')
-
-      const quotasInput = await screen.findByLabelText('目录配额')
-      fireEvent.change(quotasInput, { target: { value: '"/Family Photos 1 GB' } })
-      await user.click(screen.getByText('保存设置'))
-
-      expect(mockUpdateSettings).not.toHaveBeenCalled()
-      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
-        title: '目录配额格式无效',
-        description: '第 1 行路径引号未闭合',
-      }))
-    })
-
-    it('rejects unsafe directory quota sizes before saving', async () => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      render(<SettingsPage />)
-
-      await openTab(user, '版本保留')
-
-      const quotasInput = await screen.findByLabelText('目录配额')
-      await user.type(quotasInput, '/team 9007199254740992 B')
-      await user.click(screen.getByText('保存设置'))
-
-      expect(mockUpdateSettings).not.toHaveBeenCalled()
-      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
-        title: '目录配额格式无效',
-        description: '第 1 行容量必须是大于 0 且不超过安全范围的整数',
-      }))
-    })
-
-    it('allows editing directory access rules and saves them', async () => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      mockGetSettings.mockResolvedValueOnce({
-        ...defaultSettingsResponse,
-        data: {
-          ...defaultSettingsResponse.data,
-          storage: {
-            root: '~/.mnemonas',
-            directory_access_rules: [{ path: '/team', read_groups: ['family'], write_groups: ['editors'] }],
-          },
-        },
-      } as ReturnType<typeof getSettings>)
-      render(<SettingsPage />)
-
-      await openTab(user, '版本保留')
-
-      const pathInput = await screen.findByLabelText('目录权限路径 1')
-      const readGroupsInput = screen.getByLabelText('读组 1')
-      const writeGroupsInput = screen.getByLabelText('写组 1')
-      expect(pathInput).toHaveValue('/team')
-      expect(readGroupsInput).toHaveValue('family')
-      expect(writeGroupsInput).toHaveValue('editors')
-
-      fireEvent.change(pathInput, { target: { value: '/media' } })
-      fireEvent.change(readGroupsInput, { target: { value: '' } })
-      fireEvent.change(writeGroupsInput, { target: { value: '' } })
-      fireEvent.change(screen.getByLabelText('读用户 1'), { target: { value: 'alice,bob' } })
-      fireEvent.change(screen.getByLabelText('写角色 1'), { target: { value: 'admin' } })
-      fireEvent.click(screen.getByText('保存设置'))
-
-      await waitFor(() => {
-        expectUpdateSettingsCalledWith(expect.objectContaining({
-          storage: expect.objectContaining({
-            directory_access_rules: [
-              { path: '/media', read_users: ['alice', 'bob'], write_roles: ['admin'] },
-            ],
-          }),
-        }))
-      })
-    })
-
-    it('allows directory access rule paths with spaces', async () => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      mockGetSettings.mockResolvedValueOnce({
-        ...defaultSettingsResponse,
-        data: {
-          ...defaultSettingsResponse.data,
-          storage: {
-            root: '~/.mnemonas',
-            directory_access_rules: [{ path: '/Family Photos', read_groups: ['family'] }],
-          },
-        },
-      } as ReturnType<typeof getSettings>)
-      render(<SettingsPage />)
-
-      await openTab(user, '版本保留')
-
-      expect(await screen.findByLabelText('目录权限路径 1')).toHaveValue('/Family Photos')
-      expect(screen.getByText(/路径直接填写 MnemoNAS 逻辑路径/)).toBeTruthy()
-      expect(screen.getByLabelText('读组 1')).toHaveValue('family')
-
-      fireEvent.change(screen.getByLabelText('写组 1'), { target: { value: 'editors' } })
-      await user.click(screen.getByText('保存设置'))
-
-      await waitFor(() => {
-        expectUpdateSettingsCalledWith(expect.objectContaining({
-          storage: expect.objectContaining({
-            directory_access_rules: [
-              { path: '/Family Photos', read_groups: ['family'], write_groups: ['editors'] },
-            ],
-          }),
-        }))
-      })
-    })
-
-    it('escapes directory access rule paths with literal quotes', async () => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      mockGetSettings.mockResolvedValueOnce({
-        ...defaultSettingsResponse,
-        data: {
-          ...defaultSettingsResponse.data,
-          storage: {
-            root: '~/.mnemonas',
-            directory_access_rules: [{ path: '/Family "Photos"', read_groups: ['family'] }],
-          },
-        },
-      } as ReturnType<typeof getSettings>)
-      render(<SettingsPage />)
-
-      await openTab(user, '版本保留')
-
-      expect(await screen.findByLabelText('目录权限路径 1')).toHaveValue('/Family "Photos"')
-      expect(screen.getByLabelText('读组 1')).toHaveValue('family')
-
-      fireEvent.change(screen.getByLabelText('写组 1'), { target: { value: 'editors' } })
-      await user.click(screen.getByText('保存设置'))
-
-      await waitFor(() => {
-        expectUpdateSettingsCalledWith(expect.objectContaining({
-          storage: expect.objectContaining({
-            directory_access_rules: [
-              { path: '/Family "Photos"', read_groups: ['family'], write_groups: ['editors'] },
-            ],
-          }),
-        }))
-      })
-    })
-
-    it('rejects line-syntax quotes in structured directory access rule paths before saving', async () => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      mockGetSettings.mockResolvedValueOnce({
-        ...defaultSettingsResponse,
-        data: {
-          ...defaultSettingsResponse.data,
-          storage: {
-            root: '~/.mnemonas',
-            directory_access_rules: [{ path: '/team', read_groups: ['family'] }],
-          },
-        },
-      } as ReturnType<typeof getSettings>)
-      render(<SettingsPage />)
-
-      await openTab(user, '版本保留')
-
-      const pathInput = await screen.findByLabelText('目录权限路径 1')
-      fireEvent.change(pathInput, { target: { value: '"/Family Photos' } })
-      await user.click(screen.getByText('保存设置'))
-
-      expect(mockUpdateSettings).not.toHaveBeenCalled()
-      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
-        title: '目录权限格式无效',
-        description: '第 1 行路径无效',
-      }))
-    })
-
-    it('rejects Unicode control characters in directory access rule paths before saving', async () => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      mockGetSettings.mockResolvedValueOnce({
-        ...defaultSettingsResponse,
-        data: {
-          ...defaultSettingsResponse.data,
-          storage: {
-            root: '~/.mnemonas',
-            directory_access_rules: [{ path: '/team', read_groups: ['family'] }],
-          },
-        },
-      } as ReturnType<typeof getSettings>)
-      render(<SettingsPage />)
-
-      await openTab(user, '版本保留')
-
-      const pathInput = await screen.findByLabelText('目录权限路径 1')
-      fireEvent.change(pathInput, { target: { value: '/team\u0081private' } })
-      await user.click(screen.getByText('保存设置'))
-
-      expect(mockUpdateSettings).not.toHaveBeenCalled()
-      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
-        title: '目录权限格式无效',
-        description: '第 1 行路径无效',
-      }))
-    })
-
-    it('adds directory access rule rows', async () => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      mockGetSettings.mockResolvedValueOnce({
-        ...defaultSettingsResponse,
-        data: {
-          ...defaultSettingsResponse.data,
-          storage: {
-            root: '~/.mnemonas',
-            directory_access_rules: [{ path: '/team', read_groups: ['family'] }],
-          },
-        },
-      } as ReturnType<typeof getSettings>)
-      render(<SettingsPage />)
-
-      await openTab(user, '版本保留')
-
-      await user.click(await screen.findByRole('button', { name: '添加规则' }))
-      await user.type(screen.getByLabelText('目录权限路径 2'), '/shared')
-      await user.type(screen.getByLabelText('读角色 2'), 'user')
-      await user.click(screen.getByText('保存设置'))
-
-      await waitFor(() => {
-        expectUpdateSettingsCalledWith(expect.objectContaining({
-          storage: expect.objectContaining({
-            directory_access_rules: [
-              { path: '/team', read_groups: ['family'] },
-              { path: '/shared', read_roles: ['user'] },
-            ],
-          }),
-        }))
-      })
-    })
-
-    it('applies directory access rule presets before saving', async () => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      render(<SettingsPage />)
-
-      await openTab(user, '版本保留')
-
-      await user.click(await screen.findByRole('button', { name: /全员协作/ }))
-
-      expect(screen.getByLabelText('目录权限路径 1')).toHaveValue('/shared')
-      expect(screen.getByLabelText('读角色 1')).toHaveValue('user')
-      expect(screen.getByLabelText('写角色 1')).toHaveValue('user')
-
-      await user.click(screen.getByText('保存设置'))
-
-      await waitFor(() => {
-        expectUpdateSettingsCalledWith(expect.objectContaining({
-          storage: expect.objectContaining({
-            directory_access_rules: [
-              { path: '/shared', read_roles: ['user'], write_roles: ['user'] },
-            ],
-          }),
-        }))
-      })
-    })
-
-    it('summarizes unsaved directory access rule additions, updates, and removals', async () => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      mockGetSettings.mockResolvedValueOnce({
-        data: {
-          ...defaultSettingsResponse.data,
-          storage: {
-            ...defaultSettingsResponse.data.storage,
-            directory_access_rules: [
-              { path: '/team', read_groups: ['family'] },
-              { path: '/archive', read_roles: ['admin'], write_roles: ['admin'] },
-            ],
-          },
-        },
-      })
-
-      render(<SettingsPage />)
-
-      await openTab(user, '版本保留')
-
-      await waitFor(() => {
-        expect(screen.getByText('目录权限与已保存配置一致。')).toBeTruthy()
-      })
-
-      fireEvent.change(screen.getByLabelText('写组 1'), { target: { value: 'family' } })
-      await user.click(screen.getByLabelText('删除目录权限规则 2'))
-      await user.click(screen.getByRole('button', { name: /添加规则/ }))
-      fireEvent.change(screen.getByLabelText('目录权限路径 2'), { target: { value: '/shared' } })
-      fireEvent.change(screen.getByLabelText('读角色 2'), { target: { value: 'user' } })
-
-      expect(screen.getByText('新增 1')).toBeTruthy()
-      expect(screen.getByText('修改 1')).toBeTruthy()
-      expect(screen.getByText('删除 1')).toBeTruthy()
-      expect(screen.getByText('变更字段：写组')).toBeTruthy()
-      expect(screen.getByText('/team')).toBeTruthy()
-      expect(screen.getByText('/shared')).toBeTruthy()
-      expect(screen.getByText('/archive')).toBeTruthy()
-      expect(screen.getByText('读角色: user')).toBeTruthy()
-      expect(screen.getByText('读角色: admin · 写角色: admin')).toBeTruthy()
-    })
-
-    it('summarizes directory access rule coverage and attention items', async () => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      mockGetSettings.mockResolvedValueOnce({
-        ...defaultSettingsResponse,
-        data: {
-          ...defaultSettingsResponse.data,
-          storage: {
-            ...defaultSettingsResponse.data.storage,
-            directory_access_rules: [
-              { path: '/', read_roles: ['user'] },
-              { path: '/shared', read_roles: ['user'], write_roles: ['user'] },
-              { path: '/team', read_groups: ['family'], write_groups: ['editors'] },
-            ],
-          },
-        },
-      } as ReturnType<typeof getSettings>)
-
-      render(<SettingsPage />)
-
-      await openTab(user, '版本保留')
-
-      await waitFor(() => {
-        const summary = within(screen.getByLabelText('目录权限覆盖摘要'))
-        expect(summary.getByText('目录权限覆盖摘要')).toBeTruthy()
-        expect(summary.getByText('规则总数')).toBeTruthy()
-        expect(summary.getByText('3 条')).toBeTruthy()
-        expect(summary.getByText('有效可读主体')).toBeTruthy()
-        expect(summary.getByText('3 个')).toBeTruthy()
-        expect(summary.getByText('可写主体')).toBeTruthy()
-        expect(summary.getByText('写权限路径')).toBeTruthy()
-        expect(summary.getAllByText('2 个')).toHaveLength(2)
-        expect(summary.getByText('权限关注项')).toBeTruthy()
-        expect(summary.getByText('根路径授权')).toBeTruthy()
-        expect(summary.getByText('普通用户可写')).toBeTruthy()
-      })
-    })
-
-    it('checks effective directory permissions', async () => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      render(<SettingsPage />)
-
-      await openTab(user, '版本保留')
-
-      await user.type(await screen.findByLabelText('检查用户'), 'alice')
-      const pathInput = screen.getByLabelText('检查路径')
-      await user.clear(pathInput)
-      await user.type(pathInput, '/team/readme.txt')
-      await user.click(screen.getByRole('button', { name: '检查权限' }))
-
-      await waitFor(() => {
-        expect(mockCheckDirectoryAccess).toHaveBeenCalled()
-      })
-      expect(mockCheckDirectoryAccess.mock.calls[0]?.[0]).toEqual({ username: 'alice', path: '/team/readme.txt' })
-      expect(mockCheckDirectoryAccess.mock.calls[0]?.[1]).toEqual({
-        signal: expect.any(AbortSignal),
-      })
-      expect(await screen.findByText('读取')).toBeTruthy()
-      expect(screen.getByText('写入')).toBeTruthy()
-      expect(screen.getByText('允许')).toBeTruthy()
-      expect(screen.getByText('拒绝')).toBeTruthy()
-      expect(screen.getAllByText(/目录规则/).length).toBeGreaterThanOrEqual(2)
-    })
-
-    it.each([
-      ['dot segment', '/team/./readme.txt'],
-      ['backslash', '/team\\readme.txt'],
-      ['query marker', '/team?readme.txt'],
-      ['fragment marker', '/team#readme.txt'],
-    ])('rejects malformed directory access check paths with %s before checking', async (_label, invalidPath) => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      render(<SettingsPage />)
-
-      await openTab(user, '版本保留')
-
-      await user.type(await screen.findByLabelText('检查用户'), 'alice')
-      const pathInput = screen.getByLabelText('检查路径')
-      await user.clear(pathInput)
-      fireEvent.change(pathInput, { target: { value: invalidPath } })
-      await user.click(screen.getByRole('button', { name: '检查权限' }))
-
-      expect(mockCheckDirectoryAccess).not.toHaveBeenCalled()
-      expect(mockAddToast).toHaveBeenCalledWith({
-        title: '权限检查路径无效',
-        description: '路径必须是站内绝对路径，且不能包含反斜杠、?、#、控制字符、. 或 .. 路径段。',
-        color: 'warning',
-      })
-    })
-
-    it('maps directory access decision backend messages before rendering them', async () => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      mockCheckDirectoryAccess.mockResolvedValueOnce({
-        username: 'bob',
-        user_id: 'u2',
-        role: 'user',
-        groups: [],
-        home_dir: '/users/bob',
-        path: '/team/readme.txt',
-        read: {
-          mode: 'read',
-          allowed: true,
-          source: 'directory_access_rule',
-          message: 'directory access rule grants read through an existing descendant',
-          matched_rule: { path: '/team/projects', read_roles: ['user'] },
-        },
-        write: {
-          mode: 'write',
-          allowed: false,
-          source: 'home_dir',
-          message: 'path is outside the user\'s home_dir',
-        },
-      })
-
-      render(<SettingsPage />)
-
-      await openTab(user, '版本保留')
-
-      await user.type(await screen.findByLabelText('检查用户'), 'bob')
-      const pathInput = screen.getByLabelText('检查路径')
-      await user.clear(pathInput)
-      await user.type(pathInput, '/team/readme.txt')
-      await user.click(screen.getByRole('button', { name: '检查权限' }))
-
-      await waitFor(() => {
-        expect(screen.getByText('已存在的子目录命中读取规则，因此允许查看相关路径。')).toBeTruthy()
-        expect(screen.getByText('路径位于该用户主目录外。')).toBeTruthy()
-      })
-      expect(screen.queryByText('directory access rule grants read through an existing descendant')).toBeNull()
-      expect(screen.queryByText('path is outside the user\'s home_dir')).toBeNull()
-    })
-
-    it('builds directory access user matrix', async () => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      const writeText = vi.fn().mockResolvedValue(undefined)
-      Object.defineProperty(navigator, 'clipboard', {
-        configurable: true,
-        value: { writeText },
-      })
-      render(<SettingsPage />)
-
-      await openTab(user, '版本保留')
-
-      const pathInput = await screen.findByLabelText('检查路径')
-      await user.clear(pathInput)
-      await user.type(pathInput, '/team/readme.txt')
-      await user.click(screen.getByRole('button', { name: '用户矩阵' }))
-
-      await waitFor(() => {
-        expect(mockReportDirectoryAccess).toHaveBeenCalled()
-      })
-      expect(mockReportDirectoryAccess.mock.calls[0]?.[0]).toEqual({ path: '/team/readme.txt' })
-      expect(mockReportDirectoryAccess.mock.calls[0]?.[1]).toEqual({
-        signal: expect.any(AbortSignal),
-      })
-      expect(await screen.findByLabelText('目录权限用户矩阵')).toBeTruthy()
-      expect(screen.getByText('用户 2')).toBeTruthy()
-      expect(screen.getByText('可读 1')).toBeTruthy()
-      expect(screen.getByText('可写 1')).toBeTruthy()
-      expect(screen.getByText('相关分享 1')).toBeTruthy()
-      expect(screen.getByText('活跃分享 1')).toBeTruthy()
-      expect(screen.getByText('密码分享 1')).toBeTruthy()
-      expect(screen.getByText('命中规则 1')).toBeTruthy()
-      expect(screen.getByText('alice')).toBeTruthy()
-      expect(screen.getByText('bob')).toBeTruthy()
-      const ruleEffectsRegion = within(screen.getByLabelText('用户矩阵规则生效明细'))
-      expect(ruleEffectsRegion.getByText('规则 1 · /team')).toBeTruthy()
-      expect(ruleEffectsRegion.getByText('用户 alice')).toBeTruthy()
-      expect(ruleEffectsRegion.getByText('读允许 1')).toBeTruthy()
-      expect(ruleEffectsRegion.getByText('写允许 1')).toBeTruthy()
-      expect(screen.getByText('/team')).toBeTruthy()
-      expect(screen.getByText('可访问')).toBeTruthy()
-
-      await user.click(screen.getByRole('button', { name: '复制复核记录' }))
-
-      await waitFor(() => {
-        expect(writeText).toHaveBeenCalled()
-      })
-      const copiedReport = String(writeText.mock.calls[0]?.[0] ?? '')
-      expect(copiedReport).toContain('目录权限复核记录')
-      expect(copiedReport).toContain('类型: 用户矩阵')
-      expect(copiedReport).toContain('路径: /team/readme.txt')
-      expect(copiedReport).toContain('读取: 允许 1 / 拒绝 1')
-      expect(copiedReport).toContain('写入: 允许 1 / 拒绝 1')
-      expect(copiedReport).toContain('- alice (user · 组 family, home /users/alice): 读 允许 · 目录规则 · 规则 /team; 写 允许 · 目录规则 · 规则 /team')
-      expect(copiedReport).toContain('规则生效明细:')
-      expect(copiedReport).toContain('- 规则 1 /team: 读允许 1 / 读拒绝 0; 写允许 1 / 写拒绝 0 · 用户 alice')
-      expect(copiedReport).toContain('- /team (文件夹 · 父级覆盖): 可访问 · 密码保护 · 下载 0/不限 · 创建者 u1')
-      expect(mockAddToast).toHaveBeenCalledWith({ title: '目录权限复核记录已复制并保存', color: 'success' })
-      await waitFor(() => {
-        expect(mockCreateDirectoryAccessReviewRecord).toHaveBeenCalledWith(expect.objectContaining({
-          title: '用户矩阵',
-          path: '/team/readme.txt',
-          preview: false,
-          users: 2,
-          read_allowed: 1,
-          write_allowed: 1,
-          related_shares: 1,
-          report_text: copiedReport,
-        }))
-      })
-
-      const historyRegion = within(screen.getByLabelText('目录权限近期复核历史'))
-      expect(historyRegion.getByText('/team/readme.txt')).toBeTruthy()
-      expect(historyRegion.getByText('用户矩阵')).toBeTruthy()
-      expect(historyRegion.getByText('复核人 admin')).toBeTruthy()
-      expect(historyRegion.getByText('用户 2')).toBeTruthy()
-      expect(historyRegion.getByText('可读 1')).toBeTruthy()
-      expect(historyRegion.getByText('可写 1')).toBeTruthy()
-
-      const storedHistory = JSON.parse(localStorage.getItem(directoryAccessReviewHistoryStorageKey) ?? '[]')
-      expect(storedHistory).toHaveLength(1)
-      expect(storedHistory[0]).toMatchObject({
-        title: '用户矩阵',
-        path: '/team/readme.txt',
-        preview: false,
-        reviewer: 'admin',
-        users: 2,
-        readAllowed: 1,
-        writeAllowed: 1,
-        relatedShares: 1,
-      })
-
-      await user.click(historyRegion.getByRole('button', { name: '复制记录' }))
-
-      await waitFor(() => {
-        expect(writeText).toHaveBeenCalledTimes(2)
-      })
-      expect(writeText.mock.calls[1]?.[0]).toBe(copiedReport)
-      expect(mockAddToast).toHaveBeenCalledWith({ title: '目录权限历史记录已复制', color: 'success' })
-    })
-
-    it('loads and clears recent directory access review history', async () => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      localStorage.setItem(directoryAccessReviewHistoryStorageKey, JSON.stringify([{
-        id: 'history-1',
-        recordedAt: '2026-06-20T08:30:00Z',
-        title: '用户矩阵',
-        path: '/team/readme.txt',
-        preview: false,
-        users: 2,
-        readAllowed: 1,
-        writeAllowed: 1,
-        relatedShares: 1,
-        reportText: '目录权限复核记录\n路径: /team/readme.txt',
-      }]))
-
-      render(<SettingsPage />)
-
-      await openTab(user, '版本保留')
-
-      const historyRegion = within(await screen.findByLabelText('目录权限近期复核历史'))
-      expect(historyRegion.getByText('/team/readme.txt')).toBeTruthy()
-      expect(historyRegion.getByText('用户矩阵')).toBeTruthy()
-
-      await user.click(historyRegion.getByRole('button', { name: '清空近期记录' }))
-
-      await waitFor(() => {
-        expect(localStorage.getItem(directoryAccessReviewHistoryStorageKey)).toBeNull()
-      })
-      expect(screen.getByText('暂无近期目录权限复核记录。')).toBeTruthy()
-      expect(mockAddToast).toHaveBeenCalledWith({ title: '目录权限近期复核历史已清空', color: 'success' })
-      expect(mockClearDirectoryAccessReviewRecords).toHaveBeenCalled()
-    })
-
-    it('loads persisted directory access review history from the server', async () => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      mockListDirectoryAccessReviewRecords.mockResolvedValue({
-        items: [{
-          id: 'server-review-1',
-          reviewed_at: '2026-06-20T08:30:00Z',
-          reviewer: 'admin',
-          title: '用户矩阵',
-          path: '/team/server.txt',
-          preview: false,
-          users: 3,
-          read_allowed: 2,
-          read_denied: 1,
-          write_allowed: 1,
-          write_denied: 2,
-          related_shares: 2,
-          active_related_shares: 1,
-          password_protected_shares: 1,
-          report_text: '目录权限复核记录\n路径: /team/server.txt',
-        }],
-        total: 1,
-        limit: 5,
-        offset: 0,
-      })
-
-      render(<SettingsPage />)
-
-      await openTab(user, '版本保留')
-
-      const historyRegion = within(await screen.findByLabelText('目录权限近期复核历史'))
-      expect(await historyRegion.findByText('/team/server.txt')).toBeTruthy()
-      expect(historyRegion.getByText('复核人 admin')).toBeTruthy()
-      expect(historyRegion.getByText('用户 3')).toBeTruthy()
-      expect(historyRegion.getByText('相关分享 2')).toBeTruthy()
-    })
-
-    it('rejects malformed directory access matrix paths before reporting', async () => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      render(<SettingsPage />)
-
-      await openTab(user, '版本保留')
-
-      const pathInput = await screen.findByLabelText('检查路径')
-      await user.clear(pathInput)
-      await user.type(pathInput, '/team/./readme.txt')
-      await user.click(screen.getByRole('button', { name: '用户矩阵' }))
-
-      expect(mockReportDirectoryAccess).not.toHaveBeenCalled()
-      expect(mockAddToast).toHaveBeenCalledWith({
-        title: '权限矩阵路径无效',
-        description: '路径必须是站内绝对路径，且不能包含反斜杠、?、#、控制字符、. 或 .. 路径段。',
-        color: 'warning',
-      })
-    })
-
-    it('previews unsaved directory access rule changes', async () => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      render(<SettingsPage />)
-
-      await openTab(user, '版本保留')
-
-      fireEvent.change(await screen.findByLabelText('目录权限路径 1'), { target: { value: '/team' } })
-      fireEvent.change(screen.getByLabelText('读角色 1'), { target: { value: 'user' } })
-      const pathInput = screen.getByLabelText('检查路径')
-      fireEvent.change(pathInput, { target: { value: '/team/readme.txt' } })
-      await user.click(screen.getByRole('button', { name: '预览变更' }))
-
-      await waitFor(() => {
-        expect(mockPreviewDirectoryAccess).toHaveBeenCalled()
-      })
-      expect(mockPreviewDirectoryAccess.mock.calls[0]?.[0]).toEqual({
-        path: '/team/readme.txt',
-        directory_access_rules: [{ path: '/team', read_roles: ['user'] }],
-      })
-      expect(mockPreviewDirectoryAccess.mock.calls[0]?.[1]).toEqual({
-        signal: expect.any(AbortSignal),
-      })
-      expect(await screen.findByLabelText('目录权限变更预览')).toBeTruthy()
-      expect(screen.getByText('变更预览')).toBeTruthy()
-      expect(screen.getByText('可读 2')).toBeTruthy()
-      expect(screen.getByText('命中规则 1')).toBeTruthy()
-      const ruleEffectsRegion = within(screen.getByLabelText('变更预览规则生效明细'))
-      expect(ruleEffectsRegion.getByText('规则 1 · /team')).toBeTruthy()
-      expect(ruleEffectsRegion.getByText('读允许 2')).toBeTruthy()
-      expect(ruleEffectsRegion.getByText('写拒绝 1')).toBeTruthy()
-    })
-
-    it('rejects malformed directory access preview paths before previewing', async () => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      render(<SettingsPage />)
-
-      await openTab(user, '版本保留')
-
-      fireEvent.change(await screen.findByLabelText('目录权限路径 1'), { target: { value: '/team' } })
-      fireEvent.change(screen.getByLabelText('读角色 1'), { target: { value: 'user' } })
-      fireEvent.change(screen.getByLabelText('检查路径'), { target: { value: '/team/./readme.txt' } })
-      await user.click(screen.getByRole('button', { name: '预览变更' }))
-
-      expect(mockPreviewDirectoryAccess).not.toHaveBeenCalled()
-      expect(mockAddToast).toHaveBeenCalledWith({
-        title: '权限预览路径无效',
-        description: '路径必须是站内绝对路径，且不能包含反斜杠、?、#、控制字符、. 或 .. 路径段。',
-        color: 'warning',
-      })
-    })
-
-    it('aborts pending directory access checks when the page unmounts', async () => {
-      const user = userEvent.setup({ writeToClipboard: false })
-      mockCheckDirectoryAccess.mockReturnValue(new Promise(() => {}) as ReturnType<typeof checkDirectoryAccess>)
-      const { unmount } = render(<SettingsPage />)
-
-      await openTab(user, '版本保留')
-
-      await user.type(await screen.findByLabelText('检查用户'), 'alice')
-      const pathInput = screen.getByLabelText('检查路径')
-      await user.clear(pathInput)
-      await user.type(pathInput, '/team/readme.txt')
-      await user.click(screen.getByRole('button', { name: '检查权限' }))
-
-      await waitFor(() => {
-        expect(mockCheckDirectoryAccess).toHaveBeenCalled()
-      })
-      const signal = mockCheckDirectoryAccess.mock.calls[0]?.[1]?.signal
-      expect(signal).toBeInstanceOf(AbortSignal)
-      expect(signal?.aborted).toBe(false)
-
-      unmount()
-
-      expect(signal?.aborted).toBe(true)
     })
   })
 
@@ -5267,6 +4410,30 @@ describe('SettingsPage', () => {
       })
     })
 
+    it('never submits directory policies from the general settings draft', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        data: {
+          ...defaultSettingsResponse.data,
+          storage: {
+            ...defaultSettingsResponse.data.storage,
+            directory_quotas: [{ path: '/team', quota_bytes: 1073741824 }],
+            directory_access_rules: [{ path: '/team', read_groups: ['family'] }],
+          },
+        },
+      })
+      render(<SettingsPage />)
+
+      const portInput = await screen.findByLabelText('服务器端口')
+      await user.clear(portInput)
+      await user.type(portInput, '9000')
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => expect(mockUpdateSettings).toHaveBeenCalled())
+      const request = mockUpdateSettings.mock.calls[0]?.[0]
+      expect(request).not.toHaveProperty('storage')
+    })
+
     it('allows editing server host', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
@@ -5304,7 +4471,7 @@ describe('SettingsPage', () => {
             auth: { enabled: true, access_token_ttl: '30m0s', refresh_token_ttl: '720h0m0s' },
             trash: { enabled: false, retention_days: 14, max_size: 2147483648 },
             retention: { max_versions: 200, max_age: '720h', min_free_space: 2147483648, gc_interval: '12h' },
-            versioning: { auto_versioned_extensions: ['.md', '.txt'], auto_versioned_filenames: ['README', 'LICENSE'], max_versioned_size: 209715200 },
+            versioning: { auto_versioned_extensions: ['.md', '.txt'], auto_versioned_filenames: ['README', 'LICENSE'], max_versioned_size: 52428800 },
             webdav: { enabled: false, prefix: '/files', read_only: true, auth_type: 'basic', username: 'sync-user' },
             share: { enabled: true, base_url: 'https://share.example.com' },
             favorites: { enabled: false },
@@ -5538,7 +4705,7 @@ describe('SettingsPage', () => {
           auth: { enabled: true, access_token_ttl: '30m0s', refresh_token_ttl: '720h0m0s' },
           trash: { enabled: false, retention_days: 14, max_size: 2147483648 },
           retention: { max_versions: 200, max_age: '720h', min_free_space: 2147483648, gc_interval: '12h' },
-          versioning: { auto_versioned_extensions: ['.md', '.txt'], auto_versioned_filenames: ['README', 'LICENSE'], max_versioned_size: 209715200 },
+          versioning: { auto_versioned_extensions: ['.md', '.txt'], auto_versioned_filenames: ['README', 'LICENSE'], max_versioned_size: 52428800 },
           webdav: { enabled: false, prefix: '/files', read_only: true, auth_type: 'basic', username: 'sync-user' },
           share: { enabled: true, base_url: 'https://share.example.com' },
           favorites: { enabled: false },
@@ -6002,7 +5169,7 @@ describe('SettingsPage', () => {
   it.each([
     ['minimum free space', '版本保留', '最小空闲空间', undefined, '最小空闲空间必须是 0 或不超过安全范围的整数'],
     ['trash max size', '版本保留', '回收站最大容量', undefined, '回收站最大容量必须是大于 0 且不超过安全范围的整数'],
-    ['versioning max size', '版本保留', '最大自动版本化文件大小', undefined, '最大自动版本化文件大小必须是大于 0 且不超过安全范围的整数'],
+    ['versioning max size', '版本保留', '最大自动版本化文件大小', undefined, '最大自动版本化文件大小必须是大于 0 且不超过 100 MiB 的整数'],
   ])('shows danger toast and skips save for unsafe %s', async (_label, tab, inputLabel, switchLabel, description) => {
     const user = userEvent.setup({ writeToClipboard: false })
     render(<SettingsPage />)

@@ -7,6 +7,7 @@ import { UsersPage } from './Users'
 import * as usersApi from '@/api/users'
 import * as authStore from '@/stores/auth'
 import { UsersError } from '@/api/users'
+import { useSettingsDraftStore } from '@/stores/settingsDraft'
 
 const mockAddToast = vi.fn()
 const mockTriggerBrowserDownload = vi.fn()
@@ -41,6 +42,10 @@ vi.mock('@/stores/auth', () => ({
 
 vi.mock('@/lib/downloadResponse', () => ({
   triggerBrowserDownload: (...args: unknown[]) => mockTriggerBrowserDownload(...args),
+}))
+
+vi.mock('@/components/users/UserAccessView', () => ({
+  UserAccessView: () => <div aria-label="目录与访问管理">目录策略视图</div>,
 }))
 
 const mockUsers = [
@@ -145,6 +150,7 @@ describe('UsersPage', () => {
     vi.clearAllMocks()
     window.localStorage.clear()
     window.history.replaceState({}, '', '/users')
+    useSettingsDraftStore.setState({ hasPendingChanges: false })
     vi.mocked(authStore.useUser).mockReturnValue({
       id: 'user-1',
       username: 'admin',
@@ -174,6 +180,43 @@ describe('UsersPage', () => {
       renderUsersPage()
       expect(screen.getByText('用户管理')).toBeInTheDocument()
       expect(screen.getByText('管理系统用户、权限和配额')).toBeInTheDocument()
+    })
+
+    it('defaults invalid views to accounts and marks the account tab as selected', () => {
+      window.history.replaceState({}, '', '/users?view=unknown&source=storage')
+      renderUsersPage()
+
+      expect(screen.getByRole('tab', { name: '用户账号' })).toHaveAttribute('aria-selected', 'true')
+      expect(screen.queryByLabelText('目录与访问管理')).not.toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /添加用户/i })).toBeInTheDocument()
+    })
+
+    it('opens the directory access view from the query parameter', () => {
+      window.history.replaceState({}, '', '/users?view=access')
+      renderUsersPage()
+
+      expect(screen.getByRole('tab', { name: '目录与访问' })).toHaveAttribute('aria-selected', 'true')
+      expect(screen.getByLabelText('目录与访问管理')).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: /添加用户/i })).not.toBeInTheDocument()
+      expect(usersApi.listUsers).not.toHaveBeenCalled()
+    })
+
+    it('pushes view changes while preserving unrelated query parameters', async () => {
+      const user = userEvent.setup()
+      const pushState = vi.spyOn(window.history, 'pushState')
+      window.history.replaceState({}, '', '/users?filter=active&source=storage')
+      renderUsersPage()
+
+      await user.click(screen.getByRole('tab', { name: '目录与访问' }))
+      expect(window.location.search).toContain('filter=active')
+      expect(window.location.search).toContain('source=storage')
+      expect(window.location.search).toContain('view=access')
+      expect(pushState).toHaveBeenCalled()
+
+      await user.click(screen.getByRole('tab', { name: '用户账号' }))
+      expect(window.location.search).toContain('filter=active')
+      expect(window.location.search).toContain('source=storage')
+      expect(window.location.search).not.toContain('view=')
     })
 
     it('shows password-change requirements and the last confirmed password-change time', async () => {

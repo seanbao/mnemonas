@@ -17,6 +17,7 @@ import {
 import { getSetupStatus } from '@/api/setup'
 import { queryClient } from '@/lib/queryClient'
 import { getRedactedDiagnosticMessage } from '@/lib/diagnosticMessages'
+import { useSettingsDraftStore } from '@/stores/settingsDraft'
 
 let authStateEpoch = 0
 let initializeRunId = 0
@@ -252,15 +253,16 @@ export const useAuthStore = create<AuthState>((set) => ({
     cancelPendingInitialize()
     cancelPendingPostLoginSetup()
     cancelPendingCrossTabSessionValidation()
-    set({ isLoading: true, error: null, notice: null })
+    set({ error: null, notice: null })
 
     try {
       const result = await apiLogout()
+      useSettingsDraftStore.getState().setHasPendingChanges(false)
       set({ user: null, isAuthenticated: false, isLoading: false, error: null, notice: null, shareEnabled: null })
       return result
     } catch (err) {
       const message = getAuthStoreActionErrorMessage(err, '退出登录失败')
-      set({ isLoading: false, error: message })
+      set({ error: message })
       throw err
     }
   },
@@ -429,6 +431,7 @@ function applyAuthCleared(detail?: AuthClearedDetail): void {
   cancelPendingPostLoginSetup()
   cancelPendingCrossTabSessionValidation()
   const state = useAuthStore.getState()
+  useSettingsDraftStore.getState().setHasPendingChanges(false)
   queryClient.clear()
 
   const notice: AuthNotice | null = detail?.reason === 'password_changed'

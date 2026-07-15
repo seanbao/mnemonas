@@ -10,6 +10,7 @@ import {
   useIsGuest,
   useUser,
 } from './auth'
+import { useSettingsDraftStore } from './settingsDraft'
 
 const loginMock = vi.fn()
 const logoutMock = vi.fn()
@@ -70,6 +71,7 @@ describe('authStore', () => {
       authEnabled: true,
       shareEnabled: null,
     })
+    useSettingsDraftStore.setState({ hasPendingChanges: false })
 
     logoutMock.mockResolvedValue({ warning: false, message: undefined })
     getCurrentUserMock.mockResolvedValue(null)
@@ -211,6 +213,64 @@ describe('authStore', () => {
     expect(useAuthStore.getState().user?.username).toBe('admin')
     expect(useAuthStore.getState().isLoading).toBe(false)
     expect(useAuthStore.getState().error).toBe('退出登录失败')
+  })
+
+  it('keeps the authenticated tree and pending draft available while logout is in flight', async () => {
+    const pendingLogout = createDeferred<{ warning: boolean; message?: string }>()
+    useAuthStore.setState({
+      user: {
+        id: 'admin-1',
+        username: 'admin',
+        role: 'admin',
+        email: '',
+        homeDir: '/',
+      },
+      isAuthenticated: true,
+      isLoading: false,
+      error: null,
+      authEnabled: true,
+    })
+    useSettingsDraftStore.setState({ hasPendingChanges: true })
+    logoutMock.mockReturnValueOnce(pendingLogout.promise)
+
+    const logoutPromise = useAuthStore.getState().logout()
+
+    expect(useAuthStore.getState().isAuthenticated).toBe(true)
+    expect(useAuthStore.getState().user?.username).toBe('admin')
+    expect(useAuthStore.getState().isLoading).toBe(false)
+    expect(useSettingsDraftStore.getState().hasPendingChanges).toBe(true)
+
+    pendingLogout.reject(new Error('退出登录失败'))
+    await expect(logoutPromise).rejects.toThrow('退出登录失败')
+    expect(useAuthStore.getState().isAuthenticated).toBe(true)
+    expect(useSettingsDraftStore.getState().hasPendingChanges).toBe(true)
+  })
+
+  it('clears pending drafts only after logout succeeds', async () => {
+    const pendingLogout = createDeferred<{ warning: boolean; message?: string }>()
+    useAuthStore.setState({
+      user: {
+        id: 'admin-1',
+        username: 'admin',
+        role: 'admin',
+        email: '',
+        homeDir: '/',
+      },
+      isAuthenticated: true,
+      isLoading: false,
+      error: null,
+      authEnabled: true,
+    })
+    useSettingsDraftStore.setState({ hasPendingChanges: true })
+    logoutMock.mockReturnValueOnce(pendingLogout.promise)
+
+    const logoutPromise = useAuthStore.getState().logout()
+    expect(useSettingsDraftStore.getState().hasPendingChanges).toBe(true)
+
+    pendingLogout.resolve({ warning: false })
+    await expect(logoutPromise).resolves.toEqual({ warning: false })
+    expect(useAuthStore.getState().isAuthenticated).toBe(false)
+    expect(useSettingsDraftStore.getState().hasPendingChanges).toBe(false)
   })
 
   it('does not acknowledge setup for non-admin login', async () => {

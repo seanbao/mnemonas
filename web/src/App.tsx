@@ -1,7 +1,15 @@
 import { Component, Suspense, lazy, useEffect, useRef, type ErrorInfo, type ReactNode } from 'react'
-import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom'
+import {
+  Outlet,
+  Route,
+  RouterProvider,
+  createBrowserRouter,
+  createRoutesFromElements,
+  useLocation,
+} from 'react-router-dom'
 import { AppLayout } from '@/components/layout'
 import { PasswordChangeGate, ProtectedRoute } from '@/components/auth'
+import { UnsavedChangesGuard } from '@/components/navigation/UnsavedChangesGuard'
 import { useAuthStore } from '@/stores/auth'
 import { shouldValidateSessionOnInitialRoute } from '@/lib/authInitialRoute'
 import { routeRenderDiagnosticMessage } from '@/lib/routeDiagnostics'
@@ -87,83 +95,19 @@ class RouteErrorBoundary extends Component<RouteErrorBoundaryProps, RouteErrorBo
   }
 }
 
-function AppRoutes() {
+function AppRouterRoot() {
   const location = useLocation()
 
   return (
-    <RouteErrorBoundary resetKey={`${location.pathname}${location.search}`}>
-      <Suspense fallback={<RouteFallback />}>
-        <Routes>
-          {/* Public routes */}
-          <Route path="/login" element={<LoginPage />} />
-          <Route path="/s" element={<ShareAccessPage />} />
-          <Route path="/s/:id" element={<ShareAccessPage />} />
-
-          {/* Protected routes */}
-          <Route
-            path="/"
-            element={
-              <ProtectedRoute>
-                <PasswordChangeGate>
-                  <AppLayout />
-                </PasswordChangeGate>
-              </ProtectedRoute>
-            }
-          >
-            <Route index element={<DashboardPage />} />
-            <Route path="files/*" element={<FilesPage />} />
-            <Route path="album" element={<AlbumPage />} />
-            <Route path="versions/*" element={<VersionsPage />} />
-            <Route path="trash" element={<TrashPage />} />
-            <Route path="favorites" element={<FavoritesPage />} />
-            <Route
-              path="storage"
-              element={
-                <ProtectedRoute adminOnly>
-                  <StoragePage />
-                </ProtectedRoute>
-              }
-            />
-            <Route
-              path="system-health"
-              element={
-                <ProtectedRoute adminOnly>
-                  <HealthPage />
-                </ProtectedRoute>
-              }
-            />
-            <Route
-              path="maintenance"
-              element={
-                <ProtectedRoute adminOnly>
-                  <MaintenancePage />
-                </ProtectedRoute>
-              }
-            />
-            <Route
-              path="users"
-              element={
-                <ProtectedRoute adminOnly>
-                  <UsersPage />
-                </ProtectedRoute>
-              }
-            />
-            <Route path="search" element={<SearchPage />} />
-            <Route path="activity" element={<ActivityPage />} />
-            <Route path="account/security" element={<AccountSecurityPage />} />
-            <Route
-              path="settings"
-              element={
-                <ProtectedRoute adminOnly>
-                  <SettingsPage />
-                </ProtectedRoute>
-              }
-            />
-            <Route path="*" element={<NotFoundPage />} />
-          </Route>
-        </Routes>
-      </Suspense>
-    </RouteErrorBoundary>
+    <>
+      <AuthInitializer />
+      <UnsavedChangesGuard />
+      <RouteErrorBoundary resetKey={`${location.pathname}${location.search}`}>
+        <Suspense fallback={<RouteFallback />}>
+          <Outlet />
+        </Suspense>
+      </RouteErrorBoundary>
+    </>
   )
 }
 
@@ -181,13 +125,82 @@ function AuthInitializer() {
   return null
 }
 
+const appRoutes = createRoutesFromElements(
+  <Route element={<AppRouterRoot />}>
+    {/* Public routes */}
+    <Route path="/login" element={<LoginPage />} />
+    <Route path="/s" element={<ShareAccessPage />} />
+    <Route path="/s/:id" element={<ShareAccessPage />} />
+
+    {/* Protected routes */}
+    <Route
+      path="/"
+      element={
+        <ProtectedRoute>
+          <PasswordChangeGate>
+            <AppLayout />
+          </PasswordChangeGate>
+        </ProtectedRoute>
+      }
+    >
+      <Route index element={<DashboardPage />} />
+      <Route path="files/*" element={<FilesPage />} />
+      <Route path="album" element={<AlbumPage />} />
+      <Route path="versions/*" element={<VersionsPage />} />
+      <Route path="trash" element={<TrashPage />} />
+      <Route path="favorites" element={<FavoritesPage />} />
+      <Route
+        path="storage"
+        element={
+          <ProtectedRoute adminOnly>
+            <StoragePage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="system-health"
+        element={
+          <ProtectedRoute adminOnly>
+            <HealthPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="maintenance"
+        element={
+          <ProtectedRoute adminOnly>
+            <MaintenancePage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="users"
+        element={
+          <ProtectedRoute adminOnly>
+            <UsersPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route path="search" element={<SearchPage />} />
+      <Route path="activity" element={<ActivityPage />} />
+      <Route path="account/security" element={<AccountSecurityPage />} />
+      <Route
+        path="settings"
+        element={
+          <ProtectedRoute adminOnly>
+            <SettingsPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route path="*" element={<NotFoundPage />} />
+    </Route>
+  </Route>,
+)
+
+const appRouter = createBrowserRouter(appRoutes)
+
 function App() {
-  return (
-    <BrowserRouter>
-      <AuthInitializer />
-      <AppRoutes />
-    </BrowserRouter>
-  )
+  return <RouterProvider router={appRouter} />
 }
 
 export default App

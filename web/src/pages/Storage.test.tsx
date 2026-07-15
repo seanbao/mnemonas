@@ -531,7 +531,7 @@ describe('StoragePage', () => {
 
       await user.click(screen.getByRole('button', { name: '配置目录配额' }))
 
-      expect(mockNavigate).toHaveBeenCalledWith('/settings?tab=retention')
+      expect(mockNavigate).toHaveBeenCalledWith('/users?view=access')
     })
 
     it('renders directory quota usage summaries', async () => {

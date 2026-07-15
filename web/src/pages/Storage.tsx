@@ -747,7 +747,7 @@ export function StoragePage() {
                     color="primary"
                     variant="flat"
                     startContent={<Settings2 size={16} />}
-                    onPress={() => navigate('/settings?tab=retention')}
+                    onPress={() => navigate('/users?view=access')}
                   >
                     配置目录配额
                   </Button>

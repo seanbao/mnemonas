@@ -11,6 +11,7 @@ const mockAddToast = vi.fn()
 const openUrlInNewTabMock = vi.fn(() => true)
 const navigateMock = vi.fn()
 const logoutMock = vi.fn()
+const confirmMock = vi.fn(() => true)
 let locationPathname = '/'
 let locationSearch = ''
 let locationHash = ''
@@ -105,6 +106,8 @@ describe('Header', () => {
     locationSearch = ''
     locationHash = ''
     authEnabled = true
+    Object.defineProperty(window, 'confirm', { configurable: true, value: confirmMock })
+    confirmMock.mockReturnValue(true)
     useSettingsDraftStore.setState({ hasPendingChanges: false })
   })
 
@@ -274,6 +277,36 @@ describe('Header', () => {
     expect(navigateMock).toHaveBeenCalledWith('/login', { replace: true })
   })
 
+  it('blocks logout before calling the API when unsaved changes are not discarded', async () => {
+    useSettingsDraftStore.setState({ hasPendingChanges: true })
+    confirmMock.mockReturnValueOnce(false)
+    render(<Header />)
+
+    await act(async () => {
+      screen.getByText('退出登录').click()
+    })
+
+    expect(confirmMock).toHaveBeenCalledTimes(1)
+    expect(logoutMock).not.toHaveBeenCalled()
+    expect(clearQueries).not.toHaveBeenCalled()
+    expect(navigateMock).not.toHaveBeenCalled()
+    expect(useSettingsDraftStore.getState().hasPendingChanges).toBe(true)
+  })
+
+  it('clears confirmed unsaved changes only after logout succeeds', async () => {
+    useSettingsDraftStore.setState({ hasPendingChanges: true })
+    render(<Header />)
+
+    await act(async () => {
+      screen.getByText('退出登录').click()
+    })
+
+    await waitFor(() => expect(logoutMock).toHaveBeenCalledTimes(1))
+    expect(confirmMock).toHaveBeenCalledTimes(1)
+    expect(useSettingsDraftStore.getState().hasPendingChanges).toBe(false)
+    expect(navigateMock).toHaveBeenCalledWith('/login', { replace: true })
+  })
+
   it('navigates to settings from the user menu', () => {
     render(<Header />)
 
@@ -292,22 +325,6 @@ describe('Header', () => {
 
     expect(navigateMock).toHaveBeenCalledWith('/account/security', {
       state: { returnTo: '/files?path=%2Ffamily#recent' },
-    })
-  })
-
-  it('keeps unsaved settings in place when account security is selected from the header', () => {
-    locationPathname = '/SETTINGS/'
-    locationSearch = '?tab=general'
-    useSettingsDraftStore.setState({ hasPendingChanges: true })
-    render(<Header />)
-
-    screen.getByRole('button', { name: '账户安全' }).click()
-
-    expect(navigateMock).not.toHaveBeenCalled()
-    expect(mockAddToast).toHaveBeenCalledWith({
-      title: '设置尚未保存',
-      description: '请先保存设置或重置当前更改，再修改账户密码。',
-      color: 'warning',
     })
   })
 
@@ -341,6 +358,21 @@ describe('Header', () => {
       })
     })
     expect(clearQueries).not.toHaveBeenCalled()
+    expect(navigateMock).not.toHaveBeenCalledWith('/login', { replace: true })
+  })
+
+  it('keeps unsaved-change protection when a confirmed logout fails', async () => {
+    useSettingsDraftStore.setState({ hasPendingChanges: true })
+    logoutMock.mockRejectedValueOnce(new Error('logout refused'))
+    render(<Header />)
+
+    await act(async () => {
+      screen.getByText('退出登录').click()
+    })
+
+    await waitFor(() => expect(logoutMock).toHaveBeenCalledTimes(1))
+    expect(confirmMock).toHaveBeenCalledTimes(1)
+    expect(useSettingsDraftStore.getState().hasPendingChanges).toBe(true)
     expect(navigateMock).not.toHaveBeenCalledWith('/login', { replace: true })
   })
 })

@@ -78,6 +78,7 @@ import { triggerBrowserDownload } from '@/lib/downloadResponse'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { StatCard } from '@/components/ui/StatCard'
+import { UserAccessView } from '@/components/users/UserAccessView'
 import { getUserFacingErrorDescription } from '@/lib/apiMessages'
 import type { UserAccessContext } from '@/lib/userAccessContext'
 
@@ -101,6 +102,49 @@ const userListFilters: readonly UserListFilter[] = [
   'password-change-required',
   'access-review',
 ]
+
+type UsersView = 'accounts' | 'access'
+
+function getUsersViewFromSearchParams(searchParams: URLSearchParams): UsersView {
+  return searchParams.get('view') === 'access' ? 'access' : 'accounts'
+}
+
+function UsersViewSwitch({
+  selected,
+  onChange,
+}: {
+  selected: UsersView
+  onChange: (view: UsersView) => void
+}) {
+  return (
+    <div
+      role="tablist"
+      aria-label="用户管理视图"
+      className="mb-6 grid grid-cols-2 gap-1 rounded-lg border border-divider bg-content2/60 p-1 sm:w-fit sm:min-w-80"
+    >
+      <Button
+        role="tab"
+        aria-selected={selected === 'accounts'}
+        variant={selected === 'accounts' ? 'solid' : 'light'}
+        color={selected === 'accounts' ? 'primary' : 'default'}
+        className="min-w-0 rounded-md"
+        onPress={() => onChange('accounts')}
+      >
+        用户账号
+      </Button>
+      <Button
+        role="tab"
+        aria-selected={selected === 'access'}
+        variant={selected === 'access' ? 'solid' : 'light'}
+        color={selected === 'access' ? 'primary' : 'default'}
+        className="min-w-0 rounded-md"
+        onPress={() => onChange('access')}
+      >
+        目录与访问
+      </Button>
+    </div>
+  )
+}
 
 function getUserListFilterFromSearchParams(searchParams: URLSearchParams): UserListFilter {
   const filter = searchParams.get('filter')
@@ -955,6 +999,40 @@ function UserCard({
 }
 
 export function UsersPage() {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const usersView = getUsersViewFromSearchParams(searchParams)
+
+  const updateUsersView = useCallback((view: UsersView) => {
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current)
+      if (view === 'access') {
+        next.set('view', 'access')
+      } else {
+        next.delete('view')
+      }
+      return next
+    })
+  }, [setSearchParams])
+
+  if (usersView === 'access') {
+    return (
+      <div className="flex min-h-full min-w-0 flex-col px-4 pb-28 pt-4 sm:px-6 sm:pt-6 lg:min-h-0 lg:pb-6">
+        <PageHeader
+          title="用户管理"
+          subtitle="管理用户账号、目录权限和容量边界"
+          icon={UsersIcon}
+          className="mb-6"
+        />
+        <UsersViewSwitch selected={usersView} onChange={updateUsersView} />
+        <UserAccessView />
+      </div>
+    )
+  }
+
+  return <UserAccountsView onViewChange={updateUsersView} />
+}
+
+function UserAccountsView({ onViewChange }: { onViewChange: (view: UsersView) => void }) {
   const queryClient = useQueryClient()
   const currentUser = useUser()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -1680,6 +1758,8 @@ export function UsersPage() {
         }
         className="mb-6"
       />
+
+      <UsersViewSwitch selected="accounts" onChange={onViewChange} />
 
       {userListFilter === 'password-change-required' && (
         <Card
