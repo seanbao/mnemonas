@@ -2541,25 +2541,6 @@ func (h *Handler) ensureShareOwnerActive(share *Share) error {
 	return nil
 }
 
-func (h *Handler) reserveAuthorizedAccessForShare(share *Share) (*authorizedAccessReservation, error) {
-	if share == nil {
-		return nil, ErrShareNotFound
-	}
-
-	_, reservation, err := h.store.reserveAuthorizedAccess(share.ID)
-	if err != nil && !IsPersistenceWarning(err) {
-		return nil, err
-	}
-	if err := h.ensureShareOwnerActive(share); err != nil {
-		if rollbackErr := h.store.rollbackAuthorizedAccess(reservation); rollbackErr != nil && !IsPersistenceWarning(rollbackErr) {
-			return nil, errors.Join(err, rollbackErr)
-		}
-		return nil, err
-	}
-
-	return reservation, err
-}
-
 func (h *Handler) hasShareAccess(r *http.Request, share *Share) bool {
 	if share == nil || !share.HasPassword() {
 		return true

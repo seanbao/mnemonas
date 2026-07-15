@@ -148,17 +148,6 @@ func (m *Manager) dueJobs(now time.Time) []dueBackupJob {
 	return jobs
 }
 
-func (m *Manager) nextRunAt(jobID string) *time.Time {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	job, ok := m.jobs[jobID]
-	if !ok {
-		return nil
-	}
-	return m.nextRunAtLocked(job, m.state.Jobs[jobID], m.now())
-}
-
 func (m *Manager) nextRunAtLocked(job config.BackupJobConfig, state JobState, now time.Time) *time.Time {
 	if job.Disabled || job.ScheduleInterval <= 0 {
 		return nil

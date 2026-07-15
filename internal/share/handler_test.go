@@ -1294,15 +1294,6 @@ func assertPublicShareJSONHeaders(t *testing.T, header http.Header) {
 	}
 }
 
-func decodeResponseBytes(t *testing.T, body []byte) map[string]any {
-	t.Helper()
-	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-	return payload
-}
-
 func decodeEnvelopeData(t *testing.T, recorder *httptest.ResponseRecorder) map[string]any {
 	t.Helper()
 	var payload struct {
