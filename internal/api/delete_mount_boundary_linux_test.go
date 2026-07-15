@@ -14,10 +14,11 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/seanbao/mnemonas/internal/activity"
 	"github.com/seanbao/mnemonas/internal/config"
 	"github.com/seanbao/mnemonas/internal/storage"
-	"golang.org/x/sys/unix"
 )
 
 const apiBindMountDeleteHelperEnv = "MNEMONAS_API_BIND_MOUNT_DELETE_HELPER"

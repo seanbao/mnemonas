@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/seanbao/mnemonas/internal/config"
@@ -189,5 +190,45 @@ func TestQuotaLimitedReaderAllowsZeroLengthRead(t *testing.T) {
 	n, err := reader.Read(nil)
 	if n != 0 || err != nil {
 		t.Fatalf("zero-length Read() = (%d, %v), want (0, nil)", n, err)
+	}
+}
+
+func TestQuotaLimitedReaderAllowsExactFillBeforeGrowthLimit(t *testing.T) {
+	limitErr := errors.New("quota exceeded")
+	reader := &quotaLimitedReader{
+		reader:    strings.NewReader("abc"),
+		remaining: 3,
+		err:       limitErr,
+		grow: func() (int64, error) {
+			return 0, &quotaGrowthLimitError{err: limitErr}
+		},
+	}
+
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll(exact fill) error = %v", err)
+	}
+	if got := string(data); got != "abc" {
+		t.Fatalf("ReadAll(exact fill) = %q, want abc", got)
+	}
+}
+
+func TestQuotaLimitedReaderRejectsOneByteBeyondGrowthLimit(t *testing.T) {
+	limitErr := errors.New("quota exceeded")
+	reader := &quotaLimitedReader{
+		reader:    strings.NewReader("abcd"),
+		remaining: 3,
+		err:       limitErr,
+		grow: func() (int64, error) {
+			return 0, &quotaGrowthLimitError{err: limitErr}
+		},
+	}
+
+	data, err := io.ReadAll(reader)
+	if !errors.Is(err, limitErr) {
+		t.Fatalf("ReadAll(over limit) error = %v, want quota error", err)
+	}
+	if got := string(data); got != "abc" {
+		t.Fatalf("ReadAll(over limit) = %q, want abc", got)
 	}
 }

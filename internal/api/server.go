@@ -40,6 +40,7 @@ import (
 	"github.com/seanbao/mnemonas/internal/favorites"
 	"github.com/seanbao/mnemonas/internal/maintenance"
 	"github.com/seanbao/mnemonas/internal/metrics"
+	quotareservation "github.com/seanbao/mnemonas/internal/quota"
 	"github.com/seanbao/mnemonas/internal/requestip"
 	"github.com/seanbao/mnemonas/internal/share"
 	"github.com/seanbao/mnemonas/internal/storage"
@@ -124,7 +125,10 @@ type Server struct {
 	scrubSchedulerCancel             context.CancelFunc
 	scrubLastFailureID               string
 	scrubFailureRetries              int
-	quotaMu                          sync.Mutex
+	quotaCoordinatorOnce             sync.Once
+	quotaCoordinator                 *quotareservation.Coordinator
+	beforeQuotaMutationCommit        func(operation string)
+	quotaUsageScanVisit              func(path string)
 	loginAlertMu                     sync.Mutex
 	loginRateLimitAlerts             map[[sha256.Size]byte]time.Time
 	loginRateLimitAlertsLastPrunedAt time.Time
@@ -1427,6 +1431,8 @@ type ServerConfig struct {
 	BuildTime    string
 	ActiveWebDAV *WebDAVRuntimeConfig
 	UpdateWebDAV func(WebDAVRuntimeConfig)
+	// QuotaCoordinator coordinates logical-byte reservations across API surfaces.
+	QuotaCoordinator *quotareservation.Coordinator
 	// DeferBackgroundTasks leaves API-owned schedulers stopped until
 	// StartBackgroundTasks is called explicitly.
 	DeferBackgroundTasks bool
@@ -1496,6 +1502,7 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 		s.afterPathDeleted = cfg.AfterPathDeleted
 		s.updateWebDAV = cfg.UpdateWebDAV
 		s.authUsersFile = serverAuthUsersFile(cfg)
+		s.quotaCoordinator = cfg.QuotaCoordinator
 	}
 
 	// Store config early so runtime dataplane connection settings are available
@@ -2439,19 +2446,6 @@ func (s *Server) filterSharesByHomeDir(ctx context.Context, items []*share.Share
 	return filtered, nil
 }
 
-func (s *Server) authorizeUserTreeWritePath(ctx context.Context, targetPath string) error {
-	if !s.authEnabled || auth.IsAdmin(ctx) {
-		return nil
-	}
-	if err := s.authorizeUserWritePath(ctx, targetPath); err != nil {
-		return err
-	}
-	if s.fs == nil || !s.hasDirectoryAccessRules() {
-		return nil
-	}
-	return s.authorizeUserTreeDescendants(ctx, targetPath, "", pathAccessWrite)
-}
-
 func (s *Server) authorizeUserTreeMovePath(ctx context.Context, sourcePath, destinationPath string) error {
 	if !s.authEnabled || auth.IsAdmin(ctx) {
 		return nil
@@ -3117,6 +3111,122 @@ func topLevelAPIPath(targetPath string) string {
 	return "/" + parts[0]
 }
 
+const streamedWriteRetryAfterSeconds = 1
+
+func respondStreamedWriteStateError(w http.ResponseWriter, err error) bool {
+	if errors.Is(err, storage.ErrWriteRecoveryRequired) {
+		ServiceUnavailable(w, "storage write recovery is required")
+		return true
+	}
+	if errors.Is(err, storage.ErrWriteAtomicRenameUnsupported) {
+		ServiceUnavailable(w, "storage layout does not support atomic writes for this target")
+		return true
+	}
+	if errors.Is(err, storage.ErrInsufficientStorage) {
+		_ = NewAPIError(ErrCodeInsufficientStorage, "insufficient storage capacity for this write").Write(w, http.StatusInsufficientStorage)
+		return true
+	}
+	if errors.Is(err, storage.ErrWriteBusy) {
+		w.Header().Set("Retry-After", strconv.Itoa(streamedWriteRetryAfterSeconds))
+		_ = NewAPIError(ErrCodeWriteBusy, "write capacity is busy, retry later").Write(w, http.StatusTooManyRequests)
+		return true
+	}
+	if errors.Is(err, storage.ErrWriteConflict) {
+		Conflict(w, "write target changed; refresh and retry")
+		return true
+	}
+	return false
+}
+
+type restoreVersionErrorKind uint8
+
+const (
+	restoreVersionErrorHard restoreVersionErrorKind = iota
+	restoreVersionErrorVisibleWarning
+	restoreVersionErrorRecoveryRequired
+	restoreVersionErrorConflict
+)
+
+func classifyRestoreVersionError(err error) restoreVersionErrorKind {
+	if errors.Is(err, storage.ErrWriteRecoveryRequired) {
+		return restoreVersionErrorRecoveryRequired
+	}
+	if errors.Is(err, storage.ErrWriteConflict) {
+		return restoreVersionErrorConflict
+	}
+	if isOnlyVisibleMutationWarning(err) {
+		return restoreVersionErrorVisibleWarning
+	}
+	return restoreVersionErrorHard
+}
+
+func isOnlyVisibleMutationWarning(err error) bool {
+	if isHardWriteStateError(err) {
+		return false
+	}
+	return errorTreeAll(err, func(candidate error) bool {
+		_, ok := candidate.(*storage.VisibleMutationWarningError)
+		return ok
+	})
+}
+
+func isOnlyDeleteMutationWarning(err error) bool {
+	if isHardWriteStateError(err) {
+		return false
+	}
+	return errorTreeAll(err, func(candidate error) bool {
+		switch candidate.(type) {
+		case *storage.TrashDeleteWarningError, *storage.DeleteCleanupWarningError, *storage.VisibleMutationWarningError:
+			return true
+		default:
+			return false
+		}
+	})
+}
+
+func isOnlyTrashDeleteWarning(err error) bool {
+	if isHardWriteStateError(err) {
+		return false
+	}
+	return errorTreeAll(err, func(candidate error) bool {
+		_, ok := candidate.(*storage.TrashDeleteWarningError)
+		return ok
+	})
+}
+
+func isHardWriteStateError(err error) bool {
+	return errors.Is(err, storage.ErrWriteRecoveryRequired) ||
+		errors.Is(err, storage.ErrWriteAtomicRenameUnsupported) ||
+		errors.Is(err, storage.ErrInsufficientStorage) ||
+		errors.Is(err, storage.ErrWriteBusy) ||
+		errors.Is(err, storage.ErrWriteConflict)
+}
+
+func errorTreeAll(err error, match func(error) bool) bool {
+	if err == nil {
+		return false
+	}
+	if match(err) {
+		return true
+	}
+	if multi, ok := err.(interface{ Unwrap() []error }); ok {
+		children := multi.Unwrap()
+		if len(children) == 0 {
+			return false
+		}
+		for _, child := range children {
+			if !errorTreeAll(child, match) {
+				return false
+			}
+		}
+		return true
+	}
+	if single, ok := err.(interface{ Unwrap() error }); ok {
+		return errorTreeAll(single.Unwrap(), match)
+	}
+	return false
+}
+
 func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 	filePath, err := routePathAfterPrefix(r, "/api/v1/files")
 	if err != nil {
@@ -3150,7 +3260,8 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 
 	// Limit request body size
 	r.Body = http.MaxBytesReader(w, r.Body, DefaultMaxUploadSize)
-	reader, releaseQuota, err := s.quotaCheckedUploadReader(r.Context(), filePath, r.Body, r.ContentLength)
+	w = s.withUploadIdleDeadlines(w, r)
+	reader, condition, releaseQuota, err := s.quotaCheckedUploadReader(r.Context(), filePath, r.Body, r.ContentLength)
 	if err != nil {
 		if errors.Is(err, storage.ErrIsDir) {
 			BadRequest(w, "cannot upload to directory")
@@ -3158,6 +3269,10 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, storage.ErrNotDir) {
 			Conflict(w, "parent path is not a directory")
+			return
+		}
+		if errors.Is(err, storage.ErrNotRegular) {
+			Conflict(w, "upload target is not a regular file")
 			return
 		}
 		if errors.As(err, new(*quotaExceededError)) {
@@ -3170,35 +3285,70 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 	}
 	defer releaseQuota()
 
-	if err := s.fs.WriteFile(r.Context(), filePath, reader); err != nil {
-		var maxBytesErr *http.MaxBytesError
-		if errors.As(err, &maxBytesErr) || errors.Is(err, storage.ErrFileTooLarge) {
-			respondPayloadTooLarge(w, fmt.Sprintf("file too large (max %d bytes)", DefaultMaxUploadSize))
+	uploadWarning := false
+	commitReader := newQuotaMutationCommitReader(
+		r.Context(),
+		reader,
+		func(ctx context.Context) (*quotareservation.MutationLease, error) {
+			return s.acquireQuotaMutationForCommit(ctx, "put")
+		},
+	)
+	defer commitReader.Release()
+	writeErr := s.fs.WriteFileIfUnchanged(r.Context(), filePath, commitReader, condition)
+	releaseQuota()
+	commitReader.Release()
+	if writeErr != nil {
+		err := writeErr
+		if respondStreamedWriteStateError(w, err) {
 			return
 		}
-		if errors.As(err, new(*quotaExceededError)) {
-			s.sendQuotaExceededAlertEvent(r.Context(), "upload", err)
-			respondQuotaExceeded(w, err)
+		if isOnlyVisibleMutationWarning(err) {
+			uploadWarning = true
+			markWorkspaceMutationWarningHeaders(w)
+		} else {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(err, &maxBytesErr) || errors.Is(err, storage.ErrFileTooLarge) {
+				respondPayloadTooLarge(w, fmt.Sprintf("file too large (max %d bytes)", DefaultMaxUploadSize))
+				return
+			}
+			if errors.As(err, new(*quotaExceededError)) {
+				s.sendQuotaExceededAlertEvent(r.Context(), "upload", err)
+				respondQuotaExceeded(w, err)
+				return
+			}
+			if errors.Is(err, storage.ErrIsDir) {
+				BadRequest(w, "cannot upload to directory")
+				return
+			}
+			if errors.Is(err, storage.ErrNotDir) {
+				Conflict(w, "parent path is not a directory")
+				return
+			}
+			if errors.Is(err, storage.ErrNotRegular) {
+				Conflict(w, "upload target is not a regular file")
+				return
+			}
+			s.respondInternalError(w, "upload file", err)
 			return
 		}
-		if errors.Is(err, storage.ErrIsDir) {
-			BadRequest(w, "cannot upload to directory")
-			return
-		}
-		if errors.Is(err, storage.ErrNotDir) {
-			Conflict(w, "parent path is not a directory")
-			return
-		}
-		s.respondInternalError(w, "upload file", err)
-		return
 	}
 
 	// Log activity
-	s.LogActivityWithWarning(w, r, activity.ActionUpload, filePath, nil)
+	activityDetails := map[string]string(nil)
+	if uploadWarning {
+		activityDetails = map[string]string{"persistence_warning": "true"}
+	}
+	s.LogActivityWithWarning(w, r, activity.ActionUpload, filePath, activityDetails)
 
-	NewAPIResponse(map[string]any{
+	response := map[string]any{
 		"path": filePath,
-	}).WithMessage("file uploaded successfully").Write(w, http.StatusCreated)
+	}
+	message := "file uploaded successfully"
+	if uploadWarning {
+		response["warning"] = true
+		message = "file uploaded with persistence warning"
+	}
+	NewAPIResponse(response).WithMessage(message).Write(w, http.StatusCreated)
 }
 
 func (s *Server) handleCreateDirectory(w http.ResponseWriter, r *http.Request) {
@@ -3265,7 +3415,10 @@ func (s *Server) handleCreateDirectory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.fs.Mkdir(r.Context(), dirPath); err != nil {
-		if errors.As(err, new(*storage.VisibleMutationWarningError)) {
+		if respondStreamedWriteStateError(w, err) {
+			return
+		}
+		if isOnlyVisibleMutationWarning(err) {
 			markWorkspaceMutationWarningHeaders(w)
 			s.LogActivityWithWarning(w, r, activity.ActionCreate, dirPath, map[string]string{
 				"type":                "directory",
@@ -3502,16 +3655,20 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.fs.DeleteWithExpectedPolicyAndTarget(r.Context(), filePath, expectedPolicy, expectedTargetToken, deleteAuthorizer); err != nil {
+		if respondStreamedWriteStateError(w, err) {
+			return
+		}
 		deleteWarningDetails := map[string]string{}
 		hasWarning := false
 		message := ""
-		if errors.As(err, new(*storage.TrashDeleteWarningError)) {
+		onlyWarnings := isOnlyDeleteMutationWarning(err)
+		if onlyWarnings && errors.As(err, new(*storage.TrashDeleteWarningError)) {
 			markTrashDeleteCleanupWarningHeaders(w)
 			deleteWarningDetails["trash_cleanup_warning"] = "true"
 			hasWarning = true
 			message = "file deleted with trash cleanup warning"
 		}
-		if errors.As(err, new(*storage.DeleteCleanupWarningError)) {
+		if onlyWarnings && errors.As(err, new(*storage.DeleteCleanupWarningError)) {
 			markDeleteCleanupWarningHeaders(w)
 			deleteWarningDetails["cleanup_warning"] = "true"
 			hasWarning = true
@@ -3519,7 +3676,7 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 				message = "file deleted with cleanup warning"
 			}
 		}
-		if errors.As(err, new(*storage.VisibleMutationWarningError)) {
+		if onlyWarnings && errors.As(err, new(*storage.VisibleMutationWarningError)) {
 			markWorkspaceMutationWarningHeaders(w)
 			deleteWarningDetails["persistence_warning"] = "true"
 			hasWarning = true
@@ -3965,7 +4122,10 @@ func (s *Server) handleMoveFile(w http.ResponseWriter, r *http.Request) {
 
 	moveWarning := false
 	if err := s.moveResourceWithQuota(r.Context(), fromPath, toPath); err != nil {
-		if errors.As(err, new(*storage.VisibleMutationWarningError)) {
+		if respondStreamedWriteStateError(w, err) {
+			return
+		}
+		if isOnlyVisibleMutationWarning(err) {
 			markWorkspaceMutationWarningHeaders(w)
 			moveWarning = true
 		} else {
@@ -4112,7 +4272,10 @@ func (s *Server) handleCopyFile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := s.copyResourceWithQuota(r.Context(), fromPath, toPath); err != nil {
-		if errors.As(err, new(*storage.VisibleMutationWarningError)) {
+		if respondStreamedWriteStateError(w, err) {
+			return
+		}
+		if isOnlyVisibleMutationWarning(err) {
 			markWorkspaceMutationWarningHeaders(w)
 			s.LogActivityWithWarning(w, r, activity.ActionCopy, fromPath, map[string]string{
 				"to":                  toPath,
@@ -4334,7 +4497,7 @@ func (s *Server) copyResource(ctx context.Context, srcPath, dstPath string) erro
 	if info.IsDir {
 		var copyWarning error
 		if err := s.fs.Mkdir(ctx, dstPath); err != nil {
-			if errors.As(err, new(*storage.VisibleMutationWarningError)) {
+			if isOnlyVisibleMutationWarning(err) {
 				copyWarning = mergeCopyWarning(copyWarning, err)
 			} else {
 				return err
@@ -4352,7 +4515,7 @@ func (s *Server) copyResource(ctx context.Context, srcPath, dstPath string) erro
 				return s.rollbackCopiedDirectory(dstPath, err)
 			}
 			if err := s.copyResource(ctx, childPath, path.Join(dstPath, childName)); err != nil {
-				if errors.As(err, new(*storage.VisibleMutationWarningError)) {
+				if isOnlyVisibleMutationWarning(err) {
 					copyWarning = mergeCopyWarning(copyWarning, err)
 					continue
 				}
@@ -4512,7 +4675,10 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.restoreVersionWithQuota(r.Context(), filePath, hash); err != nil {
-		if errors.As(err, new(*storage.VisibleMutationWarningError)) {
+		if respondStreamedWriteStateError(w, err) {
+			return
+		}
+		if classifyRestoreVersionError(err) == restoreVersionErrorVisibleWarning {
 			markWorkspaceMutationWarningHeaders(w)
 			s.LogActivityWithWarning(w, r, activity.ActionRestore, filePath, map[string]string{
 				"restore_source":      "version",
@@ -4530,8 +4696,22 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 			ServiceUnavailable(w, "version storage unavailable")
 			return
 		}
+		if errors.Is(err, storage.ErrFileTooLarge) {
+			respondPayloadTooLarge(
+				w,
+				fmt.Sprintf(
+					"version restore exceeds the %d-byte safety snapshot limit",
+					versionstore.MaxVersionObjectSize,
+				),
+			)
+			return
+		}
 		if errors.Is(err, storage.ErrIsDir) {
 			BadRequest(w, "cannot restore version for directory")
+			return
+		}
+		if errors.Is(err, storage.ErrNotRegular) {
+			Conflict(w, "version restore target is not a regular file")
 			return
 		}
 		if errors.Is(err, storage.ErrNotDir) {
@@ -6308,7 +6488,10 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 
 	restorePersistenceWarning := false
 	if err != nil {
-		if errors.As(err, new(*storage.VisibleMutationWarningError)) {
+		if respondStreamedWriteStateError(w, err) {
+			return
+		}
+		if isOnlyVisibleMutationWarning(err) {
 			markWorkspaceMutationWarningHeaders(w)
 			restorePersistenceWarning = true
 		} else {
@@ -6391,8 +6574,11 @@ func (s *Server) handleDeleteFromTrash(w http.ResponseWriter, r *http.Request) {
 	activityPath := item.OriginalPath
 
 	if err := s.fs.DeleteFromTrash(r.Context(), id); err != nil {
+		if respondStreamedWriteStateError(w, err) {
+			return
+		}
 		var warningErr *storage.TrashDeleteWarningError
-		if errors.As(err, &warningErr) {
+		if isOnlyTrashDeleteWarning(err) && errors.As(err, &warningErr) {
 			markTrashDeleteCleanupWarningHeaders(w)
 			s.LogActivityWithWarning(w, r, activity.ActionTrashDelete, activityPath, map[string]string{"cleanup_warning": "true"})
 			NewAPIResponse(map[string]any{
@@ -11277,7 +11463,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			updatedConfig.Storage.Versioning.AutoVersionedFilenames = cleaned
 		}
 		if req.Versioning.MaxVersionedSize != nil {
-			if *req.Versioning.MaxVersionedSize <= 0 {
+			if *req.Versioning.MaxVersionedSize <= 0 || *req.Versioning.MaxVersionedSize > versionstore.MaxVersionObjectSize {
 				BadRequest(w, "invalid versioning.max_versioned_size")
 				return
 			}

@@ -16,6 +16,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unsafe"
@@ -23,6 +24,7 @@ import (
 	"github.com/seanbao/mnemonas/internal/dataplane"
 	"github.com/seanbao/mnemonas/internal/share"
 	"github.com/seanbao/mnemonas/internal/storage"
+	"github.com/seanbao/mnemonas/internal/versionstore"
 	"github.com/seanbao/mnemonas/internal/workspace"
 )
 
@@ -47,6 +49,78 @@ func getStorageHook[T any](t *testing.T, fs *storage.FileSystem, fieldName strin
 		t.Fatalf("storage hook %s has unexpected type %T", fieldName, value)
 	}
 	return hook
+}
+
+type blockingWriteTransactionStore struct {
+	delegate        *versionstore.Store
+	metadataStarted chan struct{}
+	continueCommit  <-chan struct{}
+	startOnce       sync.Once
+}
+
+func (s *blockingWriteTransactionStore) CaptureWriteMetadataPlan(
+	ctx context.Context,
+	index versionstore.FileIndexRecord,
+	version *versionstore.VersionRecord,
+) (versionstore.WriteMetadataPlan, error) {
+	return s.delegate.CaptureWriteMetadataPlan(ctx, index, version)
+}
+
+func (s *blockingWriteTransactionStore) InspectWriteMetadata(
+	ctx context.Context,
+	plan versionstore.WriteMetadataPlan,
+) (versionstore.WriteMetadataState, error) {
+	return s.delegate.InspectWriteMetadata(ctx, plan)
+}
+
+func (s *blockingWriteTransactionStore) RollbackWriteMetadata(
+	ctx context.Context,
+	plan versionstore.WriteMetadataPlan,
+) error {
+	return s.delegate.RollbackWriteMetadata(ctx, plan)
+}
+
+func (s *blockingWriteTransactionStore) EnsureWriteMetadataCommitted(
+	ctx context.Context,
+	plan versionstore.WriteMetadataPlan,
+) error {
+	s.startOnce.Do(func() {
+		close(s.metadataStarted)
+	})
+	select {
+	case <-s.continueCommit:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return s.delegate.EnsureWriteMetadataCommitted(ctx, plan)
+}
+
+func (s *blockingWriteTransactionStore) GetObject(ctx context.Context, hash string) ([]byte, error) {
+	return s.delegate.GetObject(ctx, hash)
+}
+
+func (s *blockingWriteTransactionStore) PutObjectExpected(
+	ctx context.Context,
+	data []byte,
+	expectedHash string,
+) (versionstore.ObjectPutResult, error) {
+	return s.delegate.PutObjectExpected(ctx, data, expectedHash)
+}
+
+func (s *blockingWriteTransactionStore) HasVersionReference(ctx context.Context, hash string) (bool, error) {
+	return s.delegate.HasVersionReference(ctx, hash)
+}
+
+func (s *blockingWriteTransactionStore) DeleteObject(ctx context.Context, hash string) error {
+	return s.delegate.DeleteObject(ctx, hash)
+}
+
+func storageVisibleMutationWarningWithCause(t *testing.T, cause error) *storage.VisibleMutationWarningError {
+	t.Helper()
+	warning := new(storage.VisibleMutationWarningError)
+	field := reflect.ValueOf(warning).Elem().FieldByName("err")
+	reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Set(reflect.ValueOf(cause))
+	return warning
 }
 
 type noProgressQuotaReader struct{}
@@ -78,6 +152,88 @@ func TestQuotaLimitedReaderAllowsZeroLengthRead(t *testing.T) {
 	n, err := reader.Read(nil)
 	if n != 0 || err != nil {
 		t.Fatalf("zero-length Read() = (%d, %v), want (0, nil)", n, err)
+	}
+}
+
+func TestQuotaLimitedReaderAllowsExactFillBeforeGrowthLimit(t *testing.T) {
+	limitErr := errors.New("quota exceeded")
+	reader := &quotaLimitedReader{
+		reader:    strings.NewReader("abc"),
+		remaining: 3,
+		err:       limitErr,
+		grow: func() (int64, error) {
+			return 0, &webDAVQuotaGrowthLimitError{err: limitErr}
+		},
+	}
+
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll(exact fill) error = %v", err)
+	}
+	if got := string(data); got != "abc" {
+		t.Fatalf("ReadAll(exact fill) = %q, want abc", got)
+	}
+}
+
+func TestQuotaLimitedReaderRejectsOneByteBeyondGrowthLimit(t *testing.T) {
+	limitErr := errors.New("quota exceeded")
+	reader := &quotaLimitedReader{
+		reader:    strings.NewReader("abcd"),
+		remaining: 3,
+		err:       limitErr,
+		grow: func() (int64, error) {
+			return 0, &webDAVQuotaGrowthLimitError{err: limitErr}
+		},
+	}
+
+	data, err := io.ReadAll(reader)
+	if !errors.Is(err, limitErr) {
+		t.Fatalf("ReadAll(over limit) error = %v, want quota error", err)
+	}
+	if got := string(data); got != "abc" {
+		t.Fatalf("ReadAll(over limit) = %q, want abc", got)
+	}
+}
+
+func TestQuotaLogicalSizeStopsWhenContextIsCanceled(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	if err := fs.Mkdir(t.Context(), "/tree"); err != nil {
+		t.Fatalf("Mkdir(/tree) error = %v", err)
+	}
+	info, err := fs.Stat(t.Context(), "/tree")
+	if err != nil {
+		t.Fatalf("Stat(/tree) error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := handler.fileInfoLogicalSize(ctx, info); !errors.Is(err, context.Canceled) {
+		t.Fatalf("fileInfoLogicalSize() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestIsOnlyVisibleMutationWarningRejectsHardWriteState(t *testing.T) {
+	warning := new(storage.VisibleMutationWarningError)
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "pure warning", err: warning, want: true},
+		{name: "joined recovery", err: errors.Join(warning, storage.ErrWriteRecoveryRequired), want: false},
+		{name: "joined conflict", err: errors.Join(warning, storage.ErrWriteConflict), want: false},
+		{name: "joined unsupported atomic rename", err: errors.Join(warning, storage.ErrWriteAtomicRenameUnsupported), want: false},
+		{name: "joined busy", err: errors.Join(warning, storage.ErrWriteBusy), want: false},
+		{name: "wrapped recovery", err: storageVisibleMutationWarningWithCause(t, storage.ErrWriteRecoveryRequired), want: false},
+		{name: "wrapped conflict", err: storageVisibleMutationWarningWithCause(t, storage.ErrWriteConflict), want: false},
+		{name: "wrapped unsupported atomic rename", err: storageVisibleMutationWarningWithCause(t, storage.ErrWriteAtomicRenameUnsupported), want: false},
+		{name: "wrapped busy", err: storageVisibleMutationWarningWithCause(t, storage.ErrWriteBusy), want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isOnlyVisibleMutationWarning(test.err); got != test.want {
+				t.Fatalf("isOnlyVisibleMutationWarning() = %t, want %t", got, test.want)
+			}
+		})
 	}
 }
 
@@ -1034,6 +1190,79 @@ func TestHandler_PUT_WeakIfMatchDoesNotOverwrite(t *testing.T) {
 	}
 }
 
+func TestHandler_PUT_IfMatchRejectsTargetReplacedAfterPreconditionCheck(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/files"); err != nil {
+		t.Fatalf("Mkdir(/files) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/files/existing.txt", strings.NewReader("initial")); err != nil {
+		t.Fatalf("WriteFile(initial) error: %v", err)
+	}
+	info, err := fs.Stat(ctx, "/files/existing.txt")
+	if err != nil {
+		t.Fatalf("Stat(existing.txt) error: %v", err)
+	}
+	handler.beforePutWrite = func(filePath string) error {
+		handler.beforePutWrite = nil
+		return fs.WriteFile(ctx, filePath, strings.NewReader("concurrent replacement"))
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/dav/files/existing.txt", strings.NewReader("stale conditional write"))
+	req.Header.Set("If-Match", `"`+info.ContentHash+`"`)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusPreconditionFailed {
+		t.Fatalf("PUT stale If-Match status = %d, want %d; body=%s", w.Code, http.StatusPreconditionFailed, w.Body.String())
+	}
+	reader, err := fs.OpenFile(ctx, "/files/existing.txt")
+	if err != nil {
+		t.Fatalf("OpenFile(existing.txt) error: %v", err)
+	}
+	data, readErr := io.ReadAll(reader)
+	closeErr := reader.Close()
+	if readErr != nil || closeErr != nil {
+		t.Fatalf("read replacement error: %v", errors.Join(readErr, closeErr))
+	}
+	if string(data) != "concurrent replacement" {
+		t.Fatalf("stored content = %q, want concurrent replacement", data)
+	}
+}
+
+func TestHandler_PUT_IfNoneMatchRejectsTargetCreatedAfterAbsenceCheck(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/files"); err != nil {
+		t.Fatalf("Mkdir(/files) error: %v", err)
+	}
+	handler.beforePutWrite = func(filePath string) error {
+		handler.beforePutWrite = nil
+		return fs.WriteFile(ctx, filePath, strings.NewReader("concurrent create"))
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/dav/files/new.txt", strings.NewReader("stale create"))
+	req.Header.Set("If-None-Match", "*")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusPreconditionFailed {
+		t.Fatalf("PUT stale If-None-Match status = %d, want %d; body=%s", w.Code, http.StatusPreconditionFailed, w.Body.String())
+	}
+	reader, err := fs.OpenFile(ctx, "/files/new.txt")
+	if err != nil {
+		t.Fatalf("OpenFile(new.txt) error: %v", err)
+	}
+	data, readErr := io.ReadAll(reader)
+	closeErr := reader.Close()
+	if readErr != nil || closeErr != nil {
+		t.Fatalf("read concurrent create error: %v", errors.Join(readErr, closeErr))
+	}
+	if string(data) != "concurrent create" {
+		t.Fatalf("stored content = %q, want concurrent create", data)
+	}
+}
+
 func TestHandler_PUT_IfUnmodifiedSinceFailsForStaleWrite(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -1831,6 +2060,31 @@ func TestHandler_DELETE_DepthValidatesCurrentTargetTypeUnderStorageLock(t *testi
 	}
 }
 
+func TestHandler_WebDAVLifecycleIDIsUniqueNonZeroAndImmutable(t *testing.T) {
+	runtimeState := NewRuntimeLockState()
+	t.Cleanup(runtimeState.Close)
+	first := NewHandler(Config{AuthType: "none", RuntimeLockState: runtimeState})
+	second := NewHandler(Config{AuthType: "none", RuntimeLockState: runtimeState})
+
+	firstID := first.WebDAVLifecycleID()
+	secondID := second.WebDAVLifecycleID()
+	if firstID == 0 || secondID == 0 {
+		t.Fatalf("lifecycle IDs = (%d, %d), want non-zero IDs", firstID, secondID)
+	}
+	if firstID == secondID {
+		t.Fatalf("lifecycle IDs = (%d, %d), want unique IDs", firstID, secondID)
+	}
+
+	first.Close()
+	if got := first.WebDAVLifecycleID(); got != firstID {
+		t.Fatalf("lifecycle ID after Close = %d, want immutable ID %d", got, firstID)
+	}
+	var nilHandler *Handler
+	if got := nilHandler.WebDAVLifecycleID(); got != 0 {
+		t.Fatalf("nil handler lifecycle ID = %d, want 0", got)
+	}
+}
+
 func TestHandler_HandleError_DoesNotLeakInternalDetails(t *testing.T) {
 	handler := NewHandler(Config{AuthType: "none"})
 	w := httptest.NewRecorder()
@@ -1867,6 +2121,56 @@ func TestHandler_HandleError_MapsLockedAndTypeConflicts(t *testing.T) {
 			t.Fatalf("status = %d, want %d", w.Code, http.StatusConflict)
 		}
 	})
+}
+
+func TestHandler_HandleError_PrioritizesHardWriteStateOverQuota(t *testing.T) {
+	handler := NewHandler(Config{AuthType: "none"})
+	tests := []struct {
+		name        string
+		err         error
+		wantStatus  int
+		wantMessage string
+	}{
+		{
+			name:        "recovery required",
+			err:         errors.Join(errWebDAVDirectoryQuotaExceeded, storage.ErrWriteRecoveryRequired),
+			wantStatus:  http.StatusServiceUnavailable,
+			wantMessage: "storage write recovery is required",
+		},
+		{
+			name:        "recovery required with access denial",
+			err:         errors.Join(errWebDAVPathAccessDenied, storage.ErrWriteRecoveryRequired),
+			wantStatus:  http.StatusServiceUnavailable,
+			wantMessage: "storage write recovery is required",
+		},
+		{
+			name:        "insufficient host capacity",
+			err:         errors.Join(errWebDAVDirectoryQuotaExceeded, storage.ErrInsufficientStorage),
+			wantStatus:  http.StatusInsufficientStorage,
+			wantMessage: "insufficient storage capacity for this write",
+		},
+		{
+			name:        "write conflict",
+			err:         errors.Join(errWebDAVDirectoryQuotaExceeded, storage.ErrWriteConflict),
+			wantStatus:  http.StatusConflict,
+			wantMessage: "resource changed during write",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			handler.handleError(w, test.err)
+			if w.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d; body=%s", w.Code, test.wantStatus, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), test.wantMessage) {
+				t.Fatalf("body = %q, want message %q", w.Body.String(), test.wantMessage)
+			}
+			if strings.Contains(w.Body.String(), "quota exceeded") {
+				t.Fatalf("hard write state was masked by quota response: %s", w.Body.String())
+			}
+		})
+	}
 }
 
 func TestHandler_COPY(t *testing.T) {
@@ -3834,22 +4138,16 @@ func TestHandler_PROPFIND_DoesNotServeStaleCacheWhilePutIsInFlight(t *testing.T)
 		t.Fatal("expected initial PROPFIND to populate cache for the large directory")
 	}
 
-	originalUpdateFileIndex := getStorageHook[func(ctx context.Context, path string, size int64, modTime time.Time, hash string) error](t, fs, "updateFileIndex")
-	updateStarted := make(chan struct{})
-	continueUpdate := make(chan struct{})
-	setStorageHook(t, fs, "updateFileIndex", func(ctx context.Context, name string, size int64, modTime time.Time, hash string) error {
-		if name == "/cache-race/new.txt" {
-			select {
-			case <-updateStarted:
-			default:
-				close(updateStarted)
-			}
-			<-continueUpdate
-		}
-		return originalUpdateFileIndex(ctx, name, size, modTime, hash)
+	versionStore := getStorageHook[*versionstore.Store](t, fs, "versions")
+	metadataStarted := make(chan struct{})
+	continueCommit := make(chan struct{})
+	setStorageHook(t, fs, "writeTransactionStore", &blockingWriteTransactionStore{
+		delegate:        versionStore,
+		metadataStarted: metadataStarted,
+		continueCommit:  continueCommit,
 	})
 	t.Cleanup(func() {
-		setStorageHook(t, fs, "updateFileIndex", originalUpdateFileIndex)
+		setStorageHook(t, fs, "writeTransactionStore", versionStore)
 	})
 
 	putReq := httptest.NewRequest("PUT", "/dav/cache-race/new.txt", strings.NewReader("new content"))
@@ -3859,21 +4157,21 @@ func TestHandler_PROPFIND_DoesNotServeStaleCacheWhilePutIsInFlight(t *testing.T)
 		handler.ServeHTTP(putW, putReq)
 		close(putDone)
 	}()
-	releaseUpdate := func() {
+	releaseCommit := func() {
 		select {
-		case <-continueUpdate:
+		case <-continueCommit:
 		default:
-			close(continueUpdate)
+			close(continueCommit)
 		}
 	}
-	defer releaseUpdate()
+	defer releaseCommit()
 
 	select {
-	case <-updateStarted:
+	case <-metadataStarted:
 	case <-putDone:
-		t.Fatalf("PUT completed before updateFileIndex hook, status=%d body=%q", putW.Code, putW.Body.String())
+		t.Fatalf("PUT completed before transaction metadata commit, status=%d body=%q", putW.Code, putW.Body.String())
 	case <-time.After(2 * time.Second):
-		t.Fatalf("timed out waiting for PUT to reach updateFileIndex hook, status=%d body=%q", putW.Code, putW.Body.String())
+		t.Fatalf("timed out waiting for PUT to reach transaction metadata commit, status=%d body=%q", putW.Code, putW.Body.String())
 	}
 	if _, ok := handler.propCache.Get("/cache-race", "1"); ok {
 		t.Fatal("expected PUT to invalidate cached PROPFIND before writing file content")
@@ -3909,7 +4207,7 @@ func TestHandler_PROPFIND_DoesNotServeStaleCacheWhilePutIsInFlight(t *testing.T)
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for concurrent PROPFIND to miss stale cache while PUT was in flight")
 	}
-	releaseUpdate()
+	releaseCommit()
 
 	select {
 	case <-concurrentDone:
@@ -4327,7 +4625,7 @@ func TestHandler_LockCleanupLoopRemovesExpiredLocksWithoutNewRequests(t *testing
 	t.Cleanup(func() { handler.Close() })
 	cleaned := make(chan struct{}, 1)
 	originalOnWebDAVLockCleanupComplete := onWebDAVLockCleanupComplete
-	onWebDAVLockCleanupComplete = func(*Handler) {
+	onWebDAVLockCleanupComplete = func() {
 		select {
 		case cleaned <- struct{}{}:
 		default:
@@ -4357,6 +4655,194 @@ func TestHandler_LockCleanupLoopRemovesExpiredLocksWithoutNewRequests(t *testing
 	handler.locksMu.Unlock()
 	if exists {
 		t.Fatal("expected background lock cleanup loop to remove expired lock")
+	}
+}
+
+func TestRuntimeLockState_CloseStopsSingleSharedCleanupLoop(t *testing.T) {
+	runtimeState := NewRuntimeLockState()
+	first := NewHandler(Config{AuthType: "none", RuntimeLockState: runtimeState})
+	second := NewHandler(Config{AuthType: "none", RuntimeLockState: runtimeState})
+	first.lockCleanupInterval = 10 * time.Millisecond
+	second.lockCleanupInterval = 10 * time.Millisecond
+
+	cleaned := make(chan struct{}, 16)
+	originalOnWebDAVLockCleanupComplete := onWebDAVLockCleanupComplete
+	onWebDAVLockCleanupComplete = func() {
+		cleaned <- struct{}{}
+	}
+	t.Cleanup(func() {
+		onWebDAVLockCleanupComplete = originalOnWebDAVLockCleanupComplete
+		runtimeState.Close()
+	})
+
+	first.startLockCleanupLoop()
+	second.startLockCleanupLoop()
+	select {
+	case <-cleaned:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for shared lock cleanup")
+	}
+
+	runtimeState.Close()
+	for {
+		select {
+		case <-cleaned:
+			continue
+		default:
+		}
+		break
+	}
+	select {
+	case <-cleaned:
+		t.Fatal("lock cleanup continued after shared runtime state was closed")
+	case <-time.After(30 * time.Millisecond):
+	}
+}
+
+func TestHandler_RuntimeLockStateSurvivesHandlerRebuild(t *testing.T) {
+	_, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+	targetPath := "/runtime-lock.txt"
+	if err := fs.WriteFile(ctx, targetPath, strings.NewReader("original")); err != nil {
+		t.Fatalf("WriteFile(runtime-lock.txt) error: %v", err)
+	}
+
+	runtimeState := NewRuntimeLockState()
+	t.Cleanup(runtimeState.Close)
+	first := NewHandler(Config{
+		FileSystem:       fs,
+		Prefix:           "/dav",
+		AuthType:         "none",
+		RuntimeLockState: runtimeState,
+	})
+
+	lockBody := `<D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>`
+	lockRequest := httptest.NewRequest("LOCK", "/dav/runtime-lock.txt", strings.NewReader(lockBody))
+	lockResponse := httptest.NewRecorder()
+	first.ServeHTTP(lockResponse, lockRequest)
+	if lockResponse.Code != http.StatusOK {
+		t.Fatalf("initial LOCK status = %d, want %d; body=%s", lockResponse.Code, http.StatusOK, lockResponse.Body.String())
+	}
+	lockToken := lockResponse.Header().Get("Lock-Token")
+	if lockToken == "" {
+		t.Fatal("initial LOCK did not return a lock token")
+	}
+
+	runtimeState.locksMu.Lock()
+	initialLock, exists := runtimeState.locks[targetPath]
+	runtimeState.locksMu.Unlock()
+	if !exists {
+		t.Fatal("shared runtime state does not contain the initial DAV lock")
+	}
+
+	// Closing a handler that borrows shared state must not stop or clear that state.
+	first.Close()
+	readOnly := NewHandler(Config{
+		FileSystem:       fs,
+		Prefix:           "/private-dav",
+		ReadOnly:         true,
+		AuthType:         "basic",
+		Username:         "admin",
+		Password:         "secret",
+		RuntimeLockState: runtimeState,
+	})
+	if readOnly.pathLock != first.pathLock || readOnly.locksMu != first.locksMu {
+		t.Fatal("rebuilt handler did not reuse the shared path-lock and DAV-lock tables")
+	}
+	readOnlyRequest := httptest.NewRequest(http.MethodPut, "/private-dav/runtime-lock.txt", strings.NewReader("denied"))
+	readOnlyRequest.SetBasicAuth("admin", "secret")
+	readOnlyRequest.Header.Set("Lock-Token", lockToken)
+	readOnlyResponse := httptest.NewRecorder()
+	readOnly.ServeHTTP(readOnlyResponse, readOnlyRequest)
+	if readOnlyResponse.Code != http.StatusForbidden {
+		t.Fatalf("read-only rebuilt PUT status = %d, want %d", readOnlyResponse.Code, http.StatusForbidden)
+	}
+
+	runtimeState.locksMu.Lock()
+	lockAfterReadOnlyRebuild, exists := runtimeState.locks[targetPath]
+	runtimeState.locksMu.Unlock()
+	if !exists || lockAfterReadOnlyRebuild != initialLock {
+		t.Fatalf("DAV lock changed across read-only rebuild: got %#v, want %#v", lockAfterReadOnlyRebuild, initialLock)
+	}
+
+	readOnly.Close()
+	replacement := NewHandler(Config{
+		FileSystem:       fs,
+		Prefix:           "/private-dav",
+		AuthType:         "basic",
+		Username:         "admin",
+		Password:         "secret",
+		DirectoryQuotas:  []DirectoryQuota{{Path: "/", QuotaBytes: 1 << 30}},
+		RuntimeLockState: runtimeState,
+	})
+
+	withoutTokenRequest := httptest.NewRequest(http.MethodPut, "/private-dav/runtime-lock.txt", strings.NewReader("blocked"))
+	withoutTokenRequest.SetBasicAuth("admin", "secret")
+	withoutTokenResponse := httptest.NewRecorder()
+	replacement.ServeHTTP(withoutTokenResponse, withoutTokenRequest)
+	if withoutTokenResponse.Code != http.StatusLocked {
+		t.Fatalf("rebuilt PUT without token status = %d, want %d", withoutTokenResponse.Code, http.StatusLocked)
+	}
+
+	withTokenRequest := httptest.NewRequest(http.MethodPut, "/private-dav/runtime-lock.txt", strings.NewReader("updated"))
+	withTokenRequest.SetBasicAuth("admin", "secret")
+	withTokenRequest.Header.Set("Lock-Token", lockToken)
+	withTokenResponse := httptest.NewRecorder()
+	replacement.ServeHTTP(withTokenResponse, withTokenRequest)
+	if withTokenResponse.Code != http.StatusNoContent {
+		t.Fatalf("rebuilt PUT with token status = %d, want %d; body=%s", withTokenResponse.Code, http.StatusNoContent, withTokenResponse.Body.String())
+	}
+
+	unlockRequest := httptest.NewRequest("UNLOCK", "/private-dav/runtime-lock.txt", nil)
+	unlockRequest.SetBasicAuth("admin", "secret")
+	unlockRequest.Header.Set("Lock-Token", lockToken)
+	unlockResponse := httptest.NewRecorder()
+	replacement.ServeHTTP(unlockResponse, unlockRequest)
+	if unlockResponse.Code != http.StatusNoContent {
+		t.Fatalf("rebuilt UNLOCK status = %d, want %d; body=%s", unlockResponse.Code, http.StatusNoContent, unlockResponse.Body.String())
+	}
+
+	runtimeState.locksMu.Lock()
+	_, exists = runtimeState.locks[targetPath]
+	runtimeState.locksMu.Unlock()
+	if exists {
+		t.Fatal("DAV lock remained after UNLOCK on rebuilt handler")
+	}
+}
+
+func TestHandler_RuntimeLockStateDeleteRollbackSurvivesHandlerRebuild(t *testing.T) {
+	runtimeState := NewRuntimeLockState()
+	t.Cleanup(runtimeState.Close)
+	first := NewHandler(Config{AuthType: "none", RuntimeLockState: runtimeState})
+
+	initialLock := webdavLock{
+		token:     "opaquelocktoken:runtime-delete-rollback",
+		depth:     webdavLockDepthInfinity,
+		expiresAt: time.Now().Add(time.Hour),
+	}
+	runtimeState.locksMu.Lock()
+	runtimeState.locks["/docs"] = initialLock
+	runtimeState.locksMu.Unlock()
+
+	hookResult := first.OnPathDeleted("/docs")
+	if hookResult == nil || hookResult.Rollback == nil {
+		t.Fatal("expected delete lock removal to return a rollback callback")
+	}
+	first.Close()
+	replacement := NewHandler(Config{
+		Prefix:           "/new-dav",
+		AuthType:         "none",
+		RuntimeLockState: runtimeState,
+	})
+	if err := hookResult.Rollback(); err != nil {
+		t.Fatalf("delete lock rollback error: %v", err)
+	}
+
+	replacement.locksMu.Lock()
+	restored, exists := replacement.locks["/docs"]
+	replacement.locksMu.Unlock()
+	if !exists || restored != initialLock {
+		t.Fatalf("lock restored after rebuild = %#v, want %#v", restored, initialLock)
 	}
 }
 
@@ -5278,6 +5764,46 @@ func TestHandler_DeleteWithMatchingTokenClearsLockState(t *testing.T) {
 	}
 }
 
+func TestHandler_DeleteWithExternalPathObserverClearsLockExactlyOnce(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	handler.pathChangesObserved = true
+	ctx := context.Background()
+	fs.UpdateTrashSettings(false, 30, 0)
+
+	if err := fs.WriteFile(ctx, "/observed-delete-locked.txt", strings.NewReader("delete me")); err != nil {
+		t.Fatalf("WriteFile(observed-delete-locked.txt) error: %v", err)
+	}
+	var deleteHookCalls atomic.Int32
+	fs.SetPathChangeHooks(nil, func(_ context.Context, filePath string) (*storage.PathDeleteHookResult, error) {
+		deleteHookCalls.Add(1)
+		return handler.OnPathDeleted(filePath), nil
+	})
+
+	lockReq := httptest.NewRequest("LOCK", "/dav/observed-delete-locked.txt", strings.NewReader(`<?xml version="1.0"?><lockinfo/>`))
+	lockW := httptest.NewRecorder()
+	handler.ServeHTTP(lockW, lockReq)
+	if lockW.Code != http.StatusOK {
+		t.Fatalf("LOCK status = %d, want %d", lockW.Code, http.StatusOK)
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/dav/observed-delete-locked.txt", nil)
+	deleteReq.Header.Set("Lock-Token", lockW.Header().Get("Lock-Token"))
+	deleteW := httptest.NewRecorder()
+	handler.ServeHTTP(deleteW, deleteReq)
+	if deleteW.Code != http.StatusNoContent {
+		t.Fatalf("observed DELETE status = %d, want %d; body=%s", deleteW.Code, http.StatusNoContent, deleteW.Body.String())
+	}
+	if deleteHookCalls.Load() != 1 {
+		t.Fatalf("delete hook calls = %d, want 1", deleteHookCalls.Load())
+	}
+	handler.locksMu.Lock()
+	_, stillLocked := handler.locks["/observed-delete-locked.txt"]
+	handler.locksMu.Unlock()
+	if stillLocked {
+		t.Fatal("observed DELETE left the DAV lock behind")
+	}
+}
+
 func TestHandler_MoveWithMatchingTokenTransfersLockToDestination(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -5332,6 +5858,136 @@ func TestHandler_MoveWithMatchingTokenTransfersLockToDestination(t *testing.T) {
 	handler.ServeHTTP(putMovedW, putMovedReq)
 	if putMovedW.Code != http.StatusLocked {
 		t.Fatalf("PUT moved destination without token status = %d, want %d", putMovedW.Code, http.StatusLocked)
+	}
+}
+
+func TestHandler_MoveWithExternalPathObserverRebasesLockExactlyOnce(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	handler.pathChangesObserved = true
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/observed-move-dst"); err != nil {
+		t.Fatalf("Mkdir(observed-move-dst) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/observed-move-src.txt", strings.NewReader("move me")); err != nil {
+		t.Fatalf("WriteFile(observed-move-src.txt) error: %v", err)
+	}
+	fs.SetPathChangeHooks(func(_ context.Context, oldPath, newPath string) error {
+		handler.OnPathRenamed(oldPath, newPath)
+		return nil
+	}, nil)
+
+	lockReq := httptest.NewRequest("LOCK", "/dav/observed-move-src.txt", strings.NewReader(`<?xml version="1.0"?><lockinfo/>`))
+	lockW := httptest.NewRecorder()
+	handler.ServeHTTP(lockW, lockReq)
+	if lockW.Code != http.StatusOK {
+		t.Fatalf("LOCK status = %d, want %d", lockW.Code, http.StatusOK)
+	}
+	lockToken := lockW.Header().Get("Lock-Token")
+
+	moveReq := httptest.NewRequest("MOVE", "/dav/observed-move-src.txt", nil)
+	moveReq.Header.Set("Destination", "http://example.com/dav/observed-move-dst/moved.txt")
+	moveReq.Header.Set("Lock-Token", lockToken)
+	moveW := httptest.NewRecorder()
+	handler.ServeHTTP(moveW, moveReq)
+	if moveW.Code != http.StatusCreated {
+		t.Fatalf("MOVE with external observer status = %d, want %d; body=%s", moveW.Code, http.StatusCreated, moveW.Body.String())
+	}
+
+	handler.locksMu.Lock()
+	_, oldLocked := handler.locks["/observed-move-src.txt"]
+	movedLock, newLocked := handler.locks["/observed-move-dst/moved.txt"]
+	handler.locksMu.Unlock()
+	if oldLocked {
+		t.Fatal("source lock remained after observed MOVE")
+	}
+	if !newLocked {
+		t.Fatal("destination lock was removed by a duplicate MOVE notification")
+	}
+	if movedLock.token != strings.Trim(lockToken, "<>") {
+		t.Fatalf("moved lock token = %q, want %q", movedLock.token, strings.Trim(lockToken, "<>"))
+	}
+}
+
+func TestHandler_OverwriteMoveWithExternalPathObserverPreservesOnlySourceLock(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	handler.pathChangesObserved = true
+	ctx := context.Background()
+
+	for _, dir := range []string{"/observed-incoming", "/observed-team"} {
+		if err := fs.Mkdir(ctx, dir); err != nil {
+			t.Fatalf("Mkdir(%s) error: %v", dir, err)
+		}
+	}
+	if err := fs.WriteFile(ctx, "/observed-incoming/src.txt", strings.NewReader("source")); err != nil {
+		t.Fatalf("WriteFile(source) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/observed-team/dst.txt", strings.NewReader("destination")); err != nil {
+		t.Fatalf("WriteFile(destination) error: %v", err)
+	}
+	fs.SetPathChangeHooks(
+		func(_ context.Context, oldPath, newPath string) error {
+			handler.OnPathRenamed(oldPath, newPath)
+			return nil
+		},
+		func(_ context.Context, filePath string) (*storage.PathDeleteHookResult, error) {
+			return handler.OnPathDeleted(filePath), nil
+		},
+	)
+
+	sourceToken := "opaquelocktoken:observed-source"
+	destinationToken := "opaquelocktoken:observed-destination"
+	handler.locksMu.Lock()
+	handler.locks["/observed-incoming/src.txt"] = webdavLock{
+		token:     sourceToken,
+		depth:     webdavLockDepthZero,
+		expiresAt: time.Now().Add(time.Hour),
+	}
+	handler.locks["/observed-team/dst.txt"] = webdavLock{
+		token:     destinationToken,
+		depth:     webdavLockDepthZero,
+		expiresAt: time.Now().Add(time.Hour),
+	}
+	handler.locksMu.Unlock()
+
+	moveReq := httptest.NewRequest("MOVE", "/dav/observed-incoming/src.txt", nil)
+	moveReq.Header.Set("Destination", "http://example.com/dav/observed-team/dst.txt")
+	moveReq.Header.Set("Overwrite", "T")
+	moveReq.Header.Set(
+		"If",
+		fmt.Sprintf(
+			"<http://example.com/dav/observed-incoming/src.txt> (<%s>) <http://example.com/dav/observed-team/dst.txt> (<%s>)",
+			sourceToken,
+			destinationToken,
+		),
+	)
+	moveW := httptest.NewRecorder()
+	handler.ServeHTTP(moveW, moveReq)
+	if moveW.Code != http.StatusNoContent {
+		t.Fatalf("overwrite MOVE status = %d, want %d; body=%s", moveW.Code, http.StatusNoContent, moveW.Body.String())
+	}
+
+	handler.locksMu.Lock()
+	_, oldSourceLocked := handler.locks["/observed-incoming/src.txt"]
+	movedLock, destinationLocked := handler.locks["/observed-team/dst.txt"]
+	remainingLocks := make(map[string]webdavLock, len(handler.locks))
+	for lockPath, lockInfo := range handler.locks {
+		remainingLocks[lockPath] = lockInfo
+	}
+	handler.locksMu.Unlock()
+	if oldSourceLocked {
+		t.Fatal("source lock remained after overwrite MOVE")
+	}
+	if !destinationLocked || movedLock.token != sourceToken {
+		t.Fatalf("destination lock = %#v, want transferred source token %q", movedLock, sourceToken)
+	}
+	for lockPath, lockInfo := range remainingLocks {
+		if lockInfo.token == destinationToken {
+			t.Fatalf("overwritten destination lock remained at %q", lockPath)
+		}
+		if strings.Contains(lockPath, ".webdav-move-backup-") {
+			t.Fatalf("backup lock remained after cleanup at %q", lockPath)
+		}
 	}
 }
 
@@ -7172,6 +7828,80 @@ func TestHandler_MoveEnforcesDirectoryQuota(t *testing.T) {
 	}
 	if _, err := fs.Stat(ctx, "/team/src.txt"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected quota-rejected MOVE to leave destination absent, got %v", err)
+	}
+}
+
+func TestHandler_MoveOverwriteReservesBackupBytesBeforeCleanup(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	handler.directoryQuotas = []DirectoryQuota{{Path: "/team", QuotaBytes: 150}}
+	ctx := context.Background()
+
+	for _, dir := range []string{"/incoming", "/team"} {
+		if err := fs.Mkdir(ctx, dir); err != nil {
+			t.Fatalf("Mkdir(%s) error: %v", dir, err)
+		}
+	}
+	sourceContent := strings.Repeat("s", 100)
+	destinationContent := strings.Repeat("d", 100)
+	if err := fs.WriteFile(ctx, "/incoming/src.txt", strings.NewReader(sourceContent)); err != nil {
+		t.Fatalf("WriteFile(source) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/dst.txt", strings.NewReader(destinationContent)); err != nil {
+		t.Fatalf("WriteFile(destination) error: %v", err)
+	}
+
+	deleteHookCalled := false
+	fs.SetPathChangeHooks(nil, func(context.Context, string) (*storage.PathDeleteHookResult, error) {
+		deleteHookCalled = true
+		return nil, errors.New("forced backup cleanup failure")
+	})
+
+	req := httptest.NewRequest(http.MethodOptions, "/dav/incoming/src.txt", nil)
+	req.Method = "MOVE"
+	req.Header.Set("Destination", "http://example.com/dav/team/dst.txt")
+	req.Header.Set("Overwrite", "T")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInsufficientStorage {
+		t.Fatalf("overwrite MOVE status = %d, want %d; body=%s", w.Code, http.StatusInsufficientStorage, w.Body.String())
+	}
+	if deleteHookCalled {
+		t.Fatal("quota admission allowed overwrite MOVE to reach risky backup cleanup")
+	}
+	for filePath, want := range map[string]string{
+		"/incoming/src.txt": sourceContent,
+		"/team/dst.txt":     destinationContent,
+	} {
+		reader, err := fs.OpenFile(ctx, filePath)
+		if err != nil {
+			t.Fatalf("OpenFile(%s) error: %v", filePath, err)
+		}
+		data, readErr := io.ReadAll(reader)
+		closeErr := reader.Close()
+		if readErr != nil {
+			t.Fatalf("ReadAll(%s) error: %v", filePath, readErr)
+		}
+		if closeErr != nil {
+			t.Fatalf("Close(%s) error: %v", filePath, closeErr)
+		}
+		if string(data) != want {
+			t.Fatalf("content at %s = %q, want unchanged", filePath, data)
+		}
+	}
+	entries, err := fs.ReadDir(ctx, "/team")
+	if err != nil {
+		t.Fatalf("ReadDir(/team) error: %v", err)
+	}
+	var usedBytes int64
+	for _, entry := range entries {
+		if strings.Contains(entry.Name, ".webdav-move-backup-") {
+			t.Fatalf("quota-rejected MOVE left backup path %q", entry.Name)
+		}
+		usedBytes += nonNegativeSize(entry.Size)
+	}
+	if usedBytes > 150 {
+		t.Fatalf("directory quota usage = %d, want <= 150", usedBytes)
 	}
 }
 

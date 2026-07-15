@@ -319,6 +319,18 @@ func uniqueVersionTestContent(t *testing.T, label string) []byte {
 	return []byte(fmt.Sprintf("%s:%s", t.Name(), label))
 }
 
+func mustCreateStorageDirectory(
+	t *testing.T,
+	fs *storage.FileSystem,
+	ctx context.Context,
+	name string,
+) {
+	t.Helper()
+	if err := fs.Mkdir(ctx, name); err != nil {
+		t.Fatalf("Mkdir(%s) error: %v", name, err)
+	}
+}
+
 func uniqueSixByteVersionTestContent(t *testing.T, label string) []byte {
 	t.Helper()
 	return []byte(fmt.Sprintf("%06x", crc32.ChecksumIEEE(uniqueVersionTestContent(t, label)))[:6])
@@ -2430,6 +2442,86 @@ func TestServer_UploadFile(t *testing.T) {
 	}
 }
 
+type uploadWriteErrorWrapper struct {
+	cause error
+}
+
+func (e uploadWriteErrorWrapper) Error() string {
+	return "wrapped upload write error"
+}
+
+func (e uploadWriteErrorWrapper) Unwrap() error {
+	return e.cause
+}
+
+func storageVisibleMutationWarningWithCause(t *testing.T, cause error) *storage.VisibleMutationWarningError {
+	t.Helper()
+	warning := new(storage.VisibleMutationWarningError)
+	field := reflect.ValueOf(warning).Elem().FieldByName("err")
+	reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Set(reflect.ValueOf(cause))
+	return warning
+}
+
+func TestIsOnlyVisibleMutationWarningRejectsMixedErrors(t *testing.T) {
+	warning := new(storage.VisibleMutationWarningError)
+	rawErr := errors.New("index update failed")
+	wrappedRecovery := storageVisibleMutationWarningWithCause(t, storage.ErrWriteRecoveryRequired)
+	wrappedConflict := storageVisibleMutationWarningWithCause(t, storage.ErrWriteConflict)
+	wrappedAtomicRename := storageVisibleMutationWarningWithCause(t, storage.ErrWriteAtomicRenameUnsupported)
+	wrappedBusy := storageVisibleMutationWarningWithCause(t, storage.ErrWriteBusy)
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "raw business error", err: rawErr, want: false},
+		{name: "single warning", err: warning, want: true},
+		{name: "wrapped warning", err: uploadWriteErrorWrapper{cause: warning}, want: true},
+		{name: "joined warnings", err: errors.Join(warning, warning), want: true},
+		{name: "raw and warning", err: errors.Join(rawErr, warning), want: false},
+		{name: "wrapped raw and warning", err: uploadWriteErrorWrapper{cause: errors.Join(rawErr, warning)}, want: false},
+		{name: "recovery and warning", err: errors.Join(storage.ErrWriteRecoveryRequired, warning), want: false},
+		{name: "warning wrapping recovery", err: wrappedRecovery, want: false},
+		{name: "warning wrapping conflict", err: wrappedConflict, want: false},
+		{name: "warning wrapping unsupported atomic rename", err: wrappedAtomicRename, want: false},
+		{name: "warning wrapping busy", err: wrappedBusy, want: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isOnlyVisibleMutationWarning(test.err); got != test.want {
+				t.Fatalf("isOnlyVisibleMutationWarning() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestClassifyRestoreVersionErrorRejectsMixedVisibleWarning(t *testing.T) {
+	warning := new(storage.VisibleMutationWarningError)
+	tests := []struct {
+		name string
+		err  error
+		want restoreVersionErrorKind
+	}{
+		{name: "pure warning", err: warning, want: restoreVersionErrorVisibleWarning},
+		{name: "warning and recovery", err: errors.Join(warning, storage.ErrWriteRecoveryRequired), want: restoreVersionErrorRecoveryRequired},
+		{name: "warning and conflict", err: errors.Join(warning, storage.ErrWriteConflict), want: restoreVersionErrorConflict},
+		{name: "warning and unsupported atomic rename", err: errors.Join(warning, storage.ErrWriteAtomicRenameUnsupported), want: restoreVersionErrorHard},
+		{name: "warning and busy", err: errors.Join(warning, storage.ErrWriteBusy), want: restoreVersionErrorHard},
+		{name: "warning and hard error", err: errors.Join(warning, errors.New("index rollback failed")), want: restoreVersionErrorHard},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := classifyRestoreVersionError(test.err); got != test.want {
+				t.Fatalf("classifyRestoreVersionError() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestServer_UploadFile_TooLargeReturnsPayloadTooLarge(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
@@ -2757,6 +2849,7 @@ func TestServer_Search_WhitespaceOnlyQueryReturnsBadRequest(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
 
+	mustCreateStorageDirectory(t, fs, ctx, "/docs")
 	if err := fs.WriteFile(ctx, "/docs/my report.txt", strings.NewReader("content")); err != nil {
 		t.Fatalf("WriteFile(my report.txt) error: %v", err)
 	}
@@ -8697,6 +8790,7 @@ func TestServer_DownloadVersion_ContentDispositionEscapesFilename(t *testing.T) 
 	historicalContent := uniqueVersionTestContent(t, "quote-v1")
 	currentContent := uniqueVersionTestContent(t, "quote-v2")
 
+	mustCreateStorageDirectory(t, fs, ctx, "/versions")
 	if err := fs.WriteFile(ctx, "/versions/quote\"name.txt", bytes.NewReader(historicalContent)); err != nil {
 		t.Fatalf("WriteFile(v1) error: %v", err)
 	}
@@ -8764,6 +8858,7 @@ func TestServer_DownloadVersion_UsesExtensionContentTypeForPreview(t *testing.T)
 	historicalContent := uniqueVersionTestContent(t, "preview-v1")
 	currentContent := uniqueVersionTestContent(t, "preview-v2")
 
+	mustCreateStorageDirectory(t, fs, ctx, "/versions")
 	if err := fs.WriteFile(ctx, "/versions/preview.txt", bytes.NewReader(historicalContent)); err != nil {
 		t.Fatalf("WriteFile(v1) error: %v", err)
 	}
@@ -8813,6 +8908,7 @@ func TestServer_DownloadVersionRejectsAmbiguousVersionParameter(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
 
+	mustCreateStorageDirectory(t, fs, ctx, "/versions")
 	if err := fs.WriteFile(ctx, "/versions/ambiguous.txt", bytes.NewReader([]byte("current"))); err != nil {
 		t.Fatalf("WriteFile(/versions/ambiguous.txt) error: %v", err)
 	}
@@ -8841,6 +8937,7 @@ func TestServer_DownloadVersion_UsesPrivateRevalidationCacheHeaders(t *testing.T
 	historicalContent := uniqueVersionTestContent(t, "cache-v1")
 	currentContent := uniqueVersionTestContent(t, "cache-v2")
 
+	mustCreateStorageDirectory(t, fs, ctx, "/versions")
 	if err := fs.WriteFile(ctx, "/versions/cache.txt", bytes.NewReader(historicalContent)); err != nil {
 		t.Fatalf("WriteFile(v1) error: %v", err)
 	}
@@ -8906,6 +9003,7 @@ func TestServer_DownloadVersion_SupportsRangeRequests(t *testing.T) {
 	historicalContent := uniqueSixByteVersionTestContent(t, "range-v1")
 	currentContent := uniqueSixByteVersionTestContent(t, "range-v2")
 
+	mustCreateStorageDirectory(t, fs, ctx, "/versions")
 	if err := fs.WriteFile(ctx, "/versions/range.txt", bytes.NewReader(historicalContent)); err != nil {
 		t.Fatalf("WriteFile(v1) error: %v", err)
 	}
@@ -8958,6 +9056,7 @@ func TestServer_DownloadVersion_LogsDownloadActivityWithHash(t *testing.T) {
 	if server.activity == nil {
 		t.Fatal("expected activity store to be initialized")
 	}
+	mustCreateStorageDirectory(t, fs, ctx, "/versions")
 	if err := fs.WriteFile(ctx, "/versions/activity.txt", bytes.NewReader(historicalContent)); err != nil {
 		t.Fatalf("WriteFile(v1) error: %v", err)
 	}
@@ -9014,6 +9113,7 @@ func TestServer_DownloadVersion_ErrorProbeDoesNotLogDownloadActivity(t *testing.
 	if server.activity == nil {
 		t.Fatal("expected activity store to be initialized")
 	}
+	mustCreateStorageDirectory(t, fs, ctx, "/versions")
 	if err := fs.WriteFile(ctx, "/versions/probe.txt", bytes.NewReader(historicalContent)); err != nil {
 		t.Fatalf("WriteFile(v1) error: %v", err)
 	}
@@ -9063,6 +9163,7 @@ func TestServer_DownloadVersion_ZeroLengthRangeDoesNotLogDownloadActivity(t *tes
 	if server.activity == nil {
 		t.Fatal("expected activity store to be initialized")
 	}
+	mustCreateStorageDirectory(t, fs, ctx, "/versions")
 	if err := fs.WriteFile(ctx, "/versions/empty-range.txt", bytes.NewReader(historicalContent)); err != nil {
 		t.Fatalf("WriteFile(v1) error: %v", err)
 	}
@@ -9114,6 +9215,7 @@ func TestServer_DownloadVersion_ProbeHeaderWithNonProbeRangeLogsDownloadActivity
 	if server.activity == nil {
 		t.Fatal("expected activity store to be initialized")
 	}
+	mustCreateStorageDirectory(t, fs, ctx, "/versions")
 	if err := fs.WriteFile(ctx, "/versions/probe-range.txt", bytes.NewReader(historicalContent)); err != nil {
 		t.Fatalf("WriteFile(v1) error: %v", err)
 	}
@@ -9164,6 +9266,7 @@ func TestServer_DownloadVersion_ReturnsNotFoundWhenHashBelongsToDifferentPath(t 
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
 
+	mustCreateStorageDirectory(t, fs, ctx, "/versions")
 	if err := fs.WriteFile(ctx, "/versions/a.txt", bytes.NewReader([]byte("a-v1"))); err != nil {
 		t.Fatalf("WriteFile(a v1) error: %v", err)
 	}
@@ -9209,6 +9312,7 @@ func TestServer_DownloadVersion_ReturnsServiceUnavailableWhenVersionStorageUnava
 	historicalContent := uniqueVersionTestContent(t, "unavailable-v1")
 	currentContent := uniqueVersionTestContent(t, "unavailable-v2")
 
+	mustCreateStorageDirectory(t, fs, ctx, "/versions")
 	if err := fs.WriteFile(ctx, "/versions/unavailable.txt", bytes.NewReader(historicalContent)); err != nil {
 		t.Fatalf("WriteFile(v1) error: %v", err)
 	}
@@ -9251,6 +9355,7 @@ func TestServer_RestoreVersion_ReturnsNotFoundWhenHashBelongsToDifferentPath(t *
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
 
+	mustCreateStorageDirectory(t, fs, ctx, "/versions")
 	if err := fs.WriteFile(ctx, "/versions/a.txt", bytes.NewReader([]byte("a-v1"))); err != nil {
 		t.Fatalf("WriteFile(a v1) error: %v", err)
 	}
@@ -9308,6 +9413,7 @@ func TestServer_RestoreVersion_ReturnsServiceUnavailableWhenVersionStorageUnavai
 	historicalContent := uniqueVersionTestContent(t, "restore-unavailable-v1")
 	currentContent := uniqueVersionTestContent(t, "restore-unavailable-v2")
 
+	mustCreateStorageDirectory(t, fs, ctx, "/versions")
 	if err := fs.WriteFile(ctx, "/versions/restore-unavailable.txt", bytes.NewReader(historicalContent)); err != nil {
 		t.Fatalf("WriteFile(v1) error: %v", err)
 	}
@@ -9350,6 +9456,7 @@ func TestServer_RestoreVersion_AllowsCurrentHash(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
 
+	mustCreateStorageDirectory(t, fs, ctx, "/versions")
 	if err := fs.WriteFile(ctx, "/versions/current.txt", bytes.NewReader([]byte("current-content"))); err != nil {
 		t.Fatalf("WriteFile() error: %v", err)
 	}
@@ -15511,6 +15618,177 @@ func TestServer_RestoreVersion_EnforcesDirectoryQuota(t *testing.T) {
 		t.Fatalf("unexpected quota alert details: %+v", event.Details)
 	}
 	requireQuotaAlertHidesPaths(t, event, "quota-secret", "/team")
+}
+
+func TestServer_RestoreVersion_AdminEnforcesTargetUserQuota(t *testing.T) {
+	server, fs, _, username, _ := setupAuthServer(t)
+	ctx := context.Background()
+	monitor := &fakeAlertMonitor{}
+	server.alertMonitor = monitor
+	setUserQuotaForTest(t, server, username, 50)
+
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	historicalContent := strings.Repeat("h", 100)
+	if err := fs.WriteFile(ctx, "/tester/doc.md", strings.NewReader(historicalContent)); err != nil {
+		t.Fatalf("WriteFile(historical) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/doc.md", strings.NewReader("c")); err != nil {
+		t.Fatalf("WriteFile(current) error: %v", err)
+	}
+	versions, err := fs.ListVersions(ctx, "/tester/doc.md")
+	if err != nil {
+		t.Fatalf("ListVersions() error: %v", err)
+	}
+	var restoreHash string
+	for _, version := range versions {
+		if version.Size == int64(len(historicalContent)) {
+			restoreHash = version.Hash
+			break
+		}
+	}
+	if restoreHash == "" {
+		t.Fatalf("expected historical version with size %d, got %+v", len(historicalContent), versions)
+	}
+
+	const adminUsername = "version-restore-admin"
+	const adminPassword = "password123"
+	if _, err := server.userStore.Create(adminUsername, adminPassword, "", auth.RoleAdmin); err != nil {
+		t.Fatalf("Create(admin) error: %v", err)
+	}
+	adminToken := loginAndGetAccessToken(t, server, adminUsername, adminPassword)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/versions/"+restoreHash+"/restore?path=/tester/doc.md",
+		nil,
+	)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInsufficientStorage {
+		t.Fatalf("admin restore target user quota status = %d, want %d; body=%s", w.Code, http.StatusInsufficientStorage, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"quota_type":"user"`) ||
+		!strings.Contains(w.Body.String(), `"quota_path":"/tester"`) {
+		t.Fatalf("expected target user quota details, got %s", w.Body.String())
+	}
+	reader, err := fs.OpenFile(ctx, "/tester/doc.md")
+	if err != nil {
+		t.Fatalf("OpenFile(current) error: %v", err)
+	}
+	defer reader.Close()
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll(current) error: %v", err)
+	}
+	if string(data) != "c" {
+		t.Fatalf("expected rejected restore to keep current content, got %q", data)
+	}
+	if len(monitor.events) != 1 ||
+		monitor.events[0].Details["operation"] != "version_restore" ||
+		monitor.events[0].Details["quota_type"] != quotaTypeUser {
+		t.Fatalf("unexpected quota alert events: %+v", monitor.events)
+	}
+}
+
+func TestServer_RestoreVersion_UsesVisibleCurrentSizeForExpansion(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+	setDirectoryQuotasForTest(t, server, []config.DirectoryQuotaConfig{{Path: "/team", QuotaBytes: 4}})
+
+	if err := fs.Mkdir(ctx, "/team"); err != nil {
+		t.Fatalf("Mkdir(/team) error: %v", err)
+	}
+	for _, content := range []string{"12345", "123456789", "12"} {
+		if err := fs.WriteFile(ctx, "/team/doc.md", strings.NewReader(content)); err != nil {
+			t.Fatalf("WriteFile(%q) error: %v", content, err)
+		}
+	}
+	versions, err := fs.ListVersions(ctx, "/team/doc.md")
+	if err != nil {
+		t.Fatalf("ListVersions() error: %v", err)
+	}
+	var restoreHash string
+	for _, version := range versions {
+		if version.Size == 5 {
+			restoreHash = version.Hash
+			break
+		}
+	}
+	if restoreHash == "" {
+		t.Fatalf("expected historical version with size 5, got %+v", versions)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/versions/"+restoreHash+"/restore?path=/team/doc.md", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInsufficientStorage {
+		t.Fatalf("restore expanding version status = %d, want %d; body=%s", w.Code, http.StatusInsufficientStorage, w.Body.String())
+	}
+	reader, err := fs.OpenFile(ctx, "/team/doc.md")
+	if err != nil {
+		t.Fatalf("OpenFile(current) error: %v", err)
+	}
+	defer reader.Close()
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll(current) error: %v", err)
+	}
+	if string(data) != "12" {
+		t.Fatalf("expected rejected restore to keep current content, got %q", data)
+	}
+}
+
+func TestServer_RestoreVersion_UsesVisibleCurrentSizeForShrink(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+	setDirectoryQuotasForTest(t, server, []config.DirectoryQuotaConfig{{Path: "/team", QuotaBytes: 8}})
+
+	if err := fs.Mkdir(ctx, "/team"); err != nil {
+		t.Fatalf("Mkdir(/team) error: %v", err)
+	}
+	for _, content := range []string{"12345", "12", "12345678"} {
+		if err := fs.WriteFile(ctx, "/team/doc.md", strings.NewReader(content)); err != nil {
+			t.Fatalf("WriteFile(%q) error: %v", content, err)
+		}
+	}
+	versions, err := fs.ListVersions(ctx, "/team/doc.md")
+	if err != nil {
+		t.Fatalf("ListVersions() error: %v", err)
+	}
+	var restoreHash string
+	for _, version := range versions {
+		if version.Size == 5 {
+			restoreHash = version.Hash
+			break
+		}
+	}
+	if restoreHash == "" {
+		t.Fatalf("expected historical version with size 5, got %+v", versions)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/versions/"+restoreHash+"/restore?path=/team/doc.md", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("restore shrinking version status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	reader, err := fs.OpenFile(ctx, "/team/doc.md")
+	if err != nil {
+		t.Fatalf("OpenFile(restored) error: %v", err)
+	}
+	defer reader.Close()
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll(restored) error: %v", err)
+	}
+	if string(data) != "12345" {
+		t.Fatalf("restored content = %q, want %q", data, "12345")
+	}
 }
 
 func TestServer_RestoreVersion_NotFound(t *testing.T) {
@@ -23951,7 +24229,7 @@ func TestServer_UpdateSettings_UpdatesVersioningConfig(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
 
-	body := `{"versioning":{"auto_versioned_extensions":[".MD"," .TXT ",""],"auto_versioned_filenames":["README"," Dockerfile ",""],"max_versioned_size":209715200}}`
+	body := `{"versioning":{"auto_versioned_extensions":[".MD"," .TXT ",""],"auto_versioned_filenames":["README"," Dockerfile ",""],"max_versioned_size":67108864}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -23967,8 +24245,8 @@ func TestServer_UpdateSettings_UpdatesVersioningConfig(t *testing.T) {
 	if !reflect.DeepEqual(server.config.Storage.Versioning.AutoVersionedFilenames, []string{"README", "Dockerfile"}) {
 		t.Fatalf("unexpected versioning filenames: %#v", server.config.Storage.Versioning.AutoVersionedFilenames)
 	}
-	if server.config.Storage.Versioning.MaxVersionedSize != 209715200 {
-		t.Fatalf("expected max versioned size 209715200, got %d", server.config.Storage.Versioning.MaxVersionedSize)
+	if server.config.Storage.Versioning.MaxVersionedSize != 67108864 {
+		t.Fatalf("expected max versioned size 67108864, got %d", server.config.Storage.Versioning.MaxVersionedSize)
 	}
 }
 
@@ -23976,7 +24254,7 @@ func TestServer_UpdateSettings_UpdatesRunningVersioningPolicy(t *testing.T) {
 	server, fs, tmpDir := setupTestServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
 
-	body := `{"versioning":{"auto_versioned_extensions":[".MD"," .TXT ",""],"auto_versioned_filenames":["README"," Dockerfile ",""],"max_versioned_size":209715200}}`
+	body := `{"versioning":{"auto_versioned_extensions":[".MD"," .TXT ",""],"auto_versioned_filenames":["README"," Dockerfile ",""],"max_versioned_size":67108864}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -23997,8 +24275,8 @@ func TestServer_UpdateSettings_UpdatesRunningVersioningPolicy(t *testing.T) {
 	if !reflect.DeepEqual(policy.AutoVersionedFilenames, []string{"README", "Dockerfile"}) {
 		t.Fatalf("unexpected running versioning filenames: %#v", policy.AutoVersionedFilenames)
 	}
-	if policy.MaxVersionedSize != 209715200 {
-		t.Fatalf("expected running max versioned size 209715200, got %d", policy.MaxVersionedSize)
+	if policy.MaxVersionedSize != 67108864 {
+		t.Fatalf("expected running max versioned size 67108864, got %d", policy.MaxVersionedSize)
 	}
 }
 
@@ -24019,6 +24297,26 @@ func TestServer_UpdateSettings_InvalidVersioningMaxSizeRejected(t *testing.T) {
 	}
 	if server.config.Storage.Versioning.MaxVersionedSize != original {
 		t.Fatalf("expected invalid versioning max size to leave config unchanged")
+	}
+}
+
+func TestServer_UpdateSettings_VersioningMaxSizeAboveObjectLimitRejected(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	original := server.config.Storage.Versioning.MaxVersionedSize
+
+	body := `{"versioning":{"max_versioned_size":104857601}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("update settings over-limit versioning max size status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if server.config.Storage.Versioning.MaxVersionedSize != original {
+		t.Fatal("over-limit versioning max size changed the active config")
 	}
 }
 
@@ -26603,10 +26901,11 @@ func TestServer_RestoreVersion_Success(t *testing.T) {
 	}
 }
 
-func TestServer_RestoreVersion_ReturnsWarningWhenWorkspaceSyncFailsAfterVisibleRestore(t *testing.T) {
-	server, fs, rootDir := setupTestServer(t)
+func TestServer_RestoreVersion_ReturnsFailureWhenTransactionMetadataCommitFailsAndRollbackRestoresOriginal(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
 
+	mustCreateStorageDirectory(t, fs, ctx, "/restore-version")
 	if err := fs.WriteFile(ctx, "/restore-version/file.txt", bytes.NewReader([]byte("version 1"))); err != nil {
 		t.Fatalf("WriteFile(v1) error: %v", err)
 	}
@@ -26630,15 +26929,14 @@ func TestServer_RestoreVersion_ReturnsWarningWhenWorkspaceSyncFailsAfterVisibleR
 		t.Fatal("expected at least one historical version")
 	}
 
-	setStorageHook(t, fs, "writeWorkspacePath", func(ctx context.Context, name string, data []byte) error {
-		fullPath := filepath.Join(rootDir, "files", strings.TrimPrefix(path.Clean(name), "/"))
-		if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(fullPath, data, 0644); err != nil {
-			return err
-		}
-		return workspace.WrapVisibleMutationWarning(errors.New("failed to sync parent directory"))
+	versionStore := getStorageHook[*versionstore.Store](t, fs, "versions")
+	faultingStore := &apiFaultingWriteTransactionStore{
+		delegate:  versionStore,
+		ensureErr: errors.New("commit write metadata failed"),
+	}
+	setStorageHook(t, fs, "writeTransactionStore", faultingStore)
+	t.Cleanup(func() {
+		setStorageHook(t, fs, "writeTransactionStore", versionStore)
 	})
 
 	req := httptest.NewRequest("POST", "/api/v1/versions/"+hashToRestore+"/restore?path=/restore-version/file.txt", nil)
@@ -26646,11 +26944,14 @@ func TestServer_RestoreVersion_ReturnsWarningWhenWorkspaceSyncFailsAfterVisibleR
 
 	server.Router().ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("RestoreVersion warning status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("RestoreVersion metadata-failure status = %d, want %d: %s", w.Code, http.StatusInternalServerError, w.Body.String())
 	}
-	if got := w.Header().Get("Warning"); got != workspaceMutationWarningHeader {
-		t.Fatalf("warning header = %q, want %q", got, workspaceMutationWarningHeader)
+	if faultingStore.ensureCall == 0 {
+		t.Fatal("RestoreVersion did not reach transaction metadata commit")
+	}
+	if got := w.Header().Get("Warning"); got != "" {
+		t.Fatalf("warning header = %q, want none after successful rollback", got)
 	}
 	var envelope struct {
 		Success bool           `json:"success"`
@@ -26660,14 +26961,8 @@ func TestServer_RestoreVersion_ReturnsWarningWhenWorkspaceSyncFailsAfterVisibleR
 	if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil {
 		t.Fatalf("failed to parse warning response JSON: %v", err)
 	}
-	if !envelope.Success {
-		t.Fatalf("expected success response, got %s", w.Body.String())
-	}
-	if envelope.Message != "version restored with persistence warning" {
-		t.Fatalf("unexpected warning message %q", envelope.Message)
-	}
-	if warning, ok := envelope.Data["warning"].(bool); !ok || !warning {
-		t.Fatalf("expected warning flag in restore warning response, got %+v", envelope.Data)
+	if envelope.Success {
+		t.Fatalf("expected failure response, got %s", w.Body.String())
 	}
 
 	reader, err := fs.OpenFile(ctx, "/restore-version/file.txt")
@@ -26680,19 +26975,72 @@ func TestServer_RestoreVersion_ReturnsWarningWhenWorkspaceSyncFailsAfterVisibleR
 	if err != nil {
 		t.Fatalf("ReadAll() after warning response error: %v", err)
 	}
-	if string(data) != "version 1" {
-		t.Fatalf("expected restored content after warning response, got %q", string(data))
+	if string(data) != "version 2" {
+		t.Fatalf("expected pre-restore content after rollback response, got %q", string(data))
 	}
 
 	entries, total := server.activity.List(10, 0, activity.ActionRestore, "")
-	if total != 1 {
-		t.Fatalf("expected one warning version restore activity entry, got %d", total)
+	if total != 0 || len(entries) != 0 {
+		t.Fatalf("failed restore activity entries = %d/%d, want none", len(entries), total)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("expected one listed warning version restore activity entry, got %d", len(entries))
+}
+
+func TestServer_RestoreVersion_RejectsOversizedSafetySnapshot(t *testing.T) {
+	server, fs, rootDir := setupTestServer(t)
+	ctx := context.Background()
+	const filePath = "/restore-version/oversized-current.txt"
+
+	mustCreateStorageDirectory(t, fs, ctx, "/restore-version")
+	if err := fs.WriteFile(ctx, filePath, strings.NewReader("version 1")); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
 	}
-	if entries[0].Details["restore_source"] != "version" || entries[0].Details["hash"] != hashToRestore || entries[0].Details["persistence_warning"] != "true" {
-		t.Fatalf("unexpected warning version restore activity details: %+v", entries[0].Details)
+	if err := fs.WriteFile(ctx, filePath, strings.NewReader("version 2")); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+	versions, err := fs.ListVersions(ctx, filePath)
+	if err != nil {
+		t.Fatalf("ListVersions() error: %v", err)
+	}
+	hashToRestore := ""
+	for _, version := range versions {
+		if version.Comment != "(current)" {
+			hashToRestore = version.Hash
+			break
+		}
+	}
+	if hashToRestore == "" {
+		t.Fatal("expected at least one historical version")
+	}
+
+	hostPath := filepath.Join(rootDir, "files", "restore-version", "oversized-current.txt")
+	if err := os.Truncate(hostPath, versionstore.MaxVersionObjectSize+1); err != nil {
+		t.Fatalf("Truncate(current file) error: %v", err)
+	}
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/versions/"+hashToRestore+"/restore?path=/restore-version/oversized-current.txt",
+		nil,
+	)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("RestoreVersion oversized-current status = %d, want %d: %s", w.Code, http.StatusRequestEntityTooLarge, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"`+ErrCodePayloadTooLarge+`"`) {
+		t.Fatalf("RestoreVersion oversized-current body = %s, want payload-too-large code", w.Body.String())
+	}
+	info, err := os.Stat(hostPath)
+	if err != nil {
+		t.Fatalf("Stat(current file) error: %v", err)
+	}
+	if info.Size() != versionstore.MaxVersionObjectSize+1 {
+		t.Fatalf("current file size = %d, want %d", info.Size(), versionstore.MaxVersionObjectSize+1)
+	}
+	entries, total := server.activity.List(10, 0, activity.ActionRestore, "")
+	if total != 0 || len(entries) != 0 {
+		t.Fatalf("failed restore activity entries = %d/%d, want none", len(entries), total)
 	}
 }
 
@@ -26853,14 +27201,15 @@ func TestServer_UploadFile_ErrorCases(t *testing.T) {
 
 		server.Router().ServeHTTP(w, req)
 
-		if w.Code != http.StatusCreated {
-			t.Fatalf("Upload to non-existent parent status = %d, want %d", w.Code, http.StatusCreated)
+		if w.Code != http.StatusConflict {
+			t.Fatalf("Upload to non-existent parent status = %d, want %d", w.Code, http.StatusConflict)
 		}
-		if _, err := fs.Stat(ctx, "/nonexistent-dir/file.txt"); err != nil {
-			t.Fatalf("expected uploaded file to exist after auto-creating parent, got %v", err)
+		if _, err := fs.Stat(ctx, "/nonexistent-dir/file.txt"); !errors.Is(err, storage.ErrNotFound) &&
+			!errors.Is(err, storage.ErrNotDir) {
+			t.Fatalf("expected upload target to remain absent, got %v", err)
 		}
-		if _, err := fs.Stat(ctx, "/nonexistent-dir"); err != nil {
-			t.Fatalf("expected parent directory to be created during upload, got %v", err)
+		if _, err := fs.Stat(ctx, "/nonexistent-dir"); !errors.Is(err, storage.ErrNotFound) {
+			t.Fatalf("expected parent directory to remain absent, got %v", err)
 		}
 	})
 
@@ -27067,6 +27416,7 @@ func TestServer_ListVersions_VersionStoreFailureReturnsInternalServerError(t *te
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
 
+	mustCreateStorageDirectory(t, fs, ctx, "/versions")
 	if err := fs.WriteFile(ctx, "/versions/failing.txt", bytes.NewReader([]byte("current"))); err != nil {
 		t.Fatalf("WriteFile() error: %v", err)
 	}

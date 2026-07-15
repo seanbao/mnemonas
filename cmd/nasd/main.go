@@ -34,6 +34,7 @@ import (
 	"github.com/seanbao/mnemonas/internal/config"
 	"github.com/seanbao/mnemonas/internal/dataplane"
 	"github.com/seanbao/mnemonas/internal/diskhealth"
+	quotareservation "github.com/seanbao/mnemonas/internal/quota"
 	"github.com/seanbao/mnemonas/internal/rootio"
 	"github.com/seanbao/mnemonas/internal/storage"
 	mnemonasTLS "github.com/seanbao/mnemonas/internal/tls"
@@ -47,6 +48,9 @@ var (
 )
 
 var errLogOutputSymlink = errors.New("log output path must not be a symlink")
+var errHTTPServerExitedWithoutShutdown = errors.New("HTTP server exited without a shutdown request")
+
+const httpServerShutdownTimeout = 30 * time.Second
 
 var startupDataplaneContext = dataplane.WithTimeout
 var startupDataplaneConnect = func(client *dataplane.Client, ctx context.Context) error {
@@ -54,15 +58,137 @@ var startupDataplaneConnect = func(client *dataplane.Client, ctx context.Context
 }
 var afterOpenLogOutputParent = func() {}
 
+type gracefulHTTPServer interface {
+	Shutdown(context.Context) error
+	Close() error
+}
+
+type httpServerLifecycleResult struct {
+	ShutdownRequested bool
+	ServeErr          error
+	ShutdownErr       error
+	CloseErr          error
+}
+
+func (r httpServerLifecycleResult) Err() error {
+	return errors.Join(r.ServeErr, r.ShutdownErr, r.CloseErr)
+}
+
+func runHTTPServerLifecycle(
+	server gracefulHTTPServer,
+	serve func() error,
+	shutdownRequest <-chan struct{},
+	shutdownTimeout time.Duration,
+	onShutdownStart func(),
+) httpServerLifecycleResult {
+	type shutdownOutcome struct {
+		shutdownErr error
+		closeErr    error
+	}
+
+	shutdownServer := func() shutdownOutcome {
+		if onShutdownStart != nil {
+			onShutdownStart()
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		shutdownErr := server.Shutdown(ctx)
+		cancel()
+
+		var closeErr error
+		if shutdownErr != nil {
+			closeErr = server.Close()
+		}
+		return shutdownOutcome{
+			shutdownErr: shutdownErr,
+			closeErr:    closeErr,
+		}
+	}
+
+	lifecycleDone := make(chan struct{})
+	shutdownDone := make(chan struct{})
+	shutdownResult := make(chan shutdownOutcome, 1)
+	go func() {
+		defer close(shutdownDone)
+		select {
+		case <-shutdownRequest:
+			shutdownResult <- shutdownServer()
+		case <-lifecycleDone:
+		}
+	}()
+
+	serveErr := serve()
+	close(lifecycleDone)
+	// If Shutdown closed the listener first, Serve may already have returned
+	// ErrServerClosed. Wait for the shutdown worker before any caller-owned
+	// resources are released.
+	<-shutdownDone
+
+	result := httpServerLifecycleResult{}
+	select {
+	case outcome := <-shutdownResult:
+		result.ShutdownRequested = true
+		result.ShutdownErr = outcome.shutdownErr
+		result.CloseErr = outcome.closeErr
+	default:
+		// Serve may exit because its listener failed or was closed outside the
+		// signal path. Drain active connections before caller-owned resources
+		// are released even though no shutdown request initiated the exit.
+		select {
+		case <-shutdownRequest:
+			result.ShutdownRequested = true
+		default:
+		}
+		outcome := shutdownServer()
+		result.ShutdownErr = outcome.shutdownErr
+		result.CloseErr = outcome.closeErr
+	}
+	if !result.ShutdownRequested {
+		if serveErr == nil || errors.Is(serveErr, http.ErrServerClosed) {
+			result.ServeErr = errHTTPServerExitedWithoutShutdown
+		} else {
+			result.ServeErr = serveErr
+		}
+	} else if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		result.ServeErr = serveErr
+	}
+	return result
+}
+
 type switchableWebDAVHandler struct {
-	mu      sync.RWMutex
+	mu                     sync.Mutex
+	current                *switchableWebDAVGeneration
+	retired                []*switchableWebDAVGeneration
+	pendingClose           []http.Handler
+	registeredLifecycleIDs map[webDAVHandlerLifecycleKey]struct{}
+	fallbackClosers        map[http.Handler]struct{}
+}
+
+type switchableWebDAVGeneration struct {
 	prefix  string
 	handler http.Handler
+	active  int
+	retired bool
 }
 
 type webdavPathChangeHandler interface {
 	OnPathRenamed(oldPath, newPath string)
 	OnPathDeleted(path string) *storage.PathDeleteHookResult
+}
+
+type sharedWebDAVPathChangeHandler interface {
+	webdavPathChangeHandler
+	PathChangeRuntimeState() *webdav.RuntimeLockState
+	InvalidateRenamedPathCache(oldPath, newPath string)
+	InvalidateDeletedPathCache(path string)
+}
+
+type webDAVLifecycleHandler interface {
+	WebDAVLifecycleID() uint64
+}
+
+type webDAVHandlerLifecycleKey struct {
+	handlerType reflect.Type
+	id          uint64
 }
 
 func newSwitchableWebDAVHandler(prefix string, handler http.Handler) *switchableWebDAVHandler {
@@ -99,16 +225,58 @@ func diskHealthRuntimeConfig(cfg config.DiskHealthConfig) diskhealth.Config {
 
 func (s *switchableWebDAVHandler) Update(prefix string, handler http.Handler) {
 	s.mu.Lock()
-	previous := s.handler
-	s.prefix = prefix
-	s.handler = handler
-	s.mu.Unlock()
-
-	if handlersEqual(previous, handler) {
+	if s.current != nil && handlersEqual(s.current.handler, handler) {
+		s.current.prefix = prefix
+		s.mu.Unlock()
 		return
 	}
-	if closer, ok := previous.(io.Closer); ok {
+	if handlerIsClosable(handler) && !handlerIsComparable(handler) {
+		s.mu.Unlock()
+		panic("closable WebDAV handlers must be comparable")
+	}
+	if err := s.registerHandlerLifecycleLocked(handler); err != nil {
+		s.mu.Unlock()
+		panic(err.Error())
+	}
+
+	next := &switchableWebDAVGeneration{
+		prefix:  prefix,
+		handler: handler,
+	}
+	previous := s.current
+	s.current = next
+
+	if previous != nil {
+		previous.retired = true
+		if previous.active == 0 {
+			s.queueHandlerCloseLocked(previous.handler)
+		} else {
+			s.retired = append(s.retired, previous)
+		}
+	}
+	closeHandlers := s.collectClosableHandlersLocked()
+	s.mu.Unlock()
+
+	s.closeWebDAVHandlersAsync(closeHandlers)
+}
+
+func closeWebDAVHandler(handler http.Handler) {
+	switch closer := handler.(type) {
+	case interface{ Close() }:
+		closer.Close()
+	case io.Closer:
 		_ = closer.Close()
+	}
+}
+
+func (s *switchableWebDAVHandler) closeWebDAVHandlersAsync(handlers []http.Handler) {
+	for _, handler := range handlers {
+		if handler == nil {
+			continue
+		}
+		go func(retired http.Handler) {
+			closeWebDAVHandler(retired)
+		}(handler)
 	}
 }
 
@@ -123,6 +291,97 @@ func handlersEqual(a, b http.Handler) bool {
 		return false
 	}
 	return a == b
+}
+
+func handlerIsComparable(handler http.Handler) bool {
+	return handler == nil || reflect.TypeOf(handler).Comparable()
+}
+
+func handlerIsClosable(handler http.Handler) bool {
+	if handler == nil {
+		return false
+	}
+	if _, ok := handler.(interface{ Close() }); ok {
+		return true
+	}
+	_, ok := handler.(io.Closer)
+	return ok
+}
+
+func (s *switchableWebDAVHandler) registerHandlerLifecycleLocked(handler http.Handler) error {
+	if handler == nil || !handlerIsClosable(handler) {
+		return nil
+	}
+
+	if lifecycle, ok := handler.(webDAVLifecycleHandler); ok {
+		id := lifecycle.WebDAVLifecycleID()
+		if id == 0 {
+			return errors.New("WebDAV handler lifecycle ID must not be zero")
+		}
+		key := webDAVHandlerLifecycleKey{
+			handlerType: reflect.TypeOf(handler),
+			id:          id,
+		}
+		if s.registeredLifecycleIDs == nil {
+			s.registeredLifecycleIDs = make(map[webDAVHandlerLifecycleKey]struct{})
+		}
+		if _, exists := s.registeredLifecycleIDs[key]; exists {
+			return errors.New("WebDAV handler lifecycle ID has already been published")
+		}
+		s.registeredLifecycleIDs[key] = struct{}{}
+		return nil
+	}
+
+	if s.fallbackClosers == nil {
+		s.fallbackClosers = make(map[http.Handler]struct{})
+	}
+	if _, exists := s.fallbackClosers[handler]; exists {
+		return errors.New("closed WebDAV handlers cannot be published again")
+	}
+	s.fallbackClosers[handler] = struct{}{}
+	return nil
+}
+
+func (s *switchableWebDAVHandler) queueHandlerCloseLocked(handler http.Handler) {
+	if !handlerIsClosable(handler) {
+		return
+	}
+	for _, pending := range s.pendingClose {
+		if handlersEqual(pending, handler) {
+			return
+		}
+	}
+	s.pendingClose = append(s.pendingClose, handler)
+}
+
+func (s *switchableWebDAVHandler) collectClosableHandlersLocked() []http.Handler {
+	if len(s.pendingClose) == 0 {
+		return nil
+	}
+
+	closable := make([]http.Handler, 0, len(s.pendingClose))
+	retained := s.pendingClose[:0]
+	for _, pending := range s.pendingClose {
+		if s.handlerIsLiveLocked(pending) {
+			retained = append(retained, pending)
+			continue
+		}
+		closable = append(closable, pending)
+	}
+	s.pendingClose = retained
+	return closable
+}
+
+func (s *switchableWebDAVHandler) handlerIsLiveLocked(handler http.Handler) bool {
+	if s.current != nil && handlersEqual(s.current.handler, handler) {
+		return true
+	}
+	for _, generation := range s.retired {
+		if handlersEqual(generation.handler, handler) {
+			return true
+		}
+	}
+	return false
 }
 
 type frontendHandler struct {
@@ -388,44 +647,195 @@ func parseAcceptQuality(raw string) (float64, bool) {
 }
 
 func (s *switchableWebDAVHandler) ServeIfMatches(w http.ResponseWriter, r *http.Request) bool {
-	s.mu.RLock()
-	prefix := s.prefix
-	handler := s.handler
-	s.mu.RUnlock()
-
-	if handler == nil || !matchesWebDAVPrefix(prefix, r.URL.Path) {
+	s.mu.Lock()
+	generation := s.current
+	if generation == nil ||
+		generation.handler == nil ||
+		!matchesWebDAVPrefix(generation.prefix, r.URL.Path) {
+		s.mu.Unlock()
 		return false
 	}
+	generation.active++
+	s.mu.Unlock()
+	defer s.releaseGeneration(generation)
 
-	handler.ServeHTTP(w, r)
+	generation.handler.ServeHTTP(w, r)
 	return true
 }
 
 func (s *switchableWebDAVHandler) OnPathRenamed(oldPath, newPath string) {
-	notifier, ok := s.currentPathChangeHandler()
-	if !ok {
-		return
+	leases := s.acquirePathChangeGenerations()
+	defer s.releasePathChangeGenerations(leases)
+
+	seenRuntimeStates := make(map[*webdav.RuntimeLockState]struct{})
+	invokedHandlers := make([]http.Handler, 0, len(leases))
+	for _, lease := range leases {
+		if shared, ok := lease.notifier.(sharedWebDAVPathChangeHandler); ok {
+			if runtimeState := shared.PathChangeRuntimeState(); runtimeState != nil {
+				if _, seen := seenRuntimeStates[runtimeState]; seen {
+					shared.InvalidateRenamedPathCache(oldPath, newPath)
+					continue
+				}
+				seenRuntimeStates[runtimeState] = struct{}{}
+			}
+		} else if handlerAlreadyInvoked(invokedHandlers, lease.generation.handler) {
+			continue
+		}
+		lease.notifier.OnPathRenamed(oldPath, newPath)
+		invokedHandlers = append(invokedHandlers, lease.generation.handler)
 	}
-	notifier.OnPathRenamed(oldPath, newPath)
 }
 
 func (s *switchableWebDAVHandler) OnPathDeleted(path string) *storage.PathDeleteHookResult {
-	notifier, ok := s.currentPathChangeHandler()
-	if !ok {
+	leases := s.acquirePathChangeGenerations()
+	defer s.releasePathChangeGenerations(leases)
+
+	seenRuntimeStates := make(map[*webdav.RuntimeLockState]struct{})
+	invokedHandlers := make([]http.Handler, 0, len(leases))
+	results := make([]*storage.PathDeleteHookResult, 0, len(leases))
+	for _, lease := range leases {
+		if shared, ok := lease.notifier.(sharedWebDAVPathChangeHandler); ok {
+			if runtimeState := shared.PathChangeRuntimeState(); runtimeState != nil {
+				if _, seen := seenRuntimeStates[runtimeState]; seen {
+					shared.InvalidateDeletedPathCache(path)
+					continue
+				}
+				seenRuntimeStates[runtimeState] = struct{}{}
+			}
+		} else if handlerAlreadyInvoked(invokedHandlers, lease.generation.handler) {
+			continue
+		}
+		results = append(results, lease.notifier.OnPathDeleted(path))
+		invokedHandlers = append(invokedHandlers, lease.generation.handler)
+	}
+	return combineWebDAVPathDeleteHookResults(results)
+}
+
+type webdavPathChangeGenerationLease struct {
+	generation *switchableWebDAVGeneration
+	notifier   webdavPathChangeHandler
+}
+
+func (s *switchableWebDAVHandler) acquirePathChangeGenerations() []webdavPathChangeGenerationLease {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	generations := make([]*switchableWebDAVGeneration, 0, len(s.retired)+1)
+	if s.current != nil {
+		generations = append(generations, s.current)
+	}
+	generations = append(generations, s.retired...)
+
+	leases := make([]webdavPathChangeGenerationLease, 0, len(generations))
+	for _, generation := range generations {
+		notifier, ok := generation.handler.(webdavPathChangeHandler)
+		if !ok {
+			continue
+		}
+		generation.active++
+		leases = append(leases, webdavPathChangeGenerationLease{
+			generation: generation,
+			notifier:   notifier,
+		})
+	}
+	return leases
+}
+
+func (s *switchableWebDAVHandler) releaseGeneration(generation *switchableWebDAVGeneration) {
+	s.releaseGenerations([]*switchableWebDAVGeneration{generation})
+}
+
+func (s *switchableWebDAVHandler) releasePathChangeGenerations(leases []webdavPathChangeGenerationLease) {
+	generations := make([]*switchableWebDAVGeneration, 0, len(leases))
+	for _, lease := range leases {
+		generations = append(generations, lease.generation)
+	}
+	s.releaseGenerations(generations)
+}
+
+func (s *switchableWebDAVHandler) releaseGenerations(generations []*switchableWebDAVGeneration) {
+	if len(generations) == 0 {
+		return
+	}
+
+	s.mu.Lock()
+	for _, generation := range generations {
+		generation.active--
+		if !generation.retired || generation.active > 0 {
+			continue
+		}
+		s.removeRetiredGenerationLocked(generation)
+		s.queueHandlerCloseLocked(generation.handler)
+	}
+	closeHandlers := s.collectClosableHandlersLocked()
+	s.mu.Unlock()
+
+	s.closeWebDAVHandlersAsync(closeHandlers)
+}
+
+func (s *switchableWebDAVHandler) removeRetiredGenerationLocked(target *switchableWebDAVGeneration) {
+	for i, generation := range s.retired {
+		if generation != target {
+			continue
+		}
+		copy(s.retired[i:], s.retired[i+1:])
+		s.retired[len(s.retired)-1] = nil
+		s.retired = s.retired[:len(s.retired)-1]
+		return
+	}
+}
+
+func handlerAlreadyInvoked(invoked []http.Handler, handler http.Handler) bool {
+	for _, candidate := range invoked {
+		if handlersEqual(candidate, handler) {
+			return true
+		}
+	}
+	return false
+}
+
+func combineWebDAVPathDeleteHookResults(results []*storage.PathDeleteHookResult) *storage.PathDeleteHookResult {
+	nonNil := make([]*storage.PathDeleteHookResult, 0, len(results))
+	rollbacks := make([]func() error, 0, len(results))
+	for _, result := range results {
+		if result == nil {
+			continue
+		}
+		if len(result.RestoreData) > 0 {
+			panic("WebDAV path delete hooks must not return restore metadata")
+		}
+		nonNil = append(nonNil, result)
+		if result.Rollback != nil {
+			rollbacks = append(rollbacks, result.Rollback)
+		}
+	}
+	if len(nonNil) == 0 {
 		return nil
 	}
-	return notifier.OnPathDeleted(path)
+	if len(nonNil) == 1 {
+		return nonNil[0]
+	}
+
+	combined := &storage.PathDeleteHookResult{}
+	if len(rollbacks) > 0 {
+		combined.Rollback = func() error {
+			var rollbackErr error
+			for i := len(rollbacks) - 1; i >= 0; i-- {
+				rollbackErr = errors.Join(rollbackErr, rollbacks[i]())
+			}
+			return rollbackErr
+		}
+	}
+	return combined
 }
 
-func (s *switchableWebDAVHandler) currentPathChangeHandler() (webdavPathChangeHandler, bool) {
-	s.mu.RLock()
-	handler := s.handler
-	s.mu.RUnlock()
-	notifier, ok := handler.(webdavPathChangeHandler)
-	return notifier, ok
-}
-
-func buildWebDAVHandler(fs *storage.FileSystem, cfg api.WebDAVRuntimeConfig) (string, http.Handler) {
+func buildWebDAVHandler(
+	fs *storage.FileSystem,
+	cfg api.WebDAVRuntimeConfig,
+	serverCfg config.ServerConfig,
+	quotaCoordinator *quotareservation.Coordinator,
+	runtimeLockState *webdav.RuntimeLockState,
+) (string, http.Handler) {
 	if !cfg.Enabled {
 		return "", nil
 	}
@@ -475,15 +885,20 @@ func buildWebDAVHandler(fs *storage.FileSystem, cfg api.WebDAVRuntimeConfig) (st
 
 	prefix := config.NormalizeWebDAVPrefix(cfg.Prefix)
 	return prefix, webdav.NewHandler(webdav.Config{
-		FileSystem:        fs,
-		Prefix:            prefix,
-		ReadOnly:          cfg.ReadOnly,
-		AuthType:          authType,
-		Username:          username,
-		Password:          cfg.Password,
-		UserAuthenticator: userAuthenticator,
-		DirectoryQuotas:   directoryQuotas,
-		DirectoryAccess:   directoryAccess,
+		FileSystem:                    fs,
+		Prefix:                        prefix,
+		ReadOnly:                      cfg.ReadOnly,
+		AuthType:                      authType,
+		Username:                      username,
+		Password:                      cfg.Password,
+		UserAuthenticator:             userAuthenticator,
+		DirectoryQuotas:               directoryQuotas,
+		DirectoryAccess:               directoryAccess,
+		ReadTimeout:                   serverCfg.ReadTimeout,
+		WriteTimeout:                  serverCfg.WriteTimeout,
+		QuotaCoordinator:              quotaCoordinator,
+		RuntimeLockState:              runtimeLockState,
+		PathChangesObservedExternally: true,
 	})
 }
 
@@ -546,6 +961,16 @@ func validateRuntimeAdminRecoveryState(cfg *config.Config) error {
 }
 
 func main() {
+	runMainAndExit(runMain, os.Exit)
+}
+
+func runMainAndExit(run func() int, exit func(int)) {
+	if exitCode := run(); exitCode != 0 {
+		exit(exitCode)
+	}
+}
+
+func runMain() int {
 	// Command line arguments
 	configPath := flag.String("config", "", "config file path")
 	checkConfig := flag.Bool("check-config", false, "validate config and exit")
@@ -561,30 +986,34 @@ func main() {
 
 	if recoverAdminRequested {
 		if *checkConfig || *showVersion {
-			log.Fatal().Msg("--recover-admin cannot be combined with --check-config or --version")
+			log.Error().Msg("--recover-admin cannot be combined with --check-config or --version")
+			return 1
 		}
 		if flag.NArg() != 0 {
-			log.Fatal().Msg("--recover-admin does not accept positional arguments")
+			log.Error().Msg("--recover-admin does not accept positional arguments")
+			return 1
 		}
 		initLogger()
 		if err := recoverAdminOnly(*configPath, *recoverAdmin, os.Stdout); err != nil {
-			log.Fatal().Err(err).Msg("failed to recover administrator")
+			log.Error().Err(err).Msg("failed to recover administrator")
+			return 1
 		}
-		return
+		return 0
 	}
 
 	if *showVersion {
 		fmt.Printf("MnemoNAS %s\n", version)
 		fmt.Printf("  Commit:     %s\n", commit)
 		fmt.Printf("  Build Time: %s\n", buildTime)
-		return
+		return 0
 	}
 
 	if *checkConfig {
 		if err := validateConfigOnly(*configPath, os.Stdout); err != nil {
-			log.Fatal().Err(err).Msg("failed to validate config")
+			log.Error().Err(err).Msg("failed to validate config")
+			return 1
 		}
-		return
+		return 0
 	}
 
 	// Initialize logger
@@ -593,11 +1022,13 @@ func main() {
 	// Load configuration
 	cfg, path, err := loadConfig(*configPath)
 	if err != nil {
-		log.Fatal().Err(err).Msg("failed to load config")
+		log.Error().Err(err).Msg("failed to load config")
+		return 1
 	}
 	logCloser, err := applyLoggerConfig(cfg.Log)
 	if err != nil {
-		log.Fatal().Err(err).Msg("failed to configure logger")
+		log.Error().Err(err).Msg("failed to configure logger")
+		return 1
 	}
 	defer func() {
 		if logCloser != nil {
@@ -607,12 +1038,14 @@ func main() {
 
 	// Ensure directories exist
 	if err := cfg.EnsureDirs(); err != nil {
-		log.Fatal().Err(err).Msg("failed to create directories")
+		log.Error().Err(err).Msg("failed to create directories")
+		return 1
 	}
 
 	authStateLock, err := acquireRuntimeAuthStateLock(cfg)
 	if err != nil {
-		log.Fatal().Err(err).Msg("failed to acquire authentication state lock")
+		log.Error().Err(err).Msg("failed to acquire authentication state lock")
+		return 1
 	}
 	if authStateLock != nil {
 		defer func() {
@@ -622,14 +1055,16 @@ func main() {
 		}()
 	}
 	if err := validateRuntimeAdminRecoveryState(cfg); err != nil {
-		log.Fatal().Err(err).Msg("offline administrator recovery must be completed before startup")
+		log.Error().Err(err).Msg("offline administrator recovery must be completed before startup")
+		return 1
 	}
 
 	// Load or create secrets (for JWT, etc.)
 	dataRoot := cfg.Storage.Root
 	secrets, isNewSecrets, err := config.LoadOrCreateSecrets(dataRoot)
 	if err != nil {
-		log.Fatal().Err(err).Msg("failed to load secrets")
+		log.Error().Err(err).Msg("failed to load secrets")
+		return 1
 	}
 
 	// Use secrets for JWT if not configured
@@ -661,7 +1096,8 @@ func main() {
 	// Create data plane client for storage operations
 	dataplaneClient, err := connectStartupDataplane(cfg.DataPlane.Address(), cfg.DataPlane.Timeout)
 	if err != nil {
-		log.Fatal().Err(err).Str("address", cfg.DataPlane.Address()).Msg("failed to connect to dataplane")
+		log.Error().Err(err).Str("address", cfg.DataPlane.Address()).Msg("failed to connect to dataplane")
+		return 1
 	}
 	defer dataplaneClient.Close()
 	log.Info().Str("address", cfg.DataPlane.Address()).Msg("connected to dataplane")
@@ -687,7 +1123,8 @@ func main() {
 		Dataplane:               dataplaneClient,
 	})
 	if err != nil {
-		log.Fatal().Err(err).Msg("failed to create filesystem")
+		log.Error().Err(err).Msg("failed to create filesystem")
+		return 1
 	}
 	defer fs.Close()
 
@@ -738,7 +1175,8 @@ func main() {
 			if auth.IsPersistenceWarning(err) && userStore != nil {
 				log.Warn().Err(err).Msg("user store initialized with an auth persistence warning")
 			} else {
-				log.Fatal().Err(err).Msg("failed to initialize user store")
+				log.Error().Err(err).Msg("failed to initialize user store")
+				return 1
 			}
 		}
 		sharedUserStore = userStore
@@ -757,7 +1195,10 @@ func main() {
 		DirectoryQuotas:      append([]config.DirectoryQuotaConfig(nil), cfg.Storage.DirectoryQuotas...),
 		DirectoryAccessRules: cloneConfigDirectoryAccessRules(cfg.Storage.DirectoryAccessRules),
 	}
-	webdavPrefix, webdavHandler := buildWebDAVHandler(fs, activeWebDAV)
+	quotaCoordinator := quotareservation.NewCoordinator()
+	webdavRuntimeLockState := webdav.NewRuntimeLockState()
+	defer webdavRuntimeLockState.Close()
+	webdavPrefix, webdavHandler := buildWebDAVHandler(fs, activeWebDAV, cfg.Server, quotaCoordinator, webdavRuntimeLockState)
 	runtimeWebDAV := newSwitchableWebDAVHandler(webdavPrefix, webdavHandler)
 
 	apiServer, err := api.NewServer(log.Logger, &api.ServerConfig{
@@ -789,13 +1230,14 @@ func main() {
 		FavoritesEnabled:   cfg.Favorites.Enabled,
 		FavoritesStoreFile: cfg.Favorites.StoreFile,
 		// Config for settings API
-		Config:       cfg,
-		ConfigPath:   path,
-		AppVersion:   version,
-		BuildTime:    buildTime,
-		ActiveWebDAV: &activeWebDAV,
+		Config:           cfg,
+		ConfigPath:       path,
+		AppVersion:       version,
+		BuildTime:        buildTime,
+		ActiveWebDAV:     &activeWebDAV,
+		QuotaCoordinator: quotaCoordinator,
 		UpdateWebDAV: func(runtimeCfg api.WebDAVRuntimeConfig) {
-			prefix, handler := buildWebDAVHandler(fs, runtimeCfg)
+			prefix, handler := buildWebDAVHandler(fs, runtimeCfg, cfg.Server, quotaCoordinator, webdavRuntimeLockState)
 			runtimeWebDAV.Update(prefix, handler)
 			if runtimeCfg.Enabled {
 				log.Info().
@@ -810,7 +1252,8 @@ func main() {
 		DeferBackgroundTasks: true,
 	})
 	if err != nil {
-		log.Fatal().Err(err).Msg("failed to create API server")
+		log.Error().Err(err).Msg("failed to create API server")
+		return 1
 	}
 	defer func() {
 		if err := apiServer.Close(); err != nil {
@@ -831,10 +1274,11 @@ func main() {
 			Msg("untracked Trash deletion residue requires manual inspection")
 	}
 	if recoveryErr != nil {
-		log.Fatal().
+		log.Error().
 			Err(recoveryErr).
 			Strs("operations", trashRecovery.Blocked).
 			Msg("interrupted Trash deletion recovery is blocked; refusing to start writable services")
+		return 1
 	}
 
 	transferRecovery, transferRecoveryErr := apiServer.RecoverTrashTransfers(ctx)
@@ -851,15 +1295,20 @@ func main() {
 			Msg("untracked Trash transfer residue requires manual inspection")
 	}
 	if transferRecoveryErr != nil {
-		log.Fatal().
+		log.Error().
 			Err(transferRecoveryErr).
 			Strs("operations", transferRecovery.Blocked).
 			Msg("interrupted Trash transfer recovery is blocked; refusing to start writable services")
+		return 1
 	}
 
 	// Cleanup staging files only after transfer recovery has reconciled every
 	// path that may still be owned by an interrupted operation.
 	if cleanedFiles, cleanedBytes, cleanErr := fs.CleanupStaging(ctx); cleanErr != nil {
+		if errors.Is(cleanErr, storage.ErrWriteRecoveryRequired) {
+			log.Error().Err(cleanErr).Msg("interrupted file write requires recovery; refusing to start writable services")
+			return 1
+		}
 		log.Warn().Err(cleanErr).Msg("failed to cleanup staging files")
 	} else if cleanedFiles > 0 {
 		log.Info().
@@ -926,7 +1375,8 @@ func main() {
 	if cfg.Server.TLS.Enabled {
 		tlsConfig, err := tlsManager.GetTLSConfig()
 		if err != nil {
-			log.Fatal().Err(err).Msg("failed to configure TLS")
+			log.Error().Err(err).Msg("failed to configure TLS")
+			return 1
 		}
 		server.TLSConfig = tlsConfig
 
@@ -941,41 +1391,59 @@ func main() {
 		}
 	}
 
-	// Graceful shutdown
-	go func() {
-		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-		<-sigCh
+	shutdownSignalContext, stopShutdownSignals := signal.NotifyContext(
+		context.Background(),
+		syscall.SIGINT,
+		syscall.SIGTERM,
+	)
+	defer stopShutdownSignals()
 
-		log.Info().Msg("shutting down server...")
-
-		// Stop storage alerts monitor
-		if alertMonitor != nil {
-			alertMonitor.Stop()
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		if err := server.Shutdown(ctx); err != nil {
-			log.Error().Err(err).Msg("failed to shutdown server")
-		}
-	}()
-
-	// Start server
+	var serve func() error
 	if cfg.Server.TLS.Enabled {
 		log.Info().Str("address", cfg.Address()).Msg("server started (HTTPS)")
-		if err := server.ListenAndServeTLS("", ""); err != http.ErrServerClosed {
-			log.Fatal().Err(err).Msg("server exited abnormally")
+		serve = func() error {
+			return server.ListenAndServeTLS("", "")
 		}
 	} else {
 		log.Info().Str("address", cfg.Address()).Msg("server started (HTTP)")
-		if err := server.ListenAndServe(); err != http.ErrServerClosed {
-			log.Fatal().Err(err).Msg("server exited abnormally")
+		serve = server.ListenAndServe
+	}
+
+	serverResult := runHTTPServerLifecycle(
+		server,
+		serve,
+		shutdownSignalContext.Done(),
+		httpServerShutdownTimeout,
+		func() {
+			log.Info().Msg("shutting down server...")
+			if alertMonitor != nil {
+				alertMonitor.Stop()
+			}
+		},
+	)
+	exitCode := 0
+	if serverResult.ShutdownErr != nil {
+		exitCode = 1
+		log.Error().Err(serverResult.ShutdownErr).Msg("graceful server shutdown failed")
+		if serverResult.CloseErr == nil {
+			log.Warn().Msg("server connections forcibly closed after graceful shutdown failure")
+		}
+	}
+	if serverResult.CloseErr != nil {
+		exitCode = 1
+		log.Error().Err(serverResult.CloseErr).Msg("failed to forcibly close server connections")
+	}
+	if serverResult.ServeErr != nil {
+		exitCode = 1
+		if serverResult.ShutdownRequested {
+			log.Error().Err(serverResult.ServeErr).Msg("server exited abnormally during shutdown")
+		} else {
+			log.Error().Err(serverResult.ServeErr).Msg("server exited abnormally")
 		}
 	}
 
 	log.Info().Msg("server stopped")
+	return exitCode
 }
 
 func logWebDAVCredentialStatus(dataRoot, username string, passwordGenerated, newSecrets bool) {

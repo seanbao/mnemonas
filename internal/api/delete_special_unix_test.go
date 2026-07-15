@@ -14,8 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/seanbao/mnemonas/internal/storage"
 	"golang.org/x/sys/unix"
+
+	"github.com/seanbao/mnemonas/internal/storage"
 )
 
 func TestServer_DeleteIntentHandlersRejectFIFOWithoutBlocking(t *testing.T) {
