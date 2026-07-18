@@ -2,7 +2,10 @@
 
 English | [简体中文](public-server-quickstart.md)
 
-This guide is for a public Linux server where MnemoNAS runs locally and users access it through a public HTTPS domain. The recommended path is:
+> [!WARNING]
+> MnemoNAS has not published a usable release. This document retains the security-validation flow for a future first public release. Do not deploy or expose the current development build to the public internet.
+
+This guide describes validation of a future public Linux server path where MnemoNAS is reached through an HTTPS domain:
 
 ```text
 Public 80/443 -> Caddy/Nginx -> 127.0.0.1:8080 -> MnemoNAS
@@ -24,9 +27,9 @@ If DNS is not ready yet, wait before requesting certificates:
 dig +short nas.example.com
 ```
 
-## 1. Install MnemoNAS
+## 1. Validate the Future Installation Flow
 
-Install the systemd services from a release package:
+The following steps apply only after a future first public release produces an archive. No usable package is currently available, and a public deployment must not be performed:
 
 ```bash
 tar -xzf mnemonas-<version>-linux-amd64.tar.gz

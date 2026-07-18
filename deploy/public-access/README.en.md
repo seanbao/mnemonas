@@ -2,6 +2,9 @@
 
 English | [简体中文](README.md)
 
+> [!WARNING]
+> MnemoNAS has not published a usable release. The current development build must not be exposed to the public internet. These templates only support configuration validation before a future first public release.
+
 These templates provide optional starting points for public HTTPS access paths that are not fully automated by `mnemonas-public-setup`.
 
 - `traefik/`: Traefik file-provider template for a Linux host where MnemoNAS runs on the same machine as the reverse proxy.

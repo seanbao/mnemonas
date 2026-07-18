@@ -8,6 +8,8 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 
 ## [Unreleased]
 
+MnemoNAS is still under development and has not published any usable release. The current source tree is for development and validation only; it must not hold real data or be used for production deployment. Problems and suggestions may be submitted through GitHub Issues. External code and documentation submissions are not being accepted at this stage.
+
 ### Added
 
 #### Web UI
@@ -76,7 +78,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - `scripts/release-readiness.sh` requires `.github/workflows/ci.yml` and `.github/workflows/release.yml` to retain key CI, E2E, Docker smoke, release-tag validation, release-artifact upload and download, checksum generation and publication, version- and repository-bound release-artifact verification, pre-publish image verification, release-job dependencies, and publication-permission baselines, preventing core automation paths from being lost before release.
 - `scripts/release-readiness.sh` requires `Makefile` to retain core local gate targets such as `check`, `verify-changed`, `release-readiness`, `quick-check`, `security-check`, `docker-check`, and `test-torture`, preventing CI, release-checklist, and maintainer-documentation entry points from being lost before release.
 - `scripts/release-readiness.sh` requires `.github/workflows/torture.yml` to retain manual and scheduled triggers, read-only permissions, the `RUN_LIVE_FAULTS: '0'` non-destructive guard, and the `make test-torture` entry point, preventing the long-running regression workflow from being lost before release.
-- `scripts/release-readiness.sh` requires blank Issues to stay disabled and checks that the bug report, usage question, feature request, and WebDAV compatibility Issue Forms retain sensitive-data redaction, diagnostic, and security-impact guidance, preventing public collaboration entry points from bypassing safety prompts.
+- `scripts/release-readiness.sh` requires blank Issues to stay disabled and checks that the bug report, usage question, feature request, and WebDAV compatibility Issue Forms retain sensitive-data redaction, diagnostic, and security-impact guidance, preventing public feedback entry points from bypassing safety prompts.
 - `scripts/release-readiness.sh` checks that the security policy and support guide retain private vulnerability reporting, public-disclosure warnings, dataplane port exposure boundaries, dependency-security checks, and direct-public-exposure limitations.
 - `scripts/release-readiness.sh` requires the release checklist and bilingual release notes to retain the `mnemonas-doctor --public-domain`, `scripts/public-go-live-smoke.sh`, `scripts/backup-restore-drill-smoke.sh`, `scripts/release-go-live-check.sh`, and `cloud-firewall-checklist` entry points, preventing public-deployment environment review, post-publication go-live verification, and the restore-drill entry point from being omitted during final release preparation.
 - `scripts/release-readiness.sh` rejects a base ref that is not an ancestor of the current HEAD, preventing misleading release-readiness summaries from sibling branch ranges.
@@ -196,7 +198,7 @@ First public release target.
 - Windows WebClient requires registry changes for HTTP connections; HTTPS is preferred.
 - Users, roles, groups, per-user root boundaries, and directory access rules are supported, but inherited ACL policies and per-file ACLs are not.
 - Direct public exposure without HTTPS reverse proxy or VPN is not recommended.
-- This version is positioned as an L1 private file cloud with an initial L1+ public-access safety baseline, not as the only long-term copy of important data. Production use should keep external backups.
+- There is currently no release candidate and no usable release has been published. The development source tree must not hold real data or be used for production deployment.
 
 ### Compatibility
 - Go: 1.25.12+

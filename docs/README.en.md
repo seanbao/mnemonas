@@ -4,20 +4,23 @@ English | [简体中文](README.md)
 
 This directory contains MnemoNAS usage guides, deployment notes, and reference material.
 
+> [!WARNING]
+> MnemoNAS is still under development and has not published any usable release. These documents support source development, testing, and preparation for a future release. Submit problems and suggestions through [GitHub Issues](https://github.com/seanbao/mnemonas/issues).
+
 ## Documentation Index
 
-### Quick Start
+### Development Validation and Future Deployment Reference
 
 | Document | Description |
 | --- | --- |
-| [README](../README.en.md) | Project overview and quick start |
+| [README](../README.en.md) | Project status and source-tree preview |
 | [中文 README](../README.md) | Chinese project overview |
-| [Linux/systemd deployment](linux-systemd-deployment.en.md) | Run MnemoNAS as systemd services on a Linux server |
-| [Public server quickstart](public-server-quickstart.en.md) | Recommended path for public domains, HTTPS, reverse proxy, and safety checks |
-| [Docker deployment](docker-deployment.en.md) | Deploy MnemoNAS with Docker Compose |
-| [Mounting guide](mounting-guide.en.md) | WebDAV mounting instructions for common platforms |
-| [Reverse proxy setup](reverse-proxy-setup.en.md) | HTTPS public entry setup with Caddy, Nginx, Traefik, or Cloudflare Tunnel |
-| [Public cloud firewall checklist](cloud-firewall-checklist.en.md) | Cloud security group, VPC firewall, and port exposure review |
+| [Linux/systemd deployment](linux-systemd-deployment.en.md) | Validation flow for future systemd release archives |
+| [Public server quickstart](public-server-quickstart.en.md) | HTTPS and safety validation before a future public release |
+| [Docker deployment](docker-deployment.en.md) | Source builds and future container-release validation |
+| [Mounting guide](mounting-guide.en.md) | WebDAV client validation in a development environment |
+| [Reverse proxy setup](reverse-proxy-setup.en.md) | Reverse-proxy validation for a future public entry path |
+| [Public cloud firewall checklist](cloud-firewall-checklist.en.md) | Cloud-firewall review for a future public release |
 
 ### User Guides
 
@@ -38,19 +41,17 @@ This directory contains MnemoNAS usage guides, deployment notes, and reference m
 | [Roadmap](roadmap.en.md) | Priorities and capability boundaries from private file cloud to home and small-team NAS |
 | [Development guide](development.en.md) | Local development setup |
 | [Testing strategy](testing-strategy.en.md) | Unit, integration, E2E, and torture test strategy |
-| [Release notes draft](release-notes.en.md) | Draft notes, validation evidence, and post-publish verification entry point for the next public release |
+| [Development change record](release-notes.en.md) | Unreleased branch changes, validation evidence, and first-public-release preparation |
 | [API reference](api-reference.en.md) | REST API endpoints and request/response formats |
 | [Extension points](extension-points.en.md) | Future interface draft for S3, plugins, and runners |
 
-### Support and Security
+### Feedback and Security
 
 | Document | Description |
 | --- | --- |
-| [Support](../SUPPORT.en.md) | Support channels and support boundary |
-| [支持说明](../SUPPORT.md) | Chinese support document |
-| [Contributing guide](../CONTRIBUTING.en.md) | Contribution flow, quality gates, and safety boundaries |
-| [贡献指南](../CONTRIBUTING.md) | Chinese contributing guide |
-| [Code of Conduct](../CODE_OF_CONDUCT.md) | Community conduct expectations and enforcement scope |
+| [Feedback](../SUPPORT.en.md) | Issue reporting channels, required context, and handling boundaries |
+| [反馈说明](../SUPPORT.md) | Chinese feedback document |
+| [Code of Conduct](../CODE_OF_CONDUCT.md) | Conduct requirements for issue feedback |
 | [行为准则](../CODE_OF_CONDUCT.zh-CN.md) | Chinese code of conduct |
 | [Security policy](../SECURITY.md) | Vulnerability reporting and deployment security |
 | [安全策略](../SECURITY.zh-CN.md) | Chinese security policy |
@@ -71,12 +72,12 @@ This directory contains MnemoNAS usage guides, deployment notes, and reference m
 
 ## Reading Path
 
-**First-time users:**
+**Development validation:**
 
 1. Read the [English README](../README.en.md) or [Chinese README](../README.md).
-2. For long-running deployment, start with [Linux/systemd deployment](linux-systemd-deployment.en.md). For temporary evaluation, start with [Docker deployment](docker-deployment.en.md).
-3. If public access is needed, follow the [Public server quickstart](public-server-quickstart.en.md) for HTTPS entry setup.
-4. Use the [Mounting guide](mounting-guide.en.md) to connect WebDAV clients.
+2. Follow the [Development guide](development.en.md), or use the [Docker deployment guide](docker-deployment.en.md) to build a development image from source.
+3. Validate file and WebDAV behavior with non-important test data.
+4. Do not use the current source tree for production or public service.
 
 **Troubleshooting:**
 

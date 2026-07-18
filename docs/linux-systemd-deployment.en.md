@@ -2,7 +2,10 @@
 
 English | [简体中文](linux-systemd-deployment.md)
 
-This guide targets long-running Linux server deployments.
+> [!WARNING]
+> MnemoNAS has not published a usable release. This guide is for maintainer validation of a future systemd release path. Do not use the current development build for real data or long-running service.
+
+This guide describes validation of the future long-running Linux server path.
 It keeps setup steps limited, enables systemd auto-start, preserves useful logs, uses a stable data directory, and supports fast diagnostics when something fails.
 
 ## Good Fit
@@ -57,9 +60,9 @@ Single-disk ext4, XFS, or Btrfs is also usable, but it does not protect against 
 If the same server also runs Docker, downloaders, transcoding, model caches, or other heavy services, do not put their data under `/srv/mnemonas`.
 Use a separate scratch path such as `/srv/fast-scratch`.
 
-## Install MnemoNAS
+## Validate the Future Installation Flow
 
-Download a Linux release archive from GitHub Releases:
+The following commands apply only after a future first public release produces a Linux archive. No usable archive is currently available:
 
 ```bash
 tar -xzf mnemonas-<version>-linux-amd64.tar.gz

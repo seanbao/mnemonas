@@ -2,17 +2,20 @@
 
 English | [简体中文](faq.md)
 
+> [!WARNING]
+> MnemoNAS has not published a usable release. The following material describes the current development build and future release flows; it is not a stable-version support commitment.
+
 ## Installation and Deployment
 
 ### Which operating systems are supported?
 
 | Platform | Status |
 | --- | --- |
-| Linux x86_64 | Primary path for long-running deployments |
-| Linux ARM64 | Primary path for long-running deployments |
-| macOS Apple Silicon | Fully supported for development and local runs |
-| macOS Intel | Fully supported for development and local runs |
-| Windows | Supported through WSL2 |
+| Linux x86_64 | Primary build and test target |
+| Linux ARM64 | Cross-build and test target |
+| macOS Apple Silicon | Development and local-test target |
+| macOS Intel | Development and local-test target |
+| Windows | WSL2 development-validation target |
 
 ### What is the difference between systemd, Docker, and manual binaries?
 
@@ -22,9 +25,11 @@ English | [简体中文](faq.md)
 | Docker | Short setup, isolated runtime, straightforward upgrades | Requires Docker and correct volume mapping |
 | Manual binaries | Simple for debugging | Manual process management |
 
-For long-running service deployments, use [Linux/systemd deployment](linux-systemd-deployment.en.md). For quick evaluation or existing container hosts, use [Docker deployment](docker-deployment.en.md).
+Only development validation is currently supported. See the [Development guide](development.en.md) for source setup and the [Docker deployment guide](docker-deployment.en.md) for a source-built image. The systemd document validates a future release path.
 
-### How do I upgrade?
+### How do I update a development checkout, and how will future upgrades work?
+
+There is currently no published release to upgrade. Rebuild and rerun validation after updating a source checkout. The release-image and systemd-archive steps below describe the expected flow only after a future first public release.
 
 Docker source checkout:
 
@@ -132,7 +137,7 @@ prefix = "/dav"
 auth_type = "users"
 ```
 
-Day-to-day or production WebDAV mounts should prefer MnemoNAS user authentication.
+WebDAV mounts used for development validation should prefer MnemoNAS user authentication.
 
 If legacy clients or dedicated service credentials require a separate global WebDAV credential, use Basic Auth:
 

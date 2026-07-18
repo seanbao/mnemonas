@@ -2,7 +2,10 @@
 
 [English](linux-systemd-deployment.en.md) | 简体中文
 
-本文面向需要长期运行的 Linux 服务器部署。
+> [!WARNING]
+> MnemoNAS 尚未发布可用版本。本文仅用于维护者验证未来 systemd 发布路径；不要用当前开发构建承载真实数据或长期运行。
+
+本文描述未来 Linux 服务器长期运行路径的验证方式。
 目标是安装步骤少、开机自启、日志可查、数据目录固定，并在出问题时能快速诊断。
 
 ## 适用范围
@@ -55,11 +58,11 @@ sudo mkdir -p /srv/mnemonas
 如果暂时只有单盘，也可以先使用 ext4/XFS/Btrfs，但要明确它不能抵御硬盘损坏。至少准备一份独立备份。
 
 如果同一台服务器还会运行 Docker、下载器、转码、模型缓存或其他服务，不要把这些数据放进 `/srv/mnemonas`。
-建议单独准备 `/srv/fast-scratch` 一类可丢弃工作区，必要时把 Docker `data-root` 挪过去，避免系统根分区或 MnemoNAS 生产数据目录被缓存挤满。
+建议单独准备 `/srv/fast-scratch` 一类可丢弃工作区，必要时把 Docker `data-root` 挪过去，避免系统根分区或未来 MnemoNAS 数据目录被缓存挤满。
 
-## 安装 MnemoNAS
+## 验证未来安装流程
 
-从 GitHub Releases 下载 Linux release 包：
+以下命令仅适用于未来首次公开发布产生 Linux release 包之后，当前没有可下载的可用归档：
 
 ```bash
 tar -xzf mnemonas-<version>-linux-amd64.tar.gz

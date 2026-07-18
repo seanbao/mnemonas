@@ -105,10 +105,27 @@ require_file_line_contains_pair() {
 	}
 }
 
-require_community_file() {
+require_public_project_file() {
 	local path="$1"
 
-	[[ -f "$path" ]] || fail "missing required community file: $path"
+	[[ -f "$path" ]] || fail "missing required public project file: $path"
+}
+
+require_path_absent() {
+	local path="$1"
+
+	[[ ! -e "$path" ]] || fail "external contribution entry point must remain absent: $path"
+}
+
+require_file_not_contains() {
+	local path="$1"
+	local unexpected="$2"
+
+	[[ -f "$path" ]] || fail "missing required checklist file: $path"
+	if grep -Fq -- "$unexpected" "$path"; then
+		printf 'release-readiness: %s contains disallowed text:\n%s\n' "$path" "$unexpected" >&2
+		exit 1
+	fi
 }
 
 require_workflow_job_contains() {
@@ -152,6 +169,10 @@ check_support_routes() {
 	require_file_contains "SUPPORT.en.md" "[SECURITY.md](SECURITY.md)"
 	require_file_contains "SUPPORT.md" "不要公开提交漏洞细节"
 	require_file_contains "SUPPORT.en.md" "Do not post exploit details publicly"
+	require_file_contains "SUPPORT.md" "尚未发布任何可用版本"
+	require_file_contains "SUPPORT.en.md" "has not published any usable release"
+	require_file_contains "SUPPORT.md" "暂不接收外部代码或文档提交"
+	require_file_contains "SUPPORT.en.md" "External code and documentation submissions are not being accepted"
 }
 
 check_security_policy() {
@@ -161,6 +182,8 @@ check_security_policy() {
 	require_file_contains "SECURITY.md" "Dataplane gRPC/HTTP ports \`9090/9091\` should not be exposed to public or untrusted networks"
 	require_file_contains "SECURITY.md" "make security-check NPM_AUDIT=1"
 	require_file_contains "SECURITY.md" "MnemoNAS is not designed for direct internet exposure without a hardened proxy/VPN layer"
+	require_file_contains "SECURITY.md" "has not published any usable release"
+	require_file_contains "SECURITY.md" "does not provide an initial-response, status-update, or fix-time SLA"
 
 	require_file_contains "SECURITY.zh-CN.md" "**不要**为安全漏洞创建公开 GitHub Issue。"
 	require_file_contains "SECURITY.zh-CN.md" "优先使用本仓库的 GitHub **Private vulnerability reporting** 功能。"
@@ -168,6 +191,8 @@ check_security_policy() {
 	require_file_contains "SECURITY.zh-CN.md" "dataplane gRPC/HTTP 端口 \`9090/9091\` 不应暴露到公网或不可信网络"
 	require_file_contains "SECURITY.zh-CN.md" "make security-check NPM_AUDIT=1"
 	require_file_contains "SECURITY.zh-CN.md" "不建议在没有加固代理/VPN 的情况下直接暴露到公网"
+	require_file_contains "SECURITY.zh-CN.md" "尚未发布任何可用版本"
+	require_file_contains "SECURITY.zh-CN.md" "不提供响应时间、状态更新时间或修复时间 SLA"
 }
 
 check_issue_template_config() {
@@ -322,9 +347,23 @@ check_makefile_targets() {
 }
 
 check_issue_templates() {
+	local path
+	local issue_templates=(
+		".github/ISSUE_TEMPLATE/bug_report.yml"
+		".github/ISSUE_TEMPLATE/feature_request.yml"
+		".github/ISSUE_TEMPLATE/question.yml"
+		".github/ISSUE_TEMPLATE/webdav_compatibility.yml"
+	)
+
+	for path in "${issue_templates[@]}"; do
+		require_file_contains "$path" "MnemoNAS is still under development and has not published a usable release."
+		require_file_contains "$path" "MnemoNAS 仍处于开发阶段，尚未发布可用版本。"
+	done
+
 	require_file_contains ".github/ISSUE_TEMPLATE/bug_report.yml" "Sensitive values such as passwords, tokens, cookies, private URLs, and internal addresses must be removed before posting logs."
 	require_file_contains ".github/ISSUE_TEMPLATE/bug_report.yml" "Relevant sanitized logs, \`mnemonas-doctor\`, Docker preflight, browser console output, screenshots, or request IDs."
 	require_file_contains ".github/ISSUE_TEMPLATE/bug_report.yml" "Security-sensitive exploit details are not posted publicly."
+	require_file_contains ".github/ISSUE_TEMPLATE/bug_report.yml" "Tested Git commit / 测试提交"
 
 	require_file_contains ".github/ISSUE_TEMPLATE/feature_request.yml" "Security, data, deployment, and compatibility implications should be called out explicitly."
 	require_file_contains ".github/ISSUE_TEMPLATE/feature_request.yml" "Data migration, security, deployment, performance, or client-compatibility concerns."
@@ -336,43 +375,20 @@ check_issue_templates() {
 	require_file_contains ".github/ISSUE_TEMPLATE/webdav_compatibility.yml" "Remove passwords, tokens, cookies, private URLs, internal addresses, and private file names before posting logs or screenshots."
 	require_file_contains ".github/ISSUE_TEMPLATE/webdav_compatibility.yml" "Sanitized \`mnemonas-doctor\`, client logs, server logs, request IDs, screenshots, or diagnostic bundle notes."
 	require_file_contains ".github/ISSUE_TEMPLATE/webdav_compatibility.yml" "Security-sensitive exploit details are not posted publicly."
+	require_file_contains ".github/ISSUE_TEMPLATE/webdav_compatibility.yml" "Tested MnemoNAS Git commit / 测试所用 MnemoNAS 提交"
 }
 
-check_pull_request_template() {
-	local path=".github/pull_request_template.md"
-	local expected_sections=(
-		"## Scope / 范围"
-		"## User-Visible Behavior / 用户可见行为"
-		"## Data, Security, And Deployment Impact / 数据、安全与部署影响"
-		"## Validation / 验证"
-		"## Residual Risk / 残余风险"
-	)
-	local expected_commands=(
-		"make verify-changed"
-		"make docs-check"
-		"make scripts-check"
-	)
-	local expected
-
-	for expected in "${expected_sections[@]}"; do
-		require_file_contains "$path" "$expected"
-	done
-	for expected in "${expected_commands[@]}"; do
-		require_file_contains "$path" "$expected"
-	done
-}
-
-check_community_files() {
+check_public_project_files() {
 	local path
 	local required_files=(
 		"README.md"
 		"README.en.md"
+		"docs/README.md"
+		"docs/README.en.md"
 		"Makefile"
 		"LICENSE"
 		"CHANGELOG.md"
 		"CHANGELOG.en.md"
-		"CONTRIBUTING.md"
-		"CONTRIBUTING.en.md"
 		"CODE_OF_CONDUCT.md"
 		"CODE_OF_CONDUCT.zh-CN.md"
 		"SUPPORT.md"
@@ -385,16 +401,24 @@ check_community_files() {
 		".github/ISSUE_TEMPLATE/feature_request.yml"
 		".github/ISSUE_TEMPLATE/question.yml"
 		".github/ISSUE_TEMPLATE/webdav_compatibility.yml"
-		".github/pull_request_template.md"
 		".github/workflows/ci.yml"
 		".github/workflows/release.yml"
 		".github/workflows/torture.yml"
 	)
 
 	for path in "${required_files[@]}"; do
-		require_community_file "$path"
+		require_public_project_file "$path"
 	done
 
+	require_path_absent "CONTRIBUTING.md"
+	require_path_absent "CONTRIBUTING.en.md"
+	require_path_absent ".github/pull_request_template.md"
+	require_file_contains "README.md" "尚未发布任何可用版本"
+	require_file_contains "README.en.md" "has not published any usable release"
+	require_file_not_contains "README.md" "贡献指南"
+	require_file_not_contains "README.en.md" "Contributing Guide"
+	require_file_not_contains "docs/README.md" "贡献指南"
+	require_file_not_contains "docs/README.en.md" "Contributing guide"
 	check_support_routes
 	check_security_policy
 	check_dependabot_config
@@ -404,9 +428,8 @@ check_community_files() {
 	check_makefile_targets
 	check_issue_template_config
 	check_issue_templates
-	check_pull_request_template
 
-	print_kv "community" "required community health files, dependency-update baseline, CI/release/torture workflow and Makefile target baselines, support/security routes, and issue template safety guidance present"
+	print_kv "feedback" "development status, Issue feedback, private security reporting, required public files, workflows, and local gate baselines present"
 }
 
 extract_validation_target() {
@@ -592,14 +615,12 @@ check_release_notes() {
 			require_file_contains "$path" "$expected"
 		done
 	done
-	require_file_contains "docs/release-notes.md" "L1 私有文件云盘"
-	require_file_contains "docs/release-notes.md" "不应作为重要数据的唯一长期副本"
-	require_file_contains "docs/release-notes.md" "外部备份"
-	require_file_contains "docs/release-notes.en.md" "L1 private file cloud"
-	require_file_contains "docs/release-notes.en.md" "not as the only long-term copy of important data"
-	require_file_contains "docs/release-notes.en.md" "external backups"
+	require_file_contains "docs/release-notes.md" "尚未发布任何可用版本"
+	require_file_contains "docs/release-notes.md" "不应承载真实数据"
+	require_file_contains "docs/release-notes.en.md" "has not published any usable release"
+	require_file_contains "docs/release-notes.en.md" "must not hold real data"
 
-	print_kv "release-notes" "release-note validation target and verification commands present"
+	print_kv "release-notes" "development status, validation target, and future release verification commands present"
 }
 
 check_branch_commit_messages() {
@@ -691,7 +712,7 @@ while IFS= read -r line; do
 done <<<"$planner_output"
 
 check_branch_commit_messages
-check_community_files
+check_public_project_files
 check_validation_evidence
 check_dirty_worktree_release_scope
 
@@ -737,12 +758,10 @@ if [[ "$CHECK_CHECKLIST" -eq 1 ]]; then
 	require_file_contains "CHANGELOG.en.md" "release checklists to include documentation, dependency-security, Docker build/smoke, selected release tag validation, and release script regression commands"
 	require_file_contains "CHANGELOG.md" "发布清单和双语 release notes 保留 \`mnemonas-doctor --public-domain\`、\`scripts/public-go-live-smoke.sh\`、\`scripts/backup-restore-drill-smoke.sh\`、\`scripts/release-go-live-check.sh\` 和 \`cloud-firewall-checklist\` 入口"
 	require_file_contains "CHANGELOG.en.md" "release checklist and bilingual release notes to retain the \`mnemonas-doctor --public-domain\`, \`scripts/public-go-live-smoke.sh\`, \`scripts/backup-restore-drill-smoke.sh\`, \`scripts/release-go-live-check.sh\`, and \`cloud-firewall-checklist\` entry points"
-	require_file_contains "CHANGELOG.md" "L1 私有文件云盘"
-	require_file_contains "CHANGELOG.md" "不应作为重要数据的唯一长期副本"
-	require_file_contains "CHANGELOG.md" "外部备份"
-	require_file_contains "CHANGELOG.en.md" "L1 private file cloud"
-	require_file_contains "CHANGELOG.en.md" "not as the only long-term copy of important data"
-	require_file_contains "CHANGELOG.en.md" "external backups"
+	require_file_contains "CHANGELOG.md" "尚未发布任何可用版本"
+	require_file_contains "CHANGELOG.md" "不应承载真实数据"
+	require_file_contains "CHANGELOG.en.md" "has not published any usable release"
+	require_file_contains "CHANGELOG.en.md" "must not hold real data"
 	check_release_notes
 	print_kv "checklist" "release commands present in CHANGELOG.md and CHANGELOG.en.md"
 fi

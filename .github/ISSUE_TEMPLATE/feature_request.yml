@@ -7,6 +7,10 @@ body:
   - type: markdown
     attributes:
       value: |
+        MnemoNAS is still under development and has not published a usable release. This form records feedback against the current source tree.
+
+        MnemoNAS 仍处于开发阶段，尚未发布可用版本。本表单用于记录针对当前源码的功能反馈。
+
         Feature requests should describe the workflow, user impact, and affected surfaces. Security, data, deployment, and compatibility implications should be called out explicitly.
 
         功能建议应说明流程、使用影响和受影响界面。安全、数据、部署和兼容性影响应明确列出。

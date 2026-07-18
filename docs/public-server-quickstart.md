@@ -2,7 +2,10 @@
 
 [English](public-server-quickstart.en.md) | 简体中文
 
-本文档面向“已有一台公网 Linux 服务器，希望先本地部署 MnemoNAS，再通过域名安全访问”的情况。推荐路径是：
+> [!WARNING]
+> MnemoNAS 尚未发布可用版本。本文仅保留未来首次公开发布前的安全验证流程；不要把当前开发构建部署或暴露到公网。
+
+本文档描述未来在公网 Linux 服务器上通过域名安全访问 MnemoNAS 的验证路径：
 
 ```text
 公网 80/443 -> Caddy/Nginx -> 127.0.0.1:8080 -> MnemoNAS
@@ -24,9 +27,9 @@
 dig +short nas.example.com
 ```
 
-## 1. 安装 MnemoNAS
+## 1. 验证未来安装流程
 
-从 release 包中安装 systemd 服务：
+以下步骤仅适用于未来首次公开发布产生 release 包之后；当前没有可用安装包，不应实际执行公网部署：
 
 ```bash
 tar -xzf mnemonas-<version>-linux-amd64.tar.gz

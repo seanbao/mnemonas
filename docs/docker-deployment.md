@@ -2,7 +2,10 @@
 
 [English](docker-deployment.en.md) | 简体中文
 
-本文档说明如何使用 Docker Compose 运行 MnemoNAS。Docker 适合快速评估、已有容器宿主机，以及需要和其他服务一起编排的环境。
+> [!WARNING]
+> MnemoNAS 尚未发布可用版本。当前 Docker 路径仅用于从源码构建开发镜像和验证未来发布流程；不要挂载真实数据或用于生产环境。
+
+本文档说明如何使用 Docker Compose 构建并运行 MnemoNAS 开发镜像。
 
 如果部署需要长期运行、开机自启和 systemd 日志管理，优先使用 [Linux/systemd 部署指南](linux-systemd-deployment.md)。
 

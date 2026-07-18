@@ -8,6 +8,9 @@ English | [简体中文](README.md)
 
 > Private files and local control for self-hosted storage.
 
+> [!WARNING]
+> MnemoNAS is still under development and has not published any usable release. The current source tree is for development and validation only; it must not hold real data or be used for production deployment. Defects, usage problems, and feature suggestions may be submitted through [GitHub Issues](https://github.com/seanbao/mnemonas/issues). External code and documentation submissions are not being accepted at this stage.
+
 MnemoNAS is an open-source self-hosted NAS system for daily file management.
 It provides a Web UI, WebDAV access, file versions, trash, scrub, and diagnostic bundles.
 Data stays in the configured storage root, and moving that full root is enough to migrate the service.
@@ -85,35 +88,11 @@ MnemoNAS uses a hybrid layout: current files are stored as native files under `f
 
 See [Storage Internals and Operations Guidance](docs/storage-internals.en.md).
 
-## Quick Start
+## Development Preview
 
-### Linux / systemd
+The following steps are for local development and functional validation only. The repository does not currently provide a downloadable release archive or supported container image.
 
-For a long-running Linux server, download a Linux release archive from [Releases](https://github.com/seanbao/mnemonas/releases) and install it as systemd services:
-
-```bash
-tar -xzf mnemonas-<version>-linux-amd64.tar.gz
-cd mnemonas-<version>-linux-amd64
-
-sudo ./scripts/install-systemd.sh
-sudo mnemonas-doctor
-```
-
-Default locations:
-
-- binaries: `/usr/local/bin`;
-- config: `/etc/mnemonas/config.toml`;
-- data: `/srv/mnemonas`;
-- Web UI: `http://<server-ip>:8080`;
-- first login password: `/srv/mnemonas/.mnemonas/initial-password.txt`.
-
-Before upgrading, keep the extracted previous release directory.
-If an upgrade fails, rerun the old installer to roll binaries and Web UI assets back; the full procedure is in the deployment guide.
-For public-domain access, follow the [Public server quickstart](docs/public-server-quickstart.en.md) to restrict the backend port and configure an HTTPS reverse proxy.
-
-See [Linux/systemd deployment](docs/linux-systemd-deployment.en.md).
-
-### Docker Compose
+### Docker Compose Source Build
 
 Docker Engine and Compose v2 are required.
 Local source builds also require the Buildx plugin.
@@ -143,13 +122,9 @@ The quickstart script:
 - runs Docker preflight checks;
 - selects the start mode from `MNEMONAS_IMAGE`.
 
-Local images use a source build.
-Release image tags use `docker compose up -d --pull missing --no-build`.
+Only local source-built development images are currently supported.
 After `--start`, the script waits for the local `/health` endpoint, then prints Web UI, health check, initial-password read, WebDAV, Compose status, and log commands.
 Use `--skip-health-check` only when the host cannot reach the Docker-published port locally.
-
-Binary archives from GitHub Releases include `docker-compose.yml` and `.env.example`.
-The packaged template presets `MNEMONAS_IMAGE` to the GHCR image for the same release tag.
 
 If port 8080 is already used:
 
@@ -163,25 +138,9 @@ If `auth.users_file` is customized, `initial-password.txt` is stored next to tha
 
 After the first administrator login, the dashboard shows a first-deployment checklist.
 The prompt closes only after explicit confirmation of initial credential handling, administrator redundancy, backup planning, and public-entry safety.
-Release image usage is documented in the [Docker deployment guide](docs/docker-deployment.en.md).
+Source-build details and validation of future container release paths are documented in the [Docker deployment guide](docs/docker-deployment.en.md).
 
-### Manual Binary Run
-
-This is useful for development and debugging. For long-running deployments, prefer systemd.
-
-```bash
-tar -xzf mnemonas-<version>-linux-amd64.tar.gz
-cd mnemonas-<version>-linux-amd64
-
-mkdir -p ~/.mnemonas
-chmod 750 ~/.mnemonas
-cp mnemonas.example.toml ~/.mnemonas/config.toml
-
-./dataplane &
-./nasd
-```
-
-### WebDAV Clients
+### WebDAV Client Validation
 
 MnemoNAS exposes WebDAV for common desktop, mobile, and CLI clients. The table below is a connection-entry summary; compatibility status is tracked in the [WebDAV Compatibility](docs/webdav-compatibility.en.md) matrix. `rclone` has optional real-client E2E coverage, while Finder, Windows File Explorer, and mobile clients remain tracked by the matrix.
 
@@ -194,8 +153,8 @@ MnemoNAS exposes WebDAV for common desktop, mobile, and CLI clients. The table b
 | Android | Solid Explorer | `http://<server-ip>:8080/dav` |
 | CLI | rclone | `webdav:` remote |
 
-For day-to-day mounting, `auth_type = "users"` is preferred so clients use MnemoNAS usernames and passwords and follow the same `home_dir`, directory-access, and quota boundaries.
-The root example config keeps `basic` as a compatibility baseline. Day-to-day or production mounts should switch to `users` unless legacy clients or dedicated service credentials require a global WebDAV username and password.
+For development validation, `auth_type = "users"` is preferred so clients use MnemoNAS usernames and passwords and follow the same `home_dir`, directory-access, and quota boundaries.
+The root example config keeps `basic` as a compatibility baseline. User-boundary validation should switch to `users` unless legacy clients or dedicated service credentials require a global WebDAV username and password.
 
 The running Web UI exposes the mount URL, Basic username, and readable generated password on the Settings -> WebDAV tab.
 Custom Basic passwords are not echoed back and should come from the config file or password manager.
@@ -340,9 +299,9 @@ Docker and systemd deployments expose only `8080` by default. Data plane ports `
 | [Documentation Index](docs/README.en.md) | English entry point for project docs |
 | [中文文档索引](docs/README.md) | Chinese documentation index |
 | [Development Guide](docs/development.en.md) | Local development setup and debugging |
-| [Linux/systemd Deployment](docs/linux-systemd-deployment.en.md) | systemd deployment for Linux servers |
-| [Public Server Quickstart](docs/public-server-quickstart.en.md) | Recommended public-domain HTTPS entry path |
-| [Docker Deployment](docs/docker-deployment.en.md) | Docker deployment guide |
+| [Linux/systemd Deployment](docs/linux-systemd-deployment.en.md) | Pre-release validation path for future systemd archives |
+| [Public Server Quickstart](docs/public-server-quickstart.en.md) | Domain, HTTPS, reverse-proxy, and security validation before a future public release |
+| [Docker Deployment](docs/docker-deployment.en.md) | Source builds and validation of future container release paths |
 | [Mounting Guide](docs/mounting-guide.en.md) | WebDAV client setup |
 | [WebDAV Compatibility](docs/webdav-compatibility.en.md) | Client compatibility and protocol coverage |
 | [Reverse Proxy Setup](docs/reverse-proxy-setup.en.md) | HTTPS and public entry setup |
@@ -352,16 +311,15 @@ Docker and systemd deployments expose only `8080` by default. Data plane ports `
 | [Architecture](docs/architecture.en.md) | System design and technology choices |
 | [Roadmap](docs/roadmap.en.md) | Priorities from private file cloud to home and small-team NAS |
 | [Security Hardening Guide](docs/security.en.md) | Auth and network security |
-| [Support](SUPPORT.en.md) | Support channels and support boundary |
-| [Contributing Guide](CONTRIBUTING.en.md) | Contribution flow, quality gates, and safety boundaries |
-| [Code of Conduct](CODE_OF_CONDUCT.md) | Community conduct expectations and enforcement scope |
+| [Feedback](SUPPORT.en.md) | Issue reporting channels, required context, and handling boundaries |
+| [Code of Conduct](CODE_OF_CONDUCT.md) | Conduct requirements and enforcement scope for feedback channels |
 
 ## Script Tools
 
 | Script | Description |
 | --- | --- |
 | [scripts/dev.sh](scripts/dev.sh) | Development environment launcher |
-| [scripts/install-systemd.sh](scripts/install-systemd.sh) | systemd installer for release archives |
+| [scripts/install-systemd.sh](scripts/install-systemd.sh) | systemd installation validator for future release archives |
 | [scripts/uninstall-systemd.sh](scripts/uninstall-systemd.sh) | systemd uninstaller |
 | [scripts/mnemonas-doctor.sh](scripts/mnemonas-doctor.sh) | Deployment diagnostics |
 | [scripts/docker-quickstart.sh](scripts/docker-quickstart.sh) | Docker Compose quickstart script |

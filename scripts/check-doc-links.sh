@@ -16,6 +16,7 @@ const files = [
   ...cp.execFileSync('git', ['ls-files', '--others', '--exclude-standard', '--', '*.md'], { encoding: 'utf8' }).split('\n'),
 ]
   .filter(Boolean)
+  .filter((file) => fs.existsSync(path.join(repoRoot, file)))
   .filter((file, index, items) => items.indexOf(file) === index)
 const fileSet = new Set(files)
 
@@ -66,7 +67,7 @@ const allowedEnglishDocChineseLinkLabels = new Set([
   '中文文档索引',
   '中文 README',
   '支持说明',
-  '贡献指南',
+  '反馈说明',
   '行为准则',
   '安全策略',
 ])
@@ -195,7 +196,7 @@ const reverseProxyWebDAVVerificationContracts = [
   {
     file: 'docs/reverse-proxy-setup.md',
     required: [
-      '公网或生产 WebDAV 挂载建议优先使用 `auth_type=users`',
+      '未来公开发布的 WebDAV 挂载应优先使用 `auth_type=users`',
       'auth_type=basic 时使用 WebDAV 用户名和密码',
       '生成密码位于 /srv/mnemonas/secrets.json 的 webdav_password 字段',
       'curl_auth_config="$(mktemp -t mnemonas-webdav-curl-auth.XXXXXX)"',
@@ -206,7 +207,7 @@ const reverseProxyWebDAVVerificationContracts = [
   {
     file: 'docs/reverse-proxy-setup.en.md',
     required: [
-      'Prefer `auth_type=users` for public or production WebDAV mounts',
+      'Future public-release WebDAV mounts should prefer `auth_type=users`',
       'Use the WebDAV username and password when auth_type=basic',
       'generated passwords use the webdav_password field in /srv/mnemonas/secrets.json',
       'curl_auth_config="$(mktemp -t mnemonas-webdav-curl-auth.XXXXXX)"',
@@ -219,7 +220,7 @@ const apiReferenceWebDAVAuthContracts = [
   {
     file: 'docs/api-reference.md',
     required: [
-      '日常或生产挂载建议设置 `webdav.auth_type = "users"`',
+      '开发验证挂载建议设置 `webdav.auth_type = "users"`',
       '根目录示例配置保留旧全局 Basic Auth 作为兼容基线',
     ],
     forbidden: [
@@ -229,7 +230,7 @@ const apiReferenceWebDAVAuthContracts = [
   {
     file: 'docs/api-reference.en.md',
     required: [
-      'For day-to-day or production mounts, set `webdav.auth_type = "users"`',
+      'For development validation, set `webdav.auth_type = "users"`',
       'The root example config keeps legacy global Basic Auth as a compatibility baseline',
     ],
     forbidden: [
@@ -277,7 +278,7 @@ const hardeningProgressReleaseReadinessContracts = [
       '备份恢复演练 smoke 入口文档和发布门禁契约',
       '发布清单和双语 release notes 保留公网部署 doctor、外部网络 smoke、备份恢复演练 smoke、发布后上线总核验和云防火墙复核入口',
       '## 整体状态边界',
-      '工程内发布候选',
+      '工程内开发快照',
       '最终可用目标',
       '不能标记为最终完成',
       '真实公网部署、正式 tag、Release workflow 结果和发布后产物核验仍缺少环境证据',
@@ -295,7 +296,7 @@ const hardeningProgressReleaseReadinessContracts = [
       'backup restore-drill smoke entry-point documentation and release-readiness contract',
       'release checklist and bilingual release notes to retain the public-deployment doctor, external-network smoke, backup restore-drill smoke, post-publication go-live verification, and cloud-firewall review entry points',
       '## Overall Status Boundary',
-      'In-repository release candidate',
+      'In-repository development snapshot',
       'Final usability objective',
       'Not complete.',
       'real public deployment, the official tag, Release workflow results, and post-publication artifact verification still lack environment evidence',
@@ -355,7 +356,6 @@ const requiredDocumentPairs = [
   ['README.md', 'README.en.md', 'English', 'Chinese'],
   ['CHANGELOG.md', 'CHANGELOG.en.md', 'English', 'Chinese'],
   ['CODE_OF_CONDUCT.zh-CN.md', 'CODE_OF_CONDUCT.md', 'English', 'Chinese'],
-  ['CONTRIBUTING.md', 'CONTRIBUTING.en.md', 'English', 'Chinese'],
   ['SUPPORT.md', 'SUPPORT.en.md', 'English', 'Chinese'],
   ['SECURITY.zh-CN.md', 'SECURITY.md', 'English', 'Chinese'],
   ['deploy/public-access/README.md', 'deploy/public-access/README.en.md', 'English', 'Chinese'],
@@ -1337,7 +1337,11 @@ def git_files(*args):
 
 tracked = git_files("ls-files", "--", "*.md")
 untracked = git_files("ls-files", "--others", "--exclude-standard", "--", "*.md")
-files = list(dict.fromkeys([*tracked, *untracked]))
+files = [
+    file_name
+    for file_name in dict.fromkeys([*tracked, *untracked])
+    if pathlib.Path(file_name).is_file()
+]
 
 open_fence = re.compile(r"^ {0,3}(`{3,}|~{3,})\s*(.*)$")
 close_backtick = re.compile(r"^ {0,3}`{3,}\s*$")
@@ -1460,10 +1464,15 @@ func main() {
 	seen := map[string]bool{}
 	files := make([]string, 0, len(tracked)+len(untracked))
 	for _, file := range append(tracked, untracked...) {
-		if !seen[file] {
-			seen[file] = true
-			files = append(files, file)
+		if seen[file] {
+			continue
 		}
+		info, statErr := os.Stat(file)
+		if statErr != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		seen[file] = true
+		files = append(files, file)
 	}
 
 	errors := []string{}

@@ -2,13 +2,11 @@
 
 English | [简体中文](SECURITY.zh-CN.md)
 
-## Supported Versions
+## Current Support Scope
 
-| Version | Supported |
-| ------- | --------- |
-| `main` / `master` / unreleased | Best-effort fixes before the first public release |
-| Published releases | Latest supported minor after releases are cut |
-| Older releases | Not supported unless noted in release notes |
+MnemoNAS is still under development and has not published any usable release. Security reports must identify the affected Git commit or development build. The project does not currently provide compatibility support for published versions or promise a response or fix timeline.
+
+Maintainers handle security findings against the default branch on a best-effort basis according to impact, reproducible evidence, and current development priorities.
 
 ## Reporting a Vulnerability
 
@@ -29,34 +27,29 @@ Reports should include the following information:
 1. **Description**: A clear description of the vulnerability
 2. **Impact**: Potential impact and severity
 3. **Steps to Reproduce**: Detailed steps to reproduce the issue
-4. **Affected Versions**: Which versions are affected
+4. **Affected Commit**: The affected Git commit or development build
 5. **Suggested Fix**: Optional suggested remediation
 
-### Response Timeline
+### Handling
 
-- **Initial Response**: Within 48 hours
-- **Status Update**: Within 7 days
-- **Fix Timeline**: Depends on severity
-  - Critical: 24-48 hours
-  - High: 7 days
-  - Medium: 30 days
-  - Low: Next release
+- Maintainers review the report and may request additional reproduction evidence.
+- Priority depends on demonstrated impact, exploitability, and the current development state.
+- The project does not provide an initial-response, status-update, or fix-time SLA.
+- Vulnerability details must remain private until maintainers confirm that disclosure is safe.
 
 ### Disclosure Policy
 
-- Receipt of the report will be acknowledged
-- An estimated fix timeline will be provided
-- The reporter will be notified when the issue is fixed
-- Release notes may credit the reporter unless anonymity is requested
-- Public disclosure should wait until a fix has been released
+- Maintainers acknowledge reports and share status when circumstances allow.
+- Maintainers decide when issue and remediation details can be disclosed based on risk and fix status.
+- Vulnerability details, exploitation steps, and sensitive deployment information must not be published without confirmation.
 
-## Deployment Security Recommendations
+## Development and Validation Security
 
-MnemoNAS deployments should follow these security recommendations:
+The current source tree is not suitable for production deployment. Isolated development or test environments should follow these recommendations:
 
 ### Network Security
 
-1. **Use HTTPS**: Production deployments should run behind a reverse proxy with TLS
+1. **Use HTTPS**: Cross-host validation should run behind a reverse proxy with TLS
 2. **Firewall**: Access should be restricted to trusted networks
 3. **Internal dataplane ports**: Dataplane gRPC/HTTP ports `9090/9091` should not be exposed to public or untrusted networks
 4. **VPN**: Remote access should use a VPN or an equivalent controlled network boundary
@@ -75,7 +68,7 @@ MnemoNAS deployments should follow these security recommendations:
 
 ### Updates
 
-1. **Stay Updated**: MnemoNAS and dependencies should stay up to date
+1. **Track the source**: Validation environments should record the tested Git commit and review dependency updates
 2. **Monitor**: Security advisories should be monitored
 3. **Test**: Updates should be tested in a staging environment first
 
@@ -109,7 +102,7 @@ By default, `make security-check` covers Go with `govulncheck` and Rust with `ca
 
 ## Security Audits
 
-MnemoNAS has not yet undergone a formal security audit. Sponsorship inquiries for an audit can use the maintainer contact associated with the repository owner.
+MnemoNAS has not yet undergone a formal security audit. Current test results do not constitute a production-security guarantee.
 
 ## Acknowledgments
 

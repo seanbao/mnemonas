@@ -6,7 +6,7 @@ This document tracks the product path from a self-hosted file cloud toward a pra
 
 ## Current Assessment
 
-As of 2026-06-21, MnemoNAS already includes Web file management, WebDAV, version history, trash, multi-user auth, user groups, user-level quotas, directory access rules, sharing, activity logs, health checks, Scrub, GC, diagnostics export, Docker deployment, systemd deployment, and post-build Docker container smoke tests. It is usable as a local private file cloud for personal or small-team evaluation, especially when the data is not the only copy.
+MnemoNAS is currently an L0 development preview and has not published any usable release. The development branch implements Web file management, WebDAV, version history, trash, multi-user authentication, user groups, user-level quotas, directory access rules, sharing, activity logs, health checks, Scrub, GC, diagnostic bundles, and validation paths for Docker and systemd. These features and test results do not constitute a usable release or production-readiness statement.
 
 The current capability set can be summarized by track:
 
@@ -15,9 +15,9 @@ The current capability set can be summarized by track:
 - Backup and restore include local jobs, command-backed restic/rclone remote targets, lightweight scheduling, automatic backup windows, retention checks, restore drills or remote checks, restore history, restore summaries, single-job restore progress steps, batch restore progress steps, post-restore read-only verification, post-restore cutover and rollback checklists, copyable restore cutover records, copyable batch-restore records with job context, backup targets, and retention-policy status, batch-restore cross-directory cutover candidates, batch-restore conflict-disposition records, batch restore attention reasons, Dashboard risk summaries, Web maintenance status, and Webhook/Telegram/WeCom/DingTalk/SMTP notifications for backup, explicit restore, restore verification, restore drill, and retention-check events.
 - Alerts and disk health include a saved-config `alert_test` entry point, directory-access and share-policy change events, soon-expiring share aggregate events, and `smartctl`-based SMART, temperature, missing-device, and serial-drift checks. These states are wired into the health page, diagnostic summaries, activity logs, and notifications.
 - Quotas and permissions include user quotas, directory quotas, dynamic usage, account-attention summaries, filtering, sorting, review-summary copy, current-list export, quota-and-permission joint review, pre-save directory-quota review, and quota enforcement for Web/API/WebDAV write and restore paths. User groups and directory access rules share one permission decision across Web/API, WebDAV users mode, search, shares, favorites, trash, activity filtering, and effective-access checks in **Users > Directory & Access**. Share path policies can also restrict share creation and maintenance by user, group, or role.
-- Storage visibility includes filesystem capacity, filesystem type, mount point, device/dataset source, redacted mount options, native data-checksum hints, and an administrator storage-health summary. SMB has preview config, credentials, gateway authorization, and diagnostics, but this build still does not start a mountable SMB/Samba runtime; that track is deferred until `smboxide` is mature enough to integrate.
+- Storage visibility includes filesystem capacity, filesystem type, mount point, device/dataset source, redacted mount options, native data-checksum hints, and an administrator storage-health summary. SMB has preview config, credentials, gateway authorization, and diagnostics, but the current development build still does not start a mountable SMB/Samba runtime; that track is deferred until `smboxide` is mature enough to integrate.
 
-It is not yet a complete NAS appliance. The main missing areas are a mountable SMB runtime, more real-media and remote restore-disposition examples, more real permission and share-rule review examples, and fuller storage-pool visibility. Until external backups and the public-access security check flow are mature, MnemoNAS should not be treated as the only long-term copy of important data or exposed directly without an HTTPS reverse proxy.
+It is not yet a complete NAS appliance. The main missing areas are a mountable SMB runtime, more real-media and remote restore-disposition examples, more real permission and share-rule review examples, and fuller storage-pool visibility. The current source tree must not hold real data, serve as a long-term data source, or be exposed directly to the public internet.
 
 The Dashboard first-run flow now uses server-derived readiness. Required checks cover administrator access, bootstrap-password replacement, the initial-password file, blocking security findings, an independent backup job, and a currently healthy successful backup. Recommended checks cover administrator redundancy, automatic scheduling, restore evidence, and security warnings. Only backup requirements can be deferred for a bounded period; completion and deferral are persisted and recomputed before mutation. This state does not replace `mnemonas-doctor` or cloud-firewall review.
 
@@ -42,13 +42,13 @@ Priorities:
 | L2 | Home NAS baseline | Long-running LAN deployment | SMB, backup jobs, SMART/disk alerts, notifications, quotas, restore drills |
 | L3 | Small-team NAS | Collaboration with clear sharing history | Folder permissions, groups, share-rule cleanup, activity review, disaster recovery flow |
 
-The project currently meets the L1 private-file-cloud baseline and has the first baseline for the L1+ public-access entry point. The next stage is to make the L1+ public-access security check flow and restore loop suitable for long-running operation before continuing the data-protection and LAN-compatibility work needed for L2.
+The project is currently at the L0 development-preview stage. The development branch implements parts of the L1 and L1+ targets, but no usable release has been produced or published. The next stage is to complete the data-safety, recovery, and deployment evidence required for a first usable release before evaluating the L1 gate.
 
 ## Priority Roadmap
 
 ### P0: Reliable Private File Cloud
 
-Goal: make MnemoNAS safe enough for cautious real-world personal use, assuming the user already has external backups.
+Goal: complete the private-file-cloud baseline required for a first usable release. Real personal data must not be used for validation before that gate is met.
 
 | Capability | Current state | Next step | Acceptance criteria |
 | --- | --- | --- | --- |

@@ -50,7 +50,7 @@ write_checklists() {
 
 ## 已知限制
 
-- 当前版本定位为 L1 私有文件云盘和 L1+ 公网安全入口基础，不应作为重要数据的唯一长期副本；生产使用应保留外部备份。
+- MnemoNAS 仍处于开发阶段，尚未发布任何可用版本。当前源码不应承载真实数据或用于生产部署。
 EOF
 
 	cat >CHANGELOG.en.md <<'EOF'
@@ -76,7 +76,7 @@ EOF
 
 ## Known Limitations
 
-- This version is positioned as an L1 private file cloud with an initial L1+ public-access safety baseline, not as the only long-term copy of important data. Production use should keep external backups.
+- MnemoNAS is still under development and has not published any usable release. The current source tree must not hold real data or be used for production deployment.
 EOF
 }
 
@@ -116,7 +116,7 @@ EOF
 
 ## 已知限制
 
-- 当前发布候选定位为已通过完整本地验证的 L1 私有文件云盘和 L1+ 公网安全入口基础，不应作为重要数据的唯一长期副本；生产使用仍应保留外部备份。
+- MnemoNAS 尚未发布任何可用版本。当前源码不应承载真实数据或用于生产部署。
 EOF
 
 	cat >docs/release-notes.en.md <<'EOF'
@@ -151,24 +151,37 @@ EOF
 
 ## Known Limitations
 
-- This release candidate is positioned as a fully locally validated L1 private file cloud with an initial L1+ public-access safety baseline, not as the only long-term copy of important data. Production use should keep external backups.
+- MnemoNAS has not published any usable release. The current source tree must not hold real data or be used for production deployment.
 EOF
 }
 
-write_community_files() {
-	mkdir -p .github/ISSUE_TEMPLATE .github/workflows
+write_public_project_files() {
+	mkdir -p .github/ISSUE_TEMPLATE .github/workflows docs
 	touch \
-		README.md \
-		README.en.md \
 		LICENSE \
-		CONTRIBUTING.md \
-		CONTRIBUTING.en.md \
 		CODE_OF_CONDUCT.md \
 		CODE_OF_CONDUCT.zh-CN.md \
-		SUPPORT.md \
-		SUPPORT.en.md \
-		SECURITY.md \
 		SECURITY.zh-CN.md
+	cat >README.md <<'EOF'
+# MnemoNAS
+
+MnemoNAS 仍处于开发阶段，尚未发布任何可用版本。
+EOF
+	cat >README.en.md <<'EOF'
+# MnemoNAS
+
+MnemoNAS is still under development and has not published any usable release.
+EOF
+	cat >docs/README.md <<'EOF'
+# 文档
+
+问题通过 Issues 反馈。
+EOF
+	cat >docs/README.en.md <<'EOF'
+# Documentation
+
+Submit feedback through Issues.
+EOF
 	cat >Makefile <<'EOF'
 .PHONY: go-packages workflows-check scripts-check toolchains-check docs-check security-check test test-torture docker docker-smoke docker-check check verify-changed release-readiness quick-check lint
 
@@ -227,9 +240,9 @@ contact_links:
   - name: Security vulnerability / 安全漏洞
     url: https://github.com/seanbao/mnemonas/security/policy
     about: Report security vulnerabilities through the private reporting channel. 安全漏洞通过私密报告渠道提交。
-  - name: Support boundary / 支持边界
+  - name: Feedback scope / 反馈范围
     url: https://github.com/seanbao/mnemonas/blob/master/SUPPORT.md
-    about: Review support channels and required diagnostics before filing operational questions. 提交运维问题前先查看支持渠道和诊断要求。
+    about: Review feedback channels and required diagnostics before filing an issue. 提交 Issue 前先查看反馈渠道和诊断要求。
 EOF
 	cat >.github/dependabot.yml <<'EOF'
 version: 2
@@ -425,6 +438,10 @@ make security-check NPM_AUDIT=1
 ```
 
 MnemoNAS is not designed for direct internet exposure without a hardened proxy/VPN layer.
+
+MnemoNAS has not published any usable release.
+
+The project does not provide an initial-response, status-update, or fix-time SLA.
 EOF
 	cat >SECURITY.zh-CN.md <<'EOF'
 # 安全策略
@@ -442,6 +459,10 @@ make security-check NPM_AUDIT=1
 ```
 
 不建议在没有加固代理/VPN 的情况下直接暴露到公网。
+
+MnemoNAS 尚未发布任何可用版本。
+
+项目不提供响应时间、状态更新时间或修复时间 SLA。
 EOF
 	cat >.github/ISSUE_TEMPLATE/bug_report.yml <<'EOF'
 name: Bug report / 缺陷报告
@@ -449,7 +470,13 @@ body:
   - type: markdown
     attributes:
       value: |
+        MnemoNAS is still under development and has not published a usable release.
+        MnemoNAS 仍处于开发阶段，尚未发布可用版本。
         Reports should include reproduction steps, deployment context, and diagnostics. Sensitive values such as passwords, tokens, cookies, private URLs, and internal addresses must be removed before posting logs.
+  - type: input
+    id: commit
+    attributes:
+      label: Tested Git commit / 测试提交
   - type: textarea
     id: diagnostics
     attributes:
@@ -466,6 +493,8 @@ body:
   - type: markdown
     attributes:
       value: |
+        MnemoNAS is still under development and has not published a usable release.
+        MnemoNAS 仍处于开发阶段，尚未发布可用版本。
         Feature requests should describe the workflow, user impact, and affected surfaces. Security, data, deployment, and compatibility implications should be called out explicitly.
   - type: textarea
     id: risks
@@ -478,6 +507,8 @@ body:
   - type: markdown
     attributes:
       value: |
+        MnemoNAS is still under development and has not published a usable release.
+        MnemoNAS 仍处于开发阶段，尚未发布可用版本。
         Usage questions should include deployment context and diagnostics. Remove passwords, tokens, cookies, private URLs, internal addresses, and private file names before posting logs or configuration snippets.
   - type: textarea
     id: diagnostics
@@ -495,7 +526,13 @@ body:
   - type: markdown
     attributes:
       value: |
+        MnemoNAS is still under development and has not published a usable release.
+        MnemoNAS 仍处于开发阶段，尚未发布可用版本。
         Use this form for WebDAV client compatibility reports, including successful validation, client-specific failures, and behavior that differs between clients. Remove passwords, tokens, cookies, private URLs, internal addresses, and private file names before posting logs or screenshots.
+  - type: input
+    id: mnemonas_commit
+    attributes:
+      label: Tested MnemoNAS Git commit / 测试所用 MnemoNAS 提交
   - type: textarea
     id: diagnostics
     attributes:
@@ -506,40 +543,19 @@ body:
       options:
         - label: Security-sensitive exploit details are not posted publicly.
 EOF
-	cat >.github/pull_request_template.md <<'EOF'
-# Pull Request / 变更说明
-
-## Scope / 范围
-
--
-
-## User-Visible Behavior / 用户可见行为
-
--
-
-## Data, Security, And Deployment Impact / 数据、安全与部署影响
-
--
-
-## Validation / 验证
-
-- [ ] `make verify-changed`
-- [ ] `make docs-check`
-- [ ] `make scripts-check`
-
-## Residual Risk / 残余风险
-
--
-EOF
 	cat >SUPPORT.md <<'EOF'
-# 支持
+# 问题反馈
+
+MnemoNAS 尚未发布任何可用版本，暂不接收外部代码或文档提交。
 
 WebDAV 兼容性报告表单：https://github.com/seanbao/mnemonas/issues/new?template=webdav_compatibility.yml
 
 | 安全漏洞 | GitHub Private Vulnerability Reporting | 不要公开提交漏洞细节，详见 [SECURITY.zh-CN.md](SECURITY.zh-CN.md) |
 EOF
 	cat >SUPPORT.en.md <<'EOF'
-# Support
+# Issue Feedback
+
+MnemoNAS has not published any usable release. External code and documentation submissions are not being accepted.
 
 WebDAV compatibility report form: https://github.com/seanbao/mnemonas/issues/new?template=webdav_compatibility.yml
 
@@ -559,7 +575,7 @@ git config user.email "mnemonas@example.invalid"
 git config user.name "MnemoNAS Test"
 
 write_checklists
-write_community_files
+write_public_project_files
 git add .
 git commit -q -m "docs: initial checklist"
 validation_target="$(git rev-parse --short=12 HEAD)"
@@ -664,7 +680,7 @@ assert_file_contains "$output_dir/deployment-release-docs-only.out" "[release-re
 
 git checkout -q master
 git checkout -q -b release-readiness
-printf '# docs\n' >README.md
+printf '\n# docs\n' >>README.md
 git add README.md
 git commit -q -m "docs: update release docs"
 
@@ -683,7 +699,7 @@ assert_file_contains "$output_dir/pass.out" "[release-readiness] diff:"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] worktree:          clean"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] planner          [hardening-commit-plan] no changed files detected"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] commit-messages:"
-assert_file_contains "$output_dir/pass.out" "[release-readiness] community:"
+assert_file_contains "$output_dir/pass.out" "[release-readiness] feedback:"
 assert_file_contains "$output_dir/pass.out" "[release-readiness] validation:"
 assert_file_contains "$output_dir/pass.out" "full gate evidence at"
 assert_file_contains "$output_dir/pass.out" "files changed since target"
@@ -742,13 +758,13 @@ assert_file_contains "$output_dir/allow-dirty.out" "[release-readiness] worktree
 assert_file_contains "$output_dir/allow-dirty.out" "[release-readiness] validation-warning:"
 
 git checkout -q -- README.md
-rm -f .github/pull_request_template.md
-if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-community.out" 2>"$output_dir/missing-community.err"; then
-	fail "release readiness accepted missing community files"
+rm -f .github/ISSUE_TEMPLATE/bug_report.yml
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-public-file.out" 2>"$output_dir/missing-public-file.err"; then
+	fail "release readiness accepted a missing public project file"
 fi
-assert_file_contains "$output_dir/missing-community.err" "missing required community file: .github/pull_request_template.md"
+assert_file_contains "$output_dir/missing-public-file.err" "missing required public project file: .github/ISSUE_TEMPLATE/bug_report.yml"
 
-git checkout -q -- .github/pull_request_template.md
+git checkout -q -- .github/ISSUE_TEMPLATE/bug_report.yml
 sed -i.bak '/webdav_compatibility.yml/d' SUPPORT.en.md
 rm -f SUPPORT.en.md.bak
 if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-support-route.out" 2>"$output_dir/missing-support-route.err"; then
@@ -980,13 +996,12 @@ assert_file_contains "$output_dir/missing-webdav-safety.err" ".github/ISSUE_TEMP
 assert_file_contains "$output_dir/missing-webdav-safety.err" "Remove passwords, tokens, cookies"
 git checkout -q -- .github/ISSUE_TEMPLATE/webdav_compatibility.yml
 
-sed -i.bak '/Data, Security, And Deployment Impact/d' .github/pull_request_template.md
-rm -f .github/pull_request_template.md.bak
-if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-pr-section.out" 2>"$output_dir/missing-pr-section.err"; then
-	fail "release readiness accepted a missing PR template section"
+printf '# external contribution entry\n' >CONTRIBUTING.md
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/contribution-entry.out" 2>"$output_dir/contribution-entry.err"; then
+	fail "release readiness accepted an external contribution entry point"
 fi
-assert_file_contains "$output_dir/missing-pr-section.err" ".github/pull_request_template.md is missing required text"
-git checkout -q -- .github/pull_request_template.md
+assert_file_contains "$output_dir/contribution-entry.err" "external contribution entry point must remain absent: CONTRIBUTING.md"
+rm -f CONTRIBUTING.md
 
 sed -i.bak '/verify-published-release/d' docs/release-notes.en.md
 rm -f docs/release-notes.en.md.bak
@@ -1086,13 +1101,13 @@ assert_file_contains "$output_dir/missing-go-live-summary-scope.err" "CHANGELOG.
 assert_file_contains "$output_dir/missing-go-live-summary-scope.err" "release checklist and bilingual release notes to retain the \`mnemonas-doctor --public-domain\`, \`scripts/public-go-live-smoke.sh\`, \`scripts/backup-restore-drill-smoke.sh\`, \`scripts/release-go-live-check.sh\`, and \`cloud-firewall-checklist\` entry points"
 git checkout -q -- CHANGELOG.en.md
 
-sed -i.bak 's/, not as the only long-term copy of important data//' CHANGELOG.en.md
+sed -i.bak 's/ and has not published any usable release//' CHANGELOG.en.md
 rm -f CHANGELOG.en.md.bak
-if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes >"$output_dir/missing-changelog-candidate-limit.out" 2>"$output_dir/missing-changelog-candidate-limit.err"; then
-	fail "release readiness accepted CHANGELOG without the release candidate data-copy limitation"
+if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes >"$output_dir/missing-changelog-development-status.out" 2>"$output_dir/missing-changelog-development-status.err"; then
+	fail "release readiness accepted CHANGELOG without the unpublished development status"
 fi
-assert_file_contains "$output_dir/missing-changelog-candidate-limit.err" "CHANGELOG.en.md is missing required text"
-assert_file_contains "$output_dir/missing-changelog-candidate-limit.err" "not as the only long-term copy of important data"
+assert_file_contains "$output_dir/missing-changelog-development-status.err" "CHANGELOG.en.md is missing required text"
+assert_file_contains "$output_dir/missing-changelog-development-status.err" "has not published any usable release"
 git checkout -q -- CHANGELOG.en.md
 
 sed -i.bak '/security-check/d' docs/release-notes.en.md
@@ -1140,13 +1155,13 @@ assert_file_contains "$output_dir/missing-release-notes-cloud-firewall.err" "doc
 assert_file_contains "$output_dir/missing-release-notes-cloud-firewall.err" "cloud-firewall-checklist"
 git checkout -q -- docs/release-notes.en.md
 
-sed -i.bak 's/, not as the only long-term copy of important data//' docs/release-notes.en.md
+sed -i.bak 's/must not hold real data/must not store data/' docs/release-notes.en.md
 rm -f docs/release-notes.en.md.bak
-if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes >"$output_dir/missing-release-notes-candidate-limit.out" 2>"$output_dir/missing-release-notes-candidate-limit.err"; then
-	fail "release readiness accepted release notes without the release candidate data-copy limitation"
+if ./scripts/release-readiness.sh --allow-dirty --allow-post-validation-changes >"$output_dir/missing-release-notes-development-limit.out" 2>"$output_dir/missing-release-notes-development-limit.err"; then
+	fail "release readiness accepted release notes without the no-real-data development limit"
 fi
-assert_file_contains "$output_dir/missing-release-notes-candidate-limit.err" "docs/release-notes.en.md is missing required text"
-assert_file_contains "$output_dir/missing-release-notes-candidate-limit.err" "not as the only long-term copy of important data"
+assert_file_contains "$output_dir/missing-release-notes-development-limit.err" "docs/release-notes.en.md is missing required text"
+assert_file_contains "$output_dir/missing-release-notes-development-limit.err" "must not hold real data"
 git checkout -q -- docs/release-notes.en.md
 
 sed -i.bak '/release-readiness/d' CHANGELOG.en.md

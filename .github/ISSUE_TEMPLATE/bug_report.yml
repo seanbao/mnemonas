@@ -7,6 +7,10 @@ body:
   - type: markdown
     attributes:
       value: |
+        MnemoNAS is still under development and has not published a usable release. This form records feedback against the current source tree.
+
+        MnemoNAS 仍处于开发阶段，尚未发布可用版本。本表单用于记录针对当前源码的问题反馈。
+
         Reports should include reproduction steps, deployment context, and diagnostics. Sensitive values such as passwords, tokens, cookies, private URLs, and internal addresses must be removed before posting logs.
 
         报告应包含复现步骤、部署背景和诊断信息。粘贴日志前应移除密码、Token、Cookie、私密 URL 和内网敏感地址。
@@ -55,11 +59,11 @@ body:
     validations:
       required: true
   - type: input
-    id: version
+    id: commit
     attributes:
-      label: Version or commit / 版本或提交
-      description: Release version, container tag, or Git commit. Release 版本、容器标签或 Git commit。
-      placeholder: v0.0.0 or c4f87616
+      label: Tested Git commit / 测试提交
+      description: Full or abbreviated Git commit used for the test. 实际测试所用的完整或缩写 Git commit。
+      placeholder: c4f87616
     validations:
       required: true
   - type: textarea

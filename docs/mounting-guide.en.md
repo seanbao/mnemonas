@@ -17,7 +17,7 @@ The client steps below are connection references; actual compatibility status is
 
 For day-to-day mounting, `auth_type = "users"` is preferred.
 It makes WebDAV follow MnemoNAS roles, groups, `home_dir`, directory access rules, home-scoped user quotas, and directory quotas.
-The root example config keeps `basic` as a compatibility baseline. Day-to-day or production mounts should switch to `users` unless legacy clients or dedicated service credentials require separate global WebDAV credentials.
+The root example config keeps `basic` as a compatibility baseline. Development validation mounts should switch to `users` unless legacy clients or dedicated service credentials require separate global WebDAV credentials.
 
 Basic Auth credential handling:
 
