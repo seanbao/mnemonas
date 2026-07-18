@@ -37,6 +37,7 @@ final class ClientTransfer {
     required this.status,
     required this.transferred,
     required this.total,
+    this.canRetry = false,
     this.errorMessage,
   });
 
@@ -46,6 +47,7 @@ final class ClientTransfer {
   final TransferStatus status;
   final int transferred;
   final int total;
+  final bool canRetry;
   final String? errorMessage;
 
   double? get progress {
@@ -59,6 +61,7 @@ final class ClientTransfer {
     TransferStatus? status,
     int? transferred,
     int? total,
+    bool? canRetry,
     String? errorMessage,
   }) {
     return ClientTransfer(
@@ -68,6 +71,7 @@ final class ClientTransfer {
       status: status ?? this.status,
       transferred: transferred ?? this.transferred,
       total: total ?? this.total,
+      canRetry: canRetry ?? this.canRetry,
       errorMessage: errorMessage,
     );
   }

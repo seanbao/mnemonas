@@ -633,6 +633,7 @@ void main() {
           .transfers
           .single;
       expect(interrupted.status, TransferStatus.paused);
+      expect(interrupted.canRetry, isTrue);
       expect(interrupted.transferred, 0);
       expect(adapter.uploadSessions.single.durableOffset, 3);
       expect(adapter.uploadSessions.single.state, 'ready');
@@ -654,6 +655,7 @@ void main() {
           .single;
       expect(restored.id, interrupted.id);
       expect(restored.status, TransferStatus.paused);
+      expect(restored.canRetry, isTrue);
       expect(restored.transferred, 0);
 
       await second.controller.resumeTransfer(restored.id);
@@ -1238,6 +1240,7 @@ void main() {
         .transfers
         .single;
     expect(transfer.status, TransferStatus.failed);
+    expect(transfer.canRetry, isFalse);
     expect(transfer.errorMessage, contains('目标文件已发生变化'));
     expect(adapter.uploadSessions.single.state, 'conflict');
   });
@@ -1855,7 +1858,7 @@ void main() {
           .read(clientControllerProvider)
           .transfers
           .single;
-      harness.controller.cancelTransfer(transfer.id);
+      harness.controller.pauseTransfer(transfer.id);
 
       await expectLater(
         download,

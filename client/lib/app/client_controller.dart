@@ -2221,7 +2221,7 @@ class ClientController extends Notifier<ClientState> {
     return payload;
   }
 
-  void cancelTransfer(String id) {
+  void pauseTransfer(String id) {
     final token = _transferCancellations[id];
     if (token == null || token.isCancelled) {
       return;
@@ -2233,6 +2233,8 @@ class ClientController extends Notifier<ClientState> {
       _updateTransfer(id, status: TransferStatus.cancelled);
     }
   }
+
+  void cancelTransfer(String id) => pauseTransfer(id);
 
   Future<void> resumeTransfer(String id) async {
     final task = _durableTransfers[id];
@@ -3029,6 +3031,7 @@ class ClientController extends Notifier<ClientState> {
       status: status,
       transferred: task.durableOffset,
       total: task.totalBytes,
+      canRetry: _canRetryDurableTransfer(task),
       errorMessage: task.errorMessage,
     );
   }
@@ -3221,6 +3224,12 @@ bool _isTransferPayloadPath(String path, String payloadDirectory) {
   final candidate = normalize(path);
   return candidate.startsWith('$root$separator') &&
       !candidate.substring(root.length + 1).contains(separator);
+}
+
+bool _canRetryDurableTransfer(transfer_core.TransferTask task) {
+  return task.phase == transfer_core.TransferPhase.paused ||
+      task.phase == transfer_core.TransferPhase.awaitingAuth ||
+      task.phase == transfer_core.TransferPhase.awaitingDestination;
 }
 
 DateTime _nextTransferTimestamp(transfer_core.TransferTask task) {
