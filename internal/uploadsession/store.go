@@ -22,9 +22,10 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/zeebo/blake3"
+
 	"github.com/seanbao/mnemonas/internal/rootio"
 	"github.com/seanbao/mnemonas/internal/workspace"
-	"github.com/zeebo/blake3"
 )
 
 const (
@@ -417,7 +418,6 @@ func (s *Store) Create(ctx context.Context, request CreateRequest) (CreateResult
 		return CreateResult{}, err
 	}
 	defer release()
-	ctx = operationContext
 	if err := validateCreateRequest(request); err != nil {
 		return CreateResult{}, err
 	}
@@ -428,6 +428,9 @@ func (s *Store) Create(ctx context.Context, request CreateRequest) (CreateResult
 
 	s.createMu.Lock()
 	defer s.createMu.Unlock()
+	if err := ctxError(operationContext); err != nil {
+		return CreateResult{}, err
+	}
 	if err := s.validateRoot(); err != nil {
 		return CreateResult{}, err
 	}
@@ -982,10 +985,12 @@ func (s *Store) Cancel(ctx context.Context, owner, id string) (Session, error) {
 		return Session{}, err
 	}
 	defer release()
-	ctx = operationContext
 	lock := s.sessionLock(id)
 	lock.Lock()
 	defer lock.Unlock()
+	if err := ctxError(operationContext); err != nil {
+		return Session{}, err
+	}
 	loaded, err := s.loadOwnedSession(owner, id)
 	if err != nil {
 		return Session{}, err
