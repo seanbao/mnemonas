@@ -385,6 +385,7 @@ func loginRouteSmokeUser(t *testing.T, server *Server, username, password string
 
 func routeSmokePath(method, routePattern string) string {
 	path := strings.ReplaceAll(routePattern, "{id}", "smoke-id")
+	path = strings.ReplaceAll(path, "{client_request_id}", "smoke-client-request")
 	path = strings.ReplaceAll(path, "{hash}", "smoke-hash")
 	path = strings.ReplaceAll(path, "*", "smoke.txt")
 	if path == "/api/v1/favorites/check" {
@@ -481,6 +482,8 @@ func routeSmokeRequiresWriteRole(contract string) bool {
 	case (method == http.MethodDelete || method == http.MethodPatch) && routePattern == "/api/v1/favorites/*":
 		return true
 	case (method == http.MethodPost || method == http.MethodDelete) && routePattern == "/api/v1/files/*":
+		return true
+	case strings.HasPrefix(routePattern, "/api/v1/upload-sessions"):
 		return true
 	case method == http.MethodPost && (routePattern == "/api/v1/files-copy" || routePattern == "/api/v1/files-delete-intents" || routePattern == "/api/v1/files-move"):
 		return true

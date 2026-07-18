@@ -900,6 +900,96 @@ func TestLogAndList(t *testing.T) {
 	}
 }
 
+func TestLogOnceIsDurablyIdempotent(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	const activityID = "upload-session-0123456789abcdef"
+	details := map[string]string{
+		"upload_session_id":   "0123456789abcdef",
+		"persistence_warning": "true",
+	}
+	if err := store.LogOnce(
+		activityID,
+		ActionUpload,
+		"/docs/report.txt",
+		"alice",
+		"192.0.2.10",
+		details,
+	); err != nil {
+		t.Fatalf("LogOnce(first) error: %v", err)
+	}
+	originalWriter := activityLogWriter
+	activityLogWriter = func(string, []byte) error {
+		return errors.New("unexpected activity rewrite")
+	}
+	defer func() {
+		activityLogWriter = originalWriter
+	}()
+	if err := store.LogOnce(
+		activityID,
+		ActionUpload,
+		"/docs/report.txt",
+		"alice",
+		"192.0.2.10",
+		map[string]string{
+			"persistence_warning": "true",
+			"upload_session_id":   "0123456789abcdef",
+		},
+	); err != nil {
+		t.Fatalf("LogOnce(retry) error: %v", err)
+	}
+	activityLogWriter = originalWriter
+
+	reloaded, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore(reload) error: %v", err)
+	}
+	entries, total := reloaded.List(10, 0, ActionUpload, "")
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("LogOnce() persisted total=%d entries=%+v, want one", total, entries)
+	}
+	if entries[0].ID != activityID {
+		t.Fatalf("LogOnce() entry ID = %q, want %q", entries[0].ID, activityID)
+	}
+}
+
+func TestLogOnceRejectsConflictingIDReuse(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	const activityID = "upload-session-conflict"
+	if err := store.LogOnce(
+		activityID,
+		ActionUpload,
+		"/docs/first.txt",
+		"alice",
+		"192.0.2.10",
+		nil,
+	); err != nil {
+		t.Fatalf("LogOnce(first) error: %v", err)
+	}
+	err = store.LogOnce(
+		activityID,
+		ActionUpload,
+		"/docs/second.txt",
+		"alice",
+		"192.0.2.10",
+		nil,
+	)
+	if !errors.Is(err, ErrActivityIDConflict) {
+		t.Fatalf("LogOnce(conflict) error = %v, want ErrActivityIDConflict", err)
+	}
+	if store.Count() != 1 {
+		t.Fatalf("LogOnce(conflict) count = %d, want 1", store.Count())
+	}
+}
+
 func TestRecordReviewPersistsAndReloads(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, err := NewStore(tmpDir)

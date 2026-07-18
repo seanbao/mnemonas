@@ -45,6 +45,7 @@ import (
 	"github.com/seanbao/mnemonas/internal/share"
 	"github.com/seanbao/mnemonas/internal/storage"
 	"github.com/seanbao/mnemonas/internal/thumbnail"
+	"github.com/seanbao/mnemonas/internal/uploadsession"
 	"github.com/seanbao/mnemonas/internal/versionstore"
 	"github.com/seanbao/mnemonas/internal/workspace"
 )
@@ -110,39 +111,47 @@ type prependReadCloser struct {
 
 // Server is the API server
 type Server struct {
-	router                           *chi.Mux
-	logger                           zerolog.Logger
-	dataplane                        *dataplane.Client
-	fs                               *storage.FileSystem
-	thumbnail                        *thumbnail.Service
-	maintenance                      *maintenance.HistoryStore
-	backupManager                    *backup.Manager
-	activity                         *activity.Store
-	thumbnailConfigured              bool
-	maintenanceConfigured            bool
-	backupConfigured                 bool
-	activityConfigured               bool
-	scrubSchedulerMu                 sync.Mutex
-	scrubSchedulerCancel             context.CancelFunc
-	scrubLastFailureID               string
-	scrubFailureRetries              int
-	quotaCoordinatorOnce             sync.Once
-	quotaCoordinator                 *quotareservation.Coordinator
-	beforeQuotaMutationCommit        func(operation string)
-	quotaUsageScanVisit              func(path string)
-	loginAlertMu                     sync.Mutex
-	loginRateLimitAlerts             map[[sha256.Size]byte]time.Time
-	loginRateLimitAlertsLastPrunedAt time.Time
-	shareExpiryReminderMu            sync.Mutex
-	shareExpiryReminderSent          map[string]time.Time
-	shareExpiryReminderCancel        context.CancelFunc
-	downloadArchiveGate              chan struct{}
-	backgroundTasksMu                sync.Mutex
-	backgroundTasksStarted           bool
-	closed                           bool
-	startTime                        time.Time
-	appVersion                       string
-	buildTime                        string
+	router                             *chi.Mux
+	logger                             zerolog.Logger
+	dataplane                          *dataplane.Client
+	fs                                 *storage.FileSystem
+	thumbnail                          *thumbnail.Service
+	maintenance                        *maintenance.HistoryStore
+	backupManager                      *backup.Manager
+	activity                           *activity.Store
+	uploadSessions                     *uploadsession.Store
+	thumbnailConfigured                bool
+	maintenanceConfigured              bool
+	backupConfigured                   bool
+	activityConfigured                 bool
+	uploadSessionsConfigured           bool
+	scrubSchedulerMu                   sync.Mutex
+	scrubSchedulerCancel               context.CancelFunc
+	scrubLastFailureID                 string
+	scrubFailureRetries                int
+	quotaCoordinatorOnce               sync.Once
+	quotaCoordinator                   *quotareservation.Coordinator
+	beforeQuotaMutationCommit          func(operation string)
+	beforeUploadSessionTransition      func(state uploadsession.State)
+	afterUploadSessionRecoveryEvidence func()
+	quotaUsageScanVisit                func(path string)
+	loginAlertMu                       sync.Mutex
+	loginRateLimitAlerts               map[[sha256.Size]byte]time.Time
+	loginRateLimitAlertsLastPrunedAt   time.Time
+	shareExpiryReminderMu              sync.Mutex
+	shareExpiryReminderSent            map[string]time.Time
+	shareExpiryReminderCancel          context.CancelFunc
+	downloadArchiveGate                chan struct{}
+	backgroundTasksMu                  sync.Mutex
+	backgroundTasksStarted             bool
+	uploadSessionCleanupCancel         context.CancelFunc
+	uploadSessionCleanupDone           chan struct{}
+	uploadSessionCommitMu              sync.Mutex
+	uploadSessionCommitLocks           map[string]*uploadSessionCommitLock
+	closed                             bool
+	startTime                          time.Time
+	appVersion                         string
+	buildTime                          string
 	// Auth components
 	userStore     *auth.UserStore
 	tokenManager  *auth.TokenManager
@@ -1404,12 +1413,16 @@ type ServerConfig struct {
 	AfterPathRenamed func(oldPath, newPath string)
 	AfterPathDeleted func(path string) *storage.PathDeleteHookResult
 	// Storage service roots
-	ThumbnailRoot   string
-	MaintenanceRoot string
-	BackupRoot      string
-	ActivityRoot    string
-	StorageRoot     string
-	BackupJobs      []config.BackupJobConfig
+	ThumbnailRoot     string
+	MaintenanceRoot   string
+	BackupRoot        string
+	ActivityRoot      string
+	UploadSessionRoot string
+	// UploadSessionMinFreeSpace reserves physical capacity below which staged
+	// upload chunks are rejected before any payload bytes are written.
+	UploadSessionMinFreeSpace uint64
+	StorageRoot               string
+	BackupJobs                []config.BackupJobConfig
 	// Auth configuration
 	AuthEnabled    bool
 	AuthUsersFile  string
@@ -1596,6 +1609,23 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 			logger.Info().Str("path", cfg.ActivityRoot).Msg("Activity store initialized")
 		}
 	}
+	if cfg != nil && cfg.UploadSessionRoot != "" {
+		s.uploadSessionsConfigured = true
+		options := uploadsession.Options{}
+		if cfg.FileSystem != nil {
+			options.CheckStagingCapacity = newUploadSessionStagingCapacityCheck(
+				logger,
+				cfg.FileSystem,
+				cfg.UploadSessionMinFreeSpace,
+			)
+		}
+		store, err := uploadsession.Open(cfg.UploadSessionRoot, options)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize upload session store: %w", err)
+		}
+		s.uploadSessions = store
+		logger.Info().Str("path", cfg.UploadSessionRoot).Msg("Upload session store initialized")
+	}
 	s.configureDiskHealthActivityRecorder()
 
 	// Initialize auth if enabled
@@ -1701,6 +1731,11 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 		s.fs.SetPathChangeHooks(s.handlePathRenamed, s.handlePathDeleted)
 		s.fs.SetTrashParticipantHooks(newDurableTrashParticipantHooks(s))
 	}
+	if s.uploadSessions != nil {
+		if _, err := s.reconcileInterruptedUploadSessions(context.Background()); err != nil {
+			return nil, fmt.Errorf("reconcile interrupted upload sessions before startup: %w", err)
+		}
+	}
 
 	s.setupRoutes()
 	if cfg == nil || !cfg.DeferBackgroundTasks {
@@ -1746,6 +1781,9 @@ func (s *Server) StartBackgroundTasks(ctx context.Context) bool {
 	}
 	if s.startShareExpiryReminderScheduler(ctx) {
 		s.logger.Info().Msg("Share expiry reminder scheduler started")
+	}
+	if s.startUploadSessionCleanupScheduler(ctx) {
+		s.logger.Info().Msg("Upload session cleanup scheduler started")
 	}
 	return true
 }
@@ -2042,6 +2080,22 @@ func (s *Server) setupRoutes() {
 			}
 		})
 
+		if s.authEnabled {
+			r.With(requireWriteAccess).Post("/upload-sessions", s.handleCreateUploadSession)
+			r.With(requireWriteAccess).Get("/upload-sessions/by-client-request/{client_request_id}", s.handleGetUploadSessionByClientRequest)
+			r.With(requireWriteAccess).Get("/upload-sessions/{id}", s.handleGetUploadSession)
+			r.With(requireWriteAccess).Patch("/upload-sessions/{id}", s.handleAppendUploadSession)
+			r.With(requireWriteAccess).Post("/upload-sessions/{id}/commit", s.handleCommitUploadSession)
+			r.With(requireWriteAccess).Delete("/upload-sessions/{id}", s.handleCancelUploadSession)
+		} else {
+			r.Post("/upload-sessions", s.handleCreateUploadSession)
+			r.Get("/upload-sessions/by-client-request/{client_request_id}", s.handleGetUploadSessionByClientRequest)
+			r.Get("/upload-sessions/{id}", s.handleGetUploadSession)
+			r.Patch("/upload-sessions/{id}", s.handleAppendUploadSession)
+			r.Post("/upload-sessions/{id}/commit", s.handleCommitUploadSession)
+			r.Delete("/upload-sessions/{id}", s.handleCancelUploadSession)
+		}
+
 		// File operations requiring bodies
 		if s.authEnabled {
 			r.With(requireWriteAccess).Post("/files-delete-intents", s.handlePrepareDeleteIntents)
@@ -2183,7 +2237,17 @@ func (s *Server) Close() error {
 	}
 	s.backgroundTasksMu.Lock()
 	s.closed = true
+	uploadSessionCleanupCancel := s.uploadSessionCleanupCancel
+	uploadSessionCleanupDone := s.uploadSessionCleanupDone
+	s.uploadSessionCleanupCancel = nil
+	s.uploadSessionCleanupDone = nil
 	s.backgroundTasksMu.Unlock()
+	if uploadSessionCleanupCancel != nil {
+		uploadSessionCleanupCancel()
+	}
+	if uploadSessionCleanupDone != nil {
+		<-uploadSessionCleanupDone
+	}
 	s.scrubSchedulerMu.Lock()
 	if s.scrubSchedulerCancel != nil {
 		s.scrubSchedulerCancel()
@@ -2196,10 +2260,14 @@ func (s *Server) Close() error {
 		s.shareExpiryReminderCancel = nil
 	}
 	s.shareExpiryReminderMu.Unlock()
+	var closeErr error
 	if s.backupManager != nil {
-		return s.backupManager.Close()
+		closeErr = errors.Join(closeErr, s.backupManager.Close())
 	}
-	return nil
+	if s.uploadSessions != nil {
+		closeErr = errors.Join(closeErr, s.uploadSessions.Close())
+	}
+	return closeErr
 }
 
 // validatePath validates and cleans a file path, preventing path traversal attacks.

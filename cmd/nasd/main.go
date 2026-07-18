@@ -1202,16 +1202,18 @@ func runMain() int {
 	runtimeWebDAV := newSwitchableWebDAVHandler(webdavPrefix, webdavHandler)
 
 	apiServer, err := api.NewServer(log.Logger, &api.ServerConfig{
-		DataplaneAddr:    cfg.DataPlane.Address(),
-		FileSystem:       fs, // Pass the new storage filesystem
-		AfterPathRenamed: runtimeWebDAV.OnPathRenamed,
-		AfterPathDeleted: runtimeWebDAV.OnPathDeleted,
-		ThumbnailRoot:    filepath.Join(cfg.InternalDir(), "thumbnails"),
-		MaintenanceRoot:  filepath.Join(cfg.InternalDir(), "maintenance"),
-		BackupRoot:       filepath.Join(cfg.InternalDir(), "backup"),
-		ActivityRoot:     filepath.Join(cfg.InternalDir(), "activity"),
-		StorageRoot:      cfg.Storage.Root,
-		BackupJobs:       cfg.Backup.Jobs,
+		DataplaneAddr:             cfg.DataPlane.Address(),
+		FileSystem:                fs, // Pass the new storage filesystem
+		AfterPathRenamed:          runtimeWebDAV.OnPathRenamed,
+		AfterPathDeleted:          runtimeWebDAV.OnPathDeleted,
+		ThumbnailRoot:             filepath.Join(cfg.InternalDir(), "thumbnails"),
+		MaintenanceRoot:           filepath.Join(cfg.InternalDir(), "maintenance"),
+		BackupRoot:                filepath.Join(cfg.InternalDir(), "backup"),
+		ActivityRoot:              filepath.Join(cfg.InternalDir(), "activity"),
+		UploadSessionRoot:         filepath.Join(cfg.InternalDir(), "upload-sessions"),
+		UploadSessionMinFreeSpace: cfg.Storage.Retention.MinFreeSpace,
+		StorageRoot:               cfg.Storage.Root,
+		BackupJobs:                cfg.Backup.Jobs,
 		// Auth configuration
 		AuthEnabled:    cfg.Auth.Enabled,
 		AuthUsersFile:  cfg.Auth.UsersFile,

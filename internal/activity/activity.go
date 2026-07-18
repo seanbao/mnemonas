@@ -27,12 +27,17 @@ var errZeroActivityTimestamp = errors.New("activity timestamp must not be zero")
 var errEmptyActivityID = errors.New("activity ID must not be empty")
 var errNoncanonicalActivityID = errors.New("activity ID must not contain surrounding whitespace")
 var errInvalidActivityPath = errors.New("invalid activity path")
+var errActivityAlreadyLogged = errors.New("activity entry already logged")
 
 // ErrInvalidReviewRecord reports invalid activity review disposition input.
 var ErrInvalidReviewRecord = errors.New("invalid activity review record")
 
 // ErrReviewRecordNotFound reports a missing persisted activity review record.
 var ErrReviewRecordNotFound = errors.New("activity review record not found")
+
+// ErrActivityIDConflict reports that an idempotency key already belongs to a
+// different activity entry.
+var ErrActivityIDConflict = errors.New("activity ID belongs to a different entry")
 
 const maxActivityReviewRecords = 1000
 const maxDirectoryAccessReviewRecords = 100
@@ -417,6 +422,18 @@ func normalizeActivityDetails(details map[string]string) map[string]string {
 		normalized[key] = cleanValue
 	}
 	return normalized
+}
+
+func activityDetailsEqual(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, value := range left {
+		if right[key] != value {
+			return false
+		}
+	}
+	return true
 }
 
 func copyEntry(entry Entry) Entry {
@@ -1639,6 +1656,63 @@ func (s *Store) Log(action ActionType, path, user, ip string, details map[string
 		}
 		return nextEntries, nil
 	})
+}
+
+// LogOnce records an activity entry with a caller-owned idempotency key.
+// Repeating the same entry is a no-op; reusing the key for different content
+// returns ErrActivityIDConflict.
+func (s *Store) LogOnce(id string, action ActionType, path, user, ip string, details map[string]string) error {
+	if err := validateActivityID(id); err != nil {
+		return err
+	}
+	if err := validateActivityAction(action); err != nil {
+		return err
+	}
+	cleanPath, err := normalizeActivityEntryPath(path)
+	if err != nil {
+		return err
+	}
+	normalizedDetails := normalizeActivityDetails(details)
+	err = s.updateEntries(func(entries []Entry) ([]Entry, error) {
+		for _, existing := range entries {
+			if existing.ID != id {
+				continue
+			}
+			if existing.Action == action &&
+				existing.Path == cleanPath &&
+				existing.User == user &&
+				existing.IP == ip &&
+				activityDetailsEqual(existing.Details, normalizedDetails) {
+				return nil, errActivityAlreadyLogged
+			}
+			return nil, fmt.Errorf("%w: %q", ErrActivityIDConflict, id)
+		}
+
+		timestamp := activityTimeNow()
+		if err := validateActivityTimestamp(timestamp); err != nil {
+			return nil, err
+		}
+		entry := Entry{
+			ID:        id,
+			Timestamp: timestamp,
+			Action:    action,
+			Path:      cleanPath,
+			User:      user,
+			IP:        ip,
+			Details:   normalizedDetails,
+		}
+		nextEntries := make([]Entry, 0, len(entries)+1)
+		nextEntries = append(nextEntries, entry)
+		nextEntries = append(nextEntries, entries...)
+		if len(nextEntries) > s.maxSize {
+			nextEntries = nextEntries[:s.maxSize]
+		}
+		return nextEntries, nil
+	})
+	if errors.Is(err, errActivityAlreadyLogged) {
+		return nil
+	}
+	return err
 }
 
 // RecordReview persists a review disposition for activity entries.
