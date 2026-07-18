@@ -38,7 +38,8 @@
 | [架构设计](architecture.md) | [Architecture](architecture.en.md) | 系统架构与技术选型 |
 | [设计决策](design-decisions.md) | [Design decisions](design-decisions.en.md) | 技术选型理由与竞争力目标 |
 | [路线图](roadmap.md) | [Roadmap](roadmap.en.md) | 从私有文件云盘到家庭/小团队 NAS 的优先级和能力边界 |
-| [开发指南](development.md) | [Development guide](development.en.md) | 本地开发环境搭建 |
+| [开发指南](development.md) | [Development guide](development.en.md) | 服务端、Web 与 Flutter 客户端本地开发环境和门禁 |
+| [Flutter 客户端](../client/README.md) | [Flutter client](../client/README.en.md) | Android-first 客户端当前实现范围、缺口与验证边界 |
 | [测试策略](testing-strategy.md) | [Testing strategy](testing-strategy.en.md) | 多层测试方案：单元、集成、E2E、torture 与前端测试 |
 | [开发阶段变更记录](release-notes.md) | [Development change record](release-notes.en.md) | 未发布开发分支的变更、验证证据和首次公开发布准备 |
 | [API 参考](api-reference.md) | [API reference](api-reference.en.md) | REST API 端点与请求/响应格式 |

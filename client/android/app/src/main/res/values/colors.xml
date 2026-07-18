@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="mnemonas_brand">#4F6FDB</color>
+    <color name="mnemonas_launch_light">#F5F7FB</color>
+    <color name="mnemonas_launch_dark">#0B1120</color>
+</resources>

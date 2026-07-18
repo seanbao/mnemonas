@@ -58,6 +58,7 @@ Goal: complete the private-file-cloud baseline required for a first usable relea
 | Data integrity | Scrub, GC, and diagnostics exist; manual and scheduled Scrub runs write activity entries; failures, object anomalies, or incomplete result persistence send Webhook/Telegram/WeCom/DingTalk/SMTP notifications; scheduled Scrub has bounded failure retries, can be hot-updated from Maintenance, and surfaces schedule state in Health and diagnostics | Add native ZFS/Btrfs scrub coordination and deeper failure remediation guidance | Scrub failures are visible in UI, activity logs, and notifications |
 | Secure defaults | Web session uses HttpOnly cookies, with login rate limiting and a user-session revocation action available | Expand admin security reminders and dangerous-configuration warnings | Weak passwords, default passwords, cross-site requests, suspicious logins, and public-share misconfiguration are blocked or warned clearly |
 | WebDAV compatibility | Basic matrix exists | Expand Windows, macOS, and rclone regression coverage | Critical clients cover read, write, rename, delete, and recovery behavior |
+| Android client | A cross-platform Flutter project now covers connection, rotating authentication, core file operations, cancellable transfers, and account flows; Android is the first usable target, with no usable version available | Validate installation and upgrade, session recovery, HTTPS, file transfer, foreground/background transitions, network loss, permission denial, and release signing on physical devices | Produce a signed candidate verified on physical devices with reproducible evidence for the core file lifecycle |
 
 Current backup and restore coverage:
 
@@ -121,7 +122,7 @@ Goal: improve long-term usability after the L2/L3 baseline is stable.
 | Capability | Direction |
 | --- | --- |
 | Full-text and media indexing | Extend filename search to document text, EXIF, video metadata, and duplicate detection |
-| Sync clients | Provide desktop/mobile sync or official rclone profiles for offline sync workflows |
+| Offline sync clients | Beyond the current interactive Flutter API client, provide a desktop/mobile sync engine or official rclone profiles for offline workflows |
 | Storage-pool visibility | Visualize ZFS/Btrfs/mdraid status by integrating system tools rather than reimplementing storage stacks |
 | Object-level encryption | User keys, recovery keys, key rotation, backup and restore process |
 | Plugins and automation | Build on extension points for task runners, webhooks, and media processing |

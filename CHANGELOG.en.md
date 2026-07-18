@@ -8,9 +8,12 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 
 ## [Unreleased]
 
-MnemoNAS is still under development and has not published any usable release. The current source tree is for development and validation only; it must not hold real data or be used for production deployment. Problems and suggestions may be submitted through GitHub Issues. External code and documentation submissions are not being accepted at this stage.
+MnemoNAS is still under development and has not published any usable release. The current source tree is for development and validation only; it must not hold real data or be used for production deployment. Problems and suggestions may be submitted through GitHub Issues.
 
 ### Added
+
+#### Flutter Client (Development)
+- Added a Flutter client project for Android, Linux, and Windows, with Android as the first usable-platform target. The current source implements server validation, Bearer sessions with single-use refresh-token rotation, secure session storage, file browsing and core file operations, streaming upload and download, Android Storage Access Framework export, account flows, and an issue-feedback entry. Linux and Windows native build and runtime validation are incomplete, and no usable client version has been published.
 
 #### Web UI
 - Dashboard with storage usage, file/version counts, recent activity, quick actions, and data-plane health. The desktop sidebar now includes a Home entry consistent with mobile navigation.

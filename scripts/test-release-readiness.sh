@@ -546,7 +546,7 @@ EOF
 	cat >SUPPORT.md <<'EOF'
 # 问题反馈
 
-MnemoNAS 尚未发布任何可用版本，暂不接收外部代码或文档提交。
+MnemoNAS 尚未发布任何可用版本。问题与建议可通过 GitHub Issues 提交。
 
 WebDAV 兼容性报告表单：https://github.com/seanbao/mnemonas/issues/new?template=webdav_compatibility.yml
 
@@ -555,7 +555,7 @@ EOF
 	cat >SUPPORT.en.md <<'EOF'
 # Issue Feedback
 
-MnemoNAS has not published any usable release. External code and documentation submissions are not being accepted.
+MnemoNAS has not published any usable release. Problems and suggestions may be submitted through GitHub Issues.
 
 WebDAV compatibility report form: https://github.com/seanbao/mnemonas/issues/new?template=webdav_compatibility.yml
 

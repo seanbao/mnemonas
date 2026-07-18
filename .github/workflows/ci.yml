@@ -17,6 +17,8 @@ env:
   GO_VERSION: '1.25.12'
   RUST_VERSION: '1.92'
   NODE_VERSION: '22'
+  FLUTTER_VERSION: '3.44.4'
+  ANDROID_NDK_VERSION: '28.2.13676358'
   PROTOC_VERSION: '3.20.1'
   PROTOC_GEN_GO_VERSION: 'v1.36.11'
   PROTOC_GEN_GO_GRPC_VERSION: 'v1.6.1'
@@ -279,6 +281,65 @@ jobs:
           files: web/coverage/coverage-final.json
           flags: frontend
           fail_ci_if_error: false
+
+  # Flutter Android client checks
+  client:
+    name: Android Client
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+          pub-cache: true
+
+      - name: Install Android NDK
+        run: sdkmanager "ndk;${ANDROID_NDK_VERSION}"
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Check Android backup policy
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 python3 tool/check_android_backup_policy.py
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tool -p 'test_android_backup_policy.py'
+
+      - name: Format check
+        run: dart format --output=none --set-exit-if-changed lib test
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Test
+        run: flutter test
+
+      - name: Build debug APK
+        run: flutter build apk --debug
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: mnemonas-android-debug-apk
+          path: client/build/app/outputs/flutter-apk/app-debug.apk
+          if-no-files-found: error
+          retention-days: 7
 
   # Browser end-to-end tests
   e2e:

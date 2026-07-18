@@ -1,4 +1,4 @@
-.PHONY: all build web-build test test-torture fault-injection fault-injection-live clean deps dev proto proto-go proto-rust go-packages fmt lint workflows-check scripts-check toolchains-check docs-check security-check install-audit-tools docker docker-smoke docker-check e2e bench coverage rust-coverage check verify-changed release-readiness quick-check run help
+.PHONY: all build web-build test test-torture fault-injection fault-injection-live clean deps dev proto proto-go proto-rust go-packages fmt lint workflows-check scripts-check toolchains-check docs-check security-check install-audit-tools docker docker-smoke docker-check e2e bench coverage rust-coverage check verify-changed release-readiness quick-check client-deps client-toolchain-check client-android-policy-check client-format client-format-check client-analyze client-test client-apk-debug client-check run help
 
 # Version metadata
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -12,7 +12,8 @@ GO_LIST_ENV ?= $(GO_CMD_ENV)
 GO_LINT_ENV ?= $(GO_CMD_ENV)
 GO_LINT_PACKAGES ?=
 GO_TEST_TIMEOUT ?= 20m
-GO_TEST_FLAGS ?= -timeout=$(GO_TEST_TIMEOUT)
+GO_TEST_PACKAGE_PARALLELISM ?= 3
+GO_TEST_FLAGS ?= -timeout=$(GO_TEST_TIMEOUT) -p=$(GO_TEST_PACKAGE_PARALLELISM)
 GO_RACE_TEST_FLAGS ?= $(GO_TEST_FLAGS) -race
 GOLANGCI_LINT ?= golangci-lint
 SKIP_GOLANGCI_LINT ?= 0
@@ -23,6 +24,11 @@ ACTIONLINT_CMD ?= actionlint
 ACTIONLINT_ENV ?= GOSUMDB=sum.golang.org GOTOOLCHAIN=auto
 GO_SECURITY_ENV ?= GOSUMDB=sum.golang.org GOTOOLCHAIN=auto
 GO_COVERAGE_ENV ?= GOSUMDB=sum.golang.org GOTOOLCHAIN=auto
+FLUTTER ?= flutter
+DART ?= dart
+JAVA ?= java
+JAVAC ?= javac
+FLUTTER_VERSION ?= 3.44.4
 GO_COVERAGE_MIN ?= 75
 RUST_COVERAGE_MIN ?= 70
 NPM_AUDIT ?= 0
@@ -72,6 +78,10 @@ help:
 	@echo "  verify-changed - Run checks selected from changed files"
 	@echo "  release-readiness - Summarize pre-release readiness"
 	@echo "  quick-check - Run fast local Go/Rust checks"
+	@echo "  client-check - Run Flutter client format, analyze, test, and debug APK gates"
+	@echo "  client-android-policy-check - Validate Android backup and transfer exclusions"
+	@echo "  client-format - Format Flutter client Dart sources"
+	@echo "  client-apk-debug - Build the Android client debug APK"
 	@echo "  lint       - Run linters (Go + Rust)"
 	@echo "  scripts-check - Validate deployment shell scripts and Web tool scripts"
 	@echo "  toolchains-check - Validate pinned toolchain versions"
@@ -375,3 +385,52 @@ quick-check:
 	cd dataplane && cargo check --locked
 	cargo check --manifest-path tools/proto-gen/Cargo.toml --locked
 	@echo "✅ Quick check passed"
+
+# Flutter client checks are separate from the server/Web matrix because Android,
+# Linux, and Windows runners require platform-specific SDK dependencies.
+client-deps:
+	@echo "📦 Installing Flutter client dependencies..."
+	cd client && "$(FLUTTER)" pub get
+
+client-toolchain-check:
+	@echo "🔧 Checking Flutter client toolchain..."
+	@command -v "$(JAVA)" >/dev/null 2>&1 || { echo "❌ A full JDK 17 is required; java was not found" >&2; exit 1; }
+	@command -v "$(JAVAC)" >/dev/null 2>&1 || { echo "❌ A full JDK 17 is required; javac was not found" >&2; exit 1; }
+	@javac_version="$$("$(JAVAC)" -version 2>&1 | awk '{print $$2}')"; \
+	case "$$javac_version" in \
+		17|17.*) ;; \
+		*) echo "❌ JDK 17 is required; found javac $$javac_version" >&2; exit 1 ;; \
+	esac
+	@actual_version="$$("$(FLUTTER)" --version --machine | python3 -c 'import json, sys; print(json.load(sys.stdin)["frameworkVersion"])')"; \
+	if [ "$$actual_version" != "$(FLUTTER_VERSION)" ]; then \
+		echo "❌ Flutter $(FLUTTER_VERSION) is required; found $$actual_version" >&2; \
+		exit 1; \
+	fi
+
+client-android-policy-check:
+	@echo "🔐 Checking Android backup policy..."
+	PYTHONDONTWRITEBYTECODE=1 python3 client/tool/check_android_backup_policy.py
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s client/tool -p 'test_android_backup_policy.py'
+
+client-format: client-deps
+	@echo "✨ Formatting Flutter client..."
+	cd client && "$(DART)" format lib test
+
+client-format-check: client-deps
+	@echo "🔍 Checking Flutter client formatting..."
+	cd client && "$(DART)" format --output=none --set-exit-if-changed lib test
+
+client-analyze: client-deps
+	@echo "🔍 Analyzing Flutter client..."
+	cd client && "$(FLUTTER)" analyze
+
+client-test: client-deps
+	@echo "🧪 Running Flutter client tests..."
+	cd client && "$(FLUTTER)" test
+
+client-apk-debug: client-deps
+	@echo "🤖 Building Android client debug APK..."
+	cd client && "$(FLUTTER)" build apk --debug
+
+client-check: client-toolchain-check client-android-policy-check client-format-check client-analyze client-test client-apk-debug
+	@echo "✅ Flutter client checks passed"

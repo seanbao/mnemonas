@@ -8,9 +8,12 @@
 
 ## [Unreleased]
 
-MnemoNAS 仍处于开发阶段，尚未发布任何可用版本。当前源码仅用于开发和验证，不应承载真实数据或用于生产部署。问题与建议可通过 GitHub Issues 提交；当前不接收外部代码或文档提交。
+MnemoNAS 仍处于开发阶段，尚未发布任何可用版本。当前源码仅用于开发和验证，不应承载真实数据或用于生产部署。问题与建议可通过 GitHub Issues 提交。
 
 ### Added
+
+#### Flutter 客户端（开发中）
+- 新增面向 Android、Linux 和 Windows 的 Flutter 客户端工程，以 Android 作为首个可用平台目标。当前源码已接入服务器验证、Bearer 会话与单次 refresh token 轮换、安全会话存储、文件浏览和基本文件操作、流式上传与下载、Android Storage Access Framework 导出、账户流程及问题反馈入口；Linux 和 Windows 尚未完成原生构建与运行验证，客户端也尚未发布任何可用版本。
 
 #### Web UI 功能
 - **Dashboard 首页**

@@ -11,6 +11,8 @@ This guide explains how to set up a local MnemoNAS development environment, buil
 | Go | 1.25.12 | 1.25.12+ | Go control plane |
 | Rust | 1.92 | 1.92.x | Rust data plane and protobuf generator |
 | Node.js | `^20.19.0` or `>=22.12.0` | `.nvmrc` 22.x | Frontend |
+| Flutter | 3.44.4 | 3.44.4 | Android, Linux, and Windows client |
+| JDK | 17 | 17 | Android client Gradle builds |
 | protoc | 3.20 | 3.20.1 for CI parity | Regenerate protobuf code |
 | make | 3.x | 4.x | Build automation |
 
@@ -128,6 +130,7 @@ mnemonas/
 │   └── workspace/         # native file operations
 ├── dataplane/             # Rust data plane
 ├── web/                   # React frontend
+├── client/                # Flutter Android, Linux, and Windows client
 ├── proto/                 # gRPC protocol definitions
 ├── scripts/               # dev, test, deployment helpers
 ├── docs/                  # documentation
@@ -240,6 +243,73 @@ Frontend dev server: `http://localhost:5173`; API proxy target: `http://localhos
 
 To have `nasd` serve the static Web UI directly, build the frontend first or set `MNEMONAS_WEB_DIR=web/dist`.
 
+## Flutter Client Development
+
+`client/` uses Flutter 3.44.4 and retains Android, Linux, and Windows runners. Development currently targets Android as the first usable platform. The Linux and Windows runners preserve the cross-platform project boundary but do not indicate that either desktop build has completed release validation.
+
+### Supported Scope and Toolchain
+
+Android builds require Flutter 3.44.4, the Dart SDK, a complete JDK 17 installation that includes `javac`, and an Android SDK with platform tools, NDK `28.2.13676358`, and accepted Android licenses that passes `flutter doctor -v`. A Java runtime alone cannot compile the Gradle project. When multiple Java installations are present, `JAVA_HOME` and `PATH` must select the same complete JDK. CI uses fixed Flutter, JDK 17, and NDK versions; it does not automatically follow later releases from the `stable` channel.
+
+When Flutter and Dart are not on the default `PATH`, explicit binary paths can be supplied:
+
+```bash
+make client-check \
+  FLUTTER=/path/to/flutter/bin/flutter \
+  DART=/path/to/flutter/bin/dart \
+  JAVA=/path/to/jdk-17/bin/java \
+  JAVAC=/path/to/jdk-17/bin/javac
+```
+
+Gradle still reads its Java toolchain from the process environment. When the variables above are supplied explicitly, set `JAVA_HOME=/path/to/jdk-17` as well.
+
+### Local Builds and Gates
+
+Repository-level entry points:
+
+```bash
+make client-toolchain-check
+make client-android-policy-check
+make client-format
+make client-analyze
+make client-test
+make client-apk-debug
+make client-check
+```
+
+`make client-check` verifies the Flutter version, Dart formatting, static analysis, unit/widget tests, and the Android debug APK build in sequence. The debug APK is written to `client/build/app/outputs/flutter-apk/app-debug.apk`. `make client-format` changes Dart source files; the other gates do not format code automatically.
+
+Direct Flutter commands:
+
+```bash
+cd client
+flutter pub get
+dart format --output=none --set-exit-if-changed lib test
+flutter analyze
+flutter test
+flutter build apk --debug
+```
+
+### Platform Runner Dependencies
+
+- The Android runner requires JDK 17, Android SDK command-line tools, platform tools, the applicable compile SDK, build tools, and NDK `28.2.13676358`. Emulator validation also requires Android Emulator, hardware virtualization, and a usable AVD.
+- The Linux runner must build on a Linux host with `clang`, `cmake`, `ninja-build`, `pkg-config`, and GTK 3 development packages.
+- The Windows runner must build on a Windows host with the Visual Studio 2022 "Desktop development with C++" workload and a Windows SDK.
+
+CI currently builds only the Android debug APK. Linux and Windows builds require gates on their corresponding native runners; the Android CI result does not replace desktop-platform validation.
+
+### Android Signing and Device-Validation Boundary
+
+The debug APK is limited to development and test use and is not a distributable artifact. A release APK or AAB must never use the Android debug key. Release signing material must remain outside the repository, enter through protected CI secrets or restricted local files, and must not commit the keystore, alias, or passwords. `flutter build appbundle --release` can be treated as a release-candidate build only after independent release signing is configured.
+
+Formatting, analysis, tests, and a debug APK build prove only the host-side gates. They do not establish usability on physical hardware. A release candidate requires physical Android-device evidence for installation and upgrade, session recovery after process restart, HTTPS connectivity, login and token rotation, file selection and transfer, opening downloads, foreground/background transitions, network-interruption recovery, and permission-denial paths. Emulator results and CI artifacts do not replace this evidence; the client remains under development until physical-device validation is recorded.
+
+### Android App-Data Backup Policy
+
+The Android client stores session material through platform secure storage. To prevent encrypted `SharedPreferences` from being restored without the original device's Android Keystore key, the client does not participate in Android cloud backup, device-to-device migration, or app-data restore. `AndroidManifest.xml` disables `allowBackup` and references both the `full-backup-content` rules for Android 11 and earlier and the `data-extraction-rules` rules for Android 12 and later. Both rule sets exclude every app-controlled storage domain. A new login after reinstalling the app or moving to another device is the expected behavior under this security policy.
+
+Run `make client-android-policy-check` when the manifest or backup rules change. This static gate parses the manifest and both XML rule sets, verifies that neither cloud backup nor device transfer has been re-enabled, and runs regression tests for unsafe configurations.
+
 ## Ports
 
 | Service | Port | Description |
@@ -289,10 +359,12 @@ make check
 make docs-check
 make coverage
 make docker-check
+make client-check
 ```
 
 `make verify-changed` selects checks from the changed files in the worktree, staged area, or a configured base ref.
-It can select workflow, script, Go/Rust, frontend, E2E, Docker, documentation, dependency-security, toolchain configuration, quality configuration, example configuration, and public-access template checks.
+It can select workflow, script, Go/Rust, Web frontend, Flutter client, E2E, Docker, documentation, dependency-security, toolchain configuration, quality configuration, example configuration, and public-access template checks.
+Go tests default to `GO_TEST_PACKAGE_PARALLELISM=3`, limiting package-level concurrency to three so full race runs do not create resource contention across several heavy packages. Environments with more capacity may override this variable explicitly.
 When `go.mod`, `go.sum`, Cargo manifests or lockfiles, or Web npm manifests or lockfiles change, `verify-changed` adds dependency security checks; Web npm manifest or lockfile changes run npm audit with `NPM_AUDIT=1`.
 YAML configuration validation rejects syntax errors and duplicate keys within the same mapping so local parsing cannot silently override configuration values.
 Use `./scripts/verify-changed.sh --staged` to inspect staged content only, `./scripts/verify-changed.sh --base <ref>` to validate a branch range, and `--dry-run` to review selected commands without executing them.
