@@ -1755,14 +1755,14 @@ function SharePolicyCoverageSummary({ draft }: { draft: SharePolicyReviewInput }
   )
 }
 
-function SettingRow({ 
-  label, 
-  description, 
-  children 
-}: { 
+function SettingRow({
+  label,
+  description,
+  children
+}: {
   label: string
   description?: string
-  children: React.ReactNode 
+  children: React.ReactNode
 }) {
   return (
     <div className="flex flex-col gap-2 py-2.5 first:pt-0 last:pb-0 sm:flex-row sm:items-center sm:justify-between">
