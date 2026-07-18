@@ -7,6 +7,7 @@ import 'package:mnemonas_client/core/auth/session_store.dart';
 import 'package:mnemonas_client/core/files/file_models.dart';
 import 'package:mnemonas_client/core/files/files_api.dart';
 import 'package:mnemonas_client/core/network/api_client.dart';
+import 'package:mnemonas_client/core/search/search_api.dart';
 import 'package:mnemonas_client/core/server/server_endpoint.dart';
 import 'package:mnemonas_client/core/trash/trash_api.dart';
 import 'package:mnemonas_client/core/trash/trash_models.dart';
@@ -36,12 +37,18 @@ void main() {
       final client = ApiClient(endpoint: endpoint, sessionStore: sessionStore);
       final auth = AuthApi(client);
       final files = FilesApi(client);
+      final search = SearchApi(client);
       final trash = TrashApi(client);
       var activePassword = initialPassword;
       var loggedIn = false;
       final suffix = DateTime.now().microsecondsSinceEpoch;
       final directoryName = '.mnemonas-client-smoke-$suffix';
       final directoryPath = '/$directoryName';
+      final uploadedName = 'payload-$suffix.txt';
+      final uploadedPath = '$directoryPath/$uploadedName';
+      final renamedName = 'renamed-$suffix.txt';
+      final renamedPath = '$directoryPath/$renamedName';
+      final copiedName = 'copied-$suffix.txt';
       final sourceDirectory = await Directory.systemTemp.createTemp(
         'mnemonas-client-live-',
       );
@@ -132,12 +139,18 @@ void main() {
 
       await files.createDirectory(directoryPath);
       await files.uploadFile(
-        logicalPath: '$directoryPath/payload.txt',
+        logicalPath: uploadedPath,
         sourcePath: source.path,
       );
       var listing = await files.list(directoryPath);
-      final uploaded = _entryAt(listing.data, 'payload.txt');
+      final uploaded = _entryAt(listing.data, uploadedName);
       expect(uploaded.size, utf8.encode(payload).length);
+      expect(
+        (await search.search(
+          uploadedName,
+        )).data.results.map((result) => result.path).toList(growable: false),
+        <String>[uploadedPath],
+      );
 
       final downloadedPath = '${sourceDirectory.path}/downloaded.txt';
       final downloaded = await files.downloadFile(
@@ -146,15 +159,22 @@ void main() {
       );
       expect(await downloaded.file.readAsString(), payload);
 
-      await files.rename(logicalPath: uploaded.path, newName: 'renamed.txt');
+      await files.rename(logicalPath: uploaded.path, newName: renamedName);
+      expect((await search.search(uploadedName)).data.results, isEmpty);
+      expect(
+        (await search.search(
+          renamedName,
+        )).data.results.map((result) => result.path).toList(growable: false),
+        <String>[renamedPath],
+      );
       await files.copy(
-        sourcePath: '$directoryPath/renamed.txt',
-        destinationPath: '$directoryPath/copied.txt',
+        sourcePath: renamedPath,
+        destinationPath: '$directoryPath/$copiedName',
       );
       listing = await files.list(directoryPath);
       expect(
         listing.data.entries.map((entry) => entry.name),
-        containsAll(<String>['renamed.txt', 'copied.txt']),
+        containsAll(<String>[renamedName, copiedName]),
       );
 
       final rootBeforeDelete = await files.list('/');
@@ -170,6 +190,7 @@ void main() {
         )).data.entries.any((entry) => entry.path == directoryPath),
         isFalse,
       );
+      expect((await search.search(renamedName)).data.results, isEmpty);
 
       var trashListing = await trash.list();
       final trashed = trashListing.data.items.singleWhere(
@@ -181,6 +202,12 @@ void main() {
           '/',
         )).data.entries.any((entry) => entry.path == directoryPath),
         isTrue,
+      );
+      expect(
+        (await search.search(
+          renamedName,
+        )).data.results.map((result) => result.path).toList(growable: false),
+        <String>[renamedPath],
       );
 
       final restoredDirectory = (await files.list(
@@ -209,6 +236,7 @@ void main() {
         ),
         isFalse,
       );
+      expect((await search.search(renamedName)).data.results, isEmpty);
       await auth.logout();
       loggedIn = false;
       expect((await sessionStore.snapshot()).session, isNull);

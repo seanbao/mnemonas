@@ -15,6 +15,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../core/files/file_models.dart';
 import '../core/files/file_path.dart';
 import '../core/network/api_error.dart';
+import '../core/search/search_models.dart';
 import '../core/trash/trash_models.dart';
 import '../design_system/design_system.dart';
 import '../features/account/account_page.dart';
@@ -23,6 +24,7 @@ import '../features/auth/login_page.dart';
 import '../features/connection/connection_page.dart';
 import '../features/files/files_page.dart';
 import '../features/home/home_page.dart';
+import '../features/search/search_page.dart';
 import '../features/shell/app_shell.dart';
 import '../features/trash/trash_page.dart';
 import '../platform/file_exporter.dart';
@@ -193,6 +195,8 @@ class _AuthenticatedHome extends StatefulWidget {
 
 class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
   AppDestination _destination = AppDestination.home;
+  bool _searchOpen = false;
+  int _searchPresentationGeneration = 0;
   String? _clientVersion;
 
   @override
@@ -214,7 +218,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
 
   @override
   Widget build(BuildContext context) {
-    final child = switch (_destination) {
+    final destinationChild = switch (_destination) {
       AppDestination.home => HomePage(
         viewModel: HomeViewModel.ready(_homeSummary(widget.state)),
         onRefresh: widget.controller.refreshOverview,
@@ -262,10 +266,20 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
         onReportIssue: () => unawaited(_openIssueFeedback()),
       ),
     };
+    final child = _searchOpen
+        ? SearchPage(
+            viewModel: _searchViewModel(widget.state),
+            onSearch: _searchFiles,
+            onClear: _clearSearch,
+            onClose: _closeSearch,
+            onOpenResult: _openSearchResult,
+          )
+        : destinationChild;
     return AppShell(
       destination: _destination,
       onDestinationSelected: _selectDestination,
-      onSearch: () => _showSearchUnavailable(context),
+      title: _searchOpen ? '搜索' : null,
+      onSearch: _searchOpen ? null : _openSearch,
       actions: <Widget>[
         IconButton(
           onPressed: _showTransfers,
@@ -294,6 +308,24 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
       path: state.currentPath,
       message: state.errorMessage ?? '目录加载失败',
     );
+  }
+
+  SearchViewModel _searchViewModel(ClientState state) {
+    final listing = state.search;
+    if (listing != null) {
+      return SearchViewModel.ready(
+        listing: listing,
+        refreshing: state.isSearchBusy,
+        refreshErrorMessage: state.searchErrorMessage,
+      );
+    }
+    if (state.isSearchBusy) {
+      return SearchViewModel.loading(state.searchQuery);
+    }
+    if (state.searchErrorMessage case final message?) {
+      return SearchViewModel.error(query: state.searchQuery, message: message);
+    }
+    return SearchViewModel.idle(query: state.searchQuery);
   }
 
   TrashViewModel _trashViewModel(ClientState state) {
@@ -331,11 +363,107 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
   }
 
   void _selectDestination(AppDestination destination) {
-    setState(() => _destination = destination);
+    if (_searchOpen) {
+      _searchPresentationGeneration++;
+      widget.controller.cancelSearch();
+    }
+    setState(() {
+      _destination = destination;
+      _searchOpen = false;
+    });
     if (destination == AppDestination.trash && widget.state.trash == null) {
       unawaited(_refreshTrash());
     }
   }
+
+  Future<void> _searchFiles(String query) async {
+    _searchPresentationGeneration++;
+    try {
+      await widget.controller.searchFiles(query);
+    } on Object {
+      // The controller exposes the search error through SearchViewModel.
+    }
+  }
+
+  void _openSearch() {
+    _searchPresentationGeneration++;
+    setState(() => _searchOpen = true);
+  }
+
+  void _clearSearch() {
+    _searchPresentationGeneration++;
+    widget.controller.clearSearch();
+  }
+
+  void _closeSearch() {
+    _searchPresentationGeneration++;
+    widget.controller.cancelSearch();
+    if (mounted) {
+      setState(() => _searchOpen = false);
+    }
+  }
+
+  Future<void> _openSearchResult(SearchResultItem result) async {
+    final generation = ++_searchPresentationGeneration;
+    try {
+      final targetPath = result.isDirectory ? result.path : result.parentPath;
+      final response = await widget.controller.resolveDirectoryForSearch(
+        targetPath,
+      );
+      if (!_isSearchPresentationCurrent(generation)) {
+        return;
+      }
+      final listing = response.data;
+      if (result.isDirectory) {
+        if (listing.path != result.path) {
+          _showMessage('文件夹可能已移动或删除，请重新搜索。');
+          return;
+        }
+        widget.controller.presentDirectoryListing(
+          listing,
+          persistenceWarning: response.warnings.isNotEmpty,
+        );
+        widget.controller.cancelSearch();
+        setState(() {
+          _destination = AppDestination.files;
+          _searchOpen = false;
+        });
+        return;
+      }
+
+      FileEntry? currentEntry;
+      if (listing.path == result.parentPath) {
+        for (final entry in listing.entries) {
+          if (entry.path == result.path && !entry.isDirectory) {
+            currentEntry = entry;
+            break;
+          }
+        }
+      }
+      if (currentEntry == null) {
+        _showMessage('文件可能已移动或删除，请重新搜索。');
+        return;
+      }
+
+      widget.controller.presentDirectoryListing(
+        listing,
+        persistenceWarning: response.warnings.isNotEmpty,
+      );
+      widget.controller.cancelSearch();
+      setState(() {
+        _destination = AppDestination.files;
+        _searchOpen = false;
+      });
+      await _openEntry(currentEntry);
+    } on Object catch (error) {
+      if (_isSearchPresentationCurrent(generation)) {
+        _showMessage(clientErrorMessage(error));
+      }
+    }
+  }
+
+  bool _isSearchPresentationCurrent(int generation) =>
+      mounted && _searchOpen && generation == _searchPresentationGeneration;
 
   Future<void> _refreshTrash() async {
     try {
@@ -1130,28 +1258,4 @@ String _formatBytes(int bytes) {
     unit++;
   } while (value >= 1024 && unit < units.length - 1);
   return '${value.toStringAsFixed(value >= 10 ? 1 : 2)} ${units[unit]}';
-}
-
-void _showSearchUnavailable(BuildContext context) {
-  unawaited(
-    showModalBottomSheet<void>(
-      context: context,
-      showDragHandle: true,
-      builder: (context) => const SafeArea(
-        child: Padding(
-          padding: EdgeInsets.fromLTRB(
-            MnemoSpacing.lg,
-            MnemoSpacing.sm,
-            MnemoSpacing.lg,
-            MnemoSpacing.xl,
-          ),
-          child: MnemoEmptyState(
-            icon: Icons.search_rounded,
-            title: '搜索尚未接入',
-            message: '当前版本先完成稳定的文件访问和传输流程。',
-          ),
-        ),
-      ),
-    ),
-  );
 }

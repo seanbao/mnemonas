@@ -60,6 +60,24 @@ void main() {
       isTrue,
     );
   });
+
+  testWidgets('can hide the search action for an active search page', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        AppShell(
+          destination: AppDestination.files,
+          onDestinationSelected: (_) {},
+          title: '搜索',
+          child: const Center(child: Text('搜索内容')),
+        ),
+      ),
+    );
+
+    expect(find.text('搜索'), findsOneWidget);
+    expect(find.byKey(const Key('app-shell-search')), findsNothing);
+  });
 }
 
 Widget _app(Widget home) {

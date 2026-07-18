@@ -12,6 +12,8 @@ import '../core/files/file_path.dart';
 import '../core/files/files_api.dart';
 import '../core/network/api_client.dart';
 import '../core/network/api_error.dart';
+import '../core/search/search_api.dart';
+import '../core/search/search_models.dart';
 import '../core/server/server_endpoint.dart';
 import '../core/server/server_preferences.dart';
 import '../core/system/system_api.dart';
@@ -68,15 +70,20 @@ class ClientController extends Notifier<ClientState> {
   ApiClient? _client;
   AuthApi? _auth;
   FilesApi? _files;
+  SearchApi? _search;
   SystemApi? _system;
   TrashApi? _trash;
   CancelToken? _directoryCancellation;
   CancelToken? _overviewCancellation;
+  CancelToken? _searchCancellation;
+  CancelToken? _searchTargetCancellation;
   CancelToken? _trashReadCancellation;
   CancelToken? _trashMutationCancellation;
   Future<void> _preferenceMutationTail = Future<void>.value();
   var _contextEpoch = 0;
   var _directorySequence = 0;
+  var _searchSequence = 0;
+  var _searchTargetSequence = 0;
   var _trashSequence = 0;
   var _transferSequence = 0;
   var _disposed = false;
@@ -593,6 +600,144 @@ class ClientController extends Notifier<ClientState> {
       if (identical(_trashReadCancellation, cancellation)) {
         _trashReadCancellation = null;
       }
+    }
+  }
+
+  Future<void> searchFiles(
+    String input, {
+    int limit = defaultSearchResultLimit,
+  }) async {
+    final query = normalizeSearchQuery(input);
+    final canonicalLimit = validateSearchResultLimit(limit);
+    final epoch = _contextEpoch;
+    final sequence = ++_searchSequence;
+    ++_searchTargetSequence;
+    _searchTargetCancellation?.cancel('Search query changed');
+    _searchTargetCancellation = null;
+    _searchCancellation?.cancel('Superseded search request');
+    final cancellation = CancelToken();
+    _searchCancellation = cancellation;
+    final search = _requireSearch();
+    final previous = state.search;
+    final preservePrevious =
+        previous != null &&
+        previous.query == query &&
+        previous.limit == canonicalLimit;
+    state = state.copyWith(
+      searchQuery: query,
+      search: preservePrevious ? previous : null,
+      isSearchBusy: true,
+      searchErrorMessage: null,
+    );
+    try {
+      final response = await search.search(
+        query,
+        limit: canonicalLimit,
+        cancelToken: cancellation,
+      );
+      if (!_isSearchRequestCurrent(epoch, sequence, cancellation)) {
+        return;
+      }
+      state = state.copyWith(
+        search: response.data,
+        isSearchBusy: false,
+        searchErrorMessage: null,
+      );
+    } on Object catch (error) {
+      if (!_isSearchRequestCurrent(epoch, sequence, cancellation) ||
+          _isCancellation(error)) {
+        return;
+      }
+      if (!await handleAuthenticationFailure(error, expectedEpoch: epoch)) {
+        state = state.copyWith(
+          isSearchBusy: false,
+          searchErrorMessage: clientErrorMessage(error),
+        );
+      }
+      rethrow;
+    } finally {
+      if (identical(_searchCancellation, cancellation)) {
+        _searchCancellation = null;
+      }
+    }
+  }
+
+  Future<ApiResponse<DirectoryListing>> resolveDirectoryForSearch(
+    String path,
+  ) async {
+    final normalized = normalizeLogicalPath(path);
+    final epoch = _contextEpoch;
+    final sequence = ++_searchTargetSequence;
+    _searchTargetCancellation?.cancel('Superseded search target request');
+    final cancellation = CancelToken();
+    _searchTargetCancellation = cancellation;
+    final files = _requireFiles();
+    try {
+      final response = await files.list(normalized, cancelToken: cancellation);
+      if (!_isSearchTargetRequestCurrent(epoch, sequence, cancellation)) {
+        throw StateError('The search target request was superseded');
+      }
+      return response;
+    } on Object catch (error) {
+      if (_isSearchTargetRequestCurrent(epoch, sequence, cancellation) &&
+          !_isCancellation(error)) {
+        await handleAuthenticationFailure(error, expectedEpoch: epoch);
+      }
+      rethrow;
+    } finally {
+      if (identical(_searchTargetCancellation, cancellation)) {
+        _searchTargetCancellation = null;
+      }
+    }
+  }
+
+  void presentDirectoryListing(
+    DirectoryListing listing, {
+    bool persistenceWarning = false,
+  }) {
+    if (state.stage != ClientStage.ready) {
+      throw StateError('The authenticated client is not ready');
+    }
+    final normalized = normalizeLogicalPath(listing.path);
+    if (normalized != listing.path) {
+      throw const FormatException('Directory path must be canonical');
+    }
+    _directorySequence++;
+    _directoryCancellation?.cancel('Resolved search target selected');
+    _directoryCancellation = null;
+    state = state.copyWith(
+      currentPath: listing.path,
+      directory: listing,
+      isBusy: false,
+      errorMessage: null,
+      notice: persistenceWarning ? '目录已加载，但服务器报告了持久化警告。' : state.notice,
+    );
+  }
+
+  void clearSearch() {
+    ++_searchSequence;
+    ++_searchTargetSequence;
+    _searchCancellation?.cancel('Search cleared');
+    _searchCancellation = null;
+    _searchTargetCancellation?.cancel('Search cleared');
+    _searchTargetCancellation = null;
+    state = state.copyWith(
+      searchQuery: '',
+      search: null,
+      isSearchBusy: false,
+      searchErrorMessage: null,
+    );
+  }
+
+  void cancelSearch() {
+    ++_searchSequence;
+    ++_searchTargetSequence;
+    _searchCancellation?.cancel('Search closed');
+    _searchCancellation = null;
+    _searchTargetCancellation?.cancel('Search closed');
+    _searchTargetCancellation = null;
+    if (state.isSearchBusy) {
+      state = state.copyWith(isSearchBusy: false);
     }
   }
 
@@ -1241,6 +1386,7 @@ class ClientController extends Notifier<ClientState> {
     _client = client;
     _auth = AuthApi(client);
     _files = FilesApi(client);
+    _search = SearchApi(client);
     _system = SystemApi(client);
     _trash = TrashApi(client);
     return epoch;
@@ -1249,11 +1395,17 @@ class ClientController extends Notifier<ClientState> {
   int _invalidateContext() {
     _contextEpoch++;
     _directorySequence++;
+    _searchSequence++;
+    _searchTargetSequence++;
     _trashSequence++;
     _directoryCancellation?.cancel('Client context changed');
     _directoryCancellation = null;
     _overviewCancellation?.cancel('Client context changed');
     _overviewCancellation = null;
+    _searchCancellation?.cancel('Client context changed');
+    _searchCancellation = null;
+    _searchTargetCancellation?.cancel('Client context changed');
+    _searchTargetCancellation = null;
     _trashReadCancellation?.cancel('Client context changed');
     _trashReadCancellation = null;
     _trashMutationCancellation?.cancel('Client context changed');
@@ -1263,6 +1415,7 @@ class ClientController extends Notifier<ClientState> {
     _client = null;
     _auth = null;
     _files = null;
+    _search = null;
     _system = null;
     _trash = null;
     return _contextEpoch;
@@ -1295,6 +1448,24 @@ class ClientController extends Notifier<ClientState> {
       _isContextCurrent(epoch) &&
       sequence == _trashSequence &&
       identical(_trashReadCancellation, cancellation);
+
+  bool _isSearchRequestCurrent(
+    int epoch,
+    int sequence,
+    CancelToken cancellation,
+  ) =>
+      _isContextCurrent(epoch) &&
+      sequence == _searchSequence &&
+      identical(_searchCancellation, cancellation);
+
+  bool _isSearchTargetRequestCurrent(
+    int epoch,
+    int sequence,
+    CancelToken cancellation,
+  ) =>
+      _isContextCurrent(epoch) &&
+      sequence == _searchTargetSequence &&
+      identical(_searchTargetCancellation, cancellation);
 
   bool _isTrashMutationCurrent(int epoch, CancelToken cancellation) =>
       _isContextCurrent(epoch) &&
@@ -1415,6 +1586,14 @@ class ClientController extends Notifier<ClientState> {
       throw StateError('The server is not configured');
     }
     return files;
+  }
+
+  SearchApi _requireSearch() {
+    final search = _search;
+    if (search == null) {
+      throw StateError('The server is not configured');
+    }
+    return search;
   }
 
   TrashApi _requireTrash() {
