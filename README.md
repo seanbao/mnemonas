@@ -47,9 +47,9 @@ MnemoNAS 是一个开源的自托管 NAS 系统，面向日常文件管理。
 
 ### Flutter 客户端（开发中）
 
-[`client/`](client/README.md) 包含 Android、Linux 和 Windows 的 Flutter 客户端工程，Android 是首个可用平台目标。当前源码已接入服务器连接、带 revision/CAS 隔离的 Bearer 会话与 refresh token 轮换、文件浏览、上传下载、重命名、移动、复制、两阶段安全删除、回收站恢复与精确永久删除、账户管理和问题反馈。
+[`client/`](client/README.md) 包含 Android、Linux 和 Windows 的 Flutter 客户端工程，Android 是首个可用平台目标。当前源码已接入服务器连接、带 revision/CAS 隔离的 Bearer 会话与 refresh token 轮换、文件浏览、有界文件名搜索、上传下载、重命名、移动、复制、两阶段安全删除、回收站恢复与精确永久删除、账户管理和问题反馈。
 
-客户端尚未发布任何可用版本。搜索、相册索引、后台或可恢复传输、桌面平台原生验证、真实 Android 设备验收和正式发布签名仍未完成；Linux 和 Windows runner 目前只保留跨平台工程边界。
+客户端尚未发布任何可用版本。全文与相册索引、搜索分页、后台或可恢复传输、桌面平台原生验证、真实 Android 设备验收和正式发布签名仍未完成；Linux 和 Windows runner 目前只保留跨平台工程边界。
 
 ## 架构
 
