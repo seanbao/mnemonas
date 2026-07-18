@@ -272,6 +272,8 @@ check_torture_workflow() {
 	require_file_contains "$path" "permissions:"
 	require_file_contains "$path" "contents: read"
 	require_file_contains "$path" "RUN_LIVE_FAULTS: '0'"
+	require_file_contains "$path" "GO_TEST_TIMEOUT: '30m'"
+	require_file_contains "$path" "GO_TEST_PACKAGE_PARALLELISM: '3'"
 	require_file_contains "$path" "run: make test-torture"
 }
 
@@ -287,6 +289,11 @@ check_ci_workflow() {
 	require_file_contains "$path" "run: make docs-check"
 	require_file_contains "$path" "run: make toolchains-check"
 	require_file_contains "$path" "go test -v -race -coverprofile=coverage.out"
+	require_file_contains "$path" "GO_TEST_TIMEOUT: '30m'"
+	require_file_contains "$path" "GO_TEST_PACKAGE_PARALLELISM: '3'"
+	require_file_contains "$path" "-timeout=\"\${GO_TEST_TIMEOUT}\""
+	require_file_contains "$path" "-p=\"\${GO_TEST_PACKAGE_PARALLELISM}\""
+	require_workflow_job_contains "$path" "go" "timeout-minutes: 60"
 	require_file_contains "$path" "npm audit --audit-level=\"\${{ env.NPM_AUDIT_LEVEL }}\""
 	require_file_contains "$path" "run: npm run test:e2e"
 	require_file_contains "$path" "run: ./scripts/docker-smoke.sh mnemonas:test"
@@ -325,7 +332,9 @@ check_release_workflow() {
 check_makefile_targets() {
 	local path="Makefile"
 
-	require_file_contains "$path" "GO_TEST_TIMEOUT ?= 20m"
+	require_file_contains "$path" "GO_TEST_TIMEOUT ?= 30m"
+	require_file_contains "$path" "GO_TEST_PACKAGE_PARALLELISM ?= 3"
+	require_file_contains "$path" 'GO_TEST_FLAGS ?= -timeout=$(GO_TEST_TIMEOUT) -p=$(GO_TEST_PACKAGE_PARALLELISM)'
 	require_file_contains "$path" "go-packages:"
 	require_file_contains "$path" "workflows-check:"
 	require_file_contains "$path" "scripts-check:"

@@ -185,7 +185,9 @@ EOF
 	cat >Makefile <<'EOF'
 .PHONY: go-packages workflows-check scripts-check toolchains-check docs-check security-check test test-torture docker docker-smoke docker-check check verify-changed release-readiness quick-check lint
 
-GO_TEST_TIMEOUT ?= 20m
+GO_TEST_TIMEOUT ?= 30m
+GO_TEST_PACKAGE_PARALLELISM ?= 3
+GO_TEST_FLAGS ?= -timeout=$(GO_TEST_TIMEOUT) -p=$(GO_TEST_PACKAGE_PARALLELISM)
 
 go-packages:
 	@true
@@ -317,6 +319,10 @@ on:
 permissions:
   contents: read
 
+env:
+  GO_TEST_TIMEOUT: '30m'
+  GO_TEST_PACKAGE_PARALLELISM: '3'
+
 jobs:
   workflows:
     steps:
@@ -334,8 +340,9 @@ jobs:
     steps:
       - run: make docs-check
   go:
+    timeout-minutes: 60
     steps:
-      - run: CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -v -race -coverprofile=coverage.out ./...
+      - run: CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -v -race -coverprofile=coverage.out -timeout="${GO_TEST_TIMEOUT}" -p="${GO_TEST_PACKAGE_PARALLELISM}" ./...
   frontend:
     steps:
       - run: npm audit --audit-level="${{ env.NPM_AUDIT_LEVEL }}"
@@ -419,6 +426,8 @@ jobs:
     steps:
       - name: Run non-destructive torture matrix
         env:
+          GO_TEST_TIMEOUT: '30m'
+          GO_TEST_PACKAGE_PARALLELISM: '3'
           RUN_LIVE_FAULTS: '0'
         run: make test-torture
 EOF
@@ -843,6 +852,42 @@ assert_file_contains "$output_dir/missing-ci-docker-smoke.err" ".github/workflow
 assert_file_contains "$output_dir/missing-ci-docker-smoke.err" "run: ./scripts/docker-smoke.sh mnemonas:test"
 git checkout -q -- .github/workflows/ci.yml
 
+sed -i.bak "/GO_TEST_TIMEOUT: '30m'/d" .github/workflows/ci.yml
+rm -f .github/workflows/ci.yml.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-ci-go-test-timeout.out" 2>"$output_dir/missing-ci-go-test-timeout.err"; then
+	fail "release readiness accepted a CI workflow without the Go package timeout"
+fi
+assert_file_contains "$output_dir/missing-ci-go-test-timeout.err" ".github/workflows/ci.yml is missing required text"
+assert_file_contains "$output_dir/missing-ci-go-test-timeout.err" "GO_TEST_TIMEOUT: '30m'"
+git checkout -q -- .github/workflows/ci.yml
+
+sed -i.bak "/GO_TEST_PACKAGE_PARALLELISM: '3'/d" .github/workflows/ci.yml
+rm -f .github/workflows/ci.yml.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-ci-go-test-parallelism.out" 2>"$output_dir/missing-ci-go-test-parallelism.err"; then
+	fail "release readiness accepted a CI workflow without bounded Go package parallelism"
+fi
+assert_file_contains "$output_dir/missing-ci-go-test-parallelism.err" ".github/workflows/ci.yml is missing required text"
+assert_file_contains "$output_dir/missing-ci-go-test-parallelism.err" "GO_TEST_PACKAGE_PARALLELISM: '3'"
+git checkout -q -- .github/workflows/ci.yml
+
+sed -i.bak 's/timeout-minutes: 60/timeout-minutes: 30/' .github/workflows/ci.yml
+rm -f .github/workflows/ci.yml.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/short-ci-go-job-timeout.out" 2>"$output_dir/short-ci-go-job-timeout.err"; then
+	fail "release readiness accepted an undersized CI Go job timeout"
+fi
+assert_file_contains "$output_dir/short-ci-go-job-timeout.err" ".github/workflows/ci.yml job go is missing required text"
+assert_file_contains "$output_dir/short-ci-go-job-timeout.err" "timeout-minutes: 60"
+git checkout -q -- .github/workflows/ci.yml
+
+sed -i.bak 's/ -p="${GO_TEST_PACKAGE_PARALLELISM}"//' .github/workflows/ci.yml
+rm -f .github/workflows/ci.yml.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-ci-go-test-parallel-flag.out" 2>"$output_dir/missing-ci-go-test-parallel-flag.err"; then
+	fail "release readiness accepted a CI Go test command without bounded package parallelism"
+fi
+assert_file_contains "$output_dir/missing-ci-go-test-parallel-flag.err" ".github/workflows/ci.yml is missing required text"
+assert_file_contains "$output_dir/missing-ci-go-test-parallel-flag.err" '-p="${GO_TEST_PACKAGE_PARALLELISM}"'
+git checkout -q -- .github/workflows/ci.yml
+
 sed -i.bak '/verify-release-artifacts/d' .github/workflows/release.yml
 rm -f .github/workflows/release.yml.bak
 if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-release-artifact-verifier.out" 2>"$output_dir/missing-release-artifact-verifier.err"; then
@@ -942,6 +987,15 @@ assert_file_contains "$output_dir/missing-torture-safe-mode.err" ".github/workfl
 assert_file_contains "$output_dir/missing-torture-safe-mode.err" "RUN_LIVE_FAULTS: '0'"
 git checkout -q -- .github/workflows/torture.yml
 
+sed -i.bak "/GO_TEST_PACKAGE_PARALLELISM: '3'/d" .github/workflows/torture.yml
+rm -f .github/workflows/torture.yml.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-torture-go-test-parallelism.out" 2>"$output_dir/missing-torture-go-test-parallelism.err"; then
+	fail "release readiness accepted a torture workflow without bounded Go package parallelism"
+fi
+assert_file_contains "$output_dir/missing-torture-go-test-parallelism.err" ".github/workflows/torture.yml is missing required text"
+assert_file_contains "$output_dir/missing-torture-go-test-parallelism.err" "GO_TEST_PACKAGE_PARALLELISM: '3'"
+git checkout -q -- .github/workflows/torture.yml
+
 sed -i.bak '/^docker-check:/d' Makefile
 rm -f Makefile.bak
 if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-makefile-docker-check.out" 2>"$output_dir/missing-makefile-docker-check.err"; then
@@ -958,6 +1012,33 @@ if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/m
 fi
 assert_file_contains "$output_dir/missing-makefile-release-readiness.err" "Makefile is missing required text"
 assert_file_contains "$output_dir/missing-makefile-release-readiness.err" "release-readiness:"
+git checkout -q -- Makefile
+
+sed -i.bak 's/GO_TEST_TIMEOUT ?= 30m/GO_TEST_TIMEOUT ?= 20m/' Makefile
+rm -f Makefile.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/short-makefile-go-test-timeout.out" 2>"$output_dir/short-makefile-go-test-timeout.err"; then
+	fail "release readiness accepted an undersized Makefile Go package timeout"
+fi
+assert_file_contains "$output_dir/short-makefile-go-test-timeout.err" "Makefile is missing required text"
+assert_file_contains "$output_dir/short-makefile-go-test-timeout.err" "GO_TEST_TIMEOUT ?= 30m"
+git checkout -q -- Makefile
+
+sed -i.bak '/^GO_TEST_PACKAGE_PARALLELISM ?= 3$/d' Makefile
+rm -f Makefile.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-makefile-go-test-parallelism.out" 2>"$output_dir/missing-makefile-go-test-parallelism.err"; then
+	fail "release readiness accepted a Makefile without bounded Go package parallelism"
+fi
+assert_file_contains "$output_dir/missing-makefile-go-test-parallelism.err" "Makefile is missing required text"
+assert_file_contains "$output_dir/missing-makefile-go-test-parallelism.err" "GO_TEST_PACKAGE_PARALLELISM ?= 3"
+git checkout -q -- Makefile
+
+sed -i.bak 's/ -p=$(GO_TEST_PACKAGE_PARALLELISM)//' Makefile
+rm -f Makefile.bak
+if ./scripts/release-readiness.sh --allow-dirty --skip-checklist >"$output_dir/missing-makefile-go-test-flags.out" 2>"$output_dir/missing-makefile-go-test-flags.err"; then
+	fail "release readiness accepted a Makefile Go test flag set without bounded package parallelism"
+fi
+assert_file_contains "$output_dir/missing-makefile-go-test-flags.err" "Makefile is missing required text"
+assert_file_contains "$output_dir/missing-makefile-go-test-flags.err" 'GO_TEST_FLAGS ?= -timeout=$(GO_TEST_TIMEOUT) -p=$(GO_TEST_PACKAGE_PARALLELISM)'
 git checkout -q -- Makefile
 
 sed -i.bak '/Sensitive values such as passwords/d' .github/ISSUE_TEMPLATE/bug_report.yml

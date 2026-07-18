@@ -63,6 +63,8 @@ jobs:
 
       - name: Run non-destructive torture matrix
         env:
+          GO_TEST_TIMEOUT: '30m'
+          GO_TEST_PACKAGE_PARALLELISM: '3'
           GO_FUZZTIME: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.fuzztime || '10s' }}
           MNEMONAS_E2E_ROOT: ${{ runner.temp }}/mnemonas-torture
           RUN_LIVE_FAULTS: '0'

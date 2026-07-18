@@ -379,7 +379,7 @@ make client-check
 
 `make verify-changed` selects checks from the changed files in the worktree, staged area, or a configured base ref.
 It can select workflow, script, Go/Rust, Web frontend, Flutter client, E2E, Docker, documentation, dependency-security, toolchain configuration, quality configuration, example configuration, and public-access template checks.
-Go tests default to `GO_TEST_PACKAGE_PARALLELISM=3`, limiting package-level concurrency to three so full race runs do not create resource contention across several heavy packages. Environments with more capacity may override this variable explicitly.
+Go tests default to `GO_TEST_PACKAGE_PARALLELISM=3` and `GO_TEST_TIMEOUT=30m`, limiting package-level concurrency to three while retaining package-level headroom for heavy race tests so resource contention and verbose logging do not cause false timeouts. Environments with more capacity may override these variables explicitly.
 When `go.mod`, `go.sum`, Cargo manifests or lockfiles, or Web npm manifests or lockfiles change, `verify-changed` adds dependency security checks; Web npm manifest or lockfile changes run npm audit with `NPM_AUDIT=1`.
 YAML configuration validation rejects syntax errors and duplicate keys within the same mapping so local parsing cannot silently override configuration values.
 Use `./scripts/verify-changed.sh --staged` to inspect staged content only, `./scripts/verify-changed.sh --base <ref>` to validate a branch range, and `--dry-run` to review selected commands without executing them.

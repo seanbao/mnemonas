@@ -27,6 +27,8 @@ env:
   CARGO_AUDIT_VERSION: '0.22.1'
   NPM_AUDIT_LEVEL: 'moderate'
   GO_COVERAGE_MIN: '75'
+  GO_TEST_TIMEOUT: '30m'
+  GO_TEST_PACKAGE_PARALLELISM: '3'
 
 jobs:
   workflows:
@@ -108,7 +110,7 @@ jobs:
   go:
     name: Go
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
@@ -150,7 +152,7 @@ jobs:
       - name: Test
         run: |
           mapfile -t packages < <(make --no-print-directory go-packages)
-          CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -v -race -coverprofile=coverage.out "${packages[@]}"
+          CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -v -race -coverprofile=coverage.out -timeout="${GO_TEST_TIMEOUT}" -p="${GO_TEST_PACKAGE_PARALLELISM}" "${packages[@]}"
           coverage=$(go tool cover -func=coverage.out | awk '/^total:/ { gsub("%", "", $3); print $3 }')
           awk -v coverage="$coverage" -v min="${GO_COVERAGE_MIN}" 'BEGIN {
             if ((coverage + 0) < (min + 0)) {

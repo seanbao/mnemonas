@@ -378,7 +378,7 @@ make client-check
 
 `make verify-changed` 会根据 worktree、staged area 或指定 base ref 中的变更文件选择检查。
 可选择 workflow、脚本、Go/Rust、Web 前端、Flutter 客户端、E2E、Docker、文档、依赖安全、工具链配置、质量配置、示例配置和 public-access 模板检查。
-Go 测试默认通过 `GO_TEST_PACKAGE_PARALLELISM=3` 将包级并发限制为 3，避免 race 全包测试因多个重包同时运行而发生资源争用；需要在资源更充足的环境中调整时，可显式覆盖该变量。
+Go 测试默认通过 `GO_TEST_PACKAGE_PARALLELISM=3` 将包级并发限制为 3，并通过 `GO_TEST_TIMEOUT=30m` 为重负载 race 包保留包级执行余量，避免多个重包竞争资源和详细日志开销造成误超时；需要在资源更充足的环境中调整时，可显式覆盖这些变量。
 当 `go.mod`、`go.sum`、Cargo 清单/锁文件或 Web npm 清单/锁文件变化时，`verify-changed` 会追加依赖安全检查；Web npm 清单或锁文件变化会使用 `NPM_AUDIT=1` 运行 npm audit。
 YAML 配置校验会拒绝语法错误和同一映射内的重复键，避免本地解析时静默覆盖配置值。
 使用 `./scripts/verify-changed.sh --staged` 只检查暂存内容，使用 `./scripts/verify-changed.sh --base <ref>` 检查分支范围，使用 `--dry-run` 查看将运行的命令而不执行。

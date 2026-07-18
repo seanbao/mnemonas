@@ -62,7 +62,7 @@
 - `release-readiness` 会检查安全策略和支持说明保留私密漏洞报告入口、禁止公开漏洞细节、dataplane 端口不外露、依赖安全检查和公网直连限制等关键提示。
 - `release-readiness` 会要求发布清单和双语 release notes 保留 `mnemonas-doctor --public-domain`、`scripts/public-go-live-smoke.sh`、`scripts/backup-restore-drill-smoke.sh`、`scripts/release-go-live-check.sh` 和 `cloud-firewall-checklist` 入口，避免公网部署环境复核、发布后上线总核验和恢复演练入口从最终发布流程中遗漏。
 - `release-readiness` 会拒绝不是当前 HEAD 祖先的 base ref，避免用旁支范围生成误导性的发布就绪摘要。
-- Go 测试入口现在保留 20 分钟包级超时，避免重负载 race 包在完整分支验证中被 Go 默认 10 分钟超时中断。
+- Go 测试入口现在保留 30 分钟包级超时，并将完整 race 测试的包级并发限制为 3；CI 使用相同参数且为 Go job 保留 60 分钟总时限，避免重负载包因资源竞争和详细日志开销误超时。
 - 文档检查会拒绝 API 示例中可复制的 `?path=/...` 裸路径查询，要求恢复和收藏检查等 `path` 查询示例使用 `%2F...` 编码形式。
 - 文档检查会要求双语 release notes 发布前验证清单中的 Playwright E2E、前端单测数量、Docker image 和 Docker smoke 端口与 hardening 审查摘要中的最新完整验证证据一致，避免验证证据刷新后发布说明局部数据滞后。
 - 文档检查会要求双语 Docker 部署指南保留发布后 `verify-published-release.sh` 命令、版本和仓库参数、可选 artifact 目录、镜像 manifest 重试参数、`--skip-image-check`、`--keep-artifacts`、`--keep-published-artifacts`、空目录要求、dash-prefixed artifact 目录和仓库名下载前校验说明，避免发布后核验说明退化。
