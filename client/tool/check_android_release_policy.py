@@ -104,6 +104,17 @@ def _validate_gradle(path: Path) -> None:
     for description, token in required_tokens.items():
         if token not in contents:
             raise PolicyError(f"{description} is missing")
+    _require_once(
+        contents,
+        (
+            r"tasks[.]configureEach\s*[{]\s*"
+            r"if\s*[(]\s*releaseSigningResolution[.]material\s*!=\s*null\s*[)]"
+            r"\s*[{]\s*notCompatibleWithConfigurationCache\s*[(]\s*"
+            r'"Signing credentials must never be serialized into the '
+            r'configuration cache[.]"\s*,?\s*[)]'
+        ),
+        "global release signing configuration-cache exclusion",
+    )
     if 'rootProject.file("key.properties")' in contents:
         raise PolicyError("repository-local key.properties fallback is forbidden")
 

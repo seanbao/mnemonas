@@ -21,6 +21,9 @@ EXPECTED_APPLICATION_ID = "com.mnemonas.app"
 TEST_PASSWORD = "MnemoNASReleaseTestOnly2026"
 WRONG_KEY_PASSWORD = "WrongTestKeyPassword2026"
 TEST_ALIAS = "mnemonas-release-test"
+SIGNING_CONFIGURATION_CACHE_REASON = (
+    "Signing credentials must never be serialized into the configuration cache."
+)
 
 
 class GateError(RuntimeError):
@@ -94,6 +97,41 @@ def _remove_owned_file(path: Path, contents: bytes) -> None:
         pass
 
 
+def _with_local_property_updates(
+    contents: bytes,
+    updates: dict[str, str],
+) -> bytes:
+    try:
+        text = contents.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise GateError("Android local properties are not valid UTF-8") from error
+
+    lines = text.splitlines()
+    found: set[str] = set()
+    for index, line in enumerate(lines):
+        key, separator, _ = line.partition("=")
+        normalized = key.strip()
+        if separator and normalized in updates:
+            if normalized in found:
+                raise GateError(
+                    f"Android local properties contain duplicate {normalized}"
+                )
+            lines[index] = f"{normalized}={updates[normalized]}"
+            found.add(normalized)
+    for name, value in updates.items():
+        if name not in found:
+            lines.append(f"{name}={value}")
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def _restore_owned_file(path: Path, original: bytes, temporary: bytes) -> None:
+    try:
+        if path.is_file() and path.read_bytes() == temporary:
+            path.write_bytes(original)
+    except OSError:
+        pass
+
+
 @contextmanager
 def _temporary_android_build_files(
     client_root: Path,
@@ -106,6 +144,7 @@ def _temporary_android_build_files(
     gradlew = android_root / "gradlew"
     wrapper_jar = android_root / "gradle" / "wrapper" / "gradle-wrapper.jar"
     created: list[tuple[Path, bytes]] = []
+    modified: list[tuple[Path, bytes, bytes]] = []
 
     if local_properties.exists() and not local_properties.is_file():
         raise GateError("Android local properties path is not a regular file")
@@ -138,6 +177,22 @@ def _temporary_android_build_files(
             ).encode("utf-8")
             _create_owned_file(local_properties, contents)
             created.append((local_properties, contents))
+        elif (
+            _local_property(local_properties, "sdk.dir") is not None
+            and _local_property(local_properties, "flutter.sdk") is not None
+        ):
+            original = local_properties.read_bytes()
+            version_name, version_code = _declared_flutter_version(client_root)
+            temporary = _with_local_property_updates(
+                original,
+                {
+                    "flutter.versionName": version_name,
+                    "flutter.versionCode": version_code,
+                },
+            )
+            if temporary != original:
+                local_properties.write_bytes(temporary)
+                modified.append((local_properties, original, temporary))
 
         if not gradlew.exists() or not wrapper_jar.exists():
             artifact_root = (
@@ -162,6 +217,8 @@ def _temporary_android_build_files(
     finally:
         for path, contents in reversed(created):
             _remove_owned_file(path, contents)
+        for path, original, temporary in reversed(modified):
+            _restore_owned_file(path, original, temporary)
 
 
 def _sanitized_tail(output: str, secrets: Iterable[str], lines: int = 40) -> str:
@@ -263,6 +320,57 @@ def _run_gradle(
                 f"{_sanitized_tail(output, (TEST_PASSWORD,))}"
             )
     return output
+
+
+def _verify_debug_build_does_not_cache_signing_credentials(
+    android_root: Path,
+    java_home: Path,
+    key_properties: Path,
+) -> None:
+    # Flutter's Android tasks are not configuration-cache compatible on a
+    # completely cold build. Prime the debug outputs with caching disabled,
+    # then verify that signing material still prevents cache persistence.
+    _run_gradle(
+        android_root,
+        java_home,
+        [":app:assembleDebug"],
+        key_properties,
+        expect_success=True,
+    )
+    report_root = android_root.parent / "build" / "reports" / "configuration-cache"
+    cache_outputs: list[str] = []
+    cache_evidence: list[bool] = []
+    for _ in range(2):
+        shutil.rmtree(report_root, ignore_errors=True)
+        cache_outputs.append(
+            _run_gradle(
+                android_root,
+                java_home,
+                [":app:assembleDebug"],
+                key_properties,
+                expect_success=True,
+                configuration_cache=True,
+            )
+        )
+        cache_evidence.append(
+            any(
+                SIGNING_CONFIGURATION_CACHE_REASON.encode("utf-8")
+                in report.read_bytes()
+                for report in report_root.rglob(
+                    "configuration-cache-report.html"
+                )
+            )
+        )
+    if any(
+        "Reusing configuration cache" in output
+        or "Configuration cache entry stored" in output
+        for output in cache_outputs
+    ):
+        raise GateError("debug build cached configured release signing credentials")
+    if not all(cache_evidence):
+        raise GateError(
+            "debug build did not confirm the signing configuration-cache exclusion"
+        )
 
 
 def _tool(java_home: Path, name: str) -> str:
@@ -1025,25 +1133,11 @@ def _run_prepared_gate(client_root: Path, java_home: Path) -> None:
                 "android-release-signing: configuration-cache reuse rejected"
             )
 
-            debug_cache_outputs = [
-                _run_gradle(
-                    android_root,
-                    java_home,
-                    [":app:assembleDebug"],
-                    valid,
-                    expect_success=True,
-                    configuration_cache=True,
-                )
-                for _ in range(2)
-            ]
-            if any(
-                "Reusing configuration cache" in output
-                or "Configuration cache entry stored" in output
-                for output in debug_cache_outputs
-            ):
-                raise GateError(
-                    "debug build cached configured release signing credentials"
-                )
+            _verify_debug_build_does_not_cache_signing_credentials(
+                android_root,
+                java_home,
+                valid,
+            )
             print(
                 "android-release-signing: debug signing credentials cache rejected"
             )
