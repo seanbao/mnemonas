@@ -10,16 +10,38 @@ import 'file_models.dart';
 import 'file_path.dart';
 
 typedef TransferProgress = void Function(int transferred, int total);
+typedef TransferRequestStarted = void Function();
+typedef DownloadCheckpointCallback =
+    FutureOr<void> Function(DownloadCheckpoint checkpoint);
+
+const downloadIdentityHeader = 'X-MnemoNAS-Download-Identity';
+const downloadIdentityConditionHeader = 'X-MnemoNAS-If-Download-Identity';
+
+final class DownloadCheckpoint {
+  const DownloadCheckpoint({
+    required this.validator,
+    required this.durableOffset,
+    required this.totalBytes,
+  });
+
+  final String validator;
+  final int durableOffset;
+  final int totalBytes;
+}
 
 final class DownloadResult {
   const DownloadResult({
     required this.file,
     required this.bytesWritten,
+    required this.validator,
+    required this.totalBytes,
     required this.warnings,
   });
 
   final File file;
   final int bytesWritten;
+  final String validator;
+  final int totalBytes;
   final List<ApiWarning> warnings;
 }
 
@@ -156,6 +178,7 @@ final class FilesApi {
   Future<ApiResponse<FileMutationResult>> uploadFile({
     required String logicalPath,
     required String sourcePath,
+    TransferRequestStarted? onRequestStarted,
     TransferProgress? onProgress,
     CancelToken? cancelToken,
   }) async {
@@ -172,6 +195,7 @@ final class FilesApi {
 
     // Streaming request bodies cannot be replayed safely after a 401.
     await _client.ensureSessionValidity();
+    onRequestStarted?.call();
     return _client.requestEnvelope<FileMutationResult>(
       '/api/v1/files/$encoded',
       method: 'POST',
@@ -191,6 +215,11 @@ final class FilesApi {
     required String logicalPath,
     required String destinationPath,
     bool overwrite = false,
+    String? stagingPath,
+    String? resumeValidator,
+    int? expectedTotalBytes,
+    bool preservePartialOnFailure = false,
+    DownloadCheckpointCallback? onCheckpoint,
     TransferProgress? onProgress,
     CancelToken? cancelToken,
   }) async {
@@ -210,14 +239,87 @@ final class FilesApi {
     }
     final random = Random.secure().nextInt(1 << 32);
     final temporary = File(
-      '${destination.path}.mnemonas-${DateTime.now().microsecondsSinceEpoch}'
-      '-$random.part',
+      stagingPath ??
+          '${destination.path}.mnemonas-'
+              '${DateTime.now().microsecondsSinceEpoch}-$random.part',
     );
+    if (temporary.path == destination.path) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'DOWNLOAD_STAGING_INVALID',
+        message: 'The download staging path must differ from the destination',
+      );
+    }
+    if (!await temporary.parent.exists()) {
+      await temporary.parent.create(recursive: true);
+    }
 
-    IOSink? sink;
+    RandomAccessFile? output;
+    var completed = false;
     try {
+      final partialExists = await temporary.exists();
+      var offset = partialExists ? await temporary.length() : 0;
+      if (offset < 0 ||
+          (expectedTotalBytes != null && offset > expectedTotalBytes)) {
+        throw const ApiException(
+          kind: ApiFailureKind.local,
+          code: 'DOWNLOAD_PART_INVALID',
+          message: 'The partial download has an invalid length',
+        );
+      }
+      if (offset > 0 && resumeValidator == null) {
+        await temporary.delete();
+        offset = 0;
+      }
+
+      if (partialExists &&
+          resumeValidator != null &&
+          expectedTotalBytes != null &&
+          offset == expectedTotalBytes) {
+        output = await temporary.open(mode: FileMode.append);
+        await output.flush();
+        await output.close();
+        output = null;
+        if (await temporary.length() != expectedTotalBytes) {
+          throw const ApiException(
+            kind: ApiFailureKind.local,
+            code: 'DOWNLOAD_PART_INVALID',
+            message: 'The completed partial download changed before commit',
+          );
+        }
+        await onCheckpoint?.call(
+          DownloadCheckpoint(
+            validator: resumeValidator,
+            durableOffset: offset,
+            totalBytes: expectedTotalBytes,
+          ),
+        );
+        onProgress?.call(offset, expectedTotalBytes);
+        final materialized = await _materializeDownload(
+          source: temporary,
+          destination: destination,
+          overwrite: overwrite,
+        );
+        completed = true;
+        return DownloadResult(
+          file: materialized,
+          bytesWritten: offset,
+          validator: resumeValidator,
+          totalBytes: expectedTotalBytes,
+          warnings: const [],
+        );
+      }
+
+      final requestHeaders = <String, dynamic>{};
+      if (resumeValidator != null) {
+        requestHeaders[downloadIdentityConditionHeader] = resumeValidator;
+      }
+      if (offset > 0) {
+        requestHeaders['Range'] = 'bytes=$offset-';
+      }
       final response = await _client.request(
         '/api/v1/download/$encoded',
+        headers: requestHeaders,
         responseType: ResponseType.stream,
         cancelToken: cancelToken,
       );
@@ -230,41 +332,221 @@ final class FilesApi {
         );
       }
 
-      final expectedLength = int.tryParse(
+      final validator = response.headers.value(downloadIdentityHeader)?.trim();
+      if (validator == null || validator.isEmpty) {
+        throw const ApiException(
+          kind: ApiFailureKind.invalidResponse,
+          code: 'DOWNLOAD_VALIDATOR_MISSING',
+          message: 'The server did not provide a download identity',
+        );
+      }
+      if (resumeValidator != null && validator != resumeValidator) {
+        throw const ApiException(
+          kind: ApiFailureKind.invalidResponse,
+          code: 'DOWNLOAD_SOURCE_CHANGED',
+          message: 'The source file changed before the download completed',
+        );
+      }
+
+      final responseLength = int.tryParse(
         response.headers.value(Headers.contentLengthHeader) ?? '',
       );
-      var received = 0;
-      sink = temporary.openWrite(mode: FileMode.writeOnly);
-      await for (final chunk in body.stream) {
-        sink.add(chunk);
-        received += chunk.length;
-        onProgress?.call(received, expectedLength ?? -1);
+      final statusCode = response.statusCode ?? 0;
+      late final int totalBytes;
+      if (offset > 0) {
+        if (statusCode != HttpStatus.partialContent) {
+          throw const ApiException(
+            kind: ApiFailureKind.invalidResponse,
+            code: 'DOWNLOAD_RESUME_REJECTED',
+            message: 'The server did not honor the requested download range',
+          );
+        }
+        final range = _parseContentRange(
+          response.headers.value('content-range'),
+        );
+        if (range == null ||
+            range.start != offset ||
+            range.end < range.start ||
+            range.total <= range.end ||
+            responseLength == null ||
+            responseLength != range.end - range.start + 1) {
+          throw const ApiException(
+            kind: ApiFailureKind.invalidResponse,
+            code: 'DOWNLOAD_RANGE_INVALID',
+            message: 'The server returned an invalid download range',
+          );
+        }
+        totalBytes = range.total;
+      } else {
+        if (statusCode != HttpStatus.ok || responseLength == null) {
+          throw const ApiException(
+            kind: ApiFailureKind.invalidResponse,
+            code: 'DOWNLOAD_LENGTH_INVALID',
+            message: 'The server returned an invalid download length',
+          );
+        }
+        totalBytes = responseLength;
       }
-      await sink.flush();
-      await sink.close();
-      sink = null;
+      if (expectedTotalBytes != null && totalBytes != expectedTotalBytes) {
+        throw const ApiException(
+          kind: ApiFailureKind.invalidResponse,
+          code: 'DOWNLOAD_SOURCE_CHANGED',
+          message: 'The source file changed before the download started',
+        );
+      }
+      await onCheckpoint?.call(
+        DownloadCheckpoint(
+          validator: validator,
+          durableOffset: offset,
+          totalBytes: totalBytes,
+        ),
+      );
 
-      if (expectedLength != null && received != expectedLength) {
+      output = await temporary.open(
+        mode: offset == 0 ? FileMode.write : FileMode.append,
+      );
+      var received = offset;
+      var bytesSinceCheckpoint = 0;
+      await for (final chunk in body.stream) {
+        await output.writeFrom(chunk);
+        received += chunk.length;
+        bytesSinceCheckpoint += chunk.length;
+        onProgress?.call(received, totalBytes);
+        if (bytesSinceCheckpoint >= _downloadCheckpointBytes) {
+          await output.flush();
+          await onCheckpoint?.call(
+            DownloadCheckpoint(
+              validator: validator,
+              durableOffset: received,
+              totalBytes: totalBytes,
+            ),
+          );
+          bytesSinceCheckpoint = 0;
+        }
+      }
+      await output.flush();
+      await output.close();
+      output = null;
+      await onCheckpoint?.call(
+        DownloadCheckpoint(
+          validator: validator,
+          durableOffset: received,
+          totalBytes: totalBytes,
+        ),
+      );
+
+      if (received != totalBytes || await temporary.length() != totalBytes) {
         throw const ApiException(
           kind: ApiFailureKind.invalidResponse,
           code: 'DOWNLOAD_TRUNCATED',
           message: 'The download ended before all bytes were received',
         );
       }
-      if (overwrite && await destination.exists()) {
-        await destination.delete();
-      }
-      final completed = await temporary.rename(destination.path);
+      final materialized = await _materializeDownload(
+        source: temporary,
+        destination: destination,
+        overwrite: overwrite,
+      );
+      completed = true;
       return DownloadResult(
-        file: completed,
+        file: materialized,
         bytesWritten: received,
+        validator: validator,
+        totalBytes: totalBytes,
         warnings: parseWarnings(response.headers),
       );
+    } on DioException catch (error) {
+      throw ApiException.fromDio(error);
     } finally {
-      await sink?.close();
-      if (await temporary.exists()) {
+      await output?.close();
+      if ((!preservePartialOnFailure || completed) &&
+          await temporary.exists()) {
         await temporary.delete();
       }
+    }
+  }
+}
+
+const _downloadCheckpointBytes = 4 * 1024 * 1024;
+
+final class _ContentRange {
+  const _ContentRange({
+    required this.start,
+    required this.end,
+    required this.total,
+  });
+
+  final int start;
+  final int end;
+  final int total;
+}
+
+_ContentRange? _parseContentRange(String? value) {
+  final match = RegExp(
+    r'^bytes ([0-9]+)-([0-9]+)/([0-9]+)$',
+  ).firstMatch(value?.trim() ?? '');
+  if (match == null) {
+    return null;
+  }
+  final start = int.tryParse(match.group(1)!);
+  final end = int.tryParse(match.group(2)!);
+  final total = int.tryParse(match.group(3)!);
+  if (start == null || end == null || total == null) {
+    return null;
+  }
+  return _ContentRange(start: start, end: end, total: total);
+}
+
+Future<File> _materializeDownload({
+  required File source,
+  required File destination,
+  required bool overwrite,
+}) async {
+  final nonce = DateTime.now().microsecondsSinceEpoch;
+  final ready = File('${destination.path}.mnemonas-$nonce.ready');
+  final backup = File('${destination.path}.mnemonas-$nonce.backup');
+  RandomAccessFile? output;
+  try {
+    output = await ready.open(mode: FileMode.write);
+    await for (final chunk in source.openRead()) {
+      await output.writeFrom(chunk);
+    }
+    await output.flush();
+    await output.close();
+    output = null;
+
+    final destinationExists = await destination.exists();
+    if (destinationExists && !overwrite) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'DOWNLOAD_DESTINATION_EXISTS',
+        message: 'The download destination already exists',
+      );
+    }
+    if (destinationExists) {
+      await destination.rename(backup.path);
+    }
+    try {
+      await ready.rename(destination.path);
+    } on Object {
+      if (await backup.exists() && !await destination.exists()) {
+        await backup.rename(destination.path);
+      }
+      rethrow;
+    }
+    if (await backup.exists()) {
+      try {
+        await backup.delete();
+      } on FileSystemException {
+        // The completed destination is authoritative; stale backup cleanup can
+        // be retried independently.
+      }
+    }
+    return destination;
+  } finally {
+    await output?.close();
+    if (await ready.exists()) {
+      await ready.delete();
     }
   }
 }

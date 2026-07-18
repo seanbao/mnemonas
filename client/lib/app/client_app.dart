@@ -28,12 +28,222 @@ import '../features/search/search_page.dart';
 import '../features/shell/app_shell.dart';
 import '../features/trash/trash_page.dart';
 import '../platform/file_exporter.dart';
+import '../platform/file_importer.dart';
 import 'client_controller.dart';
 import 'client_state.dart';
 
 enum _UploadConflictChoice { replace, keepBoth, skip, cancel }
 
 const int _largePreviewThresholdBytes = 128 * 1024 * 1024;
+
+typedef _UploadPreparationProgress = void Function(int transferred, int? total);
+
+final class _UploadCandidate {
+  _UploadCandidate({
+    required this.name,
+    required Future<File> Function(_UploadPreparationProgress? onProgress)
+    materialize,
+    Future<void> Function()? cancelPreparation,
+    this.deleteMaterializedFile = false,
+  }) : _materializer = materialize,
+       _preparationCancellation = cancelPreparation;
+
+  final String name;
+  final bool deleteMaterializedFile;
+  final Future<File> Function(_UploadPreparationProgress? onProgress)
+  _materializer;
+  final Future<void> Function()? _preparationCancellation;
+  File? _materialized;
+  bool _released = false;
+
+  bool get hasCancellablePreparation => _preparationCancellation != null;
+
+  Future<File> materialize({_UploadPreparationProgress? onProgress}) async {
+    if (_released) {
+      throw StateError('The upload source has already been released');
+    }
+    final existing = _materialized;
+    if (existing != null) {
+      return existing;
+    }
+    final file = await _materializer(onProgress);
+    _materialized = file;
+    return file;
+  }
+
+  Future<void> cancelPreparation() async {
+    await _preparationCancellation?.call();
+  }
+
+  Future<void> releaseBestEffort() async {
+    if (_released) {
+      return;
+    }
+    _released = true;
+    final file = _materialized;
+    if (deleteMaterializedFile && file != null) {
+      try {
+        if (await file.exists()) {
+          await file.delete();
+        }
+      } on FileSystemException {
+        // Cleanup failure must not replace the confirmed upload outcome.
+      }
+    }
+  }
+}
+
+sealed class _UploadPreparationResult {
+  const _UploadPreparationResult();
+}
+
+final class _UploadPreparationSuccess extends _UploadPreparationResult {
+  const _UploadPreparationSuccess(this.file);
+
+  final File file;
+}
+
+final class _UploadPreparationFailure extends _UploadPreparationResult {
+  const _UploadPreparationFailure(this.error, this.stackTrace);
+
+  final Object error;
+  final StackTrace stackTrace;
+}
+
+class _UploadPreparationDialog extends StatefulWidget {
+  const _UploadPreparationDialog({required this.candidate});
+
+  final _UploadCandidate candidate;
+
+  @override
+  State<_UploadPreparationDialog> createState() =>
+      _UploadPreparationDialogState();
+}
+
+class _UploadPreparationDialogState extends State<_UploadPreparationDialog> {
+  int _transferred = 0;
+  int? _total;
+  bool _cancelling = false;
+  bool _finished = false;
+  String? _cancellationError;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_start());
+  }
+
+  Future<void> _start() async {
+    try {
+      final file = await widget.candidate.materialize(
+        onProgress: (transferred, total) {
+          if (!mounted || _finished) {
+            return;
+          }
+          setState(() {
+            _transferred = transferred;
+            _total = total;
+          });
+        },
+      );
+      _close(_UploadPreparationSuccess(file));
+    } on Object catch (error, stackTrace) {
+      _close(_UploadPreparationFailure(error, stackTrace));
+    }
+  }
+
+  Future<void> _cancel() async {
+    if (_cancelling || _finished) {
+      return;
+    }
+    setState(() {
+      _cancelling = true;
+      _cancellationError = null;
+    });
+    try {
+      await widget.candidate.cancelPreparation();
+    } on Object {
+      if (mounted && !_finished) {
+        setState(() {
+          _cancelling = false;
+          _cancellationError = '无法取消文件准备，请等待当前操作结束。';
+        });
+      }
+    }
+  }
+
+  void _close(_UploadPreparationResult result) {
+    if (!mounted || _finished) {
+      return;
+    }
+    _finished = true;
+    Navigator.of(context).pop(result);
+  }
+
+  Future<void> _cancelBestEffort() async {
+    try {
+      await widget.candidate.cancelPreparation();
+    } on Object {
+      // Disposal cannot surface a cancellation error after the route closed.
+    }
+  }
+
+  @override
+  void dispose() {
+    if (!_finished) {
+      unawaited(_cancelBestEffort());
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final total = _total;
+    final progress = total != null && total > 0
+        ? (_transferred / total).clamp(0.0, 1.0)
+        : null;
+    final detail = total != null && total >= 0
+        ? '${_formatBytes(_transferred)} / ${_formatBytes(total)}'
+        : '已处理 ${_formatBytes(_transferred)}';
+    return PopScope(
+      canPop: false,
+      child: AlertDialog(
+        title: const Text('正在准备上传文件'),
+        content: SizedBox(
+          width: 360,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text(
+                widget.candidate.name,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+              const SizedBox(height: MnemoSpacing.md),
+              LinearProgressIndicator(value: progress),
+              const SizedBox(height: MnemoSpacing.sm),
+              Text(detail),
+              if (_cancellationError case final message?) ...<Widget>[
+                const SizedBox(height: MnemoSpacing.sm),
+                Text(
+                  message,
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
+              ],
+            ],
+          ),
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: _cancelling ? null : () => unawaited(_cancel()),
+            child: Text(_cancelling ? '正在取消…' : '取消'),
+          ),
+        ],
+      ),
+    );
+  }
+}
 
 class MnemoNasClientApp extends StatelessWidget {
   const MnemoNasClientApp({super.key});
@@ -286,7 +496,9 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
           tooltip: '传输记录',
           icon: Badge(
             isLabelVisible: widget.state.transfers.any(
-              (transfer) => transfer.status == TransferStatus.running,
+              (transfer) =>
+                  transfer.status != TransferStatus.completed &&
+                  transfer.status != TransferStatus.cancelled,
             ),
             child: const Icon(Icons.swap_vert_rounded),
           ),
@@ -505,69 +717,172 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
         }
         await _runAction(() => widget.controller.createDirectory(name));
       case FilesAddAction.uploadFiles:
-        final selected = await openFiles();
-        if (selected.isEmpty) {
-          return;
-        }
+        late final List<_UploadCandidate> selected;
         try {
-          await widget.controller.loadDirectory(widget.state.currentPath);
+          selected = await _selectUploadCandidates();
         } on Object catch (error) {
           _showMessage(clientErrorMessage(error));
           return;
         }
-        final listing = widget.controller.currentDirectory;
-        if (listing == null) {
-          _showMessage('无法确认当前目录状态，请刷新后重试。');
+        if (selected.isEmpty) {
           return;
         }
-        final reservedNames = listing.entries
-            .map((entry) => entry.name)
-            .toSet();
-        final existingKinds = <String, bool>{
-          for (final entry in listing.entries) entry.name: entry.isDirectory,
-        };
-        var uploaded = 0;
-        var skipped = 0;
         try {
-          for (final file in selected) {
-            var targetName = file.name;
-            final existingIsDirectory = existingKinds[targetName];
-            if (existingIsDirectory != null) {
-              final choice = await _resolveUploadConflict(
-                name: targetName,
-                isDirectory: existingIsDirectory,
-              );
-              if (!mounted || choice == _UploadConflictChoice.cancel) {
-                break;
-              }
-              if (choice == _UploadConflictChoice.skip) {
-                skipped++;
-                continue;
-              }
-              if (choice == _UploadConflictChoice.keepBoth) {
-                targetName = uniqueLogicalName(targetName, reservedNames);
-              }
-            }
-            await widget.controller.uploadFile(
-              sourcePath: file.path,
-              fileName: targetName,
-            );
-            uploaded++;
-            reservedNames.add(targetName);
-            existingKinds[targetName] = false;
+          try {
+            await widget.controller.loadDirectory(widget.state.currentPath);
+          } on Object catch (error) {
+            _showMessage(clientErrorMessage(error));
+            return;
           }
-          _showMessage(
-            skipped == 0
-                ? '已上传 $uploaded 个文件。'
-                : '已上传 $uploaded 个文件，已跳过 $skipped 个。',
-          );
-        } on Object catch (error) {
-          _showMessage(
-            uploaded == 0
-                ? clientErrorMessage(error)
-                : '已上传 $uploaded 个文件，后续上传失败。',
-          );
+          final listing = widget.controller.currentDirectory;
+          if (listing == null) {
+            _showMessage('无法确认当前目录状态，请刷新后重试。');
+            return;
+          }
+          final reservedNames = listing.entries
+              .map((entry) => entry.name)
+              .toSet();
+          final existingKinds = <String, bool>{
+            for (final entry in listing.entries) entry.name: entry.isDirectory,
+          };
+          var uploaded = 0;
+          var skipped = 0;
+          try {
+            for (final candidate in selected) {
+              var targetName = candidate.name;
+              final existingIsDirectory = existingKinds[targetName];
+              if (existingIsDirectory != null) {
+                final choice = await _resolveUploadConflict(
+                  name: targetName,
+                  isDirectory: existingIsDirectory,
+                );
+                if (!mounted || choice == _UploadConflictChoice.cancel) {
+                  break;
+                }
+                if (choice == _UploadConflictChoice.skip) {
+                  skipped++;
+                  continue;
+                }
+                if (choice == _UploadConflictChoice.keepBoth) {
+                  targetName = uniqueLogicalName(targetName, reservedNames);
+                }
+              }
+              final localFile = await _materializeUploadCandidate(candidate);
+              try {
+                await widget.controller.uploadFile(
+                  sourcePath: localFile.path,
+                  fileName: targetName,
+                );
+              } finally {
+                await candidate.releaseBestEffort();
+              }
+              uploaded++;
+              reservedNames.add(targetName);
+              existingKinds[targetName] = false;
+            }
+            _showMessage(
+              skipped == 0
+                  ? '已上传 $uploaded 个文件。'
+                  : '已上传 $uploaded 个文件，已跳过 $skipped 个。',
+            );
+          } on Object catch (error) {
+            _showMessage(
+              uploaded == 0
+                  ? clientErrorMessage(error)
+                  : '已上传 $uploaded 个文件，后续上传失败。',
+            );
+          }
+        } finally {
+          for (final candidate in selected) {
+            await candidate.releaseBestEffort();
+          }
         }
+    }
+  }
+
+  Future<List<_UploadCandidate>> _selectUploadCandidates() async {
+    if (!Platform.isAndroid) {
+      final files = await openFiles();
+      return files
+          .map(
+            (file) => _UploadCandidate(
+              name: file.name,
+              materialize: (_) async => File(file.path),
+            ),
+          )
+          .toList(growable: false);
+    }
+
+    final sources = await FileImporter.pickDocuments();
+    if (sources.isEmpty) {
+      return const <_UploadCandidate>[];
+    }
+    final root = await getApplicationSupportDirectory();
+    final imports = Directory('${root.path}/mnemonas/imports');
+    await imports.create(recursive: true);
+    await _removeOldImportFiles(imports);
+    final batch = DateTime.now().microsecondsSinceEpoch;
+    return <_UploadCandidate>[
+      for (var index = 0; index < sources.length; index++)
+        _androidUploadCandidate(
+          sources[index],
+          '${imports.path}/$batch-$index-'
+          '${_safeLocalFileName(sources[index].displayName)}',
+        ),
+    ];
+  }
+
+  _UploadCandidate _androidUploadCandidate(
+    FileImportSource source,
+    String localPath,
+  ) {
+    final operationId =
+        'import-${DateTime.now().microsecondsSinceEpoch}-'
+        '${source.uri.hashCode.toUnsigned(32)}';
+    return _UploadCandidate(
+      name: source.displayName,
+      deleteMaterializedFile: true,
+      materialize: (onProgress) => FileImporter.copyDocumentToFile(
+        uri: source.uri,
+        destinationPath: localPath,
+        expectedLength: source.size,
+        operationId: operationId,
+        onProgress: onProgress,
+      ),
+      cancelPreparation: () => FileImporter.cancelCopy(operationId),
+    );
+  }
+
+  Future<File> _materializeUploadCandidate(_UploadCandidate candidate) async {
+    if (!candidate.hasCancellablePreparation) {
+      return candidate.materialize();
+    }
+    final result = await showDialog<_UploadPreparationResult>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => _UploadPreparationDialog(candidate: candidate),
+    );
+    return switch (result) {
+      _UploadPreparationSuccess(:final file) => file,
+      _UploadPreparationFailure(:final error, :final stackTrace) =>
+        Error.throwWithStackTrace(error, stackTrace),
+      null => throw StateError('Upload preparation closed unexpectedly'),
+    };
+  }
+
+  Future<void> _removeOldImportFiles(Directory directory) async {
+    final cutoff = DateTime.now().subtract(const Duration(hours: 24));
+    await for (final entity in directory.list(followLinks: false)) {
+      if (entity is! File) {
+        continue;
+      }
+      try {
+        if ((await entity.lastModified()).isBefore(cutoff)) {
+          await entity.delete();
+        }
+      } on FileSystemException {
+        // An active or provider-owned import is left untouched.
+      }
     }
   }
 
@@ -720,6 +1035,21 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
     }
     final mimeType = lookupMimeType(entry.name) ?? 'application/octet-stream';
     try {
+      if (Platform.isAndroid) {
+        final transferId = await widget.controller.stageDownloadForDestination(
+          entry: entry,
+        );
+        if (!mounted) {
+          return;
+        }
+        final saved = await _selectDownloadDestination(
+          transferId,
+          entry.name,
+          mimeType,
+        );
+        _showMessage(saved ? '文件已保存。' : '下载已完成，可在传输记录中选择保存位置。');
+        return;
+      }
       final target = await FileExporter.chooseTarget(
         suggestedName: entry.name,
         mimeType: mimeType,
@@ -727,33 +1057,58 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
       if (target == null) {
         return;
       }
-      if (!target.requiresPrivateStaging) {
-        await widget.controller.downloadFile(
-          entry: entry,
-          destinationPath: target.path!,
-          overwrite: true,
-        );
-      } else {
-        final staging = await _stagingFile('exports', entry.name);
-        try {
-          await widget.controller.downloadFile(
-            entry: entry,
-            destinationPath: staging.path,
-          );
-          await FileExporter.exportStagedFile(
-            sourcePath: staging.path,
-            target: target,
-          );
-        } finally {
-          if (await staging.exists()) {
-            await staging.delete();
-          }
-        }
-      }
+      await widget.controller.downloadFile(
+        entry: entry,
+        destinationPath: target.path!,
+        overwrite: true,
+      );
       _showMessage('文件已保存。');
     } on Object catch (error) {
       _showMessage(clientErrorMessage(error));
     }
+  }
+
+  Future<bool> _selectDownloadDestination(
+    String transferId,
+    String fileName,
+    String mimeType,
+  ) async {
+    final target = await FileExporter.chooseTarget(
+      suggestedName: fileName,
+      mimeType: mimeType,
+    );
+    final uri = target?.contentUri;
+    if (uri == null) {
+      return false;
+    }
+    await widget.controller.setDownloadDestination(
+      id: transferId,
+      destinationUri: uri,
+    );
+    return true;
+  }
+
+  Future<void> _resumeTransfer(String id) async {
+    ClientTransfer? transfer;
+    for (final candidate in widget.state.transfers) {
+      if (candidate.id == id) {
+        transfer = candidate;
+        break;
+      }
+    }
+    if (Platform.isAndroid &&
+        transfer?.status == TransferStatus.awaitingDestination) {
+      final saved = await _selectDownloadDestination(
+        id,
+        transfer!.name,
+        lookupMimeType(transfer.name) ?? 'application/octet-stream',
+      );
+      if (saved) {
+        _showMessage('文件已保存。');
+      }
+      return;
+    }
+    await widget.controller.resumeTransfer(id);
   }
 
   Future<void> _openEntry(FileEntry entry) async {
@@ -792,6 +1147,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
       final downloaded = await widget.controller.downloadFile(
         entry: entry,
         destinationPath: file.path,
+        persistent: false,
       );
       if (Platform.isAndroid) {
         final result = await OpenFilex.open(
@@ -928,6 +1284,12 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
               onCancel: ref
                   .read(clientControllerProvider.notifier)
                   .cancelTransfer,
+              onResume: (id) => _runAction(() => _resumeTransfer(id)),
+              onRemove: (id) => _runAction(
+                () => ref
+                    .read(clientControllerProvider.notifier)
+                    .removeTransfer(id),
+              ),
             );
           },
         ),
@@ -1035,10 +1397,17 @@ Future<String?> _promptForText(
 }
 
 class _TransfersSheet extends StatelessWidget {
-  const _TransfersSheet({required this.transfers, required this.onCancel});
+  const _TransfersSheet({
+    required this.transfers,
+    required this.onCancel,
+    required this.onResume,
+    required this.onRemove,
+  });
 
   final List<ClientTransfer> transfers;
   final ValueChanged<String> onCancel;
+  final Future<void> Function(String id) onResume;
+  final Future<void> Function(String id) onRemove;
 
   @override
   Widget build(BuildContext context) {
@@ -1096,13 +1465,12 @@ class _TransfersSheet extends StatelessWidget {
                                 ),
                             ],
                           ),
-                          trailing: transfer.status == TransferStatus.running
-                              ? IconButton(
-                                  onPressed: () => onCancel(transfer.id),
-                                  tooltip: '取消传输',
-                                  icon: const Icon(Icons.close_rounded),
-                                )
-                              : null,
+                          trailing: _TransferAction(
+                            transfer: transfer,
+                            onCancel: onCancel,
+                            onResume: onResume,
+                            onRemove: onRemove,
+                          ),
                         );
                       },
                     ),
@@ -1116,14 +1484,62 @@ class _TransfersSheet extends StatelessWidget {
 
 String _transferStatusLabel(ClientTransfer transfer) {
   return switch (transfer.status) {
+    TransferStatus.queued => '等待传输',
     TransferStatus.running =>
       transfer.total > 0
           ? '${_formatBytes(transfer.transferred)} / ${_formatBytes(transfer.total)}'
           : '正在传输',
+    TransferStatus.paused => transfer.errorMessage ?? '已暂停，可继续传输',
+    TransferStatus.awaitingAuth => '等待重新登录后继续',
+    TransferStatus.awaitingDestination =>
+      transfer.errorMessage ?? '下载完成，等待写入所选位置',
+    TransferStatus.resultUnconfirmed =>
+      transfer.errorMessage ?? '操作结果待确认，请核对目标位置',
     TransferStatus.completed => '已完成',
     TransferStatus.failed => transfer.errorMessage ?? '传输失败',
     TransferStatus.cancelled => '已取消',
   };
+}
+
+class _TransferAction extends StatelessWidget {
+  const _TransferAction({
+    required this.transfer,
+    required this.onCancel,
+    required this.onResume,
+    required this.onRemove,
+  });
+
+  final ClientTransfer transfer;
+  final ValueChanged<String> onCancel;
+  final Future<void> Function(String id) onResume;
+  final Future<void> Function(String id) onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    return switch (transfer.status) {
+      TransferStatus.running => IconButton(
+        onPressed: () => onCancel(transfer.id),
+        tooltip: '暂停传输',
+        icon: const Icon(Icons.pause_rounded),
+      ),
+      TransferStatus.paused ||
+      TransferStatus.awaitingAuth ||
+      TransferStatus.awaitingDestination => IconButton(
+        onPressed: () => unawaited(onResume(transfer.id)),
+        tooltip: '继续传输',
+        icon: const Icon(Icons.play_arrow_rounded),
+      ),
+      TransferStatus.completed ||
+      TransferStatus.failed ||
+      TransferStatus.cancelled ||
+      TransferStatus.resultUnconfirmed => IconButton(
+        onPressed: () => unawaited(onRemove(transfer.id)),
+        tooltip: '移除记录',
+        icon: const Icon(Icons.close_rounded),
+      ),
+      TransferStatus.queued => const SizedBox(width: 48, height: 48),
+    };
+  }
 }
 
 class _PasswordChangeDialog extends StatefulWidget {

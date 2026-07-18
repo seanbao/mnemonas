@@ -1,22 +1,39 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
+import 'dart:io';
 
 import 'package:dio/dio.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mnemonas_client/app/client_controller.dart';
 import 'package:mnemonas_client/app/client_state.dart';
 import 'package:mnemonas_client/core/auth/auth_models.dart';
 import 'package:mnemonas_client/core/auth/session_store.dart';
+import 'package:mnemonas_client/core/files/file_models.dart';
+import 'package:mnemonas_client/core/files/files_api.dart';
 import 'package:mnemonas_client/core/network/api_client.dart';
 import 'package:mnemonas_client/core/network/api_error.dart';
 import 'package:mnemonas_client/core/search/search_models.dart';
 import 'package:mnemonas_client/core/server/server_endpoint.dart';
 import 'package:mnemonas_client/core/server/server_preferences.dart';
+import 'package:mnemonas_client/core/transfers/file_transfer_store.dart';
+import 'package:mnemonas_client/core/transfers/transfer_task.dart'
+    as transfer_core;
 import 'package:mnemonas_client/core/trash/trash_models.dart';
 
 void main() {
+  test('native storage failures use actionable client messages', () {
+    expect(
+      clientErrorMessage(PlatformException(code: 'IMPORT_CANCELLED')),
+      '操作已取消。',
+    );
+    expect(
+      clientErrorMessage(PlatformException(code: 'EXPORT_FAILED')),
+      contains('目标权限'),
+    );
+  });
+
   group('terminal authentication failures', () {
     const terminalCodes = <String>[
       'AUTH_SESSION_MISSING',
@@ -553,6 +570,605 @@ void main() {
       expect(recordingController.updateCount, updatesBeforeDisposal);
     });
   });
+
+  test('disconnected upload is retained as an unconfirmed result', () async {
+    final endpoint = ServerEndpoint.parse('https://nas.example.com');
+    final adapter = _ControllerAdapter()..disconnectNextUpload = true;
+    final harness = await _ControllerHarness.start(
+      adapters: {endpoint.baseUrl: adapter},
+    );
+    addTearDown(harness.container.dispose);
+    final directory = await Directory.systemTemp.createTemp(
+      'mnemonas-controller-upload-',
+    );
+    addTearDown(() => directory.delete(recursive: true));
+    final source = File('${directory.path}/payload.bin');
+    await source.writeAsBytes(<int>[1, 2, 3], flush: true);
+    await harness.connectAndLogin(endpoint, username: 'owner');
+
+    await expectLater(
+      harness.controller.uploadFile(
+        sourcePath: source.path,
+        fileName: 'payload.bin',
+      ),
+      throwsA(isA<ApiException>()),
+    );
+
+    final transfer = harness.container
+        .read(clientControllerProvider)
+        .transfers
+        .single;
+    expect(transfer.status, TransferStatus.resultUnconfirmed);
+    expect(transfer.errorMessage, contains('可能已经完成上传'));
+  });
+
+  test(
+    'a confirmed upload stays completed when directory refresh fails',
+    () async {
+      final endpoint = ServerEndpoint.parse('https://nas.example.com');
+      final adapter = _ControllerAdapter();
+      final harness = await _ControllerHarness.start(
+        adapters: {endpoint.baseUrl: adapter},
+      );
+      addTearDown(harness.container.dispose);
+      final directory = await Directory.systemTemp.createTemp(
+        'mnemonas-controller-upload-refresh-',
+      );
+      addTearDown(() => directory.delete(recursive: true));
+      final source = File('${directory.path}/payload.bin');
+      await source.writeAsBytes(<int>[1, 2, 3], flush: true);
+      await harness.connectAndLogin(endpoint, username: 'owner');
+      adapter.disconnectNextDirectory = true;
+
+      await harness.controller.uploadFile(
+        sourcePath: source.path,
+        fileName: 'payload.bin',
+      );
+
+      final state = harness.container.read(clientControllerProvider);
+      final transfer = state.transfers.single;
+      expect(transfer.status, TransferStatus.completed);
+      expect(transfer.errorMessage, isNull);
+      expect(state.errorMessage, isNull);
+      expect(state.notice, contains('文件已确认上传'));
+      expect(state.notice, contains('目录刷新失败'));
+    },
+  );
+
+  test(
+    'interrupted download resumes from durable state after restart',
+    () async {
+      final endpoint = ServerEndpoint.parse('https://nas.example.com');
+      final root = await Directory.systemTemp.createTemp(
+        'mnemonas-controller-download-resume-',
+      );
+      addTearDown(() => root.delete(recursive: true));
+      final transferDirectory = Directory('${root.path}/store');
+      final destination = File('${root.path}/payload.bin');
+      final firstAdapter = _ControllerAdapter()..interruptNextDownload = true;
+      final first = await _ControllerHarness.start(
+        adapters: {endpoint.baseUrl: firstAdapter},
+        transferDirectory: transferDirectory,
+      );
+      addTearDown(first.container.dispose);
+      await first.connectAndLogin(endpoint, username: 'owner');
+      final entry = FileEntry(
+        name: 'payload.bin',
+        path: '/payload.bin',
+        isDirectory: false,
+        size: 6,
+        modifiedAt: DateTime.utc(2026, 7, 19, 12),
+        capabilities: const FileCapabilities(
+          read: true,
+          concreteRead: true,
+          write: true,
+        ),
+      );
+
+      await expectLater(
+        first.controller.downloadFile(
+          entry: entry,
+          destinationPath: destination.path,
+          overwrite: true,
+        ),
+        throwsA(
+          isA<ApiException>().having(
+            (error) => error.kind,
+            'kind',
+            ApiFailureKind.connection,
+          ),
+        ),
+      );
+      final interrupted = first.container
+          .read(clientControllerProvider)
+          .transfers
+          .single;
+      expect(interrupted.status, TransferStatus.paused);
+      expect(interrupted.transferred, 3);
+
+      final secondAdapter = _ControllerAdapter();
+      final second = await _ControllerHarness.start(
+        adapters: {endpoint.baseUrl: secondAdapter},
+        transferDirectory: transferDirectory,
+      );
+      addTearDown(second.container.dispose);
+      await second.connectAndLogin(endpoint, username: 'owner');
+      final restored = second.container
+          .read(clientControllerProvider)
+          .transfers
+          .single;
+      expect(restored.id, interrupted.id);
+      expect(restored.status, TransferStatus.paused);
+      expect(restored.transferred, 3);
+
+      await Future.wait<void>(<Future<void>>[
+        second.controller.resumeTransfer(restored.id),
+        second.controller.resumeTransfer(restored.id),
+      ]);
+
+      expect(await destination.readAsBytes(), <int>[1, 2, 3, 4, 5, 6]);
+      expect(secondAdapter.downloadRanges, <String?>['bytes=3-']);
+      expect(
+        second.container.read(clientControllerProvider).transfers.single.status,
+        TransferStatus.completed,
+      );
+    },
+  );
+
+  test(
+    'startup reconciles a running task with the actual partial length',
+    () async {
+      final endpoint = ServerEndpoint.parse('https://nas.example.com');
+      final root = await Directory.systemTemp.createTemp(
+        'mnemonas-controller-running-recovery-',
+      );
+      addTearDown(() => root.delete(recursive: true));
+      final transferDirectory = Directory('${root.path}/store');
+      final payloadDirectory = Directory('${transferDirectory.path}/payloads');
+      await payloadDirectory.create(recursive: true);
+      final payloadPath = '${payloadDirectory.path}/task-running.payload';
+      await File('$payloadPath.part').writeAsBytes(<int>[1, 2, 3], flush: true);
+      final now = DateTime.now().toUtc().subtract(const Duration(hours: 1));
+      await FileTransferStore(directoryPath: transferDirectory.path).upsert(
+        transfer_core.TransferTask(
+          id: 'task-running',
+          direction: transfer_core.TransferDirection.download,
+          phase: transfer_core.TransferPhase.running,
+          endpointBaseUrl: endpoint.baseUrl,
+          userId: 'user-owner',
+          remotePath: '/payload.bin',
+          displayName: 'payload.bin',
+          stagingPath: payloadPath,
+          destinationPath: '${root.path}/payload.bin',
+          validator: 'download-identity-1',
+          durableOffset: 1,
+          totalBytes: 6,
+          createdAt: now,
+          updatedAt: now,
+        ),
+      );
+      final harness = await _ControllerHarness.start(
+        adapters: {endpoint.baseUrl: _ControllerAdapter()},
+        transferDirectory: transferDirectory,
+      );
+      addTearDown(harness.container.dispose);
+
+      await harness.connectAndLogin(endpoint, username: 'owner');
+
+      final restored = harness.container
+          .read(clientControllerProvider)
+          .transfers
+          .single;
+      expect(restored.id, 'task-running');
+      expect(restored.status, TransferStatus.paused);
+      expect(restored.transferred, 3);
+      expect(restored.errorMessage, contains('客户端重启'));
+    },
+  );
+
+  test(
+    'startup commits a complete partial without requesting an invalid range',
+    () async {
+      final endpoint = ServerEndpoint.parse('https://nas.example.com');
+      final root = await Directory.systemTemp.createTemp(
+        'mnemonas-controller-complete-partial-',
+      );
+      addTearDown(() => root.delete(recursive: true));
+      final transferDirectory = Directory('${root.path}/store');
+      final payloadDirectory = Directory('${transferDirectory.path}/payloads');
+      await payloadDirectory.create(recursive: true);
+      final payloadPath = '${payloadDirectory.path}/task-complete.payload';
+      await File(
+        '$payloadPath.part',
+      ).writeAsBytes(<int>[1, 2, 3, 4, 5, 6], flush: true);
+      final destination = File('${root.path}/payload.bin');
+      final now = DateTime.now().toUtc().subtract(const Duration(hours: 1));
+      await FileTransferStore(directoryPath: transferDirectory.path).upsert(
+        transfer_core.TransferTask(
+          id: 'task-complete',
+          direction: transfer_core.TransferDirection.download,
+          phase: transfer_core.TransferPhase.running,
+          endpointBaseUrl: endpoint.baseUrl,
+          userId: 'user-owner',
+          remotePath: '/payload.bin',
+          displayName: 'payload.bin',
+          stagingPath: payloadPath,
+          destinationPath: destination.path,
+          validator: 'download-identity-1',
+          durableOffset: 6,
+          totalBytes: 6,
+          createdAt: now,
+          updatedAt: now,
+        ),
+      );
+      final adapter = _ControllerAdapter();
+      final harness = await _ControllerHarness.start(
+        adapters: {endpoint.baseUrl: adapter},
+        transferDirectory: transferDirectory,
+      );
+      addTearDown(harness.container.dispose);
+
+      await harness.connectAndLogin(endpoint, username: 'owner');
+
+      final restored = harness.container
+          .read(clientControllerProvider)
+          .transfers
+          .single;
+      expect(restored.id, 'task-complete');
+      expect(restored.status, TransferStatus.paused);
+      expect(restored.transferred, 6);
+
+      await harness.controller.resumeTransfer(restored.id);
+
+      expect(adapter.downloadRanges, isEmpty);
+      expect(await destination.readAsBytes(), <int>[1, 2, 3, 4, 5, 6]);
+      expect(
+        harness.container
+            .read(clientControllerProvider)
+            .transfers
+            .single
+            .status,
+        TransferStatus.completed,
+      );
+      expect(File('$payloadPath.part').existsSync(), isFalse);
+    },
+  );
+
+  test('startup clears a temporary Android destination URI', () async {
+    final endpoint = ServerEndpoint.parse('https://nas.example.com');
+    final root = await Directory.systemTemp.createTemp(
+      'mnemonas-controller-stale-destination-',
+    );
+    addTearDown(() => root.delete(recursive: true));
+    final transferDirectory = Directory('${root.path}/store');
+    final payloadDirectory = Directory('${transferDirectory.path}/payloads');
+    await payloadDirectory.create(recursive: true);
+    final payloadPath = '${payloadDirectory.path}/task-destination.payload';
+    await File(payloadPath).writeAsBytes(<int>[1, 2, 3, 4, 5, 6], flush: true);
+    final now = DateTime.now().toUtc().subtract(const Duration(hours: 1));
+    final store = FileTransferStore(directoryPath: transferDirectory.path);
+    await store.upsert(
+      transfer_core.TransferTask(
+        id: 'task-destination',
+        direction: transfer_core.TransferDirection.download,
+        phase: transfer_core.TransferPhase.awaitingDestination,
+        endpointBaseUrl: endpoint.baseUrl,
+        userId: 'user-owner',
+        remotePath: '/payload.bin',
+        displayName: 'payload.bin',
+        stagingPath: payloadPath,
+        destinationUri: 'content://downloads/document/stale',
+        validator: 'download-identity-1',
+        durableOffset: 6,
+        totalBytes: 6,
+        createdAt: now,
+        updatedAt: now,
+      ),
+    );
+    final harness = await _ControllerHarness.start(
+      adapters: {endpoint.baseUrl: _ControllerAdapter()},
+      transferDirectory: transferDirectory,
+    );
+    addTearDown(harness.container.dispose);
+
+    await harness.connectAndLogin(endpoint, username: 'owner');
+
+    final restored = harness.container
+        .read(clientControllerProvider)
+        .transfers
+        .single;
+    expect(restored.status, TransferStatus.awaitingDestination);
+    expect(restored.errorMessage, contains('重新选择保存位置'));
+    final stored = (await store.load()).tasks.single;
+    expect(stored.destinationUri, isNull);
+  });
+
+  test(
+    'startup recovers a fully staged Android download before destination choice',
+    () async {
+      final endpoint = ServerEndpoint.parse('https://nas.example.com');
+      final root = await Directory.systemTemp.createTemp(
+        'mnemonas-controller-staged-recovery-',
+      );
+      addTearDown(() => root.delete(recursive: true));
+      final transferDirectory = Directory('${root.path}/store');
+      final payloadDirectory = Directory('${transferDirectory.path}/payloads');
+      await payloadDirectory.create(recursive: true);
+      final payloadPath = '${payloadDirectory.path}/task-staged.payload';
+      await File(
+        payloadPath,
+      ).writeAsBytes(<int>[1, 2, 3, 4, 5, 6], flush: true);
+      final now = DateTime.now().toUtc().subtract(const Duration(hours: 1));
+      final store = FileTransferStore(directoryPath: transferDirectory.path);
+      await store.upsert(
+        transfer_core.TransferTask(
+          id: 'task-staged',
+          direction: transfer_core.TransferDirection.download,
+          phase: transfer_core.TransferPhase.running,
+          endpointBaseUrl: endpoint.baseUrl,
+          userId: 'user-owner',
+          remotePath: '/payload.bin',
+          displayName: 'payload.bin',
+          stagingPath: payloadPath,
+          validator: 'download-identity-1',
+          durableOffset: 6,
+          totalBytes: 6,
+          createdAt: now,
+          updatedAt: now,
+        ),
+      );
+      final harness = await _ControllerHarness.start(
+        adapters: {endpoint.baseUrl: _ControllerAdapter()},
+        transferDirectory: transferDirectory,
+      );
+      addTearDown(harness.container.dispose);
+
+      await harness.connectAndLogin(endpoint, username: 'owner');
+
+      final restored = harness.container
+          .read(clientControllerProvider)
+          .transfers
+          .single;
+      expect(restored.status, TransferStatus.awaitingDestination);
+      expect(restored.errorMessage, isNull);
+      final stored = (await store.load()).tasks.single;
+      expect(stored.phase, transfer_core.TransferPhase.awaitingDestination);
+      expect(stored.destinationUri, isNull);
+      expect(File(payloadPath).existsSync(), isTrue);
+    },
+  );
+
+  test(
+    'Android destination failure remains durable and can be retried',
+    () async {
+      final endpoint = ServerEndpoint.parse('https://nas.example.com');
+      final root = await Directory.systemTemp.createTemp(
+        'mnemonas-controller-destination-retry-',
+      );
+      addTearDown(() => root.delete(recursive: true));
+      var failMaterialization = true;
+      final materializedSources = <String>[];
+      final materializedUris = <String>[];
+      final harness = await _ControllerHarness.start(
+        adapters: {endpoint.baseUrl: _ControllerAdapter()},
+        transferDirectory: Directory('${root.path}/store'),
+        contentUriMaterializer:
+            ({
+              required sourcePath,
+              required destinationUri,
+              required operationId,
+              required onProgress,
+            }) async {
+              expect(operationId, isNotEmpty);
+              materializedSources.add(sourcePath);
+              materializedUris.add(destinationUri);
+              onProgress(3, 6);
+              if (failMaterialization) {
+                throw StateError('destination unavailable');
+              }
+            },
+      );
+      addTearDown(harness.container.dispose);
+      await harness.connectAndLogin(endpoint, username: 'owner');
+      final entry = FileEntry(
+        name: 'payload.bin',
+        path: '/payload.bin',
+        isDirectory: false,
+        size: 6,
+        modifiedAt: DateTime.utc(2026, 7, 19, 12),
+        capabilities: const FileCapabilities(
+          read: true,
+          concreteRead: true,
+          write: true,
+        ),
+      );
+
+      await expectLater(
+        harness.controller.downloadFile(
+          entry: entry,
+          destinationUri: 'content://downloads/document/42',
+        ),
+        throwsStateError,
+      );
+      final pending = harness.container
+          .read(clientControllerProvider)
+          .transfers
+          .single;
+      expect(pending.status, TransferStatus.awaitingDestination);
+      expect(File(materializedSources.single).existsSync(), isTrue);
+
+      failMaterialization = false;
+      await harness.controller.resumeTransfer(pending.id);
+
+      expect(materializedUris, <String>[
+        'content://downloads/document/42',
+        'content://downloads/document/42',
+      ]);
+      expect(File(materializedSources.last).existsSync(), isFalse);
+      expect(
+        harness.container
+            .read(clientControllerProvider)
+            .transfers
+            .single
+            .status,
+        TransferStatus.completed,
+      );
+    },
+  );
+
+  test(
+    'Android download selects its document destination after network staging',
+    () async {
+      final endpoint = ServerEndpoint.parse('https://nas.example.com');
+      final root = await Directory.systemTemp.createTemp(
+        'mnemonas-controller-deferred-destination-',
+      );
+      addTearDown(() => root.delete(recursive: true));
+      final materializedSources = <String>[];
+      final harness = await _ControllerHarness.start(
+        adapters: {endpoint.baseUrl: _ControllerAdapter()},
+        transferDirectory: Directory('${root.path}/store'),
+        contentUriMaterializer:
+            ({
+              required sourcePath,
+              required destinationUri,
+              required operationId,
+              required onProgress,
+            }) async {
+              expect(destinationUri, 'content://downloads/document/deferred');
+              expect(operationId, isNotEmpty);
+              onProgress(6, 6);
+              materializedSources.add(sourcePath);
+            },
+      );
+      addTearDown(harness.container.dispose);
+      await harness.connectAndLogin(endpoint, username: 'owner');
+      final entry = FileEntry(
+        name: 'payload.bin',
+        path: '/payload.bin',
+        isDirectory: false,
+        size: 6,
+        modifiedAt: DateTime.utc(2026, 7, 19, 12),
+        capabilities: const FileCapabilities(
+          read: true,
+          concreteRead: true,
+          write: true,
+        ),
+      );
+
+      final id = await harness.controller.stageDownloadForDestination(
+        entry: entry,
+      );
+
+      final staged = harness.container
+          .read(clientControllerProvider)
+          .transfers
+          .single;
+      expect(staged.id, id);
+      expect(staged.status, TransferStatus.awaitingDestination);
+      expect(materializedSources, isEmpty);
+
+      await harness.controller.setDownloadDestination(
+        id: id,
+        destinationUri: 'content://downloads/document/deferred',
+      );
+
+      expect(materializedSources, hasLength(1));
+      expect(File(materializedSources.single).existsSync(), isFalse);
+      expect(
+        harness.container
+            .read(clientControllerProvider)
+            .transfers
+            .single
+            .status,
+        TransferStatus.completed,
+      );
+    },
+  );
+
+  test(
+    'Android destination copy is cancelled through the durable task',
+    () async {
+      final endpoint = ServerEndpoint.parse('https://nas.example.com');
+      final root = await Directory.systemTemp.createTemp(
+        'mnemonas-controller-destination-cancel-',
+      );
+      addTearDown(() => root.delete(recursive: true));
+      final copyStarted = Completer<void>();
+      final copyResult = Completer<void>();
+      final cancelledOperations = <String>[];
+      final harness = await _ControllerHarness.start(
+        adapters: {endpoint.baseUrl: _ControllerAdapter()},
+        transferDirectory: Directory('${root.path}/store'),
+        contentUriMaterializer:
+            ({
+              required sourcePath,
+              required destinationUri,
+              required operationId,
+              required onProgress,
+            }) async {
+              onProgress(1, 6);
+              copyStarted.complete();
+              await copyResult.future;
+            },
+        contentUriMaterializationCanceller: (operationId) async {
+          cancelledOperations.add(operationId);
+          if (!copyResult.isCompleted) {
+            copyResult.completeError(
+              const ApiException(
+                kind: ApiFailureKind.cancelled,
+                code: 'EXPORT_CANCELLED',
+                message: 'The export was cancelled',
+              ),
+            );
+          }
+        },
+      );
+      addTearDown(harness.container.dispose);
+      await harness.connectAndLogin(endpoint, username: 'owner');
+      final entry = FileEntry(
+        name: 'payload.bin',
+        path: '/payload.bin',
+        isDirectory: false,
+        size: 6,
+        modifiedAt: DateTime.utc(2026, 7, 19, 12),
+        capabilities: const FileCapabilities(
+          read: true,
+          concreteRead: true,
+          write: true,
+        ),
+      );
+
+      final download = harness.controller.downloadFile(
+        entry: entry,
+        destinationUri: 'content://downloads/document/cancelled',
+      );
+      await copyStarted.future;
+      final transfer = harness.container
+          .read(clientControllerProvider)
+          .transfers
+          .single;
+      harness.controller.cancelTransfer(transfer.id);
+
+      await expectLater(
+        download,
+        throwsA(
+          isA<ApiException>().having(
+            (error) => error.kind,
+            'kind',
+            ApiFailureKind.cancelled,
+          ),
+        ),
+      );
+      expect(cancelledOperations, <String>[transfer.id]);
+      final pending = harness.container
+          .read(clientControllerProvider)
+          .transfers
+          .single;
+      expect(pending.status, TransferStatus.awaitingDestination);
+      expect(pending.errorMessage, contains('重新选择位置'));
+    },
+  );
 
   group('search request isolation', () {
     test('reverse completion keeps only the latest search result', () async {
@@ -1410,14 +2026,38 @@ final class _ControllerHarness {
     bool waitForBootstrap = true,
     ClientController Function()? controllerFactory,
     AuthSessionStore? sessionStore,
+    Directory? transferDirectory,
+    ContentUriMaterializer? contentUriMaterializer,
+    ContentUriMaterializationCanceller? contentUriMaterializationCanceller,
   }) async {
     final preferences = _FakeServerPreferencesStore(savedEndpoint);
     final activeSessionStore = sessionStore ?? MemoryAuthSessionStore();
     final factory = controllerFactory ?? ClientController.new;
+    final ownsTransferDirectory = transferDirectory == null;
+    final activeTransferDirectory =
+        transferDirectory ??
+        await Directory.systemTemp.createTemp('mnemonas-controller-transfers-');
     final container = ProviderContainer(
       overrides: [
         serverPreferencesProvider.overrideWithValue(preferences),
         authSessionStoreProvider.overrideWithValue(activeSessionStore),
+        transferStoreFactoryProvider.overrideWith((ref) {
+          if (ownsTransferDirectory) {
+            ref.onDispose(() {
+              unawaited(activeTransferDirectory.delete(recursive: true));
+            });
+          }
+          return () async =>
+              FileTransferStore(directoryPath: activeTransferDirectory.path);
+        }),
+        if (contentUriMaterializer != null)
+          contentUriMaterializerProvider.overrideWithValue(
+            contentUriMaterializer,
+          ),
+        if (contentUriMaterializer != null)
+          contentUriMaterializationCancellerProvider.overrideWithValue(
+            contentUriMaterializationCanceller ?? (_) async {},
+          ),
         apiClientFactoryProvider.overrideWithValue((endpoint, store) {
           final adapter = adapters[endpoint.baseUrl];
           if (adapter == null) {
@@ -1550,6 +2190,11 @@ final class _ControllerAdapter implements HttpClientAdapter {
   Set<String> failedTrashEmptyDeletedIds = const <String>{};
   bool failNextTrashList = false;
   bool failNextSearch = false;
+  bool disconnectNextUpload = false;
+  bool disconnectNextDirectory = false;
+  bool interruptNextDownload = false;
+  List<int> downloadPayload = <int>[1, 2, 3, 4, 5, 6];
+  final List<String?> downloadRanges = <String?>[];
 
   List<_ControllerRequest> get trashRequests => requests
       .where((request) => request.path.startsWith('/api/v1/trash/'))
@@ -1724,6 +2369,66 @@ final class _ControllerAdapter implements HttpClientAdapter {
         'count': 1,
       });
     }
+    if (path.startsWith('/api/v1/download/') && options.method == 'GET') {
+      final range =
+          options.headers['Range']?.toString() ??
+          options.headers['range']?.toString();
+      downloadRanges.add(range);
+      final condition =
+          options.headers[downloadIdentityConditionHeader]?.toString() ??
+          options.headers[downloadIdentityConditionHeader.toLowerCase()]
+              ?.toString();
+      if (range != null && condition != 'download-identity-1') {
+        return _json(412, {
+          'code': 'DOWNLOAD_IDENTITY_MISMATCH',
+          'message': 'download identity changed',
+        });
+      }
+      if (interruptNextDownload) {
+        interruptNextDownload = false;
+        late final StreamController<Uint8List> controller;
+        controller = StreamController<Uint8List>(
+          onListen: () {
+            controller.add(
+              Uint8List.fromList(downloadPayload.take(3).toList()),
+            );
+            controller.addError(
+              DioException(
+                requestOptions: options,
+                type: DioExceptionType.connectionError,
+                error: 'download connection interrupted',
+              ),
+            );
+            unawaited(controller.close());
+          },
+        );
+        return ResponseBody(
+          controller.stream,
+          200,
+          headers: <String, List<String>>{
+            Headers.contentLengthHeader: <String>['${downloadPayload.length}'],
+            downloadIdentityHeader: <String>['download-identity-1'],
+          },
+        );
+      }
+      final start = range == null
+          ? 0
+          : int.parse(range.substring('bytes='.length, range.length - 1));
+      final bytes = downloadPayload.sublist(start);
+      return ResponseBody.fromBytes(
+        bytes,
+        start == 0 ? 200 : 206,
+        headers: <String, List<String>>{
+          Headers.contentLengthHeader: <String>['${bytes.length}'],
+          downloadIdentityHeader: <String>['download-identity-1'],
+          if (start > 0)
+            'content-range': <String>[
+              'bytes $start-${downloadPayload.length - 1}/'
+                  '${downloadPayload.length}',
+            ],
+        },
+      );
+    }
     if (path == '/api/v1/trash/' && options.method == 'GET') {
       final snapshot = trashItems
           .map((item) => Map<String, dynamic>.from(item))
@@ -1801,12 +2506,36 @@ final class _ControllerAdapter implements HttpClientAdapter {
       return _envelope(result);
     }
     if (path.startsWith('/api/v1/files/')) {
+      if (options.method == 'POST') {
+        if (disconnectNextUpload) {
+          disconnectNextUpload = false;
+          throw DioException(
+            requestOptions: options,
+            type: DioExceptionType.connectionError,
+            error: 'upload connection interrupted',
+          );
+        }
+        return _envelope({
+          'path': '/${path.substring('/api/v1/files/'.length)}',
+          'isDir': false,
+          'size': 0,
+          'persistenceWarning': false,
+        });
+      }
       final suffix = path.substring('/api/v1/files/'.length);
       final logicalPath = suffix.isEmpty ? '/' : '/${Uri.decodeFull(suffix)}';
       final gate = _directoryGates[logicalPath];
       if (gate != null) {
         // Ignore cancellation deliberately so stale completion is observable.
         await gate.wait();
+      }
+      if (disconnectNextDirectory) {
+        disconnectNextDirectory = false;
+        throw DioException(
+          requestOptions: options,
+          type: DioExceptionType.connectionError,
+          error: 'directory connection interrupted',
+        );
       }
       final entrySuffix = logicalPath == '/'
           ? 'root'

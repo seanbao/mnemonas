@@ -360,6 +360,7 @@ CI should cover:
 - Go protobuf generation, generated-file drift checks, `golangci-lint`, race-enabled tests, the Go coverage threshold, and `govulncheck`.
 - Rust dataplane and `tools/proto-gen` formatting, Clippy, tests, dependency audits, and release builds.
 - Frontend `npm audit`, lint, typecheck, production build, and coverage tests.
+- Flutter-client Android backup policy, formatting, static analysis, unit and widget tests, and debug APK build.
 - Playwright E2E with isolated backend and frontend test servers.
 - Docker image build plus `/health` and frontend-entry smoke checks.
 
@@ -368,7 +369,7 @@ CI should cover:
 Release and security checks should not skip `golangci-lint`.
 Go coverage is enforced by `GO_COVERAGE_MIN`, currently 75% in CI and `make coverage`.
 Rust dataplane coverage is enforced by `make rust-coverage` through `cargo-llvm-cov` and `RUST_COVERAGE_MIN`, currently 70% line coverage.
-Codecov statuses are informational; they are for trend reporting and PR comments, not the only blocking quality gate.
+Codecov statuses are informational; they support trend reporting and change-result annotations and are not the sole blocking quality gate.
 
 ## Local Change-Aware Validation
 
@@ -376,7 +377,7 @@ Run `make verify-changed` before committing local changes. The target invokes `s
 
 The selector covers these change classes:
 
-- Go, Rust dataplane, `tools/proto-gen`, protobuf, Web UI, Playwright E2E, Docker, documentation, GitHub Actions workflow, and shell-script changes.
+- Go, Rust dataplane, `tools/proto-gen`, protobuf, Web UI, Flutter client, Playwright E2E, Docker, documentation, GitHub Actions workflow, and shell-script changes.
 - Web UI changes run threshold-enforced Vitest coverage tests. TSX and CSS changes under `web/src` also run the frontend quality E2E suite for accessibility, responsive layout, and interaction integrity.
 - Go, Rust, and Web dependency manifest or lockfile changes add dependency security checks.
 - Toolchain and quality configuration changes, including `.go-version`, `.nvmrc`, `.golangci.yml`/`.golangci.yaml`, `.github/dependabot.yml`/`.github/dependabot.yaml`, `codecov.yml`/`codecov.yaml`, and `mnemonas.example.toml`.
@@ -389,6 +390,12 @@ Use `./scripts/verify-changed.sh --staged` to inspect only staged content. Use `
 Changed-file selection is covered by `scripts/test-verify-changed-safety.sh`.
 Secret leak scanning is covered by `scripts/test-secret-leaks.sh`.
 Both regression tests are included in `make scripts-check`.
+
+## Flutter Client Testing
+
+`make client-check` is the host-side Flutter-client gate and requires the repository-pinned Flutter version and JDK 17. It checks the Android backup policy, Dart formatting, static analysis, all Flutter tests, and a debug APK build. The tests cover session and context isolation, file and Trash flows, download identity and resume behavior, the durable transfer ledger, Android platform-channel arguments, progress and cancellation contracts, and primary page states.
+
+Host-side gates do not replace device acceptance. Changes involving the Storage Access Framework, Activity destruction, system cancellation, permission denial, different DocumentsProvider implementations, large files, network loss, process termination, foreground/background transitions, or upgrades also require Android-emulator and physical-device validation. A debug APK is only a development artifact and does not provide signing, upgrade-compatibility, or release-readiness evidence.
 
 ## Frontend Testing
 

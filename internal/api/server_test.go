@@ -2442,6 +2442,69 @@ func TestServer_UploadFile(t *testing.T) {
 	}
 }
 
+func TestServer_UploadFile_RejectsContentRange(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/upload"); err != nil {
+		t.Fatalf("Mkdir(/upload) error: %v", err)
+	}
+
+	rejectedBody := &apiRejectReadBody{}
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/files/upload/partial.bin",
+		rejectedBody,
+	)
+	req.ContentLength = int64(len("partial"))
+	req.Header["Content-Range"] = []string{"bytes 0-6/14"}
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("partial upload status = %d, want %d; body=%s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Content-Range is not supported") {
+		t.Fatalf("partial upload body = %s", w.Body.String())
+	}
+	if rejectedBody.reads != 0 {
+		t.Fatalf("partial upload read request body %d times, want 0", rejectedBody.reads)
+	}
+	if _, err := fs.Stat(ctx, "/upload/partial.bin"); err == nil {
+		t.Fatal("partial upload created a file")
+	}
+}
+
+func TestServer_UploadFile_AuthorizesBeforeRejectingContentRange(t *testing.T) {
+	server := &Server{authEnabled: true}
+	rejectedBody := &apiRejectReadBody{}
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/files/restricted/partial.bin",
+		rejectedBody,
+	)
+	req.ContentLength = int64(len("partial"))
+	req.Header["Content-Range"] = []string{"bytes 0-6/14"}
+	req = req.WithContext(context.WithValue(req.Context(), auth.ContextKeyUser, &auth.User{
+		ID:       "upload-user",
+		Username: "upload-user",
+		Role:     auth.RoleUser,
+		HomeDir:  "/home/upload-user",
+	}))
+	w := httptest.NewRecorder()
+
+	server.handleUploadFile(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("unauthorized partial upload status = %d, want %d; body=%s", w.Code, http.StatusForbidden, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "Content-Range") {
+		t.Fatalf("unauthorized partial upload disclosed header rejection: %s", w.Body.String())
+	}
+	if rejectedBody.reads != 0 {
+		t.Fatalf("unauthorized partial upload read request body %d times, want 0", rejectedBody.reads)
+	}
+}
+
 type uploadWriteErrorWrapper struct {
 	cause error
 }
@@ -9062,7 +9125,7 @@ func TestServer_DownloadVersion_UsesPrivateRevalidationCacheHeaders(t *testing.T
 	}
 }
 
-func TestServer_DownloadVersion_SupportsRangeRequests(t *testing.T) {
+func TestServer_DownloadVersion_SupportsGETRangeAndIgnoresHEADRange(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
 	historicalContent := uniqueSixByteVersionTestContent(t, "range-v1")
@@ -9109,6 +9172,28 @@ func TestServer_DownloadVersion_SupportsRangeRequests(t *testing.T) {
 	}
 	if body := w.Body.String(); body != string(historicalContent[1:4]) {
 		t.Fatalf("version range body = %q, want %q", body, string(historicalContent[1:4]))
+	}
+
+	req = httptest.NewRequest(http.MethodHead, "/api/v1/download/versions/range.txt?version="+historicalHash, nil)
+	req.Header.Set("Range", "bytes=1-3")
+	w = httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("version HEAD range status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if acceptRanges := w.Header().Get("Accept-Ranges"); acceptRanges != "bytes" {
+		t.Fatalf("version HEAD Accept-Ranges = %q, want %q", acceptRanges, "bytes")
+	}
+	if contentRange := w.Header().Get("Content-Range"); contentRange != "" {
+		t.Fatalf("version HEAD Content-Range = %q, want empty", contentRange)
+	}
+	if contentLength := w.Header().Get("Content-Length"); contentLength != strconv.Itoa(len(historicalContent)) {
+		t.Fatalf("version HEAD Content-Length = %q, want %d", contentLength, len(historicalContent))
+	}
+	if w.Body.Len() != 0 {
+		t.Fatalf("version HEAD body length = %d, want 0", w.Body.Len())
 	}
 }
 
