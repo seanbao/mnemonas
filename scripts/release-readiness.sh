@@ -171,8 +171,6 @@ check_support_routes() {
 	require_file_contains "SUPPORT.en.md" "Do not post exploit details publicly"
 	require_file_contains "SUPPORT.md" "尚未发布任何可用版本"
 	require_file_contains "SUPPORT.en.md" "has not published any usable release"
-	require_file_contains "SUPPORT.md" "暂不接收外部代码或文档提交"
-	require_file_contains "SUPPORT.en.md" "External code and documentation submissions are not being accepted"
 }
 
 check_security_policy() {

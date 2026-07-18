@@ -158,6 +158,7 @@ proto_tool_changed=0
 web_changed=0
 web_e2e_changed=0
 web_quality_changed=0
+client_changed=0
 proto_changed=0
 scripts_changed=0
 workflows_changed=0
@@ -236,6 +237,9 @@ for file in "${FILES[@]}"; do
 		web/*)
 			web_changed=1
 			;;
+		client/*)
+			client_changed=1
+			;;
 	esac
 
 	case "$file" in
@@ -265,6 +269,12 @@ for file in "${FILES[@]}"; do
 			;;
 		Makefile)
 			makefile_changed=1
+			;;
+	esac
+
+	case "$file" in
+		Makefile|.github/workflows/ci.yml|.github/workflows/ci.yaml|.github/dependabot.yml|.github/dependabot.yaml)
+			client_changed=1
 			;;
 	esac
 
@@ -406,6 +416,10 @@ fi
 
 if [[ "$web_e2e_changed" == "1" ]]; then
 	add_command "Run frontend E2E" "cd web && npm run test:e2e"
+fi
+
+if [[ "$client_changed" == "1" ]]; then
+	add_command "Run Flutter client checks" "make client-check"
 fi
 
 if [[ "$docker_changed" == "1" ]]; then

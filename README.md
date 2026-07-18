@@ -9,7 +9,7 @@
 > 私有文件、本地控制的自托管存储系统。
 
 > [!WARNING]
-> MnemoNAS 仍处于开发阶段，尚未发布任何可用版本。当前源码仅用于开发和验证，不应承载真实数据或用于生产部署。缺陷、使用问题和功能建议可通过 [GitHub Issues](https://github.com/seanbao/mnemonas/issues) 提交；当前不接收外部代码或文档提交。
+> MnemoNAS 仍处于开发阶段，尚未发布任何可用版本。当前源码仅用于开发和验证，不应承载真实数据或用于生产部署。缺陷、使用问题和功能建议可通过 [GitHub Issues](https://github.com/seanbao/mnemonas/issues) 提交。
 
 MnemoNAS 是一个开源的自托管 NAS 系统，面向日常文件管理。
 它提供 Web UI、WebDAV、版本历史、回收站、Scrub 和诊断包。
@@ -27,7 +27,7 @@ MnemoNAS 是一个开源的自托管 NAS 系统，面向日常文件管理。
 - **维护与诊断**：健康检查、Scrub、GC 和诊断包用于发现并定位数据问题
 - **Web 与 WebDAV 覆盖**：浏览器管理界面和 WebDAV 协议入口覆盖主要访问路径，客户端兼容状态按矩阵持续跟踪
 
-### 功能列表
+### Web 管理界面功能列表
 
 | 功能模块 | 描述 |
 | --- | --- |
@@ -45,11 +45,17 @@ MnemoNAS 是一个开源的自托管 NAS 系统，面向日常文件管理。
 
 最近操作复核还包括高风险摘要、集中窗口复核、当前页/当前筛选跨页复核、结构化批量处置摘要、需跟进复核状态，以及从活动行跳转到相关版本历史、回收站、分享处置和复核记录的入口。
 
+### Flutter 客户端（开发中）
+
+[`client/`](client/README.md) 包含 Android、Linux 和 Windows 的 Flutter 客户端工程，Android 是首个可用平台目标。当前源码已接入服务器连接、Bearer 登录与 refresh token 轮换、文件浏览、上传下载、重命名、移动、复制、两阶段安全删除、账户管理和问题反馈。
+
+客户端尚未发布任何可用版本。搜索、相册索引、后台或可恢复传输、桌面平台原生验证、真实 Android 设备验收和正式发布签名仍未完成；Linux 和 Windows runner 目前只保留跨平台工程边界。
+
 ## 架构
 
 ```text
 ┌─────────────────────────────────────────────────────────┐
-│                      Web UI (React)                      │
+│        Flutter 客户端 / Web UI / WebDAV 客户端          │
 ├─────────────────────────────────────────────────────────┤
 │                   Go 控制面 (nasd)                       │
 │  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐    │
@@ -160,6 +166,7 @@ mnemonas/
 │   └── storage/        # 文件系统、版本、回收站与 CAS 编排
 ├── dataplane/          # Rust 数据面
 ├── web/                # React 前端
+├── client/             # Flutter Android/Linux/Windows 客户端
 ├── proto/              # gRPC 协议定义
 ├── docs/               # 文档
 └── docker-compose.yml
@@ -172,6 +179,7 @@ mnemonas/
 - Go 1.25.12+
 - Rust 1.92+
 - Node.js `^20.19.0` 或 `>=22.12.0`（推荐使用 `.nvmrc` 指定的 22.x）
+- Flutter 3.44.4、完整 JDK 17，以及包含 NDK `28.2.13676358` 的 Android SDK（仅 Android 客户端构建需要）
 - Docker Engine + Compose v2 插件（支持 `docker compose`）
 - protoc 3.20+（`make proto` / `make build` 或修改 proto 时需要；Docker 镜像构建不需要）
 
@@ -218,6 +226,9 @@ make dev
 
 # 变更感知验证；提交本地变更前优先运行
 make verify-changed
+
+# Flutter 客户端格式、分析、测试、Android 策略和 debug APK 门禁
+make client-check
 
 # 发布前就绪摘要；打 tag 前运行
 make release-readiness

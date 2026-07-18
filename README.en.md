@@ -9,7 +9,7 @@ English | [简体中文](README.md)
 > Private files and local control for self-hosted storage.
 
 > [!WARNING]
-> MnemoNAS is still under development and has not published any usable release. The current source tree is for development and validation only; it must not hold real data or be used for production deployment. Defects, usage problems, and feature suggestions may be submitted through [GitHub Issues](https://github.com/seanbao/mnemonas/issues). External code and documentation submissions are not being accepted at this stage.
+> MnemoNAS is still under development and has not published any usable release. The current source tree is for development and validation only; it must not hold real data or be used for production deployment. Defects, usage problems, and feature suggestions may be submitted through [GitHub Issues](https://github.com/seanbao/mnemonas/issues).
 
 MnemoNAS is an open-source self-hosted NAS system for daily file management.
 It provides a Web UI, WebDAV access, file versions, trash, scrub, and diagnostic bundles.
@@ -27,7 +27,7 @@ The name comes from Mnemosyne, the Greek goddess of memory and mother of the nin
 - **Maintenance and diagnostics**: health checks, scrub, GC, and diagnostic bundles help discover and investigate data issues.
 - **Web and WebDAV coverage**: browser-based management and WebDAV protocol access cover the main access paths, with client compatibility tracked in the matrix.
 
-### Feature Matrix
+### Web Management Feature Matrix
 
 | Area | Description |
 | --- | --- |
@@ -53,11 +53,17 @@ Activity review includes:
 
 Activity rows also link to related versions, trash entries, shares, and review records.
 
+### Flutter Client (In Development)
+
+[`client/`](client/README.en.md) contains the Flutter project for Android, Linux, and Windows, with Android as the first usable-platform target. The current source covers server connection, Bearer login and refresh-token rotation, file browsing, upload and download, rename, move, copy, two-phase safe deletion, account management, and issue feedback.
+
+No usable client version has been published. Search, photo indexing, background or resumable transfers, native desktop validation, physical Android-device acceptance, and release signing remain incomplete. The Linux and Windows runners currently preserve only the cross-platform project boundary.
+
 ## Architecture
 
 ```text
 +---------------------------------------------------------+
-|                      Web UI (React)                      |
+|       Flutter client / Web UI / WebDAV clients          |
 +---------------------------------------------------------+
 |                   Go control plane (nasd)                |
 |  +---------+  +---------+  +---------+  +---------+      |
@@ -175,6 +181,7 @@ mnemonas/
 │   └── storage/        # Filesystem, versions, trash, CAS orchestration
 ├── dataplane/          # Rust data plane
 ├── web/                # React frontend
+├── client/             # Flutter Android/Linux/Windows client
 ├── proto/              # gRPC protocol definitions
 ├── docs/               # Documentation
 └── docker-compose.yml
@@ -187,6 +194,7 @@ mnemonas/
 - Go 1.25.12+
 - Rust 1.92+
 - Node.js `^20.19.0` or `>=22.12.0` (Node 22 from `.nvmrc` is recommended)
+- Flutter 3.44.4, a complete JDK 17, and an Android SDK with NDK `28.2.13676358` for Android client builds
 - Docker Engine + Compose v2
 - protoc 3.20+ when regenerating protobuf or running `make proto` / `make build`
 
@@ -217,6 +225,9 @@ make dev
 
 # Change-aware validation; run this first before committing local changes
 make verify-changed
+
+# Flutter formatting, analysis, tests, Android policy, and debug APK gates
+make client-check
 
 # Pre-release readiness summary; run before tagging
 make release-readiness

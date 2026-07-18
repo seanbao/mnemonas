@@ -11,6 +11,8 @@
 | Go | 1.25.12 | 1.25.12+ | Go 控制面 |
 | Rust | 1.92 | 1.92.x | Rust 数据面与 protobuf 生成器 |
 | Node.js | `^20.19.0` 或 `>=22.12.0` | `.nvmrc` 指定的 22.x | 前端 |
+| Flutter | 3.44.4 | 3.44.4 | Android、Linux 和 Windows 客户端 |
+| JDK | 17 | 17 | Android 客户端 Gradle 构建 |
 | protoc | 3.20 | CI 对齐版本 3.20.1 | 重新生成 protobuf 代码 |
 | make | 3.x | 4.x | 构建自动化 |
 
@@ -128,6 +130,7 @@ mnemonas/
 │   └── workspace/         # 原生文件操作
 ├── dataplane/             # Rust 数据面
 ├── web/                   # React 前端
+├── client/                # Flutter Android、Linux 和 Windows 客户端
 ├── proto/                 # gRPC 协议定义
 ├── scripts/               # 开发、测试和部署辅助脚本
 ├── docs/                  # 文档
@@ -239,6 +242,73 @@ npm run dev
 
 如果需要由 `nasd` 直接托管静态 Web UI，应先构建前端，或设置 `MNEMONAS_WEB_DIR=web/dist`。
 
+## Flutter 客户端开发
+
+`client/` 使用 Flutter 3.44.4，并保留 Android、Linux 和 Windows runner。当前优先完成 Android 版本；Linux 和 Windows runner 用于保持跨平台工程边界，尚不表示相应桌面构建已经完成发布验证。
+
+### 支持范围与工具链
+
+Android 构建需要 Flutter 3.44.4、Dart SDK、包含 `javac` 的完整 JDK 17，以及通过 `flutter doctor -v` 检查的 Android SDK、platform tools 和 NDK `28.2.13676358`；Android SDK 许可协议也必须已接受。仅安装 Java 运行时不足以完成 Gradle 编译。存在多套 Java 安装时，应把 `JAVA_HOME` 和 `PATH` 指向同一套完整 JDK。CI 使用固定 Flutter 版本、JDK 17 和 NDK，不跟随 `stable` 渠道的后续版本自动漂移。
+
+Flutter 和 Dart 不在默认 `PATH` 时，可显式传入二进制路径：
+
+```bash
+make client-check \
+  FLUTTER=/path/to/flutter/bin/flutter \
+  DART=/path/to/flutter/bin/dart \
+  JAVA=/path/to/jdk-17/bin/java \
+  JAVAC=/path/to/jdk-17/bin/javac
+```
+
+Gradle 仍从进程环境读取 Java 工具链；显式指定上述变量时，还应设置 `JAVA_HOME=/path/to/jdk-17`。
+
+### 本机构建与门禁
+
+仓库级入口如下：
+
+```bash
+make client-toolchain-check
+make client-android-policy-check
+make client-format
+make client-analyze
+make client-test
+make client-apk-debug
+make client-check
+```
+
+`make client-check` 依次检查 Flutter 版本、Dart 格式、静态分析、单元/组件测试和 Android debug APK 构建。debug APK 写入 `client/build/app/outputs/flutter-apk/app-debug.apk`。`make client-format` 会修改 Dart 源文件；其余门禁不会主动格式化代码。
+
+直接运行 Flutter 命令时：
+
+```bash
+cd client
+flutter pub get
+dart format --output=none --set-exit-if-changed lib test
+flutter analyze
+flutter test
+flutter build apk --debug
+```
+
+### 平台 runner 依赖
+
+- Android runner 需要 JDK 17、Android SDK command-line tools、platform tools、对应 compile SDK、build tools 和 NDK `28.2.13676358`。模拟器验证还需要 Android Emulator、硬件虚拟化和可用的 AVD。
+- Linux runner 必须在 Linux 主机上构建，并安装 `clang`、`cmake`、`ninja-build`、`pkg-config` 和 GTK 3 开发包。
+- Windows runner 必须在 Windows 主机上构建，并安装 Visual Studio 2022 的“使用 C++ 的桌面开发”工作负载和 Windows SDK。
+
+当前 CI 只构建 Android debug APK。Linux 和 Windows 构建应在对应原生 runner 上增加门禁；Android CI 结果不能替代桌面平台验证。
+
+### Android 签名与设备验证边界
+
+debug APK 只用于开发和测试，不是可发布产物。任何 release APK 或 AAB 都不得使用 Android debug key；发布签名材料必须保存在仓库之外，通过受保护的 CI 密钥或本机受限文件注入，且不得提交 keystore、别名或密码。完成独立发布签名配置后，才可执行 `flutter build appbundle --release` 并将结果视为发布候选。
+
+格式、分析、测试和 debug APK 构建只证明主机侧门禁通过，不证明客户端已在真实设备可用。发布候选至少需要在真实 Android 设备上验证安装与升级、进程重启后的会话恢复、HTTPS 连接、登录与 token 轮换、文件选择和传输、下载打开、前后台切换、网络中断恢复及权限拒绝路径。模拟器结果和 CI 产物不能替代该证据；在真实设备记录完成前，客户端状态仍应标记为开发中。
+
+### Android 应用数据备份策略
+
+Android 客户端通过平台安全存储保存会话材料。为避免加密后的 `SharedPreferences` 在缺少原设备 Android Keystore 密钥时被恢复，客户端不参与 Android 云备份、设备间迁移或应用数据恢复。`AndroidManifest.xml` 同时关闭 `allowBackup`，并分别引用 Android 11 及更早版本的 `full-backup-content` 规则和 Android 12 及更新版本的 `data-extraction-rules` 规则；两套规则均排除所有应用可控存储域。重新安装或更换设备后需要重新登录，这是当前安全策略的预期行为。
+
+清单或备份规则发生变化时，运行 `make client-android-policy-check`。该静态检查会解析清单和两套 XML，验证云备份与设备迁移均未重新启用，并执行针对不安全回归的测试。
+
 ## 端口
 
 | 服务 | 端口 | 说明 |
@@ -288,10 +358,12 @@ make check
 make docs-check
 make coverage
 make docker-check
+make client-check
 ```
 
 `make verify-changed` 会根据 worktree、staged area 或指定 base ref 中的变更文件选择检查。
-可选择 workflow、脚本、Go/Rust、前端、E2E、Docker、文档、依赖安全、工具链配置、质量配置、示例配置和 public-access 模板检查。
+可选择 workflow、脚本、Go/Rust、Web 前端、Flutter 客户端、E2E、Docker、文档、依赖安全、工具链配置、质量配置、示例配置和 public-access 模板检查。
+Go 测试默认通过 `GO_TEST_PACKAGE_PARALLELISM=3` 将包级并发限制为 3，避免 race 全包测试因多个重包同时运行而发生资源争用；需要在资源更充足的环境中调整时，可显式覆盖该变量。
 当 `go.mod`、`go.sum`、Cargo 清单/锁文件或 Web npm 清单/锁文件变化时，`verify-changed` 会追加依赖安全检查；Web npm 清单或锁文件变化会使用 `NPM_AUDIT=1` 运行 npm audit。
 YAML 配置校验会拒绝语法错误和同一映射内的重复键，避免本地解析时静默覆盖配置值。
 使用 `./scripts/verify-changed.sh --staged` 只检查暂存内容，使用 `./scripts/verify-changed.sh --base <ref>` 检查分支范围，使用 `--dry-run` 查看将运行的命令而不执行。

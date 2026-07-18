@@ -6,7 +6,7 @@ This document describes the MnemoNAS system architecture, major design decisions
 
 ## Design Position
 
-MnemoNAS is a self-hosted private cloud storage system for daily file management. It keeps the current file tree readable, adds version history and trash on top, and exposes both a Web UI and WebDAV.
+MnemoNAS is a self-hosted private cloud storage system for daily file management. It keeps the current file tree readable, adds version history and trash on top, and provides access through the Web UI, REST API, and WebDAV.
 
 Core principles:
 
@@ -27,7 +27,8 @@ Current non-goals:
 ```text
 +---------------------------------------------------------+
 |                      Clients                            |
-|  Web UI / Finder / Explorer / rclone / mobile clients   |
+| Web UI / Flutter (Android-first) / WebDAV / API clients |
+| Finder / Explorer / rclone / other mobile clients       |
 +-------------------------+-------------------------------+
                           |
 +-------------------------v-------------------------------+
@@ -139,6 +140,7 @@ SQLite is used for transactional metadata where ACID semantics matter. Some feat
 Security boundaries:
 
 - Web UI/API authentication is JWT-backed and enabled by default; browser sessions store access and refresh tokens in same-origin `HttpOnly` cookies.
+- The Flutter client uses `Authorization: Bearer` for REST API access and writes the access token and single-use rotating refresh token as one session generation in platform secure storage; it does not depend on browser cookies.
 - User roles are `admin`, `user`, and `guest`.
 - Non-admin users are scoped to their configured `home_dir`, with optional `storage.directory_access_rules` grants for shared directories.
 - Directory access rules use the same most-specific path decision for files, search, shares, favorites, trash, activity logs, and WebDAV users mode.
@@ -153,7 +155,7 @@ Deployment boundaries:
 - Set `server.trusted_proxy_hops` only when MnemoNAS is behind trusted proxies.
 - Do not disable authentication outside a loopback-only development environment.
 
-## Frontend Architecture
+## Web Frontend Architecture
 
 The Web UI lives under `web/` and uses React, TypeScript, Vite, HeroUI, Tailwind CSS, Zustand, and TanStack Query.
 
@@ -168,6 +170,20 @@ The UI is organized around repeated file-management workflows:
 
 The frontend talks to `/api/v1/*` and uses the same origin as `nasd` in production. In production, `nasd` serves the built static Web UI, keeps API, WebDAV, health, and direct share API routes ahead of the SPA fallback, and sends `Cache-Control: no-cache` for `index.html` so browser upgrades revalidate the application entry. During development, Vite serves the frontend on `5173` and proxies API calls to `8080`.
 
+## Flutter Client Architecture
+
+The Flutter client lives under `client/` and retains Android, Linux, and Windows runners. Android is the first usable-platform target. The Linux and Windows runners currently preserve the shared project boundary; builds and runtime validation on their native hosts have not been completed.
+
+The client accesses the `nasd` REST API directly:
+
+- Authenticated requests use a Bearer access token. The access token, refresh token, server address, and session timing data are stored as one record through `flutter_secure_storage`, preventing readers from observing tokens from different rotation generations.
+- A server refresh token can succeed only once. The client coalesces concurrent refresh attempts only for `401 TOKEN_EXPIRED`, saves the new token pair returned by the server, and then retries the original request. Streaming uploads check session validity before sending and disable request-body replay.
+- Public HTTP endpoints are rejected before connection. Loopback and local-network HTTP endpoints remain available for development validation, with an unencrypted-transport warning in the interface. The HTTP client does not follow redirects automatically.
+- Uploads use a file stream as the raw request body instead of loading the complete file into memory. Downloads write the response stream to a temporary file, verify the declared content length, and then publish the file to its destination.
+- Android download export uses the Storage Access Framework `ACTION_CREATE_DOCUMENT` flow. The client first writes to an app-private staging file, then uses a platform channel to copy that regular file to the user-selected `content` URI.
+
+This section describes the current source architecture only. The Flutter client remains under development and no usable version has been published. Physical Android-device acceptance, upgrade validation, and independent release signing are incomplete, and Linux and Windows do not yet have validated distributable builds.
+
 ## Related Documents
 
 - [Storage internals](storage-internals.en.md)
@@ -175,3 +191,4 @@ The frontend talks to `/api/v1/*` and uses the same origin as `nasd` in producti
 - [Security hardening](security.en.md)
 - [API reference](api-reference.en.md)
 - [Development guide](development.en.md)
+- [Flutter client](../client/README.en.md)

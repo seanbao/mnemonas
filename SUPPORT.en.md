@@ -2,7 +2,7 @@
 
 English | [简体中文](SUPPORT.md)
 
-MnemoNAS is still under development, has not published any usable release, and does not provide stable-version support. GitHub Issues currently accept defects, usage problems, compatibility results, and feature suggestions. External code and documentation submissions are not being accepted at this stage.
+MnemoNAS is still under development, has not published any usable release, and does not provide stable-version support. GitHub Issues currently accept defects, usage problems, compatibility results, and feature suggestions.
 
 Feedback must identify the tested Git commit. Maintainers triage reports according to project priorities without promising a response, fix, or release timeline.
 

@@ -15,6 +15,7 @@
 *.temp
 *.tmp
 bin/
+client/
 coverage/
 coverage.out
 data/
