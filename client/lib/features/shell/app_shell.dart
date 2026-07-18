@@ -20,8 +20,8 @@ class AppShell extends StatelessWidget {
     super.key,
     required this.destination,
     required this.onDestinationSelected,
-    required this.onSearch,
     required this.child,
+    this.onSearch,
     this.title,
     this.actions = const <Widget>[],
     this.floatingActionButton,
@@ -29,7 +29,7 @@ class AppShell extends StatelessWidget {
 
   final AppDestination destination;
   final ValueChanged<AppDestination> onDestinationSelected;
-  final VoidCallback onSearch;
+  final VoidCallback? onSearch;
   final Widget child;
   final String? title;
   final List<Widget> actions;
@@ -60,12 +60,13 @@ class AppShell extends StatelessWidget {
                     ],
                   ),
             actions: <Widget>[
-              IconButton(
-                key: const Key('app-shell-search'),
-                onPressed: onSearch,
-                tooltip: '搜索文件',
-                icon: const Icon(Icons.search_rounded),
-              ),
+              if (onSearch != null)
+                IconButton(
+                  key: const Key('app-shell-search'),
+                  onPressed: onSearch,
+                  tooltip: '搜索文件',
+                  icon: const Icon(Icons.search_rounded),
+                ),
               ...actions,
               const SizedBox(width: MnemoSpacing.xs),
             ],

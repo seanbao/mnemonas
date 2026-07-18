@@ -1,5 +1,6 @@
 import '../core/auth/auth_models.dart';
 import '../core/files/file_models.dart';
+import '../core/search/search_models.dart';
 import '../core/server/server_endpoint.dart';
 import '../core/system/system_models.dart';
 import '../core/trash/trash_models.dart';
@@ -70,13 +71,17 @@ final class ClientState {
     this.currentPath = '/',
     this.directory,
     this.stats,
+    this.search,
     this.trash,
     this.isBusy = false,
+    this.isSearchBusy = false,
     this.isTrashBusy = false,
     this.trashReconciliationRequired = false,
     this.errorMessage,
+    this.searchErrorMessage,
     this.trashErrorMessage,
     this.notice,
+    this.searchQuery = '',
     this.transfers = const <ClientTransfer>[],
   });
 
@@ -89,13 +94,17 @@ final class ClientState {
   final String currentPath;
   final DirectoryListing? directory;
   final StorageStats? stats;
+  final SearchListing? search;
   final TrashListing? trash;
   final bool isBusy;
+  final bool isSearchBusy;
   final bool isTrashBusy;
   final bool trashReconciliationRequired;
   final String? errorMessage;
+  final String? searchErrorMessage;
   final String? trashErrorMessage;
   final String? notice;
+  final String searchQuery;
   final List<ClientTransfer> transfers;
 
   bool get isAuthenticated =>
@@ -110,13 +119,17 @@ final class ClientState {
     String? currentPath,
     Object? directory = _unset,
     Object? stats = _unset,
+    Object? search = _unset,
     Object? trash = _unset,
     bool? isBusy,
+    bool? isSearchBusy,
     bool? isTrashBusy,
     bool? trashReconciliationRequired,
     Object? errorMessage = _unset,
+    Object? searchErrorMessage = _unset,
     Object? trashErrorMessage = _unset,
     Object? notice = _unset,
+    String? searchQuery,
     List<ClientTransfer>? transfers,
   }) {
     return ClientState(
@@ -131,18 +144,26 @@ final class ClientState {
           ? this.directory
           : directory as DirectoryListing?,
       stats: identical(stats, _unset) ? this.stats : stats as StorageStats?,
+      search: identical(search, _unset)
+          ? this.search
+          : search as SearchListing?,
       trash: identical(trash, _unset) ? this.trash : trash as TrashListing?,
       isBusy: isBusy ?? this.isBusy,
+      isSearchBusy: isSearchBusy ?? this.isSearchBusy,
       isTrashBusy: isTrashBusy ?? this.isTrashBusy,
       trashReconciliationRequired:
           trashReconciliationRequired ?? this.trashReconciliationRequired,
       errorMessage: identical(errorMessage, _unset)
           ? this.errorMessage
           : errorMessage as String?,
+      searchErrorMessage: identical(searchErrorMessage, _unset)
+          ? this.searchErrorMessage
+          : searchErrorMessage as String?,
       trashErrorMessage: identical(trashErrorMessage, _unset)
           ? this.trashErrorMessage
           : trashErrorMessage as String?,
       notice: identical(notice, _unset) ? this.notice : notice as String?,
+      searchQuery: searchQuery ?? this.searchQuery,
       transfers: transfers ?? this.transfers,
     );
   }

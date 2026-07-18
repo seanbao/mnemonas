@@ -11,6 +11,7 @@ import 'package:mnemonas_client/core/auth/auth_models.dart';
 import 'package:mnemonas_client/core/auth/session_store.dart';
 import 'package:mnemonas_client/core/network/api_client.dart';
 import 'package:mnemonas_client/core/network/api_error.dart';
+import 'package:mnemonas_client/core/search/search_models.dart';
 import 'package:mnemonas_client/core/server/server_endpoint.dart';
 import 'package:mnemonas_client/core/server/server_preferences.dart';
 import 'package:mnemonas_client/core/trash/trash_models.dart';
@@ -550,6 +551,235 @@ void main() {
       await Future<void>.delayed(Duration.zero);
 
       expect(recordingController.updateCount, updatesBeforeDisposal);
+    });
+  });
+
+  group('search request isolation', () {
+    test('reverse completion keeps only the latest search result', () async {
+      final endpoint = ServerEndpoint.parse('https://nas.example.com');
+      final adapter = _ControllerAdapter();
+      final harness = await _ControllerHarness.start(
+        adapters: {endpoint.baseUrl: adapter},
+      );
+      addTearDown(harness.container.dispose);
+      await harness.connectAndLogin(endpoint, username: 'owner');
+
+      final delayed = adapter.holdSearch('old');
+      addTearDown(delayed.release);
+      final oldSearch = harness.controller.searchFiles('old');
+      await delayed.started.timeout(const Duration(seconds: 2));
+
+      await harness.controller.searchFiles('new');
+      delayed.release();
+      await oldSearch;
+
+      final state = harness.container.read(clientControllerProvider);
+      expect(state.stage, ClientStage.ready);
+      expect(state.searchQuery, 'new');
+      expect(state.search?.query, 'new');
+      expect(state.search?.results.single.path, '/search/new.txt');
+      expect(state.isSearchBusy, isFalse);
+      expect(state.searchErrorMessage, isNull);
+    });
+
+    test(
+      'clearing search prevents a delayed response from returning',
+      () async {
+        final endpoint = ServerEndpoint.parse('https://nas.example.com');
+        final adapter = _ControllerAdapter();
+        final harness = await _ControllerHarness.start(
+          adapters: {endpoint.baseUrl: adapter},
+        );
+        addTearDown(harness.container.dispose);
+        await harness.connectAndLogin(endpoint, username: 'owner');
+
+        final delayed = adapter.holdSearch('pending');
+        addTearDown(delayed.release);
+        final pending = harness.controller.searchFiles('pending');
+        await delayed.started.timeout(const Duration(seconds: 2));
+        harness.controller.clearSearch();
+        delayed.release();
+        await pending;
+
+        final state = harness.container.read(clientControllerProvider);
+        expect(state.searchQuery, isEmpty);
+        expect(state.search, isNull);
+        expect(state.searchErrorMessage, isNull);
+        expect(state.isSearchBusy, isFalse);
+      },
+    );
+
+    test('a recoverable search failure keeps the signed-in state', () async {
+      final endpoint = ServerEndpoint.parse('https://nas.example.com');
+      final adapter = _ControllerAdapter()..failNextSearch = true;
+      final harness = await _ControllerHarness.start(
+        adapters: {endpoint.baseUrl: adapter},
+      );
+      addTearDown(harness.container.dispose);
+      await harness.connectAndLogin(endpoint, username: 'owner');
+
+      await expectLater(
+        harness.controller.searchFiles('report'),
+        throwsA(
+          isA<ApiException>().having(
+            (error) => error.kind,
+            'kind',
+            ApiFailureKind.connection,
+          ),
+        ),
+      );
+
+      final state = harness.container.read(clientControllerProvider);
+      expect(state.stage, ClientStage.ready);
+      expect(state.user?.username, 'owner');
+      expect(state.searchQuery, 'report');
+      expect(state.search, isNull);
+      expect(state.searchErrorMessage, isNotNull);
+      expect(state.isSearchBusy, isFalse);
+    });
+
+    test('same-query refresh failure preserves the last result', () async {
+      final endpoint = ServerEndpoint.parse('https://nas.example.com');
+      final adapter = _ControllerAdapter();
+      final harness = await _ControllerHarness.start(
+        adapters: {endpoint.baseUrl: adapter},
+      );
+      addTearDown(harness.container.dispose);
+      await harness.connectAndLogin(endpoint, username: 'owner');
+      await harness.controller.searchFiles('report');
+      final previous = harness.container.read(clientControllerProvider).search;
+      adapter.failNextSearch = true;
+
+      await expectLater(
+        harness.controller.searchFiles('report'),
+        throwsA(isA<ApiException>()),
+      );
+
+      final state = harness.container.read(clientControllerProvider);
+      expect(state.search, same(previous));
+      expect(state.search?.query, 'report');
+      expect(state.searchErrorMessage, isNotNull);
+      expect(state.isSearchBusy, isFalse);
+    });
+
+    test('an endpoint change fences a delayed search response', () async {
+      final oldEndpoint = ServerEndpoint.parse('https://old.example.com');
+      final newEndpoint = ServerEndpoint.parse('https://new.example.com');
+      final oldAdapter = _ControllerAdapter();
+      final harness = await _ControllerHarness.start(
+        adapters: {
+          oldEndpoint.baseUrl: oldAdapter,
+          newEndpoint.baseUrl: _ControllerAdapter(),
+        },
+      );
+      addTearDown(harness.container.dispose);
+      await harness.connectAndLogin(oldEndpoint, username: 'owner');
+
+      final delayed = oldAdapter.holdSearch('legacy');
+      addTearDown(delayed.release);
+      final legacySearch = harness.controller.searchFiles('legacy');
+      await delayed.started.timeout(const Duration(seconds: 2));
+      await harness.controller.connect(newEndpoint.baseUrl);
+      delayed.release();
+      await legacySearch;
+
+      final state = harness.container.read(clientControllerProvider);
+      expect(state.stage, ClientStage.needsLogin);
+      expect(state.endpoint, newEndpoint);
+      expect(state.searchQuery, isEmpty);
+      expect(state.search, isNull);
+      expect(state.searchErrorMessage, isNull);
+    });
+
+    test('invalid queries never reach the search endpoint', () async {
+      final endpoint = ServerEndpoint.parse('https://nas.example.com');
+      final adapter = _ControllerAdapter();
+      final harness = await _ControllerHarness.start(
+        adapters: {endpoint.baseUrl: adapter},
+      );
+      addTearDown(harness.container.dispose);
+      await harness.connectAndLogin(endpoint, username: 'owner');
+
+      await expectLater(
+        harness.controller.searchFiles('   '),
+        throwsFormatException,
+      );
+      await expectLater(
+        harness.controller.searchFiles(
+          'report',
+          limit: maxSearchResultLimit + 1,
+        ),
+        throwsFormatException,
+      );
+
+      expect(adapter.searchRequests, isEmpty);
+    });
+
+    test(
+      'search target resolution is non-committing until presented',
+      () async {
+        final endpoint = ServerEndpoint.parse('https://nas.example.com');
+        final adapter = _ControllerAdapter();
+        final harness = await _ControllerHarness.start(
+          adapters: {endpoint.baseUrl: adapter},
+        );
+        addTearDown(harness.container.dispose);
+        await harness.connectAndLogin(endpoint, username: 'owner');
+        await harness.controller.loadDirectory('/original');
+        final original = harness.container.read(clientControllerProvider);
+
+        final response = await harness.controller.resolveDirectoryForSearch(
+          '/target',
+        );
+
+        var state = harness.container.read(clientControllerProvider);
+        expect(state.currentPath, original.currentPath);
+        expect(state.directory, same(original.directory));
+        expect(response.data.path, '/target');
+
+        harness.controller.presentDirectoryListing(response.data);
+        state = harness.container.read(clientControllerProvider);
+        expect(state.currentPath, '/target');
+        expect(state.directory, same(response.data));
+      },
+    );
+
+    test('clearing search fences a delayed target resolution', () async {
+      final endpoint = ServerEndpoint.parse('https://nas.example.com');
+      final adapter = _ControllerAdapter();
+      final harness = await _ControllerHarness.start(
+        adapters: {endpoint.baseUrl: adapter},
+      );
+      addTearDown(harness.container.dispose);
+      await harness.connectAndLogin(endpoint, username: 'owner');
+      await harness.controller.loadDirectory('/original');
+      final original = harness.container.read(clientControllerProvider);
+
+      final delayed = adapter.holdDirectory('/target');
+      addTearDown(delayed.release);
+      final resolution = harness.controller.resolveDirectoryForSearch(
+        '/target',
+      );
+      await delayed.started.timeout(const Duration(seconds: 2));
+      harness.controller.clearSearch();
+      delayed.release();
+
+      await expectLater(
+        resolution,
+        throwsA(
+          anyOf(
+            isA<StateError>(),
+            isA<ApiException>().having(
+              (error) => error.kind,
+              'kind',
+              ApiFailureKind.cancelled,
+            ),
+          ),
+        ),
+      );
+      final state = harness.container.read(clientControllerProvider);
+      expect(state.currentPath, original.currentPath);
+      expect(state.directory, same(original.directory));
     });
   });
 
@@ -1305,6 +1535,7 @@ final class _ControllerAdapter implements HttpClientAdapter {
   final List<_ControllerRequest> requests = <_ControllerRequest>[];
   final Map<String, _RequestGate> _loginGates = {};
   final Map<String, _RequestGate> _directoryGates = {};
+  final Map<String, _RequestGate> _searchGates = {};
   _RequestGate? _probeGate;
   _RequestGate? _trashListGate;
   _RequestGate? _trashMutationGate;
@@ -1318,6 +1549,7 @@ final class _ControllerAdapter implements HttpClientAdapter {
   bool failNextTrashEmptyAfterMutation = false;
   Set<String> failedTrashEmptyDeletedIds = const <String>{};
   bool failNextTrashList = false;
+  bool failNextSearch = false;
 
   List<_ControllerRequest> get trashRequests => requests
       .where((request) => request.path.startsWith('/api/v1/trash/'))
@@ -1327,12 +1559,20 @@ final class _ControllerAdapter implements HttpClientAdapter {
       .where((request) => request.method != 'GET')
       .toList(growable: false);
 
+  List<_ControllerRequest> get searchRequests => requests
+      .where((request) => request.path == '/api/v1/search')
+      .toList(growable: false);
+
   _RequestGate holdLogin(String username) {
     return _loginGates[username] = _RequestGate();
   }
 
   _RequestGate holdDirectory(String path) {
     return _directoryGates[path] = _RequestGate();
+  }
+
+  _RequestGate holdSearch(String query) {
+    return _searchGates[query] = _RequestGate();
   }
 
   _RequestGate holdProbe() {
@@ -1365,6 +1605,7 @@ final class _ControllerAdapter implements HttpClientAdapter {
       _ControllerRequest(
         method: options.method,
         path: path,
+        query: Map<String, dynamic>.from(options.queryParameters),
         data: options.data,
       ),
     );
@@ -1452,6 +1693,35 @@ final class _ControllerAdapter implements HttpClientAdapter {
         'disk_used': 1,
         'disk_available': 99,
         'disk_usage_ratio': 0.01,
+      });
+    }
+    if (path == '/api/v1/search' && options.method == 'GET') {
+      final query = options.queryParameters['q']! as String;
+      final gate = _searchGates[query];
+      if (gate != null) {
+        // Ignore cancellation deliberately so stale completion is observable.
+        await gate.wait();
+      }
+      if (failNextSearch) {
+        failNextSearch = false;
+        throw DioException(
+          requestOptions: options,
+          type: DioExceptionType.connectionError,
+          error: 'search connection interrupted',
+        );
+      }
+      return _envelope({
+        'query': query,
+        'results': [
+          {
+            'name': '$query.txt',
+            'path': '/search/$query.txt',
+            'isDir': false,
+            'size': 42,
+            'modTime': '2026-07-19T12:00:00Z',
+          },
+        ],
+        'count': 1,
       });
     }
     if (path == '/api/v1/trash/' && options.method == 'GET') {
@@ -1598,11 +1868,13 @@ final class _ControllerRequest {
   const _ControllerRequest({
     required this.method,
     required this.path,
+    required this.query,
     required this.data,
   });
 
   final String method;
   final String path;
+  final Map<String, dynamic> query;
   final Object? data;
 }
 
