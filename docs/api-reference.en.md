@@ -86,7 +86,7 @@ Authenticated share and favorite management endpoints use `success + data (+ mes
 | `410` | Resource unavailable, expired, disabled, or download limit reached |
 | `413` | File too large |
 | `429` | Rate limited |
-| `507` | User or directory quota exceeded |
+| `507` | User or directory logical quota exceeded, or host write capacity insufficient |
 | `500` | Internal error |
 | `503` | Service dependency unavailable |
 
@@ -472,12 +472,17 @@ Enable or disable response example:
 User quotas:
 
 - `quota_bytes = 0` means unlimited.
-- When it is greater than zero, server-side quota checks apply to non-admin Web/API uploads, copies, moves, and trash restores.
+- When it is greater than zero, server-side quota checks apply to non-admin Web/API uploads, copies, moves, and trash restores. An administrator restoring a historical version into a limited user's `home_dir` is also subject to the target user's quota.
 - WebDAV PUT/COPY/MOVE writes also use this check when `webdav.auth_type = "users"` and the write target is inside that user's `home_dir`.
 - Checks use the current logical size under the `home_dir`; use `storage.directory_quotas` to limit shared directories.
 - Exceeding quota returns `507 Insufficient Storage` with code `QUOTA_EXCEEDED`.
 - `details` contains `quota_type`, `quota_path`, `used_bytes`, `quota_bytes`, `required_bytes`, and `available_bytes`.
-- When alert channels are enabled, Web/API upload, copy, move, and trash-restore quota denials also send a `quota_exceeded` warning event.
+- When the host filesystem cannot provide enough safe staging space for a write transaction, the response is also `507 Insufficient Storage`, but the code is `INSUFFICIENT_STORAGE`, logical-quota details are omitted, and `Retry-After` is not returned. This result is distinct from a user or directory quota rejection.
+- Web/API and WebDAV share one process-level quota reservation coordinator and mutation-commit gate. Upload, copy, move, trash-restore, and version-restore admission recomputes current logical usage inside the quota-coordination critical section and atomically accounts for every matching user quota, directory quota, and outstanding reservation. Usage scans do not run concurrently with cooperative HTTP mutation commits; the quota-coordination critical section itself does not read request bodies or execute storage mutations.
+- Copy, move, trash restore, and version restore recompute source, destination, current usage, and overwrite delta inside the final commit gate, then atomically replace their admission-time reservation. A failed refresh performs no storage mutation. An overwriting WebDAV MOVE counts the destination backup that remains in the logical directory during commit until backup cleanup completes. PUT acquires the commit gate only after the request body reaches EOF and holds it until the storage transaction returns, so network reads do not occupy the gate.
+- A known-length upload reserves `max(0, new size - replaced size)`. An unknown-length upload starts from the replaced size and grows its reservation in batches of at most 64 MiB, while the complete file remains capped at 10 GiB. Success, failure, condition conflict, and request cancellation all release the reservation. Boundary handling probes one additional byte, so an upload that ends exactly at the admitted limit succeeds and only actual excess returns `507`.
+- Quota rules and limits use an admission-time snapshot for an in-flight request; runtime updates apply to later requests. Each incremental reservation for an unknown-length upload still recomputes current logical usage and other outstanding reservations.
+- When alert channels are enabled, Web/API upload, copy, move, trash-restore, and version-restore quota denials also send a `quota_exceeded` warning event.
   Alert event details keep only the operation, `actor_scope`, quota type, and byte counts; they omit account names, the home directory, target path, and quota path.
 
 Directory quotas:
@@ -883,7 +888,7 @@ ZIP archive behavior:
 - Current-file and historical-version downloads support Range requests; ZIP archive downloads do not guarantee Range support.
 - ZIP writes verify the actual byte count for every regular-file snapshot. If an opened snapshot is truncated, a conflict detected before streaming returns `409 Conflict`; after the response starts, the stream terminates without closing the ZIP writer into a parseable partial archive.
 
-`POST /api/v1/files/{path}` requires `{path}` to identify a non-root file path. Root or root-equivalent upload targets return `400 Bad Request` with `invalid path`.
+`POST /api/v1/files/{path}` requires `{path}` to identify a non-root file path whose direct parent directory already exists. Root or root-equivalent upload targets return `400 Bad Request` with `invalid path`. An absent or non-directory parent returns `409 Conflict` before the request body is read; the endpoint does not create intermediate directories implicitly. When all concurrent write-staging slots are occupied, the endpoint returns `429 Too Many Requests`, `Retry-After: 1`, and `WRITE_BUSY`; clients should retry after the indicated delay. When host capacity is insufficient to stage the transaction safely, the endpoint returns `507 Insufficient Storage` and `INSUFFICIENT_STORAGE` without `Retry-After`. A target inside a nested mount below `files/`, an unverifiable mount table, or unsupported cross-root rename semantics returns `503 Service Unavailable` with an explicit atomic-upload layout error. A layout error detected before request-body reading neither consumes the body nor modifies the target. Quota admission binds the target deletion identity. Publication atomically exchanges an existing target and uses no-replace publication for a new target. If another operation changes the same path while the upload body is being read, or a new target appears before publication, the endpoint returns `409 Conflict` with `CONFLICT` and does not overwrite or remove the newer target. The server persists a `prepared` decision before visible publication and a `committed` decision only after confirming content, version objects, and SQLite metadata. Startup recovery rolls forward committed transactions and rolls back all others. If the journal, namespace, version-object, or metadata outcome cannot be confirmed, recovery evidence is retained across restarts and the write gate remains active; retrying the upload does not clear it.
 
 `POST /api/v1/directories/{path}` creates one directory when the direct parent directory already exists. If the direct parent directory is absent, the endpoint returns `409 Conflict` and does not create intermediate directories.
 
@@ -955,7 +960,9 @@ POST /api/v1/versions/{hash}/restore
 
 The `path` value must identify a non-root file path. Root or root-equivalent values return `400 Bad Request` with `invalid path`. Copyable shell or browser examples should URL-encode the query value. For example, `/documents/report.txt` is sent as `%2Fdocuments%2Freport.txt`.
 
-When the version content has already been restored but final workspace metadata persistence fails, the API still returns `200 OK` with `Warning: 199 MnemoNAS "workspace mutation persistence incomplete"` and the response `message` set to `version restored with persistence warning`.
+Before restoring, the server verifies that the version metadata belongs to the requested path and that the version object's BLAKE3 digest matches `{hash}`. Version restore uses the same staging, atomic exchange for an existing target, no-replace publication for a new target, index commit, and rollback transaction as API uploads and WebDAV PUT and checks every matching directory quota. When authentication is enabled, an administrator-initiated restore also checks the `home_dir` quota of each non-admin user that owns the target path. When the current content differs from the requested version, the current file is retained first as a safety version with the comment `before restore`. A current file or version object above the 100 MiB hard limit returns `413 Payload Too Large` without modifying the target.
+
+Exhausted concurrent write-staging slots return `429 Too Many Requests`, `Retry-After: 1`, and `WRITE_BUSY`. Insufficient host capacity to stage the transaction safely returns `507 Insufficient Storage` and `INSUFFICIENT_STORAGE` without `Retry-After`. Target drift during the transaction returns `409 Conflict`. A write-recovery gate, nested mount, or storage layout without supported atomic rename semantics returns `503 Service Unavailable`. When content or index completion fails and rollback succeeds, the endpoint returns a failure status, leaves the original file and index intact, and does not record a successful restore activity. Failure to safely remove a runtime staging entry after publication retains recovery evidence, activates the gate, and returns `503 Service Unavailable`. Only a pure persistence warning without the recovery gate or another hard state produces `200 OK`, `Warning: 199 MnemoNAS "workspace mutation persistence incomplete"`, and `version restored with persistence warning`.
 
 Successful restores write a `restore` activity entry with `details.restore_source` set to `version` and `details.hash` set to the restored version hash. Workspace persistence warnings also include `details.persistence_warning="true"`.
 
@@ -1642,14 +1649,14 @@ Settings updates can change the following configuration at runtime:
 - Scheduled Scrub maintenance. Updates immediately replace the running background scheduler.
 - Dataplane connection settings. Server listener/TLS changes and CDC chunk-size changes are saved but require restarting the affected service before they take effect.
 
-Directory quota and access-rule updates are hot-applied to the Web/API and WebDAV runtime.
+Directory quota and access-rule updates are hot-applied to the Web/API and WebDAV runtime. An admitted in-flight write keeps its quota-limit, quota-rule, and access-rule snapshots, and Web/API upload path access uses its admission-time decision. Before commit, WebDAV PUT additionally reauthenticates the user, uses that request's admission-time access-rule snapshot to recheck the write permission for the current identity, role, and home directory, and rechecks current DAV locks. A WebDAV handler rebuild publishes the new generation immediately, so later requests use the updated configuration; in-flight requests and path-change callbacks retain their retired generation until its active references reach zero, after which it closes asynchronously. Unexpired DAV locks remain active with the same token, storage path, depth, and expiry after prefix, authentication, access-rule, quota, or read-only updates.
 
 Path field rules:
 
 - `path` fields in `storage.directory_quotas`, `storage.directory_access_rules`, and `share.policy_rules` use the same MnemoNAS logical-path rules.
 - Paths must start with `/` and must not contain Windows or UNC syntax, backslashes, query or fragment characters, control characters, or `.`/`..` path segments.
 - The Settings API trims surrounding whitespace and normalizes duplicate and trailing slashes; paths containing `.` or `..` are not folded and are rejected.
-- The Web settings page wraps paths containing spaces or double quotes in double quotes in directory-quota line-based inputs; literal double quotes inside the path are escaped as `\"`, for example `"/Family Photos" 500 GB`.
+- The **Users > Directory & Access** view wraps paths containing spaces or double quotes in double quotes in directory-quota line-based inputs; literal double quotes inside the path are escaped as `\"`, for example `"/Family Photos" 500 GB`.
 - Directory access rules and share path policies use structured path inputs, so paths containing spaces or literal double quotes are entered directly without manual line quoting.
 
 The Web settings page derives a share-policy coverage summary from the current draft before save. It shows default expiry, default download limits, path-policy count, password-required path count, creator/maintainer-scope path count, attention items for loose defaults or path policies, and cleanup suggestions for root-wide rules, most-specific path rules that do not inherit ancestor limits, descendant rules that loosen ancestor expiration, download-count, or creator-scope limits, and duplicate-equivalent rules.
@@ -1891,7 +1898,7 @@ Access-preview response:
 
 `GET /api/v1/settings/access-reviews` returns recent directory-access review records and supports `limit` and `offset` query parameters. `limit` accepts 1-100 and defaults to 20.
 
-`POST /api/v1/settings/access-reviews` accepts the directory-access matrix or unsaved-rule preview summary generated by the Settings page. The server uses the current authenticated account as `reviewer`, sets `reviewed_at`, and persists at most the latest 100 records. A new record replaces an older record with the same reviewer, path, title, and preview flag.
+`POST /api/v1/settings/access-reviews` accepts the directory-access matrix or unsaved-rule preview summary generated by **Users > Directory & Access**. The server uses the current authenticated account as `reviewer`, sets `reviewed_at`, and persists at most the latest 100 records. A new record replaces an older record with the same reviewer, path, title, and preview flag.
 
 `DELETE /api/v1/settings/access-reviews` clears persisted directory-access review records.
 
@@ -2486,7 +2493,7 @@ WebDAV access and method semantics:
 - The root example config keeps legacy global Basic Auth as a compatibility baseline; that mode uses service credentials from `[webdav]` or generated credentials in `secrets.json`.
 - Ancestor entries synthesized for nested grants are read-only navigation; writes still require a matching write grant.
 - Supported core methods include `OPTIONS`, `PROPFIND`, `GET`, `HEAD`, `PUT`, `DELETE`, `MKCOL`, `MOVE`, `COPY`, simplified `PROPPATCH`, simplified `LOCK`, and simplified `UNLOCK`.
-- HTTP conditional headers follow entity-tag comparison rules: `If-Match` uses strong comparison, so a weak entity-tag cannot satisfy it, while `If-None-Match` uses weak comparison. Both accept a standalone `*` or a strict comma-separated list of non-empty entity-tags. A conditional `DELETE` revalidates write access for the target tree under the storage write lock before it reads the required target attributes and evaluates the condition; failed authorization does not hash target content or delete the target.
+- HTTP conditional headers follow entity-tag comparison rules: `If-Match` uses strong comparison, so a weak entity-tag cannot satisfy it, while `If-None-Match` uses weak comparison. Both accept a standalone `*` or a strict comma-separated list of non-empty entity-tags. A conditional `PUT` evaluates its headers before reading the request body and binds the observed deletion identity to final publication. If the target changes again while the body is streamed, a request carrying any write precondition returns `412 Precondition Failed`; an unconditional request returns `409 Conflict`, and the newer object remains unchanged. A conditional `DELETE` revalidates write access for the target tree under the storage write lock before it reads the required target attributes and evaluates the condition; failed authorization does not hash target content or delete the target.
 - WebDAV `DELETE` follows the current deletion policy. In `permanent` mode, incomplete quarantine cleanup after logical commit returns `204 No Content` with `delete cleanup incomplete`. In `trash` mode, a persistence-only participant or receipt failure returns `204 No Content` with `workspace mutation persistence incomplete`, and capacity cleanup after a completed transfer uses `trash delete cleanup incomplete`. A hard durable-transfer failure returns `500 Internal Server Error`, preserves recovery evidence, and blocks later storage mutations until recovery succeeds.
 - `MKCOL` returns `409 Conflict` when the direct parent directory does not exist, and returns `405 Method Not Allowed` with `Allow` when the target already exists.
 - Unsupported WebDAV methods return `405 Method Not Allowed` with an `Allow` response header listing the methods available to the current scope.

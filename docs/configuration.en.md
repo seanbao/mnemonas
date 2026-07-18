@@ -221,8 +221,8 @@ Controls the main HTTP server for Web UI, REST API, and WebDAV.
 | --- | --- | --- | --- |
 | `host` | string | `"0.0.0.0"` | Listen host; must be empty, `*`, a valid hostname, IPv4, or IPv6 literal, without a port, whitespace, or control characters. Use `127.0.0.1` or `::1` for local-only |
 | `port` | int | `8080` | HTTP port |
-| `read_timeout` | duration | `"30s"` | Request-read timeout |
-| `write_timeout` | duration | `"60s"` | Total write timeout for ordinary responses; browser/API file and ZIP downloads use it as an idle write deadline refreshed for each write |
+| `read_timeout` | duration | `"30s"` | Total read timeout for ordinary requests; browser/API file uploads and WebDAV PUT use it as an idle read deadline refreshed before each body read |
+| `write_timeout` | duration | `"60s"` | Total write timeout for ordinary responses; browser/API downloads, file-upload responses, and WebDAV responses use it as an idle write deadline refreshed before each write |
 | `idle_timeout` | duration | `"120s"` | Keep-alive idle timeout |
 | `trusted_proxy_hops` | int | `0` | Number of trusted reverse proxy hops used to interpret forwarded headers |
 | `trusted_proxy_cidrs` | string[] | `[]` | Direct-peer IP addresses or CIDRs for trusted reverse proxies; loopback peers are always trusted |
@@ -243,7 +243,11 @@ trusted_proxy_cidrs = ["10.0.0.0/8"]
 
 `server.host` contains only the listen host; put the port in `server.port`. IPv6 may be written as `::1` or `[::1]`, and the runtime normalizes it for `net.JoinHostPort`. `*` and an empty string both mean wildcard listen.
 
-Browser/API download responses advance the connection write deadline by `server.write_timeout` before each response header, data chunk, or flush operation. Large file and ZIP downloads that continue producing data are therefore not truncated only because their total duration exceeds this value, while a single stalled write still times out. This behavior does not apply to WebDAV responses. Reverse-proxy timeouts must also match the expected download duration and idle boundary.
+Browser/API file uploads and WebDAV PUT advance the connection read deadline by `server.read_timeout` before each request-body read. An upload that continues delivering data is therefore not interrupted only because its total read duration exceeds this value, while a single stalled read still times out. Browser/API file uploads remain subject to the API's default 30-minute total request lifetime. Other request bodies retain the fixed total read timeout.
+
+When browser/API downloads, file-upload responses, and WebDAV responses enter streamed idle-write mode, they first clear the fixed write deadline inherited by the connection or HTTP/2 stream. They then advance the write deadline by `server.write_timeout` before each response header, data chunk, or flush operation. A delayed first response or a large file or ZIP download that continues producing data is therefore not truncated only because its total duration exceeds this value, while a single stalled write still times out. Other API responses retain the fixed total write timeout. Reverse-proxy timeouts must also match the expected transfer duration and idle boundary.
+
+After `SIGINT` or `SIGTERM`, the server first stops storage-alert monitoring and accepting new connections, then allows up to 30 seconds for in-flight HTTP requests to finish. The main process does not close API, WebDAV runtime-lock, or filesystem resources until `Shutdown` completes. If draining times out or fails, the server explicitly force-closes remaining connections, records the failure, and only then releases those main resources.
 
 ## `[server.tls]`
 
@@ -272,15 +276,16 @@ Rules:
 - `root` must not be `/`.
 - Startup tightens permissions on `root`, `files`, and internal directories.
 - Move the full storage root when migrating data.
+- `root/files` and `root/.mnemonas/write-staging` must belong to the same atomic-rename domain. Startup performs bidirectional no-replace rename probes and bidirectional atomic-exchange probes between the two directories. The server rejects the storage layout if any probe fails or the platform lacks a safe exchange primitive. Equal `st_dev` values are not treated as sufficient, so separately bind-mounting either directory can still be rejected even when both mounts refer to the same underlying filesystem. Before reading each streamed-write body and again before publication, the server checks the mount table, rejects targets inside a nested mount under `root/files`, and returns `503 Service Unavailable`.
 - The systemd-installed `mnemonas-dataplane-start` helper rejects `storage.root` and `DATAPLANE_DATA_DIR` values with line breaks, parent-directory segments, symlink path components, or protected system directories before starting the dataplane.
 - `path` fields in `directory_quotas`, `directory_access_rules`, and share policy rules use MnemoNAS logical paths. Paths must start with `/` and must not contain Windows or UNC syntax, backslashes, query or fragment characters, control characters, or `.`/`..` path segments. Configuration loading and the Settings API normalize duplicate and trailing slashes; paths containing `.` or `..` are not folded and are rejected.
 - `directory_quotas` use MnemoNAS logical paths such as `/team`. Uploads, copies, moves, trash restores, version restores, and WebDAV PUT/COPY/MOVE operations check current logical bytes before writing. Use `/` for a global hard limit.
 - The storage page shows aggregate directory-quota usage, warning, exceeded, and missing-path counts, a prioritized directory-quota attention list, and current usage, remaining bytes, and status for each directory quota. The storage-health summary combines capacity, native-checksum, and directory-quota risks with a suggested next-step summary.
-- Before saving, the Web settings page summarizes added, changed, and removed directory quotas by comparing the saved quotas with the current draft. In line-based inputs, paths containing spaces or double quotes are wrapped in double quotes; literal double quotes inside the path are escaped as `\"`, for example `"/Family Photos" 500 GB`.
+- Before saving, the **Users > Directory & Access** view summarizes added, changed, and removed directory quotas by comparing the saved quotas with the current draft. In line-based inputs, paths containing spaces or double quotes are wrapped in double quotes; literal double quotes inside the path are escaped as `\"`, for example `"/Family Photos" 500 GB`.
 - `directory_access_rules` use clean absolute MnemoNAS paths such as `/team`. Each rule can grant `read_users`, `write_users`, `read_groups`, `write_groups`, `read_roles`, and `write_roles`.
 - The most specific matching rule wins. Write grants also allow reads; write operations require an explicit write grant. Non-admin Web/API, WebDAV `users` mode, search, shares, favorites, trash, and activity views use the same decision path. Paths without a matching rule fall back to the user's `home_dir` boundary.
 - Web/API root listings return only the user's `home_dir` and top-level entries for readable shared directories. When only a nested directory is granted, Web/API and WebDAV may expose existing ancestor directories as read-only navigation entries; direct children remain filtered by their own rules, and writes under those ancestors still require explicit write grants.
-- Before saving, the Web settings page summarizes added, changed, and removed directory access rules by comparing the saved rules with the current draft, and shows a draft coverage summary for rule count, read/write principals, write-enabled paths, and attention items such as root-path or broad role grants. User matrices and unsaved-rule previews can copy directory-access review records and keep backend-persisted recent review history, falling back to current-browser records when server history is unavailable. The page uses a structured rule editor; enter MnemoNAS logical paths directly in the path field, including spaces or literal double quotes, without manual line quoting.
+- Before saving, the **Users > Directory & Access** view summarizes added, changed, and removed directory access rules by comparing the saved rules with the current draft, and shows a draft coverage summary for rule count, read/write principals, write-enabled paths, and attention items such as root-path or broad role grants. User matrices and unsaved-rule previews can copy directory-access review records and keep backend-persisted recent review history, falling back to current-browser records when server history is unavailable. The view uses a structured rule editor; enter MnemoNAS logical paths directly in the path field, including spaces or literal double quotes, without manual line quoting. Directory-policy saves submit only `storage.directory_quotas` and `storage.directory_access_rules` and do not overwrite configuration maintained by the Settings page.
 
 Example:
 
@@ -336,7 +341,7 @@ The Web Trash page shows a cross-directory restore review before batch restore, 
 | --- | --- | --- | --- |
 | `auto_versioned_extensions` | string[] | common text/code extensions | Extensions eligible for automatic versioning |
 | `auto_versioned_filenames` | string[] | common config filenames | Filenames eligible for automatic versioning |
-| `max_versioned_size` | int64 | `104857600` | Maximum automatically versioned file size |
+| `max_versioned_size` | int64 | `104857600` | Maximum automatically versioned file size in bytes; valid range is 1 through `104857600`, and per-file overrides cannot bypass this hard limit |
 
 The Web version-history page shows a pre-submit review for the target file, overwrite impact, safety retention, execution checks, and conflict handling before version restore, with a copyable review record for pre-restore confirmation. After version restore succeeds, the page associates matching `restore` activity entries by path and version hash with an activity review record in the `restored` disposition state; unavailable activity logging or missing matching restore activity does not block the version restore itself.
 
@@ -407,7 +412,7 @@ The dataplane reads these values on startup. Restart dataplane after changing th
 
 Runtime behavior:
 
-- Settings API updates can switch prefix, read-only mode, and auth config without full restart.
+- Settings API updates publish the replacement handler immediately. Later requests use the new prefix, read-only mode, and authentication configuration, while in-flight requests retain their admission-time configuration until the retired handler is released.
 - Empty username with Basic Auth uses the runtime default `admin`.
 - `auth_type = "users"` uses MnemoNAS app users over HTTP Basic. Admins see the global namespace; regular users see their `home_dir` as the WebDAV root, with top-level navigation entries for granted shared directories also listed at the root. Ancestor entries synthesized for nested grants are read-only navigation; writes still require a matching write grant. Guest users are read-only; user quotas are enforced for PUT/COPY/MOVE writes into `home_dir`.
 - Empty password with Basic Auth uses the generated password from `secrets.json`. The generated password is a 16-character human-readable value with lowercase letters, uppercase letters, and digits, excluding ambiguous characters. In public deployments, this file should be a non-symlink regular file with private permissions.
