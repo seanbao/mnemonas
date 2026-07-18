@@ -38,6 +38,8 @@ final authSessionStoreProvider = Provider<AuthSessionStore>(
 typedef TransferStoreFactory =
     Future<transfer_core.FileTransferStore> Function();
 
+typedef TransferStartBarrier = Future<void> Function();
+
 typedef ContentUriMaterializer =
     Future<void> Function({
       required String sourcePath,
@@ -49,6 +51,33 @@ typedef ContentUriMaterializer =
 typedef ContentUriMaterializationCanceller =
     Future<void> Function(String operationId);
 
+final class _TransferPauseReason {
+  const _TransferPauseReason({
+    required this.code,
+    required this.message,
+    required this.destinationMessage,
+    required this.cancellationMessage,
+  });
+
+  final String code;
+  final String message;
+  final String destinationMessage;
+  final String cancellationMessage;
+}
+
+const _appBackgroundedTransferPause = _TransferPauseReason(
+  code: 'APP_BACKGROUNDED',
+  message: '应用进入后台，传输已暂停，可返回前台后继续。',
+  destinationMessage: '应用进入后台，保存已暂停，请重新选择保存位置。',
+  cancellationMessage: 'Transfer paused because the app entered background',
+);
+
+const _appBackgroundedTransferException = ApiException(
+  kind: ApiFailureKind.cancelled,
+  code: 'APP_BACKGROUNDED',
+  message: 'Transfer start was paused because the app entered background',
+);
+
 final transferStoreFactoryProvider = Provider<TransferStoreFactory>((ref) {
   return () async {
     final root = await getApplicationSupportDirectory();
@@ -58,6 +87,11 @@ final transferStoreFactoryProvider = Provider<TransferStoreFactory>((ref) {
     );
   };
 });
+
+@visibleForTesting
+final transferStartBarrierProvider = Provider<TransferStartBarrier?>(
+  (ref) => null,
+);
 
 final contentUriMaterializerProvider = Provider<ContentUriMaterializer>((ref) {
   return ({
@@ -84,6 +118,10 @@ typedef ApiClientFactory =
     ApiClient Function(ServerEndpoint endpoint, AuthSessionStore sessionStore);
 
 const int maxDurableUploadBytes = 10 * 1024 * 1024 * 1024;
+const String versionRestoreResultUnconfirmedCode =
+    'VERSION_RESTORE_RESULT_UNCONFIRMED';
+const String versionRestoreConfirmedRefreshRequiredCode =
+    'VERSION_RESTORE_CONFIRMED_REFRESH_REQUIRED';
 
 final class TrashSelectionOutcome {
   TrashSelectionOutcome({
@@ -119,6 +157,7 @@ class ClientController extends Notifier<ClientState> {
   late final AuthSessionStore _sessionStore;
   late final ApiClientFactory _apiClientFactory;
   late final TransferStoreFactory _transferStoreFactory;
+  late final TransferStartBarrier? _transferStartBarrier;
   late final ContentUriMaterializer _contentUriMaterializer;
   late final ContentUriMaterializationCanceller
   _contentUriMaterializationCanceller;
@@ -135,6 +174,9 @@ class ClientController extends Notifier<ClientState> {
   CancelToken? _searchTargetCancellation;
   CancelToken? _trashReadCancellation;
   CancelToken? _trashMutationCancellation;
+  CancelToken? _versionRestoreCancellation;
+  Object? _fileMutationLease;
+  final Set<String> _fileMutationReconciliationPaths = <String>{};
   Future<void> _preferenceMutationTail = Future<void>.value();
   var _contextEpoch = 0;
   var _directorySequence = 0;
@@ -142,9 +184,14 @@ class ClientController extends Notifier<ClientState> {
   var _searchTargetSequence = 0;
   var _trashSequence = 0;
   var _transferSequence = 0;
+  var _foregroundTransferGeneration = 0;
   var _disposed = false;
   final Map<String, CancelToken> _transferCancellations =
       <String, CancelToken>{};
+  final Map<CancelToken, _TransferPauseReason> _transferPauseReasons =
+      <CancelToken, _TransferPauseReason>{};
+  final Set<CancelToken> _settledTransferCancellations = <CancelToken>{};
+  final Set<CancelToken> _versionDownloadCancellations = <CancelToken>{};
   final Map<String, transfer_core.TransferTask> _durableTransfers =
       <String, transfer_core.TransferTask>{};
   final Set<String> _transferLeases = <String>{};
@@ -158,6 +205,7 @@ class ClientController extends Notifier<ClientState> {
     _sessionStore = ref.watch(authSessionStoreProvider);
     _apiClientFactory = ref.watch(apiClientFactoryProvider);
     _transferStoreFactory = ref.watch(transferStoreFactoryProvider);
+    _transferStartBarrier = ref.watch(transferStartBarrierProvider);
     _contentUriMaterializer = ref.watch(contentUriMaterializerProvider);
     _contentUriMaterializationCanceller = ref.watch(
       contentUriMaterializationCancellerProvider,
@@ -583,25 +631,37 @@ class ClientController extends Notifier<ClientState> {
     final normalized = normalizeLogicalPath(path);
     final epoch = _contextEpoch;
     final sequence = ++_directorySequence;
+    final previous = state.directory;
+    final preservePrevious = previous?.path == normalized;
     _directoryCancellation?.cancel('Superseded directory request');
     final cancellation = CancelToken();
     _directoryCancellation = cancellation;
     final files = _requireFiles();
     state = state.copyWith(
       currentPath: normalized,
-      directory: null,
+      directory: preservePrevious ? previous : null,
       isBusy: true,
+      isDirectoryBusy: true,
       errorMessage: null,
+      directoryErrorMessage: preservePrevious
+          ? state.directoryErrorMessage
+          : null,
     );
     try {
       final response = await files.list(normalized, cancelToken: cancellation);
       if (!_isDirectoryRequestCurrent(epoch, sequence, cancellation)) {
         return;
       }
+      _fileMutationReconciliationPaths.remove(response.data.path);
       state = state.copyWith(
         currentPath: response.data.path,
         directory: response.data,
         isBusy: false,
+        isDirectoryBusy: false,
+        directoryErrorMessage: null,
+        fileReconciliationRequired: _fileMutationReconciliationPaths.isNotEmpty,
+        fileReconciliationMessage: _fileReconciliationMessage(),
+        directoryUpdatedAt: DateTime.now().toUtc(),
         notice: response.warnings.isEmpty
             ? state.notice
             : '目录已加载，但服务器报告了持久化警告。',
@@ -612,9 +672,12 @@ class ClientController extends Notifier<ClientState> {
         return;
       }
       if (!await handleAuthenticationFailure(error, expectedEpoch: epoch)) {
+        final message = clientErrorMessage(error);
         state = state.copyWith(
           isBusy: false,
-          errorMessage: clientErrorMessage(error),
+          isDirectoryBusy: false,
+          errorMessage: message,
+          directoryErrorMessage: message,
         );
       }
       rethrow;
@@ -776,7 +839,10 @@ class ClientController extends Notifier<ClientState> {
       currentPath: listing.path,
       directory: listing,
       isBusy: false,
+      isDirectoryBusy: false,
       errorMessage: null,
+      directoryErrorMessage: null,
+      directoryUpdatedAt: DateTime.now().toUtc(),
       notice: persistenceWarning ? '目录已加载，但服务器报告了持久化警告。' : state.notice,
     );
   }
@@ -805,6 +871,237 @@ class ClientController extends Notifier<ClientState> {
     _searchTargetCancellation = null;
     if (state.isSearchBusy) {
       state = state.copyWith(isSearchBusy: false);
+    }
+  }
+
+  Future<FileVersionHistory> listVersionHistory(FileEntry entry) async {
+    final target = _requireVersionTarget(entry);
+    final epoch = _contextEpoch;
+    final files = _requireFiles();
+    try {
+      final response = await files.listVersions(target.path);
+      if (!_isContextCurrent(epoch)) {
+        throw _operationSuperseded();
+      }
+      final openedCurrentHash = target.openedCurrentHash;
+      if (openedCurrentHash != null) {
+        _requireMatchingCurrentVersion(
+          response.data,
+          expectedHash: openedCurrentHash,
+        );
+      }
+      return response.data;
+    } on Object catch (error) {
+      if (!_isContextCurrent(epoch)) {
+        throw _operationSuperseded();
+      }
+      await handleAuthenticationFailure(error, expectedEpoch: epoch);
+      rethrow;
+    }
+  }
+
+  Future<File> downloadFileVersion({
+    required FileEntry entry,
+    required FileVersion version,
+    required String destinationPath,
+    bool overwrite = false,
+  }) async {
+    final target = _requireVersionTarget(entry);
+    _requireVersionForTarget(version, target);
+    final epoch = _contextEpoch;
+    final files = _requireFiles();
+    final cancellation = CancelToken();
+    _versionDownloadCancellations.add(cancellation);
+    try {
+      final result = await files.downloadVersion(
+        logicalPath: target.path,
+        version: version,
+        destinationPath: destinationPath,
+        overwrite: overwrite,
+        cancelToken: cancellation,
+      );
+      if (!_isContextCurrent(epoch)) {
+        throw _operationSuperseded();
+      }
+      return result.file;
+    } on Object catch (error) {
+      if (!_isContextCurrent(epoch)) {
+        throw _operationSuperseded();
+      }
+      await handleAuthenticationFailure(error, expectedEpoch: epoch);
+      rethrow;
+    } finally {
+      _versionDownloadCancellations.remove(cancellation);
+    }
+  }
+
+  Future<FileVersionHistory> restoreFileVersion({
+    required FileEntry entry,
+    required FileVersion version,
+    required String expectedCurrentHash,
+  }) async {
+    final target = _requireVersionTarget(entry);
+    _requireVersionForTarget(version, target);
+    if (!_lowercaseBlake3DigestPattern.hasMatch(expectedCurrentHash)) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'VERSION_IDENTITY_INVALID',
+        message: 'The expected current file identity is invalid',
+      );
+    }
+    _ensureVersionRestoreAllowed();
+    if (version.isCurrent || version.hash == expectedCurrentHash) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'VERSION_ALREADY_CURRENT',
+        message: 'The selected version is already current',
+      );
+    }
+
+    final epoch = _contextEpoch;
+    final files = _requireFiles();
+    final lease = _beginFileMutation();
+    final cancellation = CancelToken();
+    _versionRestoreCancellation = cancellation;
+    try {
+      late final FileVersionHistory beforeRestore;
+      try {
+        final directoryResponse = await files.list(
+          target.parentPath,
+          cancelToken: cancellation,
+        );
+        if (!_isContextCurrent(epoch)) {
+          throw _operationSuperseded();
+        }
+        final currentEntry = _findFileEntry(
+          directoryResponse.data,
+          target.path,
+        );
+        if (currentEntry == null ||
+            currentEntry.isDirectory ||
+            !currentEntry.capabilities.concreteRead ||
+            (currentEntry.contentHash != null &&
+                currentEntry.contentHash != expectedCurrentHash)) {
+          throw _versionTargetChanged();
+        }
+
+        final historyResponse = await files.listVersions(
+          target.path,
+          cancelToken: cancellation,
+        );
+        if (!_isContextCurrent(epoch)) {
+          throw _operationSuperseded();
+        }
+        beforeRestore = historyResponse.data;
+        _requireMatchingCurrentVersion(
+          beforeRestore,
+          expectedHash: expectedCurrentHash,
+        );
+        final selectedVersionStillExists = beforeRestore.versions.any(
+          (candidate) => !candidate.isCurrent && candidate.hash == version.hash,
+        );
+        if (!selectedVersionStillExists) {
+          throw const ApiException(
+            kind: ApiFailureKind.local,
+            code: 'VERSION_NOT_AVAILABLE',
+            message: 'The selected historical version is no longer available',
+          );
+        }
+      } on Object catch (error) {
+        if (!_isContextCurrent(epoch)) {
+          throw _operationSuperseded();
+        }
+        if (!await handleAuthenticationFailure(error, expectedEpoch: epoch)) {
+          state = state.copyWith(errorMessage: clientErrorMessage(error));
+        }
+        rethrow;
+      }
+
+      late final ApiResponse<VersionRestoreResult> restoreResponse;
+      try {
+        restoreResponse = await files.restoreVersion(
+          logicalPath: target.path,
+          hash: version.hash,
+          cancelToken: cancellation,
+        );
+        if (!_isContextCurrent(epoch)) {
+          throw _operationSuperseded();
+        }
+      } on Object catch (error) {
+        if (!_isContextCurrent(epoch)) {
+          throw _operationSuperseded();
+        }
+        if (await handleAuthenticationFailure(error, expectedEpoch: epoch)) {
+          rethrow;
+        }
+        if (_isUnconfirmedVersionRestoreError(error)) {
+          final unconfirmed = _versionRestoreResultUnconfirmed(error);
+          _markFileMutationReconciliationRequired(<String>[target.parentPath]);
+          state = state.copyWith(
+            errorMessage: clientErrorMessage(unconfirmed),
+            notice: null,
+          );
+          throw unconfirmed;
+        }
+        state = state.copyWith(errorMessage: clientErrorMessage(error));
+        rethrow;
+      }
+
+      var refreshedHistory = beforeRestore;
+      Object? historyRefreshError;
+      try {
+        final response = await files.listVersions(
+          target.path,
+          cancelToken: cancellation,
+        );
+        if (!_isContextCurrent(epoch)) {
+          throw _operationSuperseded();
+        }
+        refreshedHistory = response.data;
+      } on Object catch (error) {
+        if (!_isContextCurrent(epoch)) {
+          throw _operationSuperseded();
+        }
+        if (await handleAuthenticationFailure(error, expectedEpoch: epoch)) {
+          throw _operationSuperseded();
+        }
+        historyRefreshError = error;
+      }
+
+      final directoryRefreshed = await _refreshAfterConfirmedFileMutation(
+        expectedEpoch: epoch,
+        path: target.parentPath,
+        staleNotice: '版本已确认恢复，但目录刷新失败，内容可能已过期。',
+      );
+      if (!_isContextCurrent(epoch)) {
+        throw _operationSuperseded();
+      }
+      if (historyRefreshError != null) {
+        final refreshRequired = _versionRestoreConfirmedRefreshRequired(
+          historyRefreshError,
+        );
+        state = state.copyWith(
+          errorMessage: null,
+          notice: clientErrorMessage(refreshRequired),
+        );
+        throw refreshRequired;
+      }
+      if (directoryRefreshed) {
+        if (refreshedHistory.current.hash != version.hash) {
+          state = state.copyWith(notice: '版本已恢复，但文件随后再次发生变化。当前列表已刷新。');
+        } else if (restoreResponse.hasWarnings ||
+            restoreResponse.data.persistenceWarning) {
+          state = state.copyWith(notice: '版本已恢复，但服务器报告了持久化警告。');
+        } else {
+          state = state.copyWith(notice: '版本已恢复。');
+        }
+      }
+      return refreshedHistory;
+    } finally {
+      if (identical(_versionRestoreCancellation, cancellation)) {
+        _versionRestoreCancellation = null;
+      }
+      _finishFileMutation(lease);
     }
   }
 
@@ -935,6 +1232,116 @@ class ClientController extends Notifier<ClientState> {
     }
   }
 
+  Object _beginFileMutation() {
+    _ensureFileMutationAllowed();
+    if (_fileMutationLease != null) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'FILE_MUTATION_IN_PROGRESS',
+        message: 'Another file operation is still in progress',
+      );
+    }
+    final lease = Object();
+    _fileMutationLease = lease;
+    state = state.copyWith(
+      isBusy: true,
+      isFileMutationBusy: true,
+      errorMessage: null,
+    );
+    return lease;
+  }
+
+  void _ensureFileMutationAllowed() {
+    if (_fileMutationReconciliationPaths.isNotEmpty ||
+        state.fileReconciliationRequired) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'FILE_RECONCILIATION_REQUIRED',
+        message:
+            'Review and refresh every affected directory before another file mutation',
+      );
+    }
+    if (state.isDirectoryBusy ||
+        state.directory == null ||
+        state.directory?.path != state.currentPath ||
+        state.directoryErrorMessage != null) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'DIRECTORY_REFRESH_REQUIRED',
+        message: 'Refresh the current directory before modifying files',
+      );
+    }
+  }
+
+  void _markFileMutationReconciliationRequired(Iterable<String> paths) {
+    for (final path in paths) {
+      _fileMutationReconciliationPaths.add(normalizeLogicalPath(path));
+    }
+    state = state.copyWith(
+      fileReconciliationRequired: _fileMutationReconciliationPaths.isNotEmpty,
+      fileReconciliationMessage: _fileReconciliationMessage(),
+    );
+  }
+
+  String? _fileReconciliationMessage() {
+    if (_fileMutationReconciliationPaths.isEmpty) {
+      return null;
+    }
+    final paths = _fileMutationReconciliationPaths.toList(growable: false)
+      ..sort();
+    return '文件操作结果待核对。请依次打开并刷新以下目录后再修改：${paths.join('、')}。';
+  }
+
+  void _finishFileMutation(Object lease) {
+    if (!identical(_fileMutationLease, lease)) {
+      return;
+    }
+    _fileMutationLease = null;
+    if (!_disposed) {
+      state = state.copyWith(
+        isBusy: state.isDirectoryBusy,
+        isFileMutationBusy: false,
+      );
+    }
+  }
+
+  Future<bool> _refreshAfterConfirmedFileMutation({
+    required int expectedEpoch,
+    required String path,
+    required String staleNotice,
+  }) async {
+    if (!_isContextCurrent(expectedEpoch) || state.stage != ClientStage.ready) {
+      return false;
+    }
+    if (state.currentPath != path) {
+      state = state.copyWith(notice: '文件操作已完成，原目录未自动刷新。');
+      return false;
+    }
+    try {
+      await loadDirectory(path);
+      final refreshed =
+          _isContextCurrent(expectedEpoch) &&
+          state.stage == ClientStage.ready &&
+          state.currentPath == path &&
+          state.directory?.path == path &&
+          state.directoryErrorMessage == null &&
+          !state.isDirectoryBusy;
+      if (!refreshed &&
+          _isContextCurrent(expectedEpoch) &&
+          state.stage == ClientStage.ready &&
+          state.currentPath != path) {
+        state = state.copyWith(notice: '文件操作已完成，原目录未自动刷新。');
+      }
+      return refreshed;
+    } on Object {
+      if (_isContextCurrent(expectedEpoch) &&
+          state.stage == ClientStage.ready) {
+        state = state.copyWith(notice: staleNotice);
+      }
+      return false;
+    }
+  }
+
   Future<void> createDirectory(String name) async {
     final trimmed = name.trim();
     if (trimmed.isEmpty || trimmed.contains('/')) {
@@ -944,17 +1351,21 @@ class ClientController extends Notifier<ClientState> {
     final refreshPath = state.currentPath;
     final files = _requireFiles();
     final target = _joinLogicalPath(refreshPath, trimmed);
-    state = state.copyWith(isBusy: true, errorMessage: null);
+    final lease = _beginFileMutation();
     try {
       final result = await files.createDirectory(target);
       if (!_isContextCurrent(epoch)) {
         return;
       }
-      await loadDirectory(refreshPath);
+      final refreshed = await _refreshAfterConfirmedFileMutation(
+        expectedEpoch: epoch,
+        path: refreshPath,
+        staleNotice: '文件夹已创建，但列表刷新失败，内容可能已过期。',
+      );
       if (!_isContextCurrent(epoch)) {
         return;
       }
-      if (result.hasWarnings || result.data.persistenceWarning) {
+      if (refreshed && (result.hasWarnings || result.data.persistenceWarning)) {
         state = state.copyWith(notice: '文件夹已创建，但服务器报告了持久化警告。');
       }
     } on Object catch (error) {
@@ -962,12 +1373,17 @@ class ClientController extends Notifier<ClientState> {
         return;
       }
       if (!await handleAuthenticationFailure(error, expectedEpoch: epoch)) {
+        if (_requiresFileMutationReconciliation(error)) {
+          _markFileMutationReconciliationRequired(<String>[refreshPath]);
+        }
         state = state.copyWith(
           isBusy: false,
-          errorMessage: clientErrorMessage(error),
+          errorMessage: _fileMutationFailureMessage(error, '创建文件夹'),
         );
       }
       rethrow;
+    } finally {
+      _finishFileMutation(lease);
     }
   }
 
@@ -975,7 +1391,7 @@ class ClientController extends Notifier<ClientState> {
     final epoch = _contextEpoch;
     final refreshPath = state.currentPath;
     final files = _requireFiles();
-    state = state.copyWith(isBusy: true, errorMessage: null);
+    final lease = _beginFileMutation();
     try {
       final result = await files.rename(
         logicalPath: entry.path,
@@ -984,11 +1400,15 @@ class ClientController extends Notifier<ClientState> {
       if (!_isContextCurrent(epoch)) {
         return;
       }
-      await loadDirectory(refreshPath);
+      final refreshed = await _refreshAfterConfirmedFileMutation(
+        expectedEpoch: epoch,
+        path: refreshPath,
+        staleNotice: '项目已重命名，但列表刷新失败，内容可能已过期。',
+      );
       if (!_isContextCurrent(epoch)) {
         return;
       }
-      if (result.hasWarnings || result.data.persistenceWarning) {
+      if (refreshed && (result.hasWarnings || result.data.persistenceWarning)) {
         state = state.copyWith(notice: '项目已重命名，但服务器报告了持久化警告。');
       }
     } on Object catch (error) {
@@ -996,12 +1416,17 @@ class ClientController extends Notifier<ClientState> {
         return;
       }
       if (!await handleAuthenticationFailure(error, expectedEpoch: epoch)) {
+        if (_requiresFileMutationReconciliation(error)) {
+          _markFileMutationReconciliationRequired(<String>[refreshPath]);
+        }
         state = state.copyWith(
           isBusy: false,
-          errorMessage: clientErrorMessage(error),
+          errorMessage: _fileMutationFailureMessage(error, '重命名'),
         );
       }
       rethrow;
+    } finally {
+      _finishFileMutation(lease);
     }
   }
 
@@ -1031,7 +1456,7 @@ class ClientController extends Notifier<ClientState> {
     final epoch = _contextEpoch;
     final refreshPath = state.currentPath;
     final files = _requireFiles();
-    state = state.copyWith(isBusy: true, errorMessage: null);
+    final lease = _beginFileMutation();
     var completed = 0;
     var hasWarnings = false;
     try {
@@ -1049,11 +1474,15 @@ class ClientController extends Notifier<ClientState> {
             response.hasWarnings ||
             response.data.persistenceWarning;
       }
-      await loadDirectory(refreshPath);
+      final refreshed = await _refreshAfterConfirmedFileMutation(
+        expectedEpoch: epoch,
+        path: refreshPath,
+        staleNotice: copy ? '项目已复制，但列表刷新失败，内容可能已过期。' : '项目已移动，但列表刷新失败，内容可能已过期。',
+      );
       if (!_isContextCurrent(epoch)) {
         return;
       }
-      if (hasWarnings) {
+      if (refreshed && hasWarnings) {
         state = state.copyWith(
           notice: copy ? '项目已复制，但服务器报告了持久化警告。' : '项目已移动，但服务器报告了持久化警告。',
         );
@@ -1065,18 +1494,18 @@ class ClientController extends Notifier<ClientState> {
       if (await handleAuthenticationFailure(error, expectedEpoch: epoch)) {
         rethrow;
       }
-      try {
-        await loadDirectory(refreshPath);
-      } on Object catch (refreshError) {
-        if (!_isContextCurrent(epoch)) {
-          return;
-        }
-        if (!await handleAuthenticationFailure(
-          refreshError,
+      final requiresReconciliation = _requiresFileMutationReconciliation(error);
+      if (requiresReconciliation) {
+        _markFileMutationReconciliationRequired(<String>[
+          refreshPath,
+          destination,
+        ]);
+      } else {
+        await _refreshAfterConfirmedFileMutation(
           expectedEpoch: epoch,
-        )) {
-          state = state.copyWith(isBusy: false);
-        }
+          path: refreshPath,
+          staleNotice: '文件操作部分完成，且列表刷新失败，内容可能已过期。',
+        );
       }
       if (!_isContextCurrent(epoch)) {
         return;
@@ -1086,17 +1515,19 @@ class ClientController extends Notifier<ClientState> {
       }
       state = state.copyWith(
         errorMessage: completed == 0
-            ? clientErrorMessage(error)
+            ? _fileMutationFailureMessage(error, copy ? '复制' : '移动')
             : '已完成 $completed 项，后续操作失败。请刷新目录确认结果。',
       );
       rethrow;
+    } finally {
+      _finishFileMutation(lease);
     }
   }
 
   Future<DeleteIntentSnapshot> prepareDelete(List<FileEntry> entries) async {
     final epoch = _contextEpoch;
     final files = _requireFiles();
-    state = state.copyWith(isBusy: true, errorMessage: null);
+    final lease = _beginFileMutation();
     try {
       final response = await files.prepareDeleteIntent(entries);
       if (!_isContextCurrent(epoch)) {
@@ -1115,6 +1546,8 @@ class ClientController extends Notifier<ClientState> {
         );
       }
       rethrow;
+    } finally {
+      _finishFileMutation(lease);
     }
   }
 
@@ -1122,7 +1555,7 @@ class ClientController extends Notifier<ClientState> {
     final epoch = _contextEpoch;
     final refreshPath = state.currentPath;
     final files = _requireFiles();
-    state = state.copyWith(isBusy: true, errorMessage: null);
+    final lease = _beginFileMutation();
     var completed = 0;
     var hasWarnings = false;
     try {
@@ -1135,11 +1568,15 @@ class ClientController extends Notifier<ClientState> {
         hasWarnings =
             hasWarnings || response.hasWarnings || response.data.hasWarning;
       }
-      await loadDirectory(refreshPath);
+      final refreshed = await _refreshAfterConfirmedFileMutation(
+        expectedEpoch: epoch,
+        path: refreshPath,
+        staleNotice: '删除已完成，但列表刷新失败，内容可能已过期。',
+      );
       if (!_isContextCurrent(epoch)) {
         return;
       }
-      if (hasWarnings) {
+      if (refreshed && hasWarnings) {
         state = state.copyWith(notice: '删除已完成，但服务器报告了清理或持久化警告。');
       }
     } on Object catch (error) {
@@ -1149,18 +1586,15 @@ class ClientController extends Notifier<ClientState> {
       if (await handleAuthenticationFailure(error, expectedEpoch: epoch)) {
         rethrow;
       }
-      try {
-        await loadDirectory(refreshPath);
-      } on Object catch (refreshError) {
-        if (!_isContextCurrent(epoch)) {
-          return;
-        }
-        if (!await handleAuthenticationFailure(
-          refreshError,
+      final requiresReconciliation = _requiresFileMutationReconciliation(error);
+      if (requiresReconciliation) {
+        _markFileMutationReconciliationRequired(<String>[refreshPath]);
+      } else {
+        await _refreshAfterConfirmedFileMutation(
           expectedEpoch: epoch,
-        )) {
-          state = state.copyWith(isBusy: false);
-        }
+          path: refreshPath,
+          staleNotice: '删除操作部分完成，且列表刷新失败，内容可能已过期。',
+        );
       }
       if (!_isContextCurrent(epoch)) {
         return;
@@ -1170,26 +1604,46 @@ class ClientController extends Notifier<ClientState> {
       }
       state = state.copyWith(
         errorMessage: completed == 0
-            ? clientErrorMessage(error)
+            ? _fileMutationFailureMessage(error, '删除')
             : '已删除 $completed 项，后续操作失败。请刷新目录确认结果。',
       );
       rethrow;
+    } finally {
+      _finishFileMutation(lease);
     }
   }
 
   Future<void> uploadFile({
     required String sourcePath,
     required String fileName,
+    required String targetDirectory,
   }) async {
     final epoch = _contextEpoch;
-    final refreshPath = state.currentPath;
-    final task = await _createDurableUploadTask(
+    final foregroundGeneration = _foregroundTransferGeneration;
+    final refreshPath = normalizeLogicalPath(targetDirectory);
+    var task = await _createDurableUploadTask(
       sourcePath: sourcePath,
       fileName: fileName,
       remotePath: _joinLogicalPath(refreshPath, fileName),
+      expectedForegroundGeneration: foregroundGeneration,
     );
+    task = await _pauseDurableTransferBeforeStartIfBackgrounded(
+      task,
+      expectedForegroundGeneration: foregroundGeneration,
+    );
+    if (_isAppBackgroundedTask(task)) {
+      throw _appBackgroundedTransferException;
+    }
     final result = await _runDurableUpload(task);
     if (!_isContextCurrent(epoch)) {
+      return;
+    }
+    if (state.currentPath != refreshPath) {
+      state = state.copyWith(
+        notice: result.persistenceWarning
+            ? '文件已确认上传到 $refreshPath，但服务器报告了持久化警告。原目录未自动刷新。'
+            : '文件已确认上传到 $refreshPath。原目录未自动刷新。',
+      );
       return;
     }
     try {
@@ -1213,6 +1667,7 @@ class ClientController extends Notifier<ClientState> {
     required String sourcePath,
     required String fileName,
     required String remotePath,
+    required int expectedForegroundGeneration,
   }) async {
     final epoch = _contextEpoch;
     final endpoint = state.endpoint;
@@ -1241,15 +1696,7 @@ class ClientController extends Notifier<ClientState> {
       );
     }
 
-    final store = await _ensureTransferStore();
-    await _pruneCompletedTransferHistory(store);
     final id = _nextTransferId();
-    final payloadDirectory = Directory(
-      '${store.directoryPath}${Platform.pathSeparator}payloads',
-    );
-    await payloadDirectory.create(recursive: true);
-    final stagingPath =
-        '${payloadDirectory.path}${Platform.pathSeparator}$id.upload';
     final cancellation = CancelToken();
     _transferCancellations[id] = cancellation;
     _addTransfer(
@@ -1264,7 +1711,40 @@ class ClientController extends Notifier<ClientState> {
       expectedEpoch: epoch,
     );
 
+    String? stagingPath;
     try {
+      final startBarrier = _transferStartBarrier;
+      if (startBarrier != null) {
+        await startBarrier();
+      }
+      _ensureForegroundTransferStart(
+        expectedEpoch: epoch,
+        expectedForegroundGeneration: expectedForegroundGeneration,
+        cancellation: cancellation,
+      );
+      final store = await _ensureTransferStore();
+      _ensureForegroundTransferStart(
+        expectedEpoch: epoch,
+        expectedForegroundGeneration: expectedForegroundGeneration,
+        cancellation: cancellation,
+      );
+      await _pruneCompletedTransferHistory(store);
+      _ensureForegroundTransferStart(
+        expectedEpoch: epoch,
+        expectedForegroundGeneration: expectedForegroundGeneration,
+        cancellation: cancellation,
+      );
+      final payloadDirectory = Directory(
+        '${store.directoryPath}${Platform.pathSeparator}payloads',
+      );
+      await payloadDirectory.create(recursive: true);
+      _ensureForegroundTransferStart(
+        expectedEpoch: epoch,
+        expectedForegroundGeneration: expectedForegroundGeneration,
+        cancellation: cancellation,
+      );
+      stagingPath =
+          '${payloadDirectory.path}${Platform.pathSeparator}$id.upload';
       final staged = await _stageUploadPayload(
         source: source,
         destination: File(stagingPath),
@@ -1282,11 +1762,24 @@ class ClientController extends Notifier<ClientState> {
       if (!_isContextCurrent(epoch)) {
         throw _operationSuperseded();
       }
+      final pauseReason = _transferPauseReasons[cancellation];
+      final backgrounded =
+          expectedForegroundGeneration != _foregroundTransferGeneration ||
+          pauseReason?.code == _appBackgroundedTransferPause.code;
+      if (cancellation.isCancelled && !backgrounded) {
+        throw const ApiException(
+          kind: ApiFailureKind.cancelled,
+          code: 'UPLOAD_PREPARATION_CANCELLED',
+          message: 'Upload preparation was cancelled',
+        );
+      }
       final now = DateTime.now().toUtc();
       final task = transfer_core.TransferTask(
         id: id,
         direction: transfer_core.TransferDirection.upload,
-        phase: transfer_core.TransferPhase.queued,
+        phase: backgrounded
+            ? transfer_core.TransferPhase.paused
+            : transfer_core.TransferPhase.queued,
         endpointBaseUrl: endpoint.baseUrl,
         userId: user.id,
         remotePath: remotePath,
@@ -1297,27 +1790,43 @@ class ClientController extends Notifier<ClientState> {
         totalBytes: staged.bytes,
         createdAt: now,
         updatedAt: now,
+        errorCode: backgrounded ? _appBackgroundedTransferPause.code : null,
+        errorMessage: backgrounded
+            ? _appBackgroundedTransferPause.message
+            : null,
       );
       await _persistDurableTask(task);
       return task;
     } on Object catch (error) {
-      for (final path in <String>[stagingPath, '$stagingPath.part']) {
-        try {
-          final file = File(path);
-          if (await file.exists()) {
-            await file.delete();
+      final path = stagingPath;
+      if (path != null) {
+        for (final candidate in <String>[path, '$path.part']) {
+          try {
+            final file = File(candidate);
+            if (await file.exists()) {
+              await file.delete();
+            }
+          } on FileSystemException {
+            // A later orphan-payload cleanup can retry this private file.
           }
-        } on FileSystemException {
-          // A later orphan-payload cleanup can retry this private file.
         }
       }
       if (_isContextCurrent(epoch)) {
+        final backgrounded =
+            error is ApiException &&
+            error.code == _appBackgroundedTransferPause.code;
         final cancelled =
-            error is ApiException && error.kind == ApiFailureKind.cancelled;
+            !backgrounded &&
+            error is ApiException &&
+            error.kind == ApiFailureKind.cancelled;
         _updateTransfer(
           id,
           status: cancelled ? TransferStatus.cancelled : TransferStatus.failed,
-          errorMessage: cancelled ? null : clientErrorMessage(error),
+          errorMessage: backgrounded
+              ? _appBackgroundedTransferPause.message
+              : cancelled
+              ? null
+              : clientErrorMessage(error),
           expectedEpoch: epoch,
         );
       }
@@ -1326,6 +1835,8 @@ class ClientController extends Notifier<ClientState> {
       if (identical(_transferCancellations[id], cancellation)) {
         _transferCancellations.remove(id);
       }
+      _settledTransferCancellations.remove(cancellation);
+      _transferPauseReasons.remove(cancellation);
     }
   }
 
@@ -1428,16 +1939,36 @@ class ClientController extends Notifier<ClientState> {
       );
     }
 
-    final task = await _createDurableDownloadTask(
+    final foregroundGeneration = _foregroundTransferGeneration;
+    var task = await _createDurableDownloadTask(
       entry: entry,
       destinationPath: destinationPath,
       destinationUri: destinationUri,
+      expectedForegroundGeneration: foregroundGeneration,
     );
+    task = await _pauseDurableTransferBeforeStartIfBackgrounded(
+      task,
+      expectedForegroundGeneration: foregroundGeneration,
+    );
+    if (_isAppBackgroundedTask(task)) {
+      throw _appBackgroundedTransferException;
+    }
     return _runDurableDownload(task, overwrite: overwrite);
   }
 
   Future<String> stageDownloadForDestination({required FileEntry entry}) async {
-    final task = await _createDurableDownloadTask(entry: entry);
+    final foregroundGeneration = _foregroundTransferGeneration;
+    var task = await _createDurableDownloadTask(
+      entry: entry,
+      expectedForegroundGeneration: foregroundGeneration,
+    );
+    task = await _pauseDurableTransferBeforeStartIfBackgrounded(
+      task,
+      expectedForegroundGeneration: foregroundGeneration,
+    );
+    if (_isAppBackgroundedTask(task)) {
+      throw _appBackgroundedTransferException;
+    }
     await _runDurableDownload(task);
     return task.id;
   }
@@ -1446,6 +1977,7 @@ class ClientController extends Notifier<ClientState> {
     required String id,
     required String destinationUri,
   }) async {
+    final foregroundGeneration = _foregroundTransferGeneration;
     final current = _durableTransfers[id];
     if (current == null) {
       throw const ApiException(
@@ -1470,13 +2002,20 @@ class ClientController extends Notifier<ClientState> {
         message: 'The transfer is not waiting for a document destination',
       );
     }
-    final task = current.copyWith(
+    var task = current.copyWith(
       destinationUri: destinationUri,
       updatedAt: _nextTransferTimestamp(current),
       errorCode: null,
       errorMessage: null,
     );
     await _persistDurableTask(task);
+    task = await _pauseDurableTransferBeforeStartIfBackgrounded(
+      task,
+      expectedForegroundGeneration: foregroundGeneration,
+    );
+    if (_isAppBackgroundedTask(task)) {
+      throw _appBackgroundedTransferException;
+    }
     return _runDurableDownload(task);
   }
 
@@ -1484,6 +2023,7 @@ class ClientController extends Notifier<ClientState> {
     required FileEntry entry,
     String? destinationPath,
     String? destinationUri,
+    required int expectedForegroundGeneration,
   }) async {
     final endpoint = state.endpoint;
     final user = state.user;
@@ -1494,6 +2034,10 @@ class ClientController extends Notifier<ClientState> {
         message: 'Sign in is required',
       );
     }
+    final startBarrier = _transferStartBarrier;
+    if (startBarrier != null) {
+      await startBarrier();
+    }
     final store = await _ensureTransferStore();
     await _pruneCompletedTransferHistory(store);
     final id = _nextTransferId();
@@ -1502,10 +2046,14 @@ class ClientController extends Notifier<ClientState> {
     );
     await payloadDirectory.create(recursive: true);
     final now = DateTime.now().toUtc();
+    final backgrounded =
+        expectedForegroundGeneration != _foregroundTransferGeneration;
     final task = transfer_core.TransferTask(
       id: id,
       direction: transfer_core.TransferDirection.download,
-      phase: transfer_core.TransferPhase.queued,
+      phase: backgrounded
+          ? transfer_core.TransferPhase.paused
+          : transfer_core.TransferPhase.queued,
       endpointBaseUrl: endpoint.baseUrl,
       userId: user.id,
       remotePath: entry.path,
@@ -1518,6 +2066,8 @@ class ClientController extends Notifier<ClientState> {
       totalBytes: entry.size,
       createdAt: now,
       updatedAt: now,
+      errorCode: backgrounded ? _appBackgroundedTransferPause.code : null,
+      errorMessage: backgrounded ? _appBackgroundedTransferPause.message : null,
     );
     await _persistDurableTask(task);
     return task;
@@ -1544,6 +2094,8 @@ class ClientController extends Notifier<ClientState> {
       if (identical(_transferCancellations[initialTask.id], cancellation)) {
         _transferCancellations.remove(initialTask.id);
       }
+      _settledTransferCancellations.remove(cancellation);
+      _transferPauseReasons.remove(cancellation);
       _transferLeases.remove(initialTask.id);
     }
   }
@@ -1812,11 +2364,16 @@ class ClientController extends Notifier<ClientState> {
         rethrow;
       }
       final phase = _uploadFailurePhase(error);
+      final pauseReason =
+          cancellation.isCancelled &&
+              phase == transfer_core.TransferPhase.paused
+          ? _transferPauseReasons[cancellation]
+          : null;
       task = task.copyWith(
         phase: phase,
         updatedAt: _nextTransferTimestamp(task),
-        errorCode: _uploadFailureCode(error, phase),
-        errorMessage: clientErrorMessage(error),
+        errorCode: pauseReason?.code ?? _uploadFailureCode(error, phase),
+        errorMessage: pauseReason?.message ?? clientErrorMessage(error),
       );
       await _persistDurableTask(task);
       if (_isContextCurrent(epoch)) {
@@ -1953,7 +2510,11 @@ class ClientController extends Notifier<ClientState> {
       }
       rethrow;
     } finally {
-      _transferCancellations.remove(id);
+      if (identical(_transferCancellations[id], cancelToken)) {
+        _transferCancellations.remove(id);
+      }
+      _settledTransferCancellations.remove(cancelToken);
+      _transferPauseReasons.remove(cancelToken);
     }
   }
 
@@ -1980,6 +2541,8 @@ class ClientController extends Notifier<ClientState> {
       if (identical(_transferCancellations[initialTask.id], cancellation)) {
         _transferCancellations.remove(initialTask.id);
       }
+      _settledTransferCancellations.remove(cancellation);
+      _transferPauseReasons.remove(cancellation);
       _transferLeases.remove(initialTask.id);
     }
   }
@@ -2112,12 +2675,17 @@ class ClientController extends Notifier<ClientState> {
         rethrow;
       }
       final phase = _downloadFailurePhase(error);
+      final pauseReason =
+          cancellation.isCancelled &&
+              phase == transfer_core.TransferPhase.paused
+          ? _transferPauseReasons[cancellation]
+          : null;
       task = task.copyWith(
         phase: phase,
         durableOffset: await partial.exists() ? await partial.length() : 0,
         updatedAt: _nextTransferTimestamp(task),
-        errorCode: _downloadFailureCode(error, phase),
-        errorMessage: clientErrorMessage(error),
+        errorCode: pauseReason?.code ?? _downloadFailureCode(error, phase),
+        errorMessage: pauseReason?.message ?? clientErrorMessage(error),
       );
       await _persistDurableTask(task);
       if (_isContextCurrent(epoch)) {
@@ -2190,12 +2758,18 @@ class ClientController extends Notifier<ClientState> {
         },
       );
     } on Object catch (error) {
+      final pauseReason = cancellation.isCancelled
+          ? _transferPauseReasons[cancellation]
+          : null;
       task = task.copyWith(
         updatedAt: _nextTransferTimestamp(task),
-        errorCode: 'DESTINATION_WRITE_FAILED',
-        errorMessage: cancellation.isCancelled
-            ? '保存已暂停，可重新选择位置。'
-            : clientErrorMessage(error),
+        destinationUri: cancellation.isCancelled ? null : task.destinationUri,
+        errorCode: pauseReason?.code ?? 'DESTINATION_WRITE_FAILED',
+        errorMessage:
+            pauseReason?.destinationMessage ??
+            (cancellation.isCancelled
+                ? '保存已暂停，可重新选择位置。'
+                : clientErrorMessage(error)),
       );
       await _persistDurableTask(task);
       rethrow;
@@ -2221,9 +2795,62 @@ class ClientController extends Notifier<ClientState> {
     return payload;
   }
 
+  void _ensureForegroundTransferStart({
+    required int expectedEpoch,
+    required int expectedForegroundGeneration,
+    required CancelToken cancellation,
+  }) {
+    if (!_isContextCurrent(expectedEpoch)) {
+      throw _operationSuperseded();
+    }
+    final pauseReason = _transferPauseReasons[cancellation];
+    if (expectedForegroundGeneration != _foregroundTransferGeneration ||
+        pauseReason?.code == _appBackgroundedTransferPause.code) {
+      throw _appBackgroundedTransferException;
+    }
+    if (cancellation.isCancelled) {
+      throw const ApiException(
+        kind: ApiFailureKind.cancelled,
+        code: 'UPLOAD_PREPARATION_CANCELLED',
+        message: 'Upload preparation was cancelled',
+      );
+    }
+  }
+
+  Future<transfer_core.TransferTask>
+  _pauseDurableTransferBeforeStartIfBackgrounded(
+    transfer_core.TransferTask task, {
+    required int expectedForegroundGeneration,
+  }) async {
+    if (expectedForegroundGeneration == _foregroundTransferGeneration ||
+        _isAppBackgroundedTask(task)) {
+      return task;
+    }
+    final awaitingDestination =
+        task.phase == transfer_core.TransferPhase.awaitingDestination;
+    final paused = task.copyWith(
+      phase: awaitingDestination
+          ? transfer_core.TransferPhase.awaitingDestination
+          : transfer_core.TransferPhase.paused,
+      destinationUri: awaitingDestination ? null : task.destinationUri,
+      updatedAt: _nextTransferTimestamp(task),
+      errorCode: _appBackgroundedTransferPause.code,
+      errorMessage: awaitingDestination
+          ? _appBackgroundedTransferPause.destinationMessage
+          : _appBackgroundedTransferPause.message,
+    );
+    await _persistDurableTask(paused);
+    return paused;
+  }
+
+  bool _isAppBackgroundedTask(transfer_core.TransferTask task) =>
+      task.errorCode == _appBackgroundedTransferPause.code;
+
   void pauseTransfer(String id) {
     final token = _transferCancellations[id];
-    if (token == null || token.isCancelled) {
+    if (token == null ||
+        token.isCancelled ||
+        _settledTransferCancellations.contains(token)) {
       return;
     }
     token.cancel('Cancelled by the user');
@@ -2235,6 +2862,47 @@ class ClientController extends Notifier<ClientState> {
   }
 
   void cancelTransfer(String id) => pauseTransfer(id);
+
+  Future<int> pauseActiveTransfersForAppBackground() async {
+    if (_disposed || state.stage != ClientStage.ready) {
+      return 0;
+    }
+    _foregroundTransferGeneration++;
+    final versionDownloads = _versionDownloadCancellations
+        .where((cancellation) => !cancellation.isCancelled)
+        .toList(growable: false);
+    for (final cancellation in versionDownloads) {
+      cancellation.cancel('App entered the background');
+    }
+    final active = _transferCancellations.entries
+        .where(
+          (entry) =>
+              !entry.value.isCancelled &&
+              !_settledTransferCancellations.contains(entry.value),
+        )
+        .toList(growable: false);
+    for (final entry in active) {
+      final id = entry.key;
+      final task = _durableTransfers[id];
+      _transferPauseReasons[entry.value] = _appBackgroundedTransferPause;
+      entry.value.cancel(_appBackgroundedTransferPause.cancellationMessage);
+      if (task == null) {
+        _updateTransfer(id, status: TransferStatus.cancelled);
+        continue;
+      }
+      _updateTransfer(
+        id,
+        status: task.phase == transfer_core.TransferPhase.awaitingDestination
+            ? TransferStatus.awaitingDestination
+            : TransferStatus.paused,
+        errorMessage:
+            task.phase == transfer_core.TransferPhase.awaitingDestination
+            ? _appBackgroundedTransferPause.destinationMessage
+            : _appBackgroundedTransferPause.message,
+      );
+    }
+    return active.length + versionDownloads.length;
+  }
 
   Future<void> resumeTransfer(String id) async {
     final task = _durableTransfers[id];
@@ -2484,6 +3152,8 @@ class ClientController extends Notifier<ClientState> {
 
   int _invalidateContext() {
     _contextEpoch++;
+    _fileMutationLease = null;
+    _fileMutationReconciliationPaths.clear();
     _directorySequence++;
     _searchSequence++;
     _searchTargetSequence++;
@@ -2500,6 +3170,17 @@ class ClientController extends Notifier<ClientState> {
     _trashReadCancellation = null;
     _trashMutationCancellation?.cancel('Client context changed');
     _trashMutationCancellation = null;
+    _versionRestoreCancellation?.cancel('Client context changed');
+    _versionRestoreCancellation = null;
+    for (final cancellation in _versionDownloadCancellations.toList(
+      growable: false,
+    )) {
+      if (!cancellation.isCancelled) {
+        cancellation.cancel('Client context changed');
+      }
+    }
+    _versionDownloadCancellations.clear();
+    _settledTransferCancellations.clear();
     _cancelAllTransfers();
     _client?.close();
     _client = null;
@@ -2654,6 +3335,101 @@ class ClientController extends Notifier<ClientState> {
     final statusCode = error.statusCode;
     return error.isUnconfirmedMutation ||
         (statusCode != null && statusCode >= 500 && statusCode < 600);
+  }
+
+  bool _requiresFileMutationReconciliation(Object error) {
+    if (error is! ApiException) {
+      return true;
+    }
+    final statusCode = error.statusCode;
+    return error.isUnconfirmedMutation ||
+        (statusCode != null && statusCode >= 500 && statusCode < 600);
+  }
+
+  _VersionTarget _requireVersionTarget(FileEntry entry) {
+    if (state.stage != ClientStage.ready || state.user == null) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'AUTH_SESSION_MISSING',
+        message: 'Sign in is required',
+      );
+    }
+    if (entry.isDirectory ||
+        !entry.versioned ||
+        !entry.capabilities.concreteRead) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'VERSION_TARGET_INVALID',
+        message: 'Version history requires a readable regular file',
+      );
+    }
+    final path = normalizeLogicalPath(entry.path, allowRoot: false);
+    if (path != entry.path) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'VERSION_TARGET_INVALID',
+        message: 'The version target path is not canonical',
+      );
+    }
+    final currentHash = entry.contentHash;
+    if (currentHash != null &&
+        !_lowercaseBlake3DigestPattern.hasMatch(currentHash)) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'VERSION_IDENTITY_INVALID',
+        message: 'The current file identity is invalid',
+      );
+    }
+    return _VersionTarget(
+      path: path,
+      parentPath: _logicalParentPath(path),
+      openedCurrentHash: currentHash,
+    );
+  }
+
+  void _requireVersionForTarget(FileVersion version, _VersionTarget target) {
+    if (version.path != target.path) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'VERSION_TARGET_MISMATCH',
+        message: 'The selected version belongs to a different file',
+      );
+    }
+  }
+
+  void _ensureVersionRestoreAllowed() {
+    if (state.stage != ClientStage.ready || state.user == null) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'AUTH_SESSION_MISSING',
+        message: 'Sign in is required',
+      );
+    }
+    if (state.user!.role != 'admin') {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'ADMIN_REQUIRED',
+        message: 'Administrator access is required to restore versions',
+      );
+    }
+  }
+
+  void _requireMatchingCurrentVersion(
+    FileVersionHistory history, {
+    required String expectedHash,
+  }) {
+    if (history.current.hash != expectedHash) {
+      throw _versionTargetChanged();
+    }
+  }
+
+  FileEntry? _findFileEntry(DirectoryListing listing, String path) {
+    for (final entry in listing.entries) {
+      if (entry.path == path) {
+        return entry;
+      }
+    }
+    return null;
   }
 
   Future<void> _serializePreferenceMutation(Future<void> Function() operation) {
@@ -3001,6 +3777,14 @@ class ClientController extends Notifier<ClientState> {
     }
     await store.upsert(task);
     _durableTransfers[task.id] = task;
+    final cancellation = _transferCancellations[task.id];
+    if (cancellation != null) {
+      if (task.isTerminal) {
+        _settledTransferCancellations.add(cancellation);
+      } else {
+        _settledTransferCancellations.remove(cancellation);
+      }
+    }
     if (!_disposed &&
         state.endpoint?.baseUrl == task.endpointBaseUrl &&
         state.user?.id == task.userId) {
@@ -3090,6 +3874,20 @@ class ClientController extends Notifier<ClientState> {
     );
   }
 }
+
+final class _VersionTarget {
+  const _VersionTarget({
+    required this.path,
+    required this.parentPath,
+    required this.openedCurrentHash,
+  });
+
+  final String path;
+  final String parentPath;
+  final String? openedCurrentHash;
+}
+
+final RegExp _lowercaseBlake3DigestPattern = RegExp(r'^[0-9a-f]{64}$');
 
 final class _StagedUploadPayload {
   const _StagedUploadPayload({required this.bytes, required this.sha256});
@@ -3260,10 +4058,50 @@ bool _isTerminalAuthenticationFailure(Object error) {
 bool _isCancellation(Object error) =>
     error is ApiException && error.kind == ApiFailureKind.cancelled;
 
+bool _isUnconfirmedVersionRestoreError(Object error) {
+  if (error is! ApiException) {
+    return true;
+  }
+  return switch (error.kind) {
+    ApiFailureKind.connection ||
+    ApiFailureKind.timeout ||
+    ApiFailureKind.cancelled ||
+    ApiFailureKind.invalidResponse => true,
+    ApiFailureKind.response =>
+      !error.hasStructuredServerError ||
+          (error.statusCode != null && error.statusCode! >= 500),
+    ApiFailureKind.local => false,
+  };
+}
+
 ApiException _operationSuperseded() => const ApiException(
   kind: ApiFailureKind.cancelled,
   code: 'OPERATION_SUPERSEDED',
   message: 'The client context changed',
+);
+
+ApiException _versionTargetChanged() => const ApiException(
+  kind: ApiFailureKind.local,
+  code: 'VERSION_TARGET_CHANGED',
+  message: 'The current file changed after version history was opened',
+);
+
+ApiException _versionRestoreResultUnconfirmed(Object cause) => ApiException(
+  kind: ApiFailureKind.invalidResponse,
+  code: versionRestoreResultUnconfirmedCode,
+  message:
+      'The version restore result could not be confirmed; refresh before retrying',
+  cause: cause,
+);
+
+ApiException _versionRestoreConfirmedRefreshRequired(
+  Object cause,
+) => ApiException(
+  kind: ApiFailureKind.local,
+  code: versionRestoreConfirmedRefreshRequiredCode,
+  message:
+      'The version restore was confirmed, but refreshed history is unavailable',
+  cause: cause,
 );
 
 String _trashDeletionNotice(
@@ -3309,6 +4147,7 @@ String clientErrorMessage(Object error) {
       'UPLOAD_SOURCE_TOO_LARGE' => '单个上传文件不能超过 10 GiB。',
       'UPLOAD_STAGING_CAPACITY_EXCEEDED' => '设备可用空间不足，无法暂存上传内容。',
       'UPLOAD_STAGING_LIMIT' => '服务器上传暂存空间繁忙，请稍后重试。',
+      'APP_BACKGROUNDED' => _appBackgroundedTransferPause.message,
       'CONFLICT' => '文件已发生变化，请刷新后重试。',
       'DELETE_TARGET_CHANGED' ||
       'DELETE_POLICY_CHANGED' => '文件或删除策略已变化，请刷新后重新确认。',
@@ -3316,6 +4155,19 @@ String clientErrorMessage(Object error) {
       'READ_ONLY_ACCOUNT' => '当前账户为只读账户，不能修改回收站。',
       'TRASH_RECONCILIATION_REQUIRED' => '需要先刷新回收站并核对上一次操作结果。',
       'TRASH_MUTATION_IN_PROGRESS' => '另一项回收站操作仍在进行中。',
+      'FILE_MUTATION_IN_PROGRESS' => '另一项文件操作仍在进行中，请等待其完成。',
+      'DIRECTORY_REFRESH_REQUIRED' => '当前目录内容需要刷新，刷新成功后才能继续修改。',
+      'FILE_RECONCILIATION_REQUIRED' => '上一项文件操作结果仍待核对。请刷新提示的相关目录后再继续修改。',
+      'ADMIN_REQUIRED' => '只有管理员可以恢复文件版本。',
+      'VERSION_TARGET_INVALID' => '只能查看可读取文件的版本历史。',
+      'VERSION_IDENTITY_UNAVAILABLE' => '无法确认当前文件身份，请刷新目录后重试。',
+      'VERSION_TARGET_MISMATCH' => '所选版本不属于当前文件，请重新打开版本历史。',
+      'VERSION_TARGET_CHANGED' => '当前文件已发生变化，请刷新目录后重新打开版本历史。',
+      'VERSION_ALREADY_CURRENT' => '所选版本已经是当前版本。',
+      'VERSION_NOT_AVAILABLE' => '所选历史版本已不存在，请刷新版本历史。',
+      versionRestoreResultUnconfirmedCode => '版本恢复结果无法确认。请先刷新目录和版本历史核对，避免重复提交。',
+      versionRestoreConfirmedRefreshRequiredCode =>
+        '版本已确认恢复，但版本历史刷新失败。请关闭后重新打开版本历史核对；不要重复恢复。',
       _ when error.kind == ApiFailureKind.cancelled => '传输已取消。',
       _ when error.kind == ApiFailureKind.timeout => '连接超时，请确认网络和设备状态。',
       _ when error.kind == ApiFailureKind.connection => '无法连接到设备，请确认地址和网络。',
@@ -3344,6 +4196,15 @@ String clientErrorMessage(Object error) {
     };
   }
   return '操作未完成，请稍后重试。';
+}
+
+String _fileMutationFailureMessage(Object error, String action) {
+  if (error is ApiException &&
+      (error.isUnconfirmedMutation ||
+          (error.statusCode != null && error.statusCode! >= 500))) {
+    return '$action结果无法确认。请先刷新目录核对，避免重复提交。';
+  }
+  return clientErrorMessage(error);
 }
 
 String _joinLogicalPath(String parent, String name) {

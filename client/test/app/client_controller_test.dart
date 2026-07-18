@@ -596,6 +596,278 @@ void main() {
     });
   });
 
+  group('home freshness and file mutation safety', () {
+    test(
+      'an initial directory failure remains an honest ready error',
+      () async {
+        final endpoint = ServerEndpoint.parse('https://nas.example.com');
+        final adapter = _ControllerAdapter();
+        final harness = await _ControllerHarness.start(
+          adapters: {endpoint.baseUrl: adapter},
+        );
+        addTearDown(harness.container.dispose);
+        await harness.controller.connect(endpoint.baseUrl);
+        adapter.disconnectNextDirectory = true;
+
+        await expectLater(
+          harness.controller.login(username: 'owner', password: 'password'),
+          throwsA(isA<ApiException>()),
+        );
+
+        final state = harness.container.read(clientControllerProvider);
+        expect(state.stage, ClientStage.ready);
+        expect(state.directory, isNull);
+        expect(state.isDirectoryBusy, isFalse);
+        expect(state.directoryErrorMessage, isNotNull);
+      },
+    );
+
+    test(
+      'cached directory becomes stale and recovers on a later refresh',
+      () async {
+        final endpoint = ServerEndpoint.parse('https://nas.example.com');
+        final adapter = _ControllerAdapter();
+        final harness = await _ControllerHarness.start(
+          adapters: {endpoint.baseUrl: adapter},
+        );
+        addTearDown(harness.container.dispose);
+        await harness.connectAndLogin(endpoint, username: 'owner');
+        final before = harness.container.read(clientControllerProvider);
+        expect(before.directory, isNotNull);
+        expect(before.directoryUpdatedAt, isNotNull);
+
+        adapter.disconnectNextDirectory = true;
+        await expectLater(
+          harness.controller.refreshOverview(),
+          throwsA(isA<ApiException>()),
+        );
+
+        var state = harness.container.read(clientControllerProvider);
+        expect(state.directory, before.directory);
+        expect(state.directoryUpdatedAt, before.directoryUpdatedAt);
+        expect(state.directoryErrorMessage, isNotNull);
+        expect(state.isDirectoryBusy, isFalse);
+
+        final mutationsBefore = adapter.requests
+            .where(
+              (request) =>
+                  request.method == 'POST' &&
+                  request.path.startsWith('/api/v1/directories/'),
+            )
+            .length;
+        await expectLater(
+          harness.controller.createDirectory('blocked-while-stale'),
+          throwsA(
+            isA<ApiException>().having(
+              (error) => error.code,
+              'code',
+              'DIRECTORY_REFRESH_REQUIRED',
+            ),
+          ),
+        );
+        expect(
+          adapter.requests.where(
+            (request) =>
+                request.method == 'POST' &&
+                request.path.startsWith('/api/v1/directories/'),
+          ),
+          hasLength(mutationsBefore),
+        );
+
+        await harness.controller.refreshOverview();
+        state = harness.container.read(clientControllerProvider);
+        expect(state.directory?.path, '/');
+        expect(state.directoryErrorMessage, isNull);
+        expect(state.isDirectoryBusy, isFalse);
+        expect(
+          state.directoryUpdatedAt!.isBefore(before.directoryUpdatedAt!),
+          isFalse,
+        );
+      },
+    );
+
+    test(
+      'optional statistics failure does not mark file access stale',
+      () async {
+        final endpoint = ServerEndpoint.parse('https://nas.example.com');
+        final adapter = _ControllerAdapter();
+        final harness = await _ControllerHarness.start(
+          adapters: {endpoint.baseUrl: adapter},
+        );
+        addTearDown(harness.container.dispose);
+        await harness.connectAndLogin(endpoint, username: 'owner');
+        adapter.failNextStats = true;
+
+        await harness.controller.refreshOverview();
+
+        final state = harness.container.read(clientControllerProvider);
+        expect(state.stage, ClientStage.ready);
+        expect(state.directory, isNotNull);
+        expect(state.directoryErrorMessage, isNull);
+        expect(state.stats, isNull);
+      },
+    );
+
+    test(
+      'file mutations are single-flight and do not restore an old path',
+      () async {
+        final endpoint = ServerEndpoint.parse('https://nas.example.com');
+        final adapter = _ControllerAdapter();
+        final harness = await _ControllerHarness.start(
+          adapters: {endpoint.baseUrl: adapter},
+        );
+        addTearDown(harness.container.dispose);
+        await harness.connectAndLogin(endpoint, username: 'owner');
+        final mutationGate = adapter.holdFileMutation();
+        addTearDown(mutationGate.release);
+
+        final first = harness.controller.createDirectory('first');
+        await mutationGate.started.timeout(const Duration(seconds: 2));
+        expect(
+          harness.container.read(clientControllerProvider).isFileMutationBusy,
+          isTrue,
+        );
+        await expectLater(
+          harness.controller.createDirectory('second'),
+          throwsA(
+            isA<ApiException>().having(
+              (error) => error.code,
+              'code',
+              'FILE_MUTATION_IN_PROGRESS',
+            ),
+          ),
+        );
+
+        await harness.controller.loadDirectory('/other');
+        mutationGate.release();
+        await first;
+
+        final state = harness.container.read(clientControllerProvider);
+        expect(state.currentPath, '/other');
+        expect(state.directory?.path, '/other');
+        expect(state.isFileMutationBusy, isFalse);
+        expect(state.notice, contains('原目录未自动刷新'));
+        expect(
+          adapter.requests.where(
+            (request) =>
+                request.method == 'POST' &&
+                request.path.startsWith('/api/v1/directories/'),
+          ),
+          hasLength(1),
+        );
+      },
+    );
+
+    test('a confirmed mutation survives a failed directory refresh', () async {
+      final endpoint = ServerEndpoint.parse('https://nas.example.com');
+      final adapter = _ControllerAdapter();
+      final harness = await _ControllerHarness.start(
+        adapters: {endpoint.baseUrl: adapter},
+      );
+      addTearDown(harness.container.dispose);
+      await harness.connectAndLogin(endpoint, username: 'owner');
+      final before = harness.container.read(clientControllerProvider).directory;
+      adapter.disconnectNextDirectory = true;
+
+      await harness.controller.createDirectory('confirmed');
+
+      final state = harness.container.read(clientControllerProvider);
+      expect(state.directory, before);
+      expect(state.directoryErrorMessage, isNotNull);
+      expect(state.isFileMutationBusy, isFalse);
+      expect(state.notice, contains('文件夹已创建'));
+      expect(state.notice, contains('内容可能已过期'));
+      await expectLater(
+        harness.controller.createDirectory('blocked-until-refresh'),
+        throwsA(
+          isA<ApiException>().having(
+            (error) => error.code,
+            'code',
+            'DIRECTORY_REFRESH_REQUIRED',
+          ),
+        ),
+      );
+    });
+
+    test(
+      'an unconfirmed mutation blocks writes until every affected path is reviewed',
+      () async {
+        final endpoint = ServerEndpoint.parse('https://nas.example.com');
+        final adapter = _ControllerAdapter()..disconnectNextFileMutation = true;
+        final harness = await _ControllerHarness.start(
+          adapters: {endpoint.baseUrl: adapter},
+        );
+        addTearDown(harness.container.dispose);
+        await harness.connectAndLogin(endpoint, username: 'owner');
+
+        await expectLater(
+          harness.controller.createDirectory('uncertain'),
+          throwsA(isA<ApiException>()),
+        );
+        var state = harness.container.read(clientControllerProvider);
+        expect(state.fileReconciliationRequired, isTrue);
+        expect(state.fileReconciliationMessage, contains('/'));
+        expect(state.errorMessage, contains('结果无法确认'));
+        final mutationCount = adapter.requests
+            .where(
+              (request) =>
+                  request.method == 'POST' &&
+                  request.path.startsWith('/api/v1/directories/'),
+            )
+            .length;
+
+        await expectLater(
+          harness.controller.createDirectory('must-not-repeat'),
+          throwsA(
+            isA<ApiException>().having(
+              (error) => error.code,
+              'code',
+              'FILE_RECONCILIATION_REQUIRED',
+            ),
+          ),
+        );
+        expect(
+          adapter.requests.where(
+            (request) =>
+                request.method == 'POST' &&
+                request.path.startsWith('/api/v1/directories/'),
+          ),
+          hasLength(mutationCount),
+        );
+
+        await harness.controller.loadDirectory('/');
+        state = harness.container.read(clientControllerProvider);
+        expect(state.fileReconciliationRequired, isFalse);
+        expect(state.fileReconciliationMessage, isNull);
+        await harness.controller.createDirectory('safe-after-review');
+      },
+    );
+
+    test('a structured server error also requires reconciliation', () async {
+      final endpoint = ServerEndpoint.parse('https://nas.example.com');
+      final adapter = _ControllerAdapter()..nextFileMutationStatus = 500;
+      final harness = await _ControllerHarness.start(
+        adapters: {endpoint.baseUrl: adapter},
+      );
+      addTearDown(harness.container.dispose);
+      await harness.connectAndLogin(endpoint, username: 'owner');
+
+      await expectLater(
+        harness.controller.createDirectory('server-uncertain'),
+        throwsA(
+          isA<ApiException>().having(
+            (error) => error.statusCode,
+            'status',
+            500,
+          ),
+        ),
+      );
+      final state = harness.container.read(clientControllerProvider);
+      expect(state.fileReconciliationRequired, isTrue);
+      expect(state.errorMessage, contains('结果无法确认'));
+    });
+  });
+
   test(
     'disconnected upload resumes from server durable offset after restart',
     () async {
@@ -624,6 +896,7 @@ void main() {
         first.controller.uploadFile(
           sourcePath: source.path,
           fileName: 'payload.bin',
+          targetDirectory: '/',
         ),
         throwsA(isA<ApiException>()),
       );
@@ -679,6 +952,49 @@ void main() {
     },
   );
 
+  test('an upload batch keeps its explicit target after navigation', () async {
+    final endpoint = ServerEndpoint.parse('https://nas.example.com');
+    final adapter = _ControllerAdapter();
+    final root = await Directory.systemTemp.createTemp(
+      'mnemonas-controller-upload-target-',
+    );
+    addTearDown(() => root.delete(recursive: true));
+    final harness = await _ControllerHarness.start(
+      adapters: {endpoint.baseUrl: adapter},
+      transferDirectory: Directory('${root.path}/store'),
+    );
+    addTearDown(harness.container.dispose);
+    final source = File('${root.path}/payload.bin');
+    await source.writeAsBytes(<int>[1, 2, 3], flush: true);
+    await harness.connectAndLogin(endpoint, username: 'owner');
+    await harness.controller.loadDirectory('/A');
+    final gate = adapter.holdUploadCreate();
+    addTearDown(gate.release);
+
+    final first = harness.controller.uploadFile(
+      sourcePath: source.path,
+      fileName: 'first.bin',
+      targetDirectory: '/A',
+    );
+    await gate.started.timeout(const Duration(seconds: 2));
+    await harness.controller.loadDirectory('/B');
+    gate.release();
+    await first;
+    await harness.controller.uploadFile(
+      sourcePath: source.path,
+      fileName: 'second.bin',
+      targetDirectory: '/A',
+    );
+
+    expect(
+      adapter.uploadSessions.map((session) => session.path),
+      unorderedEquals(<String>['/A/first.bin', '/A/second.bin']),
+    );
+    final state = harness.container.read(clientControllerProvider);
+    expect(state.currentPath, '/B');
+    expect(state.directory?.path, '/B');
+  });
+
   test('a lost create response is recovered by lookup after restart', () async {
     final endpoint = ServerEndpoint.parse('https://nas.example.com');
     final adapter = _ControllerAdapter()..disconnectNextUploadCreate = true;
@@ -705,6 +1021,7 @@ void main() {
       first.controller.uploadFile(
         sourcePath: source.path,
         fileName: 'payload.bin',
+        targetDirectory: '/',
       ),
       throwsA(isA<ApiException>()),
     );
@@ -785,6 +1102,7 @@ void main() {
         harness.controller.uploadFile(
           sourcePath: source.path,
           fileName: 'payload.bin',
+          targetDirectory: '/',
         ),
         throwsA(isA<ApiException>()),
       );
@@ -853,6 +1171,7 @@ void main() {
       harness.controller.uploadFile(
         sourcePath: source.path,
         fileName: 'payload.bin',
+        targetDirectory: '/',
       ),
       throwsA(
         isA<ApiException>().having(
@@ -909,6 +1228,7 @@ void main() {
       await harness.controller.uploadFile(
         sourcePath: source.path,
         fileName: 'payload.bin',
+        targetDirectory: '/',
       );
 
       final state = harness.container.read(clientControllerProvider);
@@ -944,6 +1264,7 @@ void main() {
         harness.controller.uploadFile(
           sourcePath: source.path,
           fileName: 'payload.bin',
+          targetDirectory: '/',
         ),
         throwsA(isA<ApiException>()),
       );
@@ -1019,6 +1340,7 @@ void main() {
         harness.controller.uploadFile(
           sourcePath: source.path,
           fileName: 'payload.bin',
+          targetDirectory: '/',
         ),
         throwsA(isA<ApiException>()),
       );
@@ -1107,6 +1429,7 @@ void main() {
           harness.controller.uploadFile(
             sourcePath: source.path,
             fileName: 'payload.bin',
+            targetDirectory: '/',
           ),
           throwsA(
             isA<ApiException>().having(
@@ -1170,6 +1493,7 @@ void main() {
           harness.controller.uploadFile(
             sourcePath: source.path,
             fileName: 'payload.bin',
+            targetDirectory: '/',
           ),
           throwsA(isA<ApiException>()),
         );
@@ -1225,6 +1549,7 @@ void main() {
       harness.controller.uploadFile(
         sourcePath: source.path,
         fileName: 'payload.bin',
+        targetDirectory: '/',
       ),
       throwsA(
         isA<ApiException>().having(
@@ -1877,6 +2202,432 @@ void main() {
           .single;
       expect(pending.status, TransferStatus.awaitingDestination);
       expect(pending.errorMessage, contains('重新选择位置'));
+    },
+  );
+
+  test(
+    'app background fences a download while durable task creation is waiting',
+    () async {
+      final endpoint = ServerEndpoint.parse('https://nas.example.com');
+      final root = await Directory.systemTemp.createTemp(
+        'mnemonas-controller-download-start-fence-',
+      );
+      addTearDown(() => root.delete(recursive: true));
+      final transferDirectory = Directory('${root.path}/store');
+      final startGate = _RequestGate();
+      addTearDown(startGate.release);
+      final adapter = _ControllerAdapter();
+      final harness = await _ControllerHarness.start(
+        adapters: {endpoint.baseUrl: adapter},
+        transferDirectory: transferDirectory,
+        transferStartBarrier: startGate.wait,
+      );
+      addTearDown(harness.container.dispose);
+      await harness.connectAndLogin(endpoint, username: 'owner');
+      final observedStatuses = <TransferStatus>[];
+      final subscription = harness.container.listen<ClientState>(
+        clientControllerProvider,
+        (_, next) {
+          observedStatuses.addAll(
+            next.transfers.map((transfer) => transfer.status),
+          );
+        },
+      );
+      addTearDown(subscription.close);
+
+      final download = harness.controller.downloadFile(
+        entry: FileEntry(
+          name: 'start-fenced.bin',
+          path: '/start-fenced.bin',
+          isDirectory: false,
+          size: 6,
+          modifiedAt: DateTime.utc(2026, 7, 19, 12),
+          capabilities: const FileCapabilities(
+            read: true,
+            concreteRead: true,
+            write: true,
+          ),
+        ),
+        destinationPath: '${root.path}/start-fenced.bin',
+      );
+      final downloadFinished = expectLater(
+        download,
+        throwsA(
+          isA<ApiException>().having(
+            (error) => error.code,
+            'code',
+            'APP_BACKGROUNDED',
+          ),
+        ),
+      );
+
+      await startGate.started.timeout(const Duration(seconds: 2));
+      expect(
+        await harness.controller.pauseActiveTransfersForAppBackground(),
+        0,
+      );
+      expect(adapter.downloadRanges, isEmpty);
+      startGate.release();
+      await downloadFinished;
+
+      expect(adapter.downloadRanges, isEmpty);
+      expect(observedStatuses, isNot(contains(TransferStatus.running)));
+      final transfer = harness.container
+          .read(clientControllerProvider)
+          .transfers
+          .single;
+      expect(transfer.status, TransferStatus.paused);
+      expect(transfer.canRetry, isTrue);
+      expect(transfer.errorMessage, contains('后台'));
+      final stored = (await FileTransferStore(
+        directoryPath: transferDirectory.path,
+      ).load()).tasks.single;
+      expect(stored.phase, transfer_core.TransferPhase.paused);
+      expect(stored.errorCode, 'APP_BACKGROUNDED');
+      expect(stored.errorMessage, contains('后台'));
+      expect(File('${root.path}/start-fenced.bin').existsSync(), isFalse);
+    },
+  );
+
+  test(
+    'app background fences an upload while durable task creation is waiting',
+    () async {
+      final endpoint = ServerEndpoint.parse('https://nas.example.com');
+      final root = await Directory.systemTemp.createTemp(
+        'mnemonas-controller-upload-start-fence-',
+      );
+      addTearDown(() => root.delete(recursive: true));
+      final transferDirectory = Directory('${root.path}/store');
+      final startGate = _RequestGate();
+      addTearDown(startGate.release);
+      final adapter = _ControllerAdapter();
+      final harness = await _ControllerHarness.start(
+        adapters: {endpoint.baseUrl: adapter},
+        transferDirectory: transferDirectory,
+        transferStartBarrier: startGate.wait,
+      );
+      addTearDown(harness.container.dispose);
+      await harness.connectAndLogin(endpoint, username: 'owner');
+      final source = File('${root.path}/upload-source.bin');
+      await source.writeAsBytes(<int>[1, 2, 3], flush: true);
+      final observedStatuses = <TransferStatus>[];
+      final subscription = harness.container.listen<ClientState>(
+        clientControllerProvider,
+        (_, next) {
+          observedStatuses.addAll(
+            next.transfers.map((transfer) => transfer.status),
+          );
+        },
+      );
+      addTearDown(subscription.close);
+
+      final upload = harness.controller.uploadFile(
+        sourcePath: source.path,
+        fileName: 'start-fenced.bin',
+        targetDirectory: '/',
+      );
+      final uploadFinished = expectLater(
+        upload,
+        throwsA(
+          isA<ApiException>().having(
+            (error) => error.code,
+            'code',
+            'APP_BACKGROUNDED',
+          ),
+        ),
+      );
+
+      await startGate.started.timeout(const Duration(seconds: 2));
+      expect(
+        await harness.controller.pauseActiveTransfersForAppBackground(),
+        1,
+      );
+      expect(
+        adapter.requests.where(
+          (request) => request.path.startsWith('/api/v1/upload-sessions'),
+        ),
+        isEmpty,
+      );
+      startGate.release();
+      await uploadFinished;
+
+      expect(
+        adapter.requests.where(
+          (request) => request.path.startsWith('/api/v1/upload-sessions'),
+        ),
+        isEmpty,
+      );
+      expect(observedStatuses, isNot(contains(TransferStatus.running)));
+      final transfer = harness.container
+          .read(clientControllerProvider)
+          .transfers
+          .single;
+      expect(transfer.status, TransferStatus.failed);
+      expect(transfer.canRetry, isFalse);
+      expect(transfer.errorMessage, contains('后台'));
+      expect(
+        (await FileTransferStore(
+          directoryPath: transferDirectory.path,
+        ).load()).tasks,
+        isEmpty,
+      );
+    },
+  );
+
+  test(
+    'app background pauses active Android copies once and preserves idle tasks',
+    () async {
+      final endpoint = ServerEndpoint.parse('https://nas.example.com');
+      final root = await Directory.systemTemp.createTemp(
+        'mnemonas-controller-background-pause-',
+      );
+      addTearDown(() => root.delete(recursive: true));
+      final transferDirectory = Directory('${root.path}/store');
+      final copies = _ContentUriCopyGate(expectedOperationCount: 2);
+      final harness = await _ControllerHarness.start(
+        adapters: {endpoint.baseUrl: _ControllerAdapter()},
+        transferDirectory: transferDirectory,
+        contentUriMaterializer: copies.materialize,
+        contentUriMaterializationCanceller: copies.cancel,
+      );
+      addTearDown(harness.container.dispose);
+      await harness.connectAndLogin(endpoint, username: 'owner');
+
+      FileEntry entry(String name) => FileEntry(
+        name: name,
+        path: '/$name',
+        isDirectory: false,
+        size: 6,
+        modifiedAt: DateTime.utc(2026, 7, 19, 12),
+        capabilities: const FileCapabilities(
+          read: true,
+          concreteRead: true,
+          write: true,
+        ),
+      );
+
+      await harness.controller.downloadFile(
+        entry: entry('completed.bin'),
+        destinationPath: '${root.path}/completed.bin',
+      );
+      final store = FileTransferStore(directoryPath: transferDirectory.path);
+      final completedBefore = (await store.load()).tasks.singleWhere(
+        (task) => task.displayName == 'completed.bin',
+      );
+      final completedBeforeJson = completedBefore.toJson();
+
+      final firstDownload = harness.controller.downloadFile(
+        entry: entry('first.bin'),
+        destinationUri: 'content://downloads/document/first',
+      );
+      final secondDownload = harness.controller.downloadFile(
+        entry: entry('second.bin'),
+        destinationUri: 'content://downloads/document/second',
+      );
+      final downloadsFinished = expectLater(
+        Future.wait<File>(<Future<File>>[firstDownload, secondDownload]),
+        throwsA(
+          isA<ApiException>().having(
+            (error) => error.kind,
+            'kind',
+            ApiFailureKind.cancelled,
+          ),
+        ),
+      );
+
+      await copies.allStarted.timeout(const Duration(seconds: 2));
+      final activeIds = copies.operationIds;
+      expect(activeIds, hasLength(2));
+
+      final firstPause = harness.controller
+          .pauseActiveTransfersForAppBackground();
+      final repeatedPause = harness.controller
+          .pauseActiveTransfersForAppBackground();
+
+      expect(await firstPause, 2);
+      expect(await repeatedPause, 0);
+      await downloadsFinished;
+      expect(copies.cancelledOperationIds, unorderedEquals(activeIds));
+
+      final state = harness.container.read(clientControllerProvider);
+      final paused = state.transfers.where(
+        (transfer) => activeIds.contains(transfer.id),
+      );
+      expect(paused, hasLength(2));
+      for (final transfer in paused) {
+        expect(transfer.status, TransferStatus.awaitingDestination);
+        expect(transfer.errorMessage, contains('后台'));
+      }
+
+      final snapshot = await store.load();
+      for (final id in activeIds) {
+        final task = snapshot.tasks.singleWhere((task) => task.id == id);
+        expect(task.phase, transfer_core.TransferPhase.awaitingDestination);
+        expect(task.errorCode, 'APP_BACKGROUNDED');
+        expect(task.errorMessage, contains('后台'));
+        expect(task.destinationUri, isNull);
+      }
+
+      final completedAfter = snapshot.tasks.singleWhere(
+        (task) => task.id == completedBefore.id,
+      );
+      expect(completedAfter.toJson(), equals(completedBeforeJson));
+      expect(
+        await harness.controller.pauseActiveTransfersForAppBackground(),
+        0,
+      );
+      expect((await store.load()).generation, snapshot.generation);
+    },
+  );
+
+  test(
+    'app background cannot downgrade a durably completed active run',
+    () async {
+      final endpoint = ServerEndpoint.parse('https://nas.example.com');
+      final root = await Directory.systemTemp.createTemp(
+        'mnemonas-controller-terminal-pause-race-',
+      );
+      addTearDown(() => root.delete(recursive: true));
+      final harness = await _ControllerHarness.start(
+        adapters: {endpoint.baseUrl: _ControllerAdapter()},
+        transferDirectory: Directory('${root.path}/store'),
+      );
+      addTearDown(harness.container.dispose);
+      await harness.connectAndLogin(endpoint, username: 'owner');
+      final pauseResult = Completer<int>();
+      final subscription = harness.container.listen<ClientState>(
+        clientControllerProvider,
+        (_, next) {
+          if (!pauseResult.isCompleted &&
+              next.transfers.any(
+                (transfer) => transfer.status == TransferStatus.completed,
+              )) {
+            unawaited(
+              harness.controller.pauseActiveTransfersForAppBackground().then(
+                pauseResult.complete,
+              ),
+            );
+          }
+        },
+      );
+      addTearDown(subscription.close);
+      final entry = FileEntry(
+        name: 'completed-race.bin',
+        path: '/completed-race.bin',
+        isDirectory: false,
+        size: 6,
+        modifiedAt: DateTime.utc(2026, 7, 19, 12),
+        capabilities: const FileCapabilities(
+          read: true,
+          concreteRead: true,
+          write: true,
+        ),
+      );
+
+      await harness.controller.downloadFile(
+        entry: entry,
+        destinationPath: '${root.path}/completed-race.bin',
+      );
+
+      expect(await pauseResult.future.timeout(const Duration(seconds: 2)), 0);
+      expect(
+        harness.container
+            .read(clientControllerProvider)
+            .transfers
+            .single
+            .status,
+        TransferStatus.completed,
+      );
+      final snapshot = await FileTransferStore(
+        directoryPath: '${root.path}/store',
+      ).load();
+      expect(
+        snapshot.tasks.single.phase,
+        transfer_core.TransferPhase.completed,
+      );
+    },
+  );
+
+  test(
+    'logout fences completion of an overlapping app-background pause',
+    () async {
+      final endpoint = ServerEndpoint.parse('https://nas.example.com');
+      final root = await Directory.systemTemp.createTemp(
+        'mnemonas-controller-background-logout-',
+      );
+      addTearDown(() => root.delete(recursive: true));
+      final transferDirectory = Directory('${root.path}/store');
+      final copies = _ContentUriCopyGate(expectedOperationCount: 1);
+      final adapter = _ControllerAdapter();
+      final logoutGate = adapter.holdLogout();
+      addTearDown(logoutGate.release);
+      final harness = await _ControllerHarness.start(
+        adapters: {endpoint.baseUrl: adapter},
+        transferDirectory: transferDirectory,
+        contentUriMaterializer: copies.materialize,
+        contentUriMaterializationCanceller: copies.cancel,
+      );
+      addTearDown(harness.container.dispose);
+      await harness.connectAndLogin(endpoint, username: 'owner');
+
+      final download = harness.controller.downloadFile(
+        entry: FileEntry(
+          name: 'payload.bin',
+          path: '/payload.bin',
+          isDirectory: false,
+          size: 6,
+          modifiedAt: DateTime.utc(2026, 7, 19, 12),
+          capabilities: const FileCapabilities(
+            read: true,
+            concreteRead: true,
+            write: true,
+          ),
+        ),
+        destinationUri: 'content://downloads/document/logout-race',
+      );
+      final downloadFinished = expectLater(
+        download,
+        throwsA(
+          isA<ApiException>().having(
+            (error) => error.kind,
+            'kind',
+            ApiFailureKind.cancelled,
+          ),
+        ),
+      );
+
+      await copies.allStarted.timeout(const Duration(seconds: 2));
+      final transferId = copies.operationIds.single;
+      final pause = harness.controller.pauseActiveTransfersForAppBackground();
+      final logout = harness.controller.logout();
+      final stalePause = harness.controller
+          .pauseActiveTransfersForAppBackground();
+
+      await logoutGate.started.timeout(const Duration(seconds: 2));
+      expect(await pause, 1);
+      expect(await stalePause, 0);
+      await downloadFinished;
+
+      var state = harness.container.read(clientControllerProvider);
+      expect(state.stage, ClientStage.needsLogin);
+      expect(state.user, isNull);
+      expect(state.transfers, isEmpty);
+
+      final stored = (await FileTransferStore(
+        directoryPath: transferDirectory.path,
+      ).load()).tasks.singleWhere((task) => task.id == transferId);
+      expect(stored.phase, transfer_core.TransferPhase.awaitingDestination);
+      expect(stored.errorCode, 'APP_BACKGROUNDED');
+      expect(stored.destinationUri, isNull);
+      expect(copies.cancelledOperationIds, <String>[transferId]);
+
+      logoutGate.release();
+      await logout;
+      state = harness.container.read(clientControllerProvider);
+      expect(state.stage, ClientStage.needsLogin);
+      expect(state.user, isNull);
+      expect(state.transfers, isEmpty);
+      expect(state.notice, isNull);
     },
   );
 
@@ -2737,6 +3488,7 @@ final class _ControllerHarness {
     ClientController Function()? controllerFactory,
     AuthSessionStore? sessionStore,
     Directory? transferDirectory,
+    TransferStartBarrier? transferStartBarrier,
     ContentUriMaterializer? contentUriMaterializer,
     ContentUriMaterializationCanceller? contentUriMaterializationCanceller,
   }) async {
@@ -2760,6 +3512,8 @@ final class _ControllerHarness {
           return () async =>
               FileTransferStore(directoryPath: activeTransferDirectory.path);
         }),
+        if (transferStartBarrier != null)
+          transferStartBarrierProvider.overrideWithValue(transferStartBarrier),
         if (contentUriMaterializer != null)
           contentUriMaterializerProvider.overrideWithValue(
             contentUriMaterializer,
@@ -2876,6 +3630,55 @@ final class _RequestGate {
   }
 }
 
+final class _ContentUriCopyGate {
+  _ContentUriCopyGate({required this.expectedOperationCount});
+
+  final int expectedOperationCount;
+  final Completer<void> _allStarted = Completer<void>();
+  final Map<String, Completer<void>> _operations = <String, Completer<void>>{};
+  final List<String> cancelledOperationIds = <String>[];
+
+  Future<void> get allStarted => _allStarted.future;
+
+  Set<String> get operationIds => _operations.keys.toSet();
+
+  Future<void> materialize({
+    required String sourcePath,
+    required String destinationUri,
+    required String operationId,
+    required void Function(int transferred, int? total) onProgress,
+  }) async {
+    if (_operations.containsKey(operationId)) {
+      throw StateError('Duplicate content URI operation: $operationId');
+    }
+    final result = Completer<void>();
+    _operations[operationId] = result;
+    onProgress(1, 6);
+    if (_operations.length == expectedOperationCount &&
+        !_allStarted.isCompleted) {
+      _allStarted.complete();
+    }
+    await result.future;
+  }
+
+  Future<void> cancel(String operationId) async {
+    cancelledOperationIds.add(operationId);
+    final result = _operations[operationId];
+    if (result == null) {
+      throw StateError('Unknown content URI operation: $operationId');
+    }
+    if (!result.isCompleted) {
+      result.completeError(
+        const ApiException(
+          kind: ApiFailureKind.cancelled,
+          code: 'EXPORT_CANCELLED',
+          message: 'The export was cancelled',
+        ),
+      );
+    }
+  }
+}
+
 final class _ControllerAdapter implements HttpClientAdapter {
   _ControllerAdapter({this.userRole = 'admin'})
     : trashItems = _defaultTrashItems();
@@ -2890,6 +3693,9 @@ final class _ControllerAdapter implements HttpClientAdapter {
   _RequestGate? _trashListGate;
   _RequestGate? _trashMutationGate;
   _RequestGate? _passwordChangeGate;
+  _RequestGate? _logoutGate;
+  _RequestGate? _fileMutationGate;
+  _RequestGate? _uploadCreateGate;
   Map<String, dynamic>? trashEmptyResult;
   bool disconnectNextTrashMutation = false;
   bool disconnectNextPasswordChange = false;
@@ -2900,6 +3706,7 @@ final class _ControllerAdapter implements HttpClientAdapter {
   Set<String> failedTrashEmptyDeletedIds = const <String>{};
   bool failNextTrashList = false;
   bool failNextSearch = false;
+  bool failNextStats = false;
   bool disconnectNextUploadCreate = false;
   bool disconnectNextUpload = false;
   bool expireNextUploadCreate = false;
@@ -2910,6 +3717,8 @@ final class _ControllerAdapter implements HttpClientAdapter {
   int? goneNextUploadCommitStatus;
   bool conflictNextUploadCommit = false;
   bool disconnectNextDirectory = false;
+  bool disconnectNextFileMutation = false;
+  int? nextFileMutationStatus;
   bool interruptNextDownload = false;
   List<int> downloadPayload = <int>[1, 2, 3, 4, 5, 6];
   final List<String?> downloadRanges = <String?>[];
@@ -2962,6 +3771,18 @@ final class _ControllerAdapter implements HttpClientAdapter {
 
   _RequestGate holdPasswordChange() {
     return _passwordChangeGate = _RequestGate();
+  }
+
+  _RequestGate holdLogout() {
+    return _logoutGate = _RequestGate();
+  }
+
+  _RequestGate holdFileMutation() {
+    return _fileMutationGate = _RequestGate();
+  }
+
+  _RequestGate holdUploadCreate() {
+    return _uploadCreateGate = _RequestGate();
   }
 
   @override
@@ -3027,6 +3848,14 @@ final class _ControllerAdapter implements HttpClientAdapter {
         'user': _user(username),
       });
     }
+    if (path == '/api/v1/auth/logout' && options.method == 'POST') {
+      final gate = _logoutGate;
+      _logoutGate = null;
+      if (gate != null) {
+        await gate.wait();
+      }
+      return _envelope(<String, dynamic>{});
+    }
     if (path == '/api/v1/auth/me') {
       return _envelope({'user': _user('owner')});
     }
@@ -3054,6 +3883,14 @@ final class _ControllerAdapter implements HttpClientAdapter {
       return _envelope(<String, dynamic>{});
     }
     if (path == '/api/v1/stats') {
+      if (failNextStats) {
+        failNextStats = false;
+        throw DioException(
+          requestOptions: options,
+          type: DioExceptionType.connectionError,
+          error: 'statistics connection interrupted',
+        );
+      }
       return _envelope({
         'total_files_available': true,
         'storage_stats_available': true,
@@ -3158,6 +3995,11 @@ final class _ControllerAdapter implements HttpClientAdapter {
       );
     }
     if (path == '/api/v1/upload-sessions' && options.method == 'POST') {
+      final gate = _uploadCreateGate;
+      _uploadCreateGate = null;
+      if (gate != null) {
+        await gate.wait();
+      }
       if (expireNextUploadCreate) {
         expireNextUploadCreate = false;
         return _json(410, {
@@ -3435,6 +4277,34 @@ final class _ControllerAdapter implements HttpClientAdapter {
             'capabilities': _capabilities(),
           },
         ],
+      });
+    }
+    if (path.startsWith('/api/v1/directories/') && options.method == 'POST') {
+      final gate = _fileMutationGate;
+      _fileMutationGate = null;
+      if (gate != null) {
+        await gate.wait();
+      }
+      if (disconnectNextFileMutation) {
+        disconnectNextFileMutation = false;
+        throw DioException(
+          requestOptions: options,
+          type: DioExceptionType.connectionError,
+          error: 'file mutation connection interrupted',
+        );
+      }
+      final status = nextFileMutationStatus;
+      nextFileMutationStatus = null;
+      if (status != null) {
+        return _json(status, {
+          'code': 'INTERNAL_ERROR',
+          'message': 'file mutation result is uncertain',
+        });
+      }
+      final suffix = path.substring('/api/v1/directories/'.length);
+      return _envelope({
+        'path': '/${Uri.decodeFull(suffix)}',
+        'warning': false,
       });
     }
     return _json(404, {'code': 'NOT_FOUND', 'message': 'not found'});

@@ -106,12 +106,91 @@ void main() {
     expect(find.text('上传文件'), findsWidgets);
     expect(find.text('新建文件夹'), findsWidgets);
   });
+
+  testWidgets(
+    'offers downloads and version history without a directory-list hash',
+    (WidgetTester tester) async {
+      final actions = <FileActionRequest>[];
+      await tester.pumpWidget(
+        _app(
+          FilesPage(
+            viewModel: FilesViewModel.ready(
+              path: '/文档',
+              entries: <FileEntry>[
+                _entry(name: '记录.txt', path: '/文档/记录.txt', versioned: true),
+              ],
+              canWrite: true,
+            ),
+            onRefresh: () async {},
+            onNavigatePath: (_) {},
+            onOpenFile: (_) {},
+            onAddAction: (_) {},
+            onFileAction: actions.add,
+          ),
+        ),
+      );
+
+      expect(
+        _entry(name: '记录.txt', path: '/文档/记录.txt', versioned: true).contentHash,
+        isNull,
+      );
+      final fileItem = find.byKey(const Key('file-item-/文档/记录.txt'));
+      final menu = find.descendant(
+        of: fileItem,
+        matching: find.byType(PopupMenuButton<FileItemAction>),
+      );
+      await tester.tap(menu);
+      await tester.pumpAndSettle();
+
+      expect(find.text('下载'), findsOneWidget);
+      expect(find.text('版本历史'), findsOneWidget);
+      await tester.tap(find.text('版本历史'));
+      await tester.pumpAndSettle();
+
+      expect(actions.single.action, FileItemAction.versions);
+      expect(actions.single.entries.single.path, '/文档/记录.txt');
+    },
+  );
+
+  testWidgets('does not offer history for a file outside version policy', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        FilesPage(
+          viewModel: FilesViewModel.ready(
+            path: '/媒体',
+            entries: <FileEntry>[
+              _entry(name: 'archive.raw', path: '/媒体/archive.raw'),
+            ],
+            canWrite: true,
+          ),
+          onRefresh: () async {},
+          onNavigatePath: (_) {},
+          onOpenFile: (_) {},
+          onAddAction: (_) {},
+          onFileAction: (_) {},
+        ),
+      ),
+    );
+
+    final menu = find.descendant(
+      of: find.byKey(const Key('file-item-/媒体/archive.raw')),
+      matching: find.byType(PopupMenuButton<FileItemAction>),
+    );
+    await tester.tap(menu);
+    await tester.pumpAndSettle();
+
+    expect(find.text('下载'), findsOneWidget);
+    expect(find.text('版本历史'), findsNothing);
+  });
 }
 
 FileEntry _entry({
   required String name,
   required String path,
   bool isDirectory = false,
+  bool versioned = false,
 }) {
   return FileEntry(
     name: name,
@@ -119,6 +198,7 @@ FileEntry _entry({
     isDirectory: isDirectory,
     size: isDirectory ? 0 : 2048,
     modifiedAt: DateTime.utc(2026, 7, 19, 10),
+    versioned: versioned,
     capabilities: const FileCapabilities(
       read: true,
       concreteRead: true,

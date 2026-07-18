@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../design_system/design_system.dart';
 
-enum NasConnectionStatus { online, connecting, offline }
+enum NasConnectionStatus { online, connecting, stale, offline }
 
 enum HomeActivityType { upload, download, createFolder, delete, other }
 
@@ -238,6 +238,12 @@ class _ConnectionCard extends StatelessWidget {
         title: '正在重新连接',
         message: '等待设备响应',
         icon: Icons.sync_rounded,
+        tone: MnemoStatusTone.warning,
+      ),
+      NasConnectionStatus.stale => (
+        title: '数据可能已过期',
+        message: '上次刷新未完成，请下拉刷新',
+        icon: Icons.sync_problem_rounded,
         tone: MnemoStatusTone.warning,
       ),
       NasConnectionStatus.offline => (
@@ -516,6 +522,11 @@ class _ConnectionPill extends StatelessWidget {
       ),
       NasConnectionStatus.connecting => const MnemoStatusPill(
         label: '连接中',
+        tone: MnemoStatusTone.warning,
+        liveRegion: true,
+      ),
+      NasConnectionStatus.stale => const MnemoStatusPill(
+        label: '需刷新',
         tone: MnemoStatusTone.warning,
         liveRegion: true,
       ),
