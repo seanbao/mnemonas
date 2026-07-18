@@ -790,6 +790,12 @@ Content-Type: application/json
 | --- | --- | --- |
 | `GET` | `/api/v1/files/{path}` | 列出目录或获取文件元数据 |
 | `POST` | `/api/v1/files/{path}` | 上传或覆盖文件 |
+| `POST` | `/api/v1/upload-sessions` | 创建或重放可恢复上传会话 |
+| `GET` | `/api/v1/upload-sessions/by-client-request/{client_request_id}` | 按客户端请求 ID 查询当前账号的上传会话 |
+| `GET` | `/api/v1/upload-sessions/{id}` | 查询上传会话的服务端可靠状态 |
+| `PATCH` | `/api/v1/upload-sessions/{id}` | 按可靠偏移追加一个上传分块 |
+| `POST` | `/api/v1/upload-sessions/{id}/commit` | 原子提交已完整暂存的上传 |
+| `DELETE` | `/api/v1/upload-sessions/{id}` | 取消未提交的上传会话 |
 | `POST` | `/api/v1/files-delete-intents` | 获取待删除目标与当前删除策略的原子确认快照 |
 | `DELETE` | `/api/v1/files/{path}` | 按已确认的目标快照和当前删除策略移入回收站或永久删除 |
 | `POST` | `/api/v1/files-move` | 移动或重命名资源 |
@@ -893,6 +899,55 @@ ZIP 归档语义：
 - ZIP 写入会校验每个普通文件快照的实际字节数。快照在打开后被截断时，传输前检测到的冲突返回 `409 Conflict`；响应已开始时终止流，不会关闭 ZIP 写入器生成可解析的残缺归档。
 
 `POST /api/v1/files/{path}` 只接受完整文件请求体，不支持分块或断点上传。请求只要包含 `Content-Range` 请求头，即返回 `400 Bad Request`，且不会创建或修改目标。该接口要求 `{path}` 指向非根文件路径，且直接父目录必须已经存在。根路径或等价根路径上传目标返回 `400 Bad Request` 和 `invalid path`；父目录不存在或不是目录时返回 `409 Conflict`，不会读取请求体或隐式创建中间目录。并发写入暂存槽占满时返回 `429 Too Many Requests`、`Retry-After: 1` 和 `WRITE_BUSY`；客户端应在等待后重试。主机可用空间不足以安全暂存事务时返回 `507 Insufficient Storage` 和 `INSUFFICIENT_STORAGE`，不返回 `Retry-After`。目标位于 `files/` 下的嵌套挂载点、挂载表无法验证，或跨根重命名不受支持时，接口返回 `503 Service Unavailable` 和明确的原子上传布局错误；在请求体读取前识别的布局错误不会读取内容或修改目标。接口在配额准入时绑定目标删除身份。发布阶段对已有目标执行原子交换，对新目标执行禁止覆盖发布；读取上传内容期间同一路径被修改，或新目标在发布前出现时，返回 `409 Conflict` 和 `CONFLICT`，不会覆盖或移除较新的目标。服务端在可见发布前持久化 `prepared` 决策，在内容、版本对象和 SQLite 元数据确认后持久化 `committed` 决策；启动恢复只前滚已提交事务，其余事务回滚。无法确认日志、命名空间、版本对象或元数据终态时会保留跨重启恢复证据并启用恢复门禁；重复上传不会解除门禁。
+
+### 可恢复上传会话
+
+可恢复上传使用独立于旧完整文件 `POST` 的会话协议。启用认证时，六个端点都要求写权限；会话同时绑定创建者和目标路径，其他账号不能通过会话 ID 或客户端请求 ID 读取或修改其状态。每次操作还会按当前目录访问规则重新检查目标路径。
+
+创建请求只接受以下字段：
+
+```json
+{
+  "path": "/documents/report.pdf",
+  "total_bytes": 12582912,
+  "client_request_id": "1742399123456789-1"
+}
+```
+
+`path` 必须是规范化的非根逻辑文件路径，直接父目录必须已存在。`total_bytes` 必须在 `0` 至 10 GiB 之间。`client_request_id` 长度不超过 128 字节，以字母或数字开头，后续只允许字母、数字、`.`、`_`、`:` 和 `-`。服务端在创建时冻结目标是否存在及其删除身份，并执行配额准入；提交时会重新执行配额和目标条件检查。首次创建返回 `201 Created`。同一账号使用相同 `client_request_id`、`path` 和 `total_bytes` 重放时返回原会话和 `200 OK`；同一请求 ID 对应不同不可变输入时返回 `409 Conflict`。
+
+`GET /api/v1/upload-sessions/by-client-request/{client_request_id}` 只查询当前账号已有的会话，不创建或重放会话。路径参数遵循与创建请求中 `client_request_id` 相同的格式约束，查询成功时返回 `200 OK` 和标准会话响应。会话已过期但尚未清理时返回 `410 UPLOAD_SESSION_EXPIRED`；会话从未存在或已清理时返回 `404 UPLOAD_SESSION_NOT_FOUND`。客户端丢失创建响应且尚未取得会话 ID 时，必须先调用此端点确认服务端状态，不得直接重发创建请求。
+
+成功响应中的 `data` 始终使用同一结构：
+
+```json
+{
+  "id": "0123456789abcdef0123456789abcdef",
+  "path": "/documents/report.pdf",
+  "state": "uploading",
+  "durable_offset": 0,
+  "total_bytes": 12582912,
+  "created_at": "2026-07-19T12:00:00Z",
+  "updated_at": "2026-07-19T12:00:00Z",
+  "expires_at": "2026-07-22T12:00:00Z",
+  "content_blake3": null,
+  "persistence_warning": false
+}
+```
+
+状态值为 `uploading`、`ready`、`committing`、`committed`、`conflict` 或 `cancelled`。所有成功响应还包含 `Upload-Offset` 和 `Upload-Length`，分别对应 `durable_offset` 与 `total_bytes`。完整载荷进入 `ready` 后，`content_blake3` 为 64 位小写十六进制 BLAKE3；`persistence_warning` 只可能在 `committed` 状态为 `true`。
+
+`PATCH /api/v1/upload-sessions/{id}` 必须提供且只提供一个 `Upload-Offset`、`Upload-Chunk-ID` 和 `X-MnemoNAS-Chunk-SHA256` 请求头，并提供准确的 `Content-Length`。非末分块必须为 1 MiB 至 8 MiB，末分块可以为 1 字节至 8 MiB；零字节会话在创建时直接进入 `ready`，不使用 `PATCH`。`Upload-Offset` 使用无前导零的十进制整数，且必须等于服务端当前 `durable_offset`。`Upload-Chunk-ID` 遵循与 `client_request_id` 相同的字符约束。`X-MnemoNAS-Chunk-SHA256` 是当前分块的 64 位小写十六进制 SHA-256。服务端只在分块内容写入并同步后推进可靠偏移；最后一个分块还会计算完整载荷的 BLAKE3 并把状态改为 `ready`。
+
+客户端在响应丢失后必须先查询会话状态，并以服务端 `durable_offset` 为准。紧邻的上一个分块可以使用相同 ID、偏移、长度、SHA-256 和正文安全重放，不会重复追加。偏移不匹配时返回 `409 UPLOAD_OFFSET_CONFLICT`，`details.durable_offset` 给出服务端可靠偏移；分块过大返回 `413 Request Entity Too Large`，长度或摘要不匹配返回 `400 UPLOAD_CHUNK_INVALID`。
+
+`POST /api/v1/upload-sessions/{id}/commit` 只提交 `ready` 或正在恢复的 `committing` 会话。服务端重新检查配额、目录权限和创建时冻结的目标条件，再通过现有的条件写入事务原子发布载荷。重复提交已经确认的会话返回相同的 `committed` 终态。如果目标在创建后变化，接口返回 `409 Conflict`，会话终态变为 `conflict`，且不会覆盖较新的对象；客户端随后可用 `GET` 取得该终态。服务端先持久化 `committing`，并在取得写入互斥后、实际发布前另行持久化发布窗口标记。恢复时先比较目标条件：条件仍与原始快照一致时回到 `ready`；没有发布窗口证据但目标已变化时转为 `conflict`；只有发布窗口证据存在、目标身份已经变化且大小和 BLAKE3 均匹配时，才转为 `committed`。同一上传活动使用稳定 ID 幂等写入，并在 `committed` 终态前落盘；活动记录失败时会话保留为 `committing`。存储层要求先完成写入或回收站恢复时，对账返回 `503`，并保留 `committing` 状态和私有暂存载荷；恢复门禁解除后才继续判定终态。服务端启动会在开放路由前同步对账这些会话，对账失败会阻止启动。
+
+`DELETE /api/v1/upload-sessions/{id}` 可取消 `uploading` 或 `ready` 会话。服务端先持久化 `cancelled` 终态，再删除私有暂存载荷；重复取消返回同一终态。`committing`、`committed` 和 `conflict` 会话不能取消。
+
+会话活动期限默认为最后一次持久状态变更后的 72 小时。对已过期且不处于 `committing` 的会话操作时返回 `410 UPLOAD_SESSION_EXPIRED`，清理任务随后移除保留记录；尚未对账的 `committing` 会话保留到终态能够确认。服务端先持久化 `committed`、`conflict` 或 `cancelled` 终态，再删除私有载荷；小型终态记录保留到期限清理。默认保留记录上限为每个账号 32 个、进程内 512 个，终态记录也计入上限；达到上限时返回 `429 UPLOAD_SESSION_LIMIT` 和 `Retry-After: 60`。
+
+可靠暂存载荷的默认字节上限为每个账号 20 GiB、进程内 100 GiB。服务端在分块准入时原子增加计数，并在终态载荷删除或会话清理后释放；达到任一上限时返回 `429 UPLOAD_STAGING_LIMIT` 和 `Retry-After: 60`。写入每个分块前，服务端还会把所有尚未物化的并发分块预留计入容量检查，确认写入后主机文件系统至少保留 `storage.retention.min_free_space`；空间不足或容量证据不可用时返回 `507 UPLOAD_STAGING_CAPACITY_EXCEEDED`，且不推进 `durable_offset`。状态损坏或需要人工恢复时返回 `503 UPLOAD_SESSION_UNAVAILABLE`；配置的会话存储初始化或启动对账失败时，服务端会终止启动，不以降级状态开放上传会话。当前 Flutter 客户端的会话执行器仍只在前台运行，Android 原生后台执行和跨进程任务租约不属于该协议保证。
 
 `POST /api/v1/directories/{path}` 只创建一个目录，且直接父目录必须已存在。直接父目录不存在时返回 `409 Conflict`，不会创建中间目录。
 

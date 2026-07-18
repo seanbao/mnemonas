@@ -792,6 +792,12 @@ When auth is enabled, home-scoped non-admin users do not receive global disk, CA
 | --- | --- | --- |
 | `GET` | `/api/v1/files/{path}` | List directory or get file metadata |
 | `POST` | `/api/v1/files/{path}` | Upload or overwrite file |
+| `POST` | `/api/v1/upload-sessions` | Create or replay a recoverable upload session |
+| `GET` | `/api/v1/upload-sessions/by-client-request/{client_request_id}` | Look up the current account's upload session by client request ID |
+| `GET` | `/api/v1/upload-sessions/{id}` | Read the server-authoritative upload state |
+| `PATCH` | `/api/v1/upload-sessions/{id}` | Append one chunk at the durable offset |
+| `POST` | `/api/v1/upload-sessions/{id}/commit` | Atomically commit a completely staged upload |
+| `DELETE` | `/api/v1/upload-sessions/{id}` | Cancel an uncommitted upload session |
 | `POST` | `/api/v1/files-delete-intents` | Capture an atomic confirmation snapshot of deletion targets and the current policy |
 | `DELETE` | `/api/v1/files/{path}` | Delete to Trash or permanently under a confirmed target snapshot and current policy |
 | `POST` | `/api/v1/files-move` | Move or rename resource |
@@ -895,6 +901,55 @@ ZIP archive behavior:
 - ZIP writes verify the actual byte count for every regular-file snapshot. If an opened snapshot is truncated, a conflict detected before streaming returns `409 Conflict`; after the response starts, the stream terminates without closing the ZIP writer into a parseable partial archive.
 
 `POST /api/v1/files/{path}` accepts only a complete-file request body and does not support chunked or resumable upload semantics. Any request that contains a `Content-Range` header returns `400 Bad Request` without creating or modifying the target. The endpoint requires `{path}` to identify a non-root file path whose direct parent directory already exists. Root or root-equivalent upload targets return `400 Bad Request` with `invalid path`. An absent or non-directory parent returns `409 Conflict` before the request body is read; the endpoint does not create intermediate directories implicitly. When all concurrent write-staging slots are occupied, the endpoint returns `429 Too Many Requests`, `Retry-After: 1`, and `WRITE_BUSY`; clients should retry after the indicated delay. When host capacity is insufficient to stage the transaction safely, the endpoint returns `507 Insufficient Storage` and `INSUFFICIENT_STORAGE` without `Retry-After`. A target inside a nested mount below `files/`, an unverifiable mount table, or unsupported cross-root rename semantics returns `503 Service Unavailable` with an explicit atomic-upload layout error. A layout error detected before request-body reading neither consumes the body nor modifies the target. Quota admission binds the target deletion identity. Publication atomically exchanges an existing target and uses no-replace publication for a new target. If another operation changes the same path while the upload body is being read, or a new target appears before publication, the endpoint returns `409 Conflict` with `CONFLICT` and does not overwrite or remove the newer target. The server persists a `prepared` decision before visible publication and a `committed` decision only after confirming content, version objects, and SQLite metadata. Startup recovery rolls forward committed transactions and rolls back all others. If the journal, namespace, version-object, or metadata outcome cannot be confirmed, recovery evidence is retained across restarts and the write gate remains active; retrying the upload does not clear it.
+
+### Recoverable upload sessions
+
+Recoverable uploads use a session protocol that is separate from the legacy complete-file `POST`. When authentication is enabled, all six endpoints require write access. A session is also bound to its creator and target path, so another account cannot read or mutate it by knowing its session ID or client request ID. Every operation reapplies the current directory-access policy to the target.
+
+The create request accepts only these fields:
+
+```json
+{
+  "path": "/documents/report.pdf",
+  "total_bytes": 12582912,
+  "client_request_id": "1742399123456789-1"
+}
+```
+
+`path` must be a normalized, non-root logical file path with an existing direct parent. `total_bytes` must be between `0` and 10 GiB. `client_request_id` is at most 128 bytes, starts with an ASCII letter or digit, and otherwise contains only letters, digits, `.`, `_`, `:`, or `-`. Creation freezes whether the target exists and its deletion identity, and performs quota admission. Commit repeats quota and target-condition checks. The first create returns `201 Created`. Replaying the same `client_request_id`, `path`, and `total_bytes` under the same account returns the original session with `200 OK`; using one request ID for different immutable input returns `409 Conflict`.
+
+`GET /api/v1/upload-sessions/by-client-request/{client_request_id}` only looks up an existing session for the current account; it never creates or replays one. The path parameter follows the same format rules as the create request's `client_request_id`. A successful lookup returns `200 OK` with the standard session response. An expired but retained session returns `410 UPLOAD_SESSION_EXPIRED`; a session that never existed or has already been cleaned returns `404 UPLOAD_SESSION_NOT_FOUND`. If a client loses the create response before obtaining a session ID, it must call this endpoint to recover the server state instead of issuing another create request.
+
+Every successful response uses the same `data` shape:
+
+```json
+{
+  "id": "0123456789abcdef0123456789abcdef",
+  "path": "/documents/report.pdf",
+  "state": "uploading",
+  "durable_offset": 0,
+  "total_bytes": 12582912,
+  "created_at": "2026-07-19T12:00:00Z",
+  "updated_at": "2026-07-19T12:00:00Z",
+  "expires_at": "2026-07-22T12:00:00Z",
+  "content_blake3": null,
+  "persistence_warning": false
+}
+```
+
+`state` is `uploading`, `ready`, `committing`, `committed`, `conflict`, or `cancelled`. Every successful response also includes `Upload-Offset` and `Upload-Length`, corresponding to `durable_offset` and `total_bytes`. Once the complete payload reaches `ready`, `content_blake3` is a 64-character lowercase hexadecimal BLAKE3 digest. `persistence_warning` can be `true` only for `committed`.
+
+`PATCH /api/v1/upload-sessions/{id}` requires exactly one `Upload-Offset`, `Upload-Chunk-ID`, and `X-MnemoNAS-Chunk-SHA256` header and an exact `Content-Length`. A non-final chunk must contain between 1 MiB and 8 MiB; the final chunk may contain between 1 byte and 8 MiB. A zero-byte session enters `ready` during creation and does not use `PATCH`. `Upload-Offset` is a canonical decimal integer without leading zeroes and must equal the current server `durable_offset`. `Upload-Chunk-ID` follows the same character rules as `client_request_id`. `X-MnemoNAS-Chunk-SHA256` is the 64-character lowercase hexadecimal SHA-256 digest of this chunk. The server advances the durable offset only after writing and synchronizing the chunk. The final chunk also computes the complete payload BLAKE3 digest and moves the session to `ready`.
+
+After losing a response, a client must query the session and treat the server `durable_offset` as authoritative. The immediately previous chunk can be replayed safely with the same ID, offset, length, SHA-256, and body without appending it twice. An offset mismatch returns `409 UPLOAD_OFFSET_CONFLICT` with the authoritative offset in `details.durable_offset`. An oversized chunk returns `413 Request Entity Too Large`; a length or digest mismatch returns `400 UPLOAD_CHUNK_INVALID`.
+
+`POST /api/v1/upload-sessions/{id}/commit` accepts only a `ready` session or a `committing` session under recovery. The server reapplies quota, directory authorization, and the target condition frozen at creation before publishing the payload atomically through the existing conditional-write transaction. Repeating a confirmed commit returns the same `committed` terminal state. If the target changed after creation, commit returns `409 Conflict`, the session becomes `conflict`, and the newer object is not overwritten; a later `GET` returns that terminal state. The server first persists `committing`, then persists a separate publication-window marker after acquiring the mutation lease and before publication can begin. Recovery compares the target condition first: an unchanged original condition returns to `ready`; a changed target without publication-window evidence becomes `conflict`; and only a marked publication window with a changed target identity and matching size and BLAKE3 becomes `committed`. The matching upload activity is written idempotently with a stable ID before the `committed` terminal state; an activity-write failure leaves the session `committing`. If the storage layer requires write or Trash recovery, reconciliation returns `503` and retains both the `committing` state and the private staged payload; it decides the terminal state only after that recovery gate clears. Startup reconciles these sessions synchronously before routes become available and fails closed when reconciliation cannot complete.
+
+`DELETE /api/v1/upload-sessions/{id}` cancels an `uploading` or `ready` session. The server persists the `cancelled` terminal state before deleting the private staged payload, and repeated cancellation returns the same state. A `committing`, `committed`, or `conflict` session cannot be cancelled.
+
+A session expires 72 hours after its last durable state change by default. Operations on an expired non-`committing` session return `410 UPLOAD_SESSION_EXPIRED`; cleanup removes that retained record, while an unresolved `committing` session remains until its terminal result can be reconciled. Terminal `committed`, `conflict`, and `cancelled` states are persisted before their private payload is removed, and their small tombstones remain until expiry cleanup. The default retained-session limits are 32 per account and 512 per process, including terminal tombstones; saturation returns `429 UPLOAD_SESSION_LIMIT` with `Retry-After: 60`.
+
+Durably staged payload bytes are also limited to 20 GiB per account and 100 GiB per process. These counters are advanced atomically with chunk admission and released after terminal payload removal or session cleanup. Reaching either byte limit returns `429 UPLOAD_STAGING_LIMIT` with `Retry-After: 60`. Before writing each chunk, the server includes all concurrent chunks reserved but not yet materialized in the capacity check and verifies that the host filesystem will retain at least `storage.retention.min_free_space`. Insufficient or unavailable capacity evidence returns `507 UPLOAD_STAGING_CAPACITY_EXCEEDED` without advancing `durable_offset`. Corrupt state or a store requiring manual recovery returns `503 UPLOAD_SESSION_UNAVAILABLE`; failure to initialize the configured store or reconcile startup state prevents server startup instead of exposing a degraded upload-session service. The current Flutter executor still runs only in the foreground; Android native background execution and cross-process task leases are outside this protocol guarantee.
 
 `POST /api/v1/directories/{path}` creates one directory when the direct parent directory already exists. If the direct parent directory is absent, the endpoint returns `409 Conflict` and does not create intermediate directories.
 
