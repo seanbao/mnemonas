@@ -26,6 +26,7 @@ import '../features/files/files_page.dart';
 import '../features/home/home_page.dart';
 import '../features/search/search_page.dart';
 import '../features/shell/app_shell.dart';
+import '../features/transfers/transfer_center.dart';
 import '../features/trash/trash_page.dart';
 import '../platform/file_exporter.dart';
 import '../platform/file_importer.dart';
@@ -1283,21 +1284,29 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
   }
 
   void _showTransfers() {
+    final bool compact =
+        MediaQuery.sizeOf(context).width < MnemoBreakpoint.compact;
     unawaited(
       showModalBottomSheet<void>(
         context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
         showDragHandle: true,
+        backgroundColor: Colors.transparent,
+        constraints: compact
+            ? null
+            : const BoxConstraints(maxWidth: TransferCenter.maxWidth),
         builder: (context) => Consumer(
           builder: (context, ref, _) {
-            return _TransfersSheet(
+            return TransferCenter(
               transfers: ref.watch(
                 clientControllerProvider.select((state) => state.transfers),
               ),
-              onCancel: ref
+              onPause: ref
                   .read(clientControllerProvider.notifier)
-                  .cancelTransfer,
-              onResume: (id) => _runAction(() => _resumeTransfer(id)),
-              onRemove: (id) => _runAction(
+                  .pauseTransfer,
+              onRetry: (id) => _runAction(() => _resumeTransfer(id)),
+              onDelete: (id) => _runAction(
                 () => ref
                     .read(clientControllerProvider.notifier)
                     .removeTransfer(id),
@@ -1405,159 +1414,6 @@ Future<String?> _promptForText(
     );
   } finally {
     controller.dispose();
-  }
-}
-
-class _TransfersSheet extends StatelessWidget {
-  const _TransfersSheet({
-    required this.transfers,
-    required this.onCancel,
-    required this.onResume,
-    required this.onRemove,
-  });
-
-  final List<ClientTransfer> transfers;
-  final ValueChanged<String> onCancel;
-  final Future<void> Function(String id) onResume;
-  final Future<void> Function(String id) onRemove;
-
-  @override
-  Widget build(BuildContext context) {
-    return SafeArea(
-      child: SizedBox(
-        height: MediaQuery.sizeOf(context).height * 0.6,
-        child: transfers.isEmpty
-            ? const MnemoEmptyState(
-                icon: Icons.swap_vert_rounded,
-                title: '暂无传输记录',
-                message: '上传或下载文件后，传输状态会显示在这里。',
-              )
-            : Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: <Widget>[
-                  Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: MnemoSpacing.lg,
-                    ),
-                    child: Text(
-                      '传输记录',
-                      style: Theme.of(context).textTheme.titleLarge,
-                    ),
-                  ),
-                  const SizedBox(height: MnemoSpacing.sm),
-                  Expanded(
-                    child: ListView.separated(
-                      itemCount: transfers.length,
-                      separatorBuilder: (_, _) => const Divider(height: 1),
-                      itemBuilder: (context, index) {
-                        final transfer = transfers[index];
-                        return ListTile(
-                          leading: Icon(
-                            transfer.direction == TransferDirection.upload
-                                ? Icons.upload_rounded
-                                : Icons.download_rounded,
-                          ),
-                          title: Text(
-                            transfer.name,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          subtitle: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: <Widget>[
-                              Text(_transferStatusLabel(transfer)),
-                              if (transfer.status == TransferStatus.preparing ||
-                                  transfer.status == TransferStatus.running)
-                                Padding(
-                                  padding: const EdgeInsets.only(
-                                    top: MnemoSpacing.xxs,
-                                  ),
-                                  child: LinearProgressIndicator(
-                                    value: transfer.progress,
-                                  ),
-                                ),
-                            ],
-                          ),
-                          trailing: _TransferAction(
-                            transfer: transfer,
-                            onCancel: onCancel,
-                            onResume: onResume,
-                            onRemove: onRemove,
-                          ),
-                        );
-                      },
-                    ),
-                  ),
-                ],
-              ),
-      ),
-    );
-  }
-}
-
-String _transferStatusLabel(ClientTransfer transfer) {
-  return switch (transfer.status) {
-    TransferStatus.preparing =>
-      transfer.total > 0
-          ? '正在准备上传：'
-                '${_formatBytes(transfer.transferred)} / '
-                '${_formatBytes(transfer.total)}'
-          : '正在准备上传',
-    TransferStatus.queued => '等待传输',
-    TransferStatus.running =>
-      transfer.total > 0
-          ? '${_formatBytes(transfer.transferred)} / ${_formatBytes(transfer.total)}'
-          : '正在传输',
-    TransferStatus.paused => transfer.errorMessage ?? '已暂停，可继续传输',
-    TransferStatus.awaitingAuth => '等待重新登录后继续',
-    TransferStatus.awaitingDestination =>
-      transfer.errorMessage ?? '下载完成，等待写入所选位置',
-    TransferStatus.resultUnconfirmed =>
-      transfer.errorMessage ?? '操作结果待确认，请核对目标位置',
-    TransferStatus.completed => '已完成',
-    TransferStatus.failed => transfer.errorMessage ?? '传输失败',
-    TransferStatus.cancelled => '已取消',
-  };
-}
-
-class _TransferAction extends StatelessWidget {
-  const _TransferAction({
-    required this.transfer,
-    required this.onCancel,
-    required this.onResume,
-    required this.onRemove,
-  });
-
-  final ClientTransfer transfer;
-  final ValueChanged<String> onCancel;
-  final Future<void> Function(String id) onResume;
-  final Future<void> Function(String id) onRemove;
-
-  @override
-  Widget build(BuildContext context) {
-    return switch (transfer.status) {
-      TransferStatus.preparing || TransferStatus.running => IconButton(
-        onPressed: () => onCancel(transfer.id),
-        tooltip: '暂停传输',
-        icon: const Icon(Icons.pause_rounded),
-      ),
-      TransferStatus.paused ||
-      TransferStatus.awaitingAuth ||
-      TransferStatus.awaitingDestination => IconButton(
-        onPressed: () => unawaited(onResume(transfer.id)),
-        tooltip: '继续传输',
-        icon: const Icon(Icons.play_arrow_rounded),
-      ),
-      TransferStatus.completed ||
-      TransferStatus.failed ||
-      TransferStatus.cancelled ||
-      TransferStatus.resultUnconfirmed => IconButton(
-        onPressed: () => unawaited(onRemove(transfer.id)),
-        tooltip: '移除记录',
-        icon: const Icon(Icons.close_rounded),
-      ),
-      TransferStatus.queued => const SizedBox(width: 48, height: 48),
-    };
   }
 }
 
