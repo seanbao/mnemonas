@@ -3,7 +3,9 @@ import 'dart:io';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path_provider/path_provider.dart';
 
 import '../core/auth/auth_api.dart';
 import '../core/auth/session_store.dart';
@@ -18,8 +20,10 @@ import '../core/server/server_endpoint.dart';
 import '../core/server/server_preferences.dart';
 import '../core/system/system_api.dart';
 import '../core/system/system_models.dart';
+import '../core/transfers/transfers.dart' as transfer_core;
 import '../core/trash/trash_api.dart';
 import '../core/trash/trash_models.dart';
+import '../platform/file_exporter.dart';
 import 'client_state.dart';
 
 final serverPreferencesProvider = Provider<ServerPreferencesStore>(
@@ -29,6 +33,51 @@ final serverPreferencesProvider = Provider<ServerPreferencesStore>(
 final authSessionStoreProvider = Provider<AuthSessionStore>(
   (ref) => SecureAuthSessionStore(),
 );
+
+typedef TransferStoreFactory =
+    Future<transfer_core.FileTransferStore> Function();
+
+typedef ContentUriMaterializer =
+    Future<void> Function({
+      required String sourcePath,
+      required String destinationUri,
+      required String operationId,
+      required void Function(int transferred, int? total) onProgress,
+    });
+
+typedef ContentUriMaterializationCanceller =
+    Future<void> Function(String operationId);
+
+final transferStoreFactoryProvider = Provider<TransferStoreFactory>((ref) {
+  return () async {
+    final root = await getApplicationSupportDirectory();
+    final separator = Platform.pathSeparator;
+    return transfer_core.FileTransferStore(
+      directoryPath: '${root.path}${separator}mnemonas${separator}transfers',
+    );
+  };
+});
+
+final contentUriMaterializerProvider = Provider<ContentUriMaterializer>((ref) {
+  return ({
+    required sourcePath,
+    required destinationUri,
+    required operationId,
+    required onProgress,
+  }) {
+    return FileExporter.exportStagedFile(
+      sourcePath: sourcePath,
+      target: FileExportTarget.contentUri(destinationUri),
+      operationId: operationId,
+      onProgress: onProgress,
+    );
+  };
+});
+
+final contentUriMaterializationCancellerProvider =
+    Provider<ContentUriMaterializationCanceller>((ref) {
+      return FileExporter.cancelExport;
+    });
 
 typedef ApiClientFactory =
     ApiClient Function(ServerEndpoint endpoint, AuthSessionStore sessionStore);
@@ -66,6 +115,10 @@ class ClientController extends Notifier<ClientState> {
   late final ServerPreferencesStore _serverPreferences;
   late final AuthSessionStore _sessionStore;
   late final ApiClientFactory _apiClientFactory;
+  late final TransferStoreFactory _transferStoreFactory;
+  late final ContentUriMaterializer _contentUriMaterializer;
+  late final ContentUriMaterializationCanceller
+  _contentUriMaterializationCanceller;
 
   ApiClient? _client;
   AuthApi? _auth;
@@ -89,6 +142,10 @@ class ClientController extends Notifier<ClientState> {
   var _disposed = false;
   final Map<String, CancelToken> _transferCancellations =
       <String, CancelToken>{};
+  final Map<String, transfer_core.TransferTask> _durableTransfers =
+      <String, transfer_core.TransferTask>{};
+  final Set<String> _transferLeases = <String>{};
+  Future<transfer_core.FileTransferStore>? _transferStoreFuture;
 
   DirectoryListing? get currentDirectory => state.directory;
 
@@ -97,6 +154,11 @@ class ClientController extends Notifier<ClientState> {
     _serverPreferences = ref.watch(serverPreferencesProvider);
     _sessionStore = ref.watch(authSessionStoreProvider);
     _apiClientFactory = ref.watch(apiClientFactoryProvider);
+    _transferStoreFactory = ref.watch(transferStoreFactoryProvider);
+    _contentUriMaterializer = ref.watch(contentUriMaterializerProvider);
+    _contentUriMaterializationCanceller = ref.watch(
+      contentUriMaterializationCancellerProvider,
+    );
     ref.onDispose(_disposeController);
     unawaited(Future<void>.microtask(_bootstrap));
     return const ClientState.booting();
@@ -182,6 +244,7 @@ class ClientController extends Notifier<ClientState> {
           probe: probe,
           user: me.data,
         );
+        await _restoreDurableTransfers(expectedEpoch: epoch);
         await refreshOverview(expectedEpoch: epoch);
       } on ApiException catch (error) {
         if (!_isContextCurrent(epoch)) {
@@ -316,6 +379,7 @@ class ClientController extends Notifier<ClientState> {
         notice: result.warnings.isEmpty ? null : '登录已完成，但服务器报告了持久化警告。',
       );
       if (nextStage == ClientStage.ready) {
+        await _restoreDurableTransfers(expectedEpoch: epoch);
         await refreshOverview(expectedEpoch: epoch);
       }
     } on Object catch (error) {
@@ -1132,20 +1196,54 @@ class ClientController extends Notifier<ClientState> {
       ),
       expectedEpoch: epoch,
     );
+    var requestStarted = false;
     try {
-      final result = await files.uploadFile(
-        logicalPath: target,
-        sourcePath: sourcePath,
-        cancelToken: cancelToken,
-        onProgress: (transferred, total) {
+      late final ApiResponse<FileMutationResult> result;
+      try {
+        result = await files.uploadFile(
+          logicalPath: target,
+          sourcePath: sourcePath,
+          cancelToken: cancelToken,
+          onRequestStarted: () {
+            requestStarted = true;
+          },
+          onProgress: (transferred, total) {
+            _updateTransfer(
+              id,
+              transferred: transferred,
+              total: total,
+              expectedEpoch: epoch,
+            );
+          },
+        );
+      } on Object catch (error) {
+        if (!_isContextCurrent(epoch)) {
+          return;
+        }
+        if (!await handleAuthenticationFailure(error, expectedEpoch: epoch)) {
+          final cancelled =
+              error is ApiException && error.kind == ApiFailureKind.cancelled;
+          final resultUnconfirmed =
+              requestStarted &&
+              error is ApiException &&
+              error.isUnconfirmedMutation;
           _updateTransfer(
             id,
-            transferred: transferred,
-            total: total,
+            status: resultUnconfirmed
+                ? TransferStatus.resultUnconfirmed
+                : cancelled
+                ? TransferStatus.cancelled
+                : TransferStatus.failed,
+            errorMessage: resultUnconfirmed
+                ? '服务器可能已经完成上传，请刷新目录核对后再重试。'
+                : cancelled
+                ? null
+                : clientErrorMessage(error),
             expectedEpoch: epoch,
           );
-        },
-      );
+        }
+        rethrow;
+      }
       if (!_isContextCurrent(epoch)) {
         return;
       }
@@ -1154,28 +1252,27 @@ class ClientController extends Notifier<ClientState> {
         status: TransferStatus.completed,
         expectedEpoch: epoch,
       );
-      await loadDirectory(refreshPath);
+      try {
+        await loadDirectory(refreshPath);
+      } on Object {
+        if (!_isContextCurrent(epoch)) {
+          return;
+        }
+        state = state.copyWith(
+          isBusy: false,
+          errorMessage: null,
+          notice: result.hasWarnings || result.data.persistenceWarning
+              ? '文件已确认上传，但服务器报告了持久化警告，且目录刷新失败。请手动刷新确认最新目录。'
+              : '文件已确认上传，但目录刷新失败。请手动刷新确认最新目录。',
+        );
+        return;
+      }
       if (!_isContextCurrent(epoch)) {
         return;
       }
       if (result.hasWarnings || result.data.persistenceWarning) {
         state = state.copyWith(notice: '文件已上传，但服务器报告了持久化警告。');
       }
-    } on Object catch (error) {
-      if (!_isContextCurrent(epoch)) {
-        return;
-      }
-      if (!await handleAuthenticationFailure(error, expectedEpoch: epoch)) {
-        final cancelled =
-            error is ApiException && error.kind == ApiFailureKind.cancelled;
-        _updateTransfer(
-          id,
-          status: cancelled ? TransferStatus.cancelled : TransferStatus.failed,
-          errorMessage: cancelled ? null : clientErrorMessage(error),
-          expectedEpoch: epoch,
-        );
-      }
-      rethrow;
     } finally {
       _transferCancellations.remove(id);
     }
@@ -1183,8 +1280,128 @@ class ClientController extends Notifier<ClientState> {
 
   Future<File> downloadFile({
     required FileEntry entry,
-    required String destinationPath,
+    String? destinationPath,
+    String? destinationUri,
     bool overwrite = false,
+    bool persistent = true,
+  }) async {
+    if ((destinationPath == null) == (destinationUri == null)) {
+      throw ArgumentError(
+        'Exactly one download destination path or content URI is required',
+      );
+    }
+    if (!persistent) {
+      if (destinationPath == null || destinationUri != null) {
+        throw ArgumentError(
+          'Ephemeral downloads require a local destination path',
+        );
+      }
+      return _downloadEphemeral(
+        entry: entry,
+        destinationPath: destinationPath,
+        overwrite: overwrite,
+      );
+    }
+
+    final task = await _createDurableDownloadTask(
+      entry: entry,
+      destinationPath: destinationPath,
+      destinationUri: destinationUri,
+    );
+    return _runDurableDownload(task, overwrite: overwrite);
+  }
+
+  Future<String> stageDownloadForDestination({required FileEntry entry}) async {
+    final task = await _createDurableDownloadTask(entry: entry);
+    await _runDurableDownload(task);
+    return task.id;
+  }
+
+  Future<File> setDownloadDestination({
+    required String id,
+    required String destinationUri,
+  }) async {
+    final current = _durableTransfers[id];
+    if (current == null) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'TRANSFER_NOT_FOUND',
+        message: 'The transfer record is unavailable',
+      );
+    }
+    if (_transferLeases.contains(id)) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'TRANSFER_RUNNING',
+        message: 'The transfer is already running',
+      );
+    }
+    if (current.phase != transfer_core.TransferPhase.awaitingDestination ||
+        current.direction != transfer_core.TransferDirection.download ||
+        current.destinationPath != null) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'TRANSFER_DESTINATION_NOT_EXPECTED',
+        message: 'The transfer is not waiting for a document destination',
+      );
+    }
+    final task = current.copyWith(
+      destinationUri: destinationUri,
+      updatedAt: _nextTransferTimestamp(current),
+      errorCode: null,
+      errorMessage: null,
+    );
+    await _persistDurableTask(task);
+    return _runDurableDownload(task);
+  }
+
+  Future<transfer_core.TransferTask> _createDurableDownloadTask({
+    required FileEntry entry,
+    String? destinationPath,
+    String? destinationUri,
+  }) async {
+    final endpoint = state.endpoint;
+    final user = state.user;
+    if (endpoint == null || user == null || state.stage != ClientStage.ready) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'AUTH_SESSION_MISSING',
+        message: 'Sign in is required',
+      );
+    }
+    final store = await _ensureTransferStore();
+    await _pruneCompletedTransferHistory(store);
+    final id = _nextTransferId();
+    final payloadDirectory = Directory(
+      '${store.directoryPath}${Platform.pathSeparator}payloads',
+    );
+    await payloadDirectory.create(recursive: true);
+    final now = DateTime.now().toUtc();
+    final task = transfer_core.TransferTask(
+      id: id,
+      direction: transfer_core.TransferDirection.download,
+      phase: transfer_core.TransferPhase.queued,
+      endpointBaseUrl: endpoint.baseUrl,
+      userId: user.id,
+      remotePath: entry.path,
+      displayName: entry.name,
+      stagingPath:
+          '${payloadDirectory.path}${Platform.pathSeparator}$id.payload',
+      destinationPath: destinationPath,
+      destinationUri: destinationUri,
+      durableOffset: 0,
+      totalBytes: entry.size,
+      createdAt: now,
+      updatedAt: now,
+    );
+    await _persistDurableTask(task);
+    return task;
+  }
+
+  Future<File> _downloadEphemeral({
+    required FileEntry entry,
+    required String destinationPath,
+    required bool overwrite,
   }) async {
     final epoch = _contextEpoch;
     final files = _requireFiles();
@@ -1251,13 +1468,336 @@ class ClientController extends Notifier<ClientState> {
     }
   }
 
+  Future<File> _runDurableDownload(
+    transfer_core.TransferTask initialTask, {
+    bool overwrite = false,
+  }) async {
+    if (!_transferLeases.add(initialTask.id)) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'TRANSFER_RUNNING',
+        message: 'The transfer is already running',
+      );
+    }
+    final cancellation = CancelToken();
+    _transferCancellations[initialTask.id] = cancellation;
+    try {
+      return await _runDurableDownloadClaimed(
+        initialTask,
+        cancellation: cancellation,
+        overwrite: overwrite,
+      );
+    } finally {
+      if (identical(_transferCancellations[initialTask.id], cancellation)) {
+        _transferCancellations.remove(initialTask.id);
+      }
+      _transferLeases.remove(initialTask.id);
+    }
+  }
+
+  Future<File> _runDurableDownloadClaimed(
+    transfer_core.TransferTask initialTask, {
+    required CancelToken cancellation,
+    required bool overwrite,
+  }) async {
+    var task = initialTask;
+    final epoch = _contextEpoch;
+    final endpoint = state.endpoint;
+    final user = state.user;
+    if (endpoint?.baseUrl != task.endpointBaseUrl ||
+        user?.id != task.userId ||
+        state.stage != ClientStage.ready) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'TRANSFER_SCOPE_MISMATCH',
+        message: 'The transfer belongs to another server or account',
+      );
+    }
+    final store = await _ensureTransferStore();
+    if (!_isTransferPayloadPath(
+      task.stagingPath,
+      '${store.directoryPath}${Platform.pathSeparator}payloads',
+    )) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'TRANSFER_STAGING_SCOPE_INVALID',
+        message: 'The transfer staging path is outside app storage',
+      );
+    }
+
+    if (task.phase == transfer_core.TransferPhase.awaitingDestination) {
+      if (task.destinationUri == null) {
+        throw const ApiException(
+          kind: ApiFailureKind.local,
+          code: 'TRANSFER_DESTINATION_REQUIRED',
+          message: 'A document destination must be selected',
+        );
+      }
+      return _materializeUriDownload(task, cancellation: cancellation);
+    }
+    if (task.isTerminal && task.phase != transfer_core.TransferPhase.failed) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'TRANSFER_NOT_RESUMABLE',
+        message: 'The transfer cannot be resumed',
+      );
+    }
+
+    final partial = File('${task.stagingPath}.part');
+    var actualOffset = await partial.exists() ? await partial.length() : 0;
+    if (actualOffset > task.totalBytes) {
+      task = task.copyWith(
+        phase: transfer_core.TransferPhase.failed,
+        updatedAt: _nextTransferTimestamp(task),
+        errorCode: 'PARTIAL_FILE_INVALID',
+        errorMessage: '断点文件大于源文件，无法安全继续。',
+      );
+      await _persistDurableTask(task);
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'DOWNLOAD_PART_INVALID',
+        message: 'The partial download has an invalid length',
+      );
+    }
+    if (actualOffset > 0 && task.validator == null) {
+      await partial.delete();
+      actualOffset = 0;
+    }
+    task = task.copyWith(
+      phase: transfer_core.TransferPhase.running,
+      durableOffset: actualOffset,
+      updatedAt: _nextTransferTimestamp(task),
+      errorCode: null,
+      errorMessage: null,
+    );
+    await _persistDurableTask(task);
+
+    final files = _requireFiles();
+    try {
+      final result = await files.downloadFile(
+        logicalPath: task.remotePath,
+        destinationPath: task.destinationPath ?? task.stagingPath,
+        stagingPath: partial.path,
+        resumeValidator: task.validator,
+        expectedTotalBytes: task.totalBytes,
+        overwrite: task.destinationPath == null ? true : overwrite,
+        preservePartialOnFailure: true,
+        cancelToken: cancellation,
+        onProgress: (transferred, total) {
+          _updateTransfer(
+            task.id,
+            transferred: transferred,
+            total: total,
+            expectedEpoch: epoch,
+          );
+        },
+        onCheckpoint: (checkpoint) async {
+          task = task.copyWith(
+            validator: checkpoint.validator,
+            durableOffset: checkpoint.durableOffset,
+            updatedAt: _nextTransferTimestamp(task),
+          );
+          await _persistDurableTask(task);
+        },
+      );
+      task = task.copyWith(
+        phase: task.destinationPath != null
+            ? transfer_core.TransferPhase.completed
+            : transfer_core.TransferPhase.awaitingDestination,
+        validator: result.validator,
+        durableOffset: result.totalBytes,
+        updatedAt: _nextTransferTimestamp(task),
+        errorCode: null,
+        errorMessage: null,
+      );
+      await _persistDurableTask(task);
+      if (result.warnings.isNotEmpty && _isContextCurrent(epoch)) {
+        state = state.copyWith(notice: '文件已下载，但服务器报告了持久化警告。');
+      }
+      if (task.destinationUri != null) {
+        return _materializeUriDownload(task, cancellation: cancellation);
+      }
+      return result.file;
+    } on Object catch (error) {
+      if (task.phase == transfer_core.TransferPhase.awaitingDestination) {
+        rethrow;
+      }
+      final phase = _downloadFailurePhase(error);
+      task = task.copyWith(
+        phase: phase,
+        durableOffset: await partial.exists() ? await partial.length() : 0,
+        updatedAt: _nextTransferTimestamp(task),
+        errorCode: _downloadFailureCode(error, phase),
+        errorMessage: clientErrorMessage(error),
+      );
+      await _persistDurableTask(task);
+      if (_isContextCurrent(epoch)) {
+        await handleAuthenticationFailure(error, expectedEpoch: epoch);
+      }
+      rethrow;
+    }
+  }
+
+  Future<File> _materializeUriDownload(
+    transfer_core.TransferTask initialTask, {
+    required CancelToken cancellation,
+  }) async {
+    var task = initialTask;
+    final uri = task.destinationUri;
+    if (uri == null ||
+        task.phase != transfer_core.TransferPhase.awaitingDestination) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'TRANSFER_DESTINATION_INVALID',
+        message: 'The transfer has no pending document destination',
+      );
+    }
+    final payload = File(task.stagingPath);
+    if (!await payload.exists() || await payload.length() != task.totalBytes) {
+      task = task.copyWith(
+        phase: transfer_core.TransferPhase.failed,
+        updatedAt: _nextTransferTimestamp(task),
+        errorCode: 'STAGED_DOWNLOAD_MISSING',
+        errorMessage: '已完成的下载暂存文件不可用。',
+      );
+      await _persistDurableTask(task);
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'STAGED_DOWNLOAD_MISSING',
+        message: 'The completed download staging file is unavailable',
+      );
+    }
+    var operationActive = true;
+    unawaited(
+      cancellation.whenCancel.then((_) async {
+        if (!operationActive) {
+          return;
+        }
+        try {
+          await _contentUriMaterializationCanceller(task.id);
+        } on Object {
+          // The copy future remains authoritative for cancellation failure.
+        }
+      }),
+    );
+    _updateTransfer(
+      task.id,
+      status: TransferStatus.running,
+      transferred: 0,
+      total: task.totalBytes,
+    );
+    try {
+      await _contentUriMaterializer(
+        sourcePath: payload.path,
+        destinationUri: uri,
+        operationId: task.id,
+        onProgress: (transferred, total) {
+          _updateTransfer(
+            task.id,
+            status: TransferStatus.running,
+            transferred: transferred,
+            total: total ?? task.totalBytes,
+          );
+        },
+      );
+    } on Object catch (error) {
+      task = task.copyWith(
+        updatedAt: _nextTransferTimestamp(task),
+        errorCode: 'DESTINATION_WRITE_FAILED',
+        errorMessage: cancellation.isCancelled
+            ? '保存已暂停，可重新选择位置。'
+            : clientErrorMessage(error),
+      );
+      await _persistDurableTask(task);
+      rethrow;
+    } finally {
+      operationActive = false;
+    }
+    task = task.copyWith(
+      phase: transfer_core.TransferPhase.completed,
+      updatedAt: _nextTransferTimestamp(task),
+      errorCode: null,
+      errorMessage: null,
+    );
+    await _persistDurableTask(task);
+    try {
+      await payload.delete();
+    } on FileSystemException {
+      if (!_disposed &&
+          state.endpoint?.baseUrl == task.endpointBaseUrl &&
+          state.user?.id == task.userId) {
+        state = state.copyWith(notice: '文件已保存，但应用暂存文件未能立即清理。');
+      }
+    }
+    return payload;
+  }
+
   void cancelTransfer(String id) {
     final token = _transferCancellations[id];
     if (token == null || token.isCancelled) {
       return;
     }
     token.cancel('Cancelled by the user');
-    _updateTransfer(id, status: TransferStatus.cancelled);
+    if (_durableTransfers.containsKey(id)) {
+      _updateTransfer(id, status: TransferStatus.paused);
+    } else {
+      _updateTransfer(id, status: TransferStatus.cancelled);
+    }
+  }
+
+  Future<void> resumeTransfer(String id) async {
+    final task = _durableTransfers[id];
+    if (task == null) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'TRANSFER_NOT_FOUND',
+        message: 'The transfer record is unavailable',
+      );
+    }
+    if (_transferLeases.contains(id)) {
+      return;
+    }
+    await _runDurableDownload(task);
+  }
+
+  Future<void> removeTransfer(String id) async {
+    if (_transferLeases.contains(id)) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'TRANSFER_RUNNING',
+        message: 'Pause the transfer before removing it',
+      );
+    }
+    final task = _durableTransfers[id];
+    if (task == null) {
+      state = state.copyWith(
+        transfers: List<ClientTransfer>.unmodifiable(
+          state.transfers.where((transfer) => transfer.id != id),
+        ),
+      );
+      return;
+    }
+    final store = await _ensureTransferStore();
+    final payloadDirectory =
+        '${store.directoryPath}${Platform.pathSeparator}payloads';
+    if (_isTransferPayloadPath(task.stagingPath, payloadDirectory)) {
+      for (final path in <String>[
+        task.stagingPath,
+        '${task.stagingPath}.part',
+      ]) {
+        final file = File(path);
+        if (await file.exists()) {
+          await file.delete();
+        }
+      }
+    }
+    await store.remove(id);
+    _durableTransfers.remove(id);
+    state = state.copyWith(
+      transfers: List<ClientTransfer>.unmodifiable(
+        state.transfers.where((transfer) => transfer.id != id),
+      ),
+    );
   }
 
   @visibleForTesting
@@ -1609,6 +2149,278 @@ class ClientController extends Notifier<ClientState> {
     return '${DateTime.now().microsecondsSinceEpoch}-$_transferSequence';
   }
 
+  Future<transfer_core.FileTransferStore> _ensureTransferStore() async {
+    final existing = _transferStoreFuture;
+    if (existing != null) {
+      return existing;
+    }
+    final created = _transferStoreFactory();
+    _transferStoreFuture = created;
+    try {
+      return await created;
+    } on Object {
+      if (identical(_transferStoreFuture, created)) {
+        _transferStoreFuture = null;
+      }
+      rethrow;
+    }
+  }
+
+  Future<void> _pruneCompletedTransferHistory(
+    transfer_core.FileTransferStore store,
+  ) async {
+    final snapshot = await store.load();
+    final terminal =
+        snapshot.tasks
+            .where(
+              (task) =>
+                  task.phase == transfer_core.TransferPhase.completed ||
+                  task.phase == transfer_core.TransferPhase.cancelled,
+            )
+            .toList(growable: false)
+          ..sort((left, right) => right.updatedAt.compareTo(left.updatedAt));
+    if (terminal.length <= 200) {
+      return;
+    }
+    final payloadDirectory =
+        '${store.directoryPath}${Platform.pathSeparator}payloads';
+    final removable = <String>{};
+    for (final task in terminal.skip(200)) {
+      if (!_isTransferPayloadPath(task.stagingPath, payloadDirectory)) {
+        continue;
+      }
+      var cleanupSucceeded = true;
+      for (final path in <String>[
+        task.stagingPath,
+        '${task.stagingPath}.part',
+      ]) {
+        try {
+          final file = File(path);
+          if (await file.exists()) {
+            await file.delete();
+          }
+        } on FileSystemException {
+          cleanupSucceeded = false;
+        }
+      }
+      if (cleanupSucceeded) {
+        removable.add(task.id);
+      }
+    }
+    if (removable.isEmpty) {
+      return;
+    }
+    await store.retainWhere((task) => !removable.contains(task.id));
+    _durableTransfers.removeWhere((id, _) => removable.contains(id));
+    if (!_disposed) {
+      state = state.copyWith(
+        transfers: List<ClientTransfer>.unmodifiable(
+          state.transfers.where((transfer) => !removable.contains(transfer.id)),
+        ),
+      );
+    }
+  }
+
+  Future<void> _restoreDurableTransfers({required int expectedEpoch}) async {
+    if (!_isContextCurrent(expectedEpoch)) {
+      return;
+    }
+    final endpoint = state.endpoint;
+    final user = state.user;
+    if (endpoint == null || user == null) {
+      return;
+    }
+    try {
+      final store = await _ensureTransferStore();
+      final snapshot = await store.load();
+      if (!_isContextCurrent(expectedEpoch)) {
+        return;
+      }
+      final payloadDirectory = Directory(
+        '${store.directoryPath}${Platform.pathSeparator}payloads',
+      );
+      await payloadDirectory.create(recursive: true);
+      final restored = <transfer_core.TransferTask>[];
+      for (var task in snapshot.tasks) {
+        if (task.endpointBaseUrl != endpoint.baseUrl ||
+            task.userId != user.id) {
+          continue;
+        }
+        var changed = false;
+        if (!_isTransferPayloadPath(task.stagingPath, payloadDirectory.path)) {
+          task = task.copyWith(
+            phase: transfer_core.TransferPhase.failed,
+            updatedAt: _nextTransferTimestamp(task),
+            errorCode: 'STAGING_SCOPE_INVALID',
+            errorMessage: '传输暂存路径不在应用私有目录中。',
+          );
+          changed = true;
+        } else if (task.phase == transfer_core.TransferPhase.running &&
+            task.durableOffset == task.totalBytes &&
+            !await File('${task.stagingPath}.part').exists()) {
+          final payload = File(task.stagingPath);
+          if (task.destinationPath == null &&
+              await payload.exists() &&
+              await payload.length() == task.totalBytes) {
+            task = task.copyWith(
+              phase: transfer_core.TransferPhase.awaitingDestination,
+              updatedAt: _nextTransferTimestamp(task),
+              errorCode: null,
+              errorMessage: null,
+            );
+          } else {
+            task = task.copyWith(
+              phase: transfer_core.TransferPhase.resultUnconfirmed,
+              updatedAt: _nextTransferTimestamp(task),
+              errorCode: 'DOWNLOAD_RESULT_UNCONFIRMED',
+              errorMessage: '下载可能已写入目标位置，请核对后移除记录。',
+            );
+          }
+          changed = true;
+        } else if (task.phase == transfer_core.TransferPhase.running ||
+            task.phase == transfer_core.TransferPhase.queued) {
+          task = task.copyWith(
+            phase: transfer_core.TransferPhase.paused,
+            updatedAt: _nextTransferTimestamp(task),
+            errorCode: 'CLIENT_RESTARTED',
+            errorMessage: '客户端重启后，传输已暂停，可继续。',
+          );
+          changed = true;
+        }
+
+        if (task.phase == transfer_core.TransferPhase.awaitingDestination &&
+            task.destinationUri != null) {
+          task = task.copyWith(
+            destinationUri: null,
+            updatedAt: _nextTransferTimestamp(task),
+            errorCode: 'DESTINATION_SELECTION_REQUIRED',
+            errorMessage: '客户端重启后需要重新选择保存位置。',
+          );
+          changed = true;
+        }
+        if (_isTransferPayloadPath(task.stagingPath, payloadDirectory.path) &&
+            !task.isTerminal &&
+            task.phase != transfer_core.TransferPhase.awaitingDestination) {
+          final partial = File('${task.stagingPath}.part');
+          final actualOffset = await partial.exists()
+              ? await partial.length()
+              : 0;
+          if (actualOffset > task.totalBytes) {
+            task = task.copyWith(
+              phase: transfer_core.TransferPhase.failed,
+              updatedAt: _nextTransferTimestamp(task),
+              errorCode: 'PARTIAL_FILE_INVALID',
+              errorMessage: '断点文件大于源文件，无法安全继续。',
+            );
+            changed = true;
+          } else if (actualOffset != task.durableOffset) {
+            task = task.copyWith(
+              durableOffset: actualOffset,
+              updatedAt: _nextTransferTimestamp(task),
+            );
+            changed = true;
+          }
+        }
+        if (task.phase == transfer_core.TransferPhase.awaitingDestination) {
+          final payload = File(task.stagingPath);
+          if (!await payload.exists() ||
+              await payload.length() != task.totalBytes) {
+            task = task.copyWith(
+              phase: transfer_core.TransferPhase.failed,
+              updatedAt: _nextTransferTimestamp(task),
+              errorCode: 'STAGED_DOWNLOAD_MISSING',
+              errorMessage: '已完成的下载暂存文件不可用。',
+            );
+            changed = true;
+          }
+        }
+        if (changed) {
+          await store.upsert(task);
+        }
+        restored.add(task);
+      }
+      if (!_isContextCurrent(expectedEpoch)) {
+        return;
+      }
+      restored.sort((left, right) => right.updatedAt.compareTo(left.updatedAt));
+      _durableTransfers
+        ..clear()
+        ..addEntries(restored.map((task) => MapEntry(task.id, task)));
+      state = state.copyWith(
+        transfers: List<ClientTransfer>.unmodifiable(
+          restored.take(100).map(_clientTransferFromTask),
+        ),
+      );
+    } on Object {
+      if (_isContextCurrent(expectedEpoch)) {
+        state = state.copyWith(notice: '传输记录暂时无法读取。现有传输未自动恢复，请检查应用存储。');
+      }
+    }
+  }
+
+  Future<void> _persistDurableTask(transfer_core.TransferTask task) async {
+    final store = await _ensureTransferStore();
+    if (!_isTransferPayloadPath(
+      task.stagingPath,
+      '${store.directoryPath}${Platform.pathSeparator}payloads',
+    )) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'TRANSFER_STAGING_SCOPE_INVALID',
+        message: 'The transfer staging path is outside app storage',
+      );
+    }
+    await store.upsert(task);
+    _durableTransfers[task.id] = task;
+    if (!_disposed &&
+        state.endpoint?.baseUrl == task.endpointBaseUrl &&
+        state.user?.id == task.userId) {
+      _replaceTransfer(_clientTransferFromTask(task));
+    }
+  }
+
+  ClientTransfer _clientTransferFromTask(transfer_core.TransferTask task) {
+    final status = switch (task.phase) {
+      transfer_core.TransferPhase.queued => TransferStatus.queued,
+      transfer_core.TransferPhase.running => TransferStatus.running,
+      transfer_core.TransferPhase.paused => TransferStatus.paused,
+      transfer_core.TransferPhase.awaitingAuth => TransferStatus.awaitingAuth,
+      transfer_core.TransferPhase.awaitingDestination =>
+        TransferStatus.awaitingDestination,
+      transfer_core.TransferPhase.resultUnconfirmed =>
+        TransferStatus.resultUnconfirmed,
+      transfer_core.TransferPhase.completed => TransferStatus.completed,
+      transfer_core.TransferPhase.failed => TransferStatus.failed,
+      transfer_core.TransferPhase.cancelled => TransferStatus.cancelled,
+    };
+    return ClientTransfer(
+      id: task.id,
+      name: task.displayName,
+      direction: task.direction == transfer_core.TransferDirection.download
+          ? TransferDirection.download
+          : TransferDirection.upload,
+      status: status,
+      transferred: task.durableOffset,
+      total: task.totalBytes,
+      errorMessage: task.errorMessage,
+    );
+  }
+
+  void _replaceTransfer(ClientTransfer transfer) {
+    final existingIndex = state.transfers.indexWhere(
+      (candidate) => candidate.id == transfer.id,
+    );
+    final next = state.transfers.toList(growable: true);
+    if (existingIndex >= 0) {
+      next[existingIndex] = transfer;
+    } else {
+      next.insert(0, transfer);
+    }
+    state = state.copyWith(
+      transfers: List<ClientTransfer>.unmodifiable(next.take(100)),
+    );
+  }
+
   void _addTransfer(ClientTransfer transfer, {int? expectedEpoch}) {
     if (expectedEpoch != null && !_isContextCurrent(expectedEpoch)) {
       return;
@@ -1647,6 +2459,57 @@ class ClientController extends Notifier<ClientState> {
       ),
     );
   }
+}
+
+transfer_core.TransferPhase _downloadFailurePhase(Object error) {
+  if (_isTerminalAuthenticationFailure(error)) {
+    return transfer_core.TransferPhase.awaitingAuth;
+  }
+  if (error is ApiException) {
+    final status = error.statusCode;
+    if (error.kind == ApiFailureKind.cancelled ||
+        error.kind == ApiFailureKind.connection ||
+        error.kind == ApiFailureKind.timeout ||
+        status == 408 ||
+        status == 429 ||
+        (status != null && status >= 500)) {
+      return transfer_core.TransferPhase.paused;
+    }
+  }
+  return transfer_core.TransferPhase.failed;
+}
+
+String _downloadFailureCode(Object error, transfer_core.TransferPhase phase) {
+  if (phase == transfer_core.TransferPhase.awaitingAuth) {
+    return 'AUTH_REQUIRED';
+  }
+  if (phase == transfer_core.TransferPhase.paused) {
+    return error is ApiException && error.kind == ApiFailureKind.cancelled
+        ? 'PAUSED_BY_USER'
+        : 'RETRYABLE_DOWNLOAD_FAILURE';
+  }
+  return 'DOWNLOAD_FAILED';
+}
+
+bool _isTransferPayloadPath(String path, String payloadDirectory) {
+  final separator = Platform.pathSeparator;
+  String normalize(String value) {
+    var normalized = value.replaceAll(RegExp(r'[\\/]+'), separator);
+    while (normalized.endsWith(separator) && normalized.length > 1) {
+      normalized = normalized.substring(0, normalized.length - 1);
+    }
+    return Platform.isWindows ? normalized.toLowerCase() : normalized;
+  }
+
+  final root = normalize(payloadDirectory);
+  final candidate = normalize(path);
+  return candidate.startsWith('$root$separator') &&
+      !candidate.substring(root.length + 1).contains(separator);
+}
+
+DateTime _nextTransferTimestamp(transfer_core.TransferTask task) {
+  final now = DateTime.now().toUtc();
+  return now.isAfter(task.updatedAt) ? now : task.updatedAt;
 }
 
 bool _isTerminalAuthenticationFailure(Object error) {
@@ -1733,6 +2596,23 @@ String clientErrorMessage(Object error) {
   }
   if (error is FileSystemException) {
     return '无法访问本地文件，请检查存储权限和可用空间。';
+  }
+  if (error is PlatformException) {
+    return switch (error.code) {
+      'IMPORT_CANCELLED' ||
+      'IMPORT_METADATA_CANCELLED' ||
+      'EXPORT_CANCELLED' => '操作已取消。',
+      'IMPORT_QUEUE_FULL' || 'EXPORT_QUEUE_FULL' => '正在处理的文件较多，请稍后重试。',
+      'IMPORT_COPY_FAILED' ||
+      'IMPORT_METADATA_FAILED' => '无法读取所选文件，请检查文件权限和可用空间。',
+      'EXPORT_FAILED' => '无法写入所选位置，请检查目标权限和可用空间。',
+      'FILE_PICKER_UNAVAILABLE' ||
+      'FILE_PICKER_FAILED' ||
+      'SAVE_DIALOG_UNAVAILABLE' ||
+      'SAVE_DIALOG_FAILED' => '无法使用系统文件选择器，请重试或更换存储位置。',
+      'TOO_MANY_IMPORTS' => '一次最多选择 100 个文件。',
+      _ => '本地文件操作未完成，请重试。',
+    };
   }
   return '操作未完成，请稍后重试。';
 }

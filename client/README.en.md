@@ -15,7 +15,9 @@ The current source tree implements:
 - sign-in, secure session storage, access-token refresh, required password changes, voluntary password changes, and sign-out; session updates use revision/CAS, and sign-out, server switching, or a new sign-in invalidates older requests;
 - device overview and file-directory browsing;
 - filename search across files and directories visible to the current account; each request displays at most 100 results, a new query cancels the older request, and the target directory is reloaded before a result is opened;
-- folder creation, upload, download, transfer progress and cancellation, open, rename, move, copy, and deletion confirmation based on the server deletion policy;
+- folder creation, upload, download, open, rename, move, copy, and deletion confirmation based on the server deletion policy;
+- an app-private durable ledger and stable partial files for foreground downloads, with pause, resume, and client-restart recovery; resumed responses must match the server download identity, `206`, `Content-Range`, and total size;
+- Android upload selection through the Storage Access Framework, returning only URI metadata to Dart and streaming one file at a time into app-private storage without complete-file Java heap residency; an unconfirmed upload is not replayed automatically;
 - trash listing with per-item expiry, restore to the original or a custom path, and permanent deletion of a frozen exact ID selection; when a mutation result is unconfirmed, the client reloads Trash but does not infer restore or deletion success only because an item disappeared, and later mutations remain paused until an explicit refresh;
 - client and server version display, plus a GitHub Issues feedback entry.
 
@@ -25,7 +27,8 @@ This list describes the implementation scope in the current source tree. It does
 
 - Full-text and photo indexing are not connected, and filename search does not yet support cursor pagination.
 - Version history, sharing, and administrative workflows are not complete in the client.
-- Background transfers, resumable transfers, and transfer recovery after process restart are not complete.
+- The Android native background-transfer executor, notification controls, and cross-process task lease remain incomplete. Recoverable download execution currently runs only in the foreground coordinator.
+- Server-side resumable upload sessions, chunk offsets, idempotent commit, and result lookup are incomplete. Upload remains one complete-file request.
 - Interface text is currently primarily Simplified Chinese; complete localization is not available.
 - Linux and Windows native build and runtime validation have not been completed.
 - Physical Android-device acceptance, upgrade validation, independent release signing, and formal release artifacts have not been completed.

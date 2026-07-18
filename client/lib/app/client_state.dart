@@ -16,7 +16,17 @@ enum ClientStage {
 
 enum TransferDirection { upload, download }
 
-enum TransferStatus { running, completed, failed, cancelled }
+enum TransferStatus {
+  queued,
+  running,
+  paused,
+  awaitingAuth,
+  awaitingDestination,
+  resultUnconfirmed,
+  completed,
+  failed,
+  cancelled,
+}
 
 final class ClientTransfer {
   const ClientTransfer({

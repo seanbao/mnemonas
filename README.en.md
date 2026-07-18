@@ -57,7 +57,7 @@ Activity rows also link to related versions, trash entries, shares, and review r
 
 [`client/`](client/README.en.md) contains the Flutter project for Android, Linux, and Windows, with Android as the first usable-platform target. The current source covers server connection, Bearer sessions and refresh-token rotation isolated by revision/CAS, file browsing, bounded filename search, upload and download, rename, move, copy, two-phase safe deletion, trash restore and exact permanent deletion, account management, and issue feedback.
 
-No usable client version has been published. Full-text and photo indexing, search pagination, background or resumable transfers, native desktop validation, physical Android-device acceptance, and release signing remain incomplete. The Linux and Windows runners currently preserve only the cross-platform project boundary.
+No usable client version has been published. Full-text and photo indexing, search pagination, Android native background transfer, cross-process task leases, resumable upload, native desktop validation, physical Android-device acceptance, and release signing remain incomplete. The Linux and Windows runners currently preserve only the cross-platform project boundary.
 
 ## Architecture
 

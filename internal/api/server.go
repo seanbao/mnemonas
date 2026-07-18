@@ -65,6 +65,7 @@ const untrustedAttachmentContentSecurityPolicy = "sandbox allow-downloads; defau
 const untrustedEmbeddedErrorContentSecurityPolicy = "sandbox; default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'self'"
 
 var errScrubDataplaneNotConnected = errors.New("dataplane not connected")
+var errDownloadSnapshotChanged = errors.New("download snapshot changed while streaming")
 
 var newAuthUserStore = auth.NewUserStore
 
@@ -1198,6 +1199,8 @@ const (
 	auditStatusFailedValue              = "failed"
 	downloadProbeHeader                 = "X-Mnemonas-Download-Probe"
 	downloadProbeHeaderValue            = "json-error"
+	downloadIdentityHeader              = "X-MnemoNAS-Download-Identity"
+	downloadIdentityPreconditionHeader  = "X-MnemoNAS-If-Download-Identity"
 	auditWarningHeader                  = `199 MnemoNAS "activity log persistence failed"`
 	workspaceMutationWarningHeader      = `199 MnemoNAS "workspace mutation persistence incomplete"`
 	scrubResultPersistenceWarningHeader = `199 MnemoNAS "scrub result persistence incomplete"`
@@ -2052,6 +2055,7 @@ func (s *Server) setupRoutes() {
 
 		// File download/preview (authenticated, no Basic Auth popup)
 		r.Get("/download/*", s.handleDownloadFile)
+		r.Head("/download/*", s.handleDownloadFile)
 
 		// Directory operations
 		r.Route("/directories", func(r chi.Router) {
@@ -3248,6 +3252,11 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if len(r.Header.Values("Content-Range")) != 0 {
+		BadRequest(w, "Content-Range is not supported for file uploads")
+		return
+	}
+
 	if s.fs == nil {
 		ServiceUnavailable(w, "filesystem not initialized")
 		return
@@ -3896,6 +3905,11 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if archiveFormat != "" {
+		if r.Method == http.MethodHead {
+			w.Header().Set("Allow", http.MethodGet)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		if versionHash != "" {
 			BadRequest(w, "versioned archive downloads are not supported")
 			return
@@ -3972,7 +3986,13 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 		}
 
 		trackingWriter := &apiDownloadResponseWriter{ResponseWriter: w}
-		http.ServeContent(trackingWriter, r, path.Base(filePath), versionModTime, reader)
+		http.ServeContent(
+			trackingWriter,
+			downloadServeContentRequest(r),
+			path.Base(filePath),
+			versionModTime,
+			reader,
+		)
 		if downloadResponseShouldLogActivity(r, trackingWriter) {
 			s.LogActivity(r, activity.ActionDownload, filePath, map[string]string{"hash": versionHash})
 		}
@@ -3991,20 +4011,96 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 	// Set cache headers
 	setUntrustedDownloadHeaders(w)
 	if snapshotInfo.DeleteIdentityToken != "" {
+		w.Header().Set(downloadIdentityHeader, snapshotInfo.DeleteIdentityToken)
 		w.Header().Set("ETag", fmt.Sprintf(`W/"%s"`, snapshotInfo.DeleteIdentityToken))
 	}
 	w.Header().Set("Cache-Control", "private, no-cache")
+	if !downloadIdentityPreconditionMatches(r, snapshotInfo.DeleteIdentityToken) {
+		w.Header().Set("Content-Length", "0")
+		w.WriteHeader(http.StatusPreconditionFailed)
+		return
+	}
 	if forceDownload {
 		setUntrustedAttachmentDownloadHeaders(w)
 		w.Header().Set("Content-Disposition", formatAttachmentHeader(path.Base(filePath)))
 	}
 
-	// Use http.ServeContent for proper Range support and content type detection
+	// Use http.ServeContent for proper Range support and content type detection.
+	// Keep a bounded response tail pending until the opened file identity is
+	// revalidated. If an out-of-band writer mutates the same inode while it is
+	// being read, the response remains shorter than its declared Content-Length
+	// and cannot be accepted as a complete representation.
 	trackingWriter := &apiDownloadResponseWriter{ResponseWriter: w}
-	http.ServeContent(trackingWriter, r, path.Base(filePath), snapshotInfo.ModTime, file)
+	integrityWriter := newDownloadIntegrityResponseWriter(trackingWriter)
+	http.ServeContent(
+		integrityWriter,
+		downloadServeContentRequest(r),
+		path.Base(filePath),
+		snapshotInfo.ModTime,
+		file,
+	)
+	if integrityWriter.writeErr == nil && downloadResponseCarriesRepresentation(r, trackingWriter) {
+		if err := validateOpenDownloadSnapshot(file, snapshotInfo); err != nil {
+			integrityWriter.abort(err)
+			trackingWriter.writeErr = err
+			s.logger.Warn().Err(err).Str("path", filePath).Msg("Download snapshot changed while streaming")
+		}
+	}
+	if integrityWriter.writeErr == nil {
+		if err := integrityWriter.commit(); err != nil {
+			trackingWriter.writeErr = err
+		}
+	}
 	if downloadResponseShouldLogActivity(r, trackingWriter) {
 		s.LogActivity(r, activity.ActionDownload, filePath, nil)
 	}
+}
+
+func downloadIdentityPreconditionMatches(r *http.Request, actualIdentity string) bool {
+	values := r.Header.Values(downloadIdentityPreconditionHeader)
+	if len(values) == 0 {
+		return true
+	}
+	return actualIdentity != "" && len(values) == 1 && values[0] == actualIdentity
+}
+
+func downloadServeContentRequest(r *http.Request) *http.Request {
+	if r == nil || r.Method != http.MethodHead || len(r.Header.Values("Range")) == 0 {
+		return r
+	}
+	cloned := r.Clone(r.Context())
+	cloned.Header = r.Header.Clone()
+	cloned.Header.Del("Range")
+	return cloned
+}
+
+func downloadResponseCarriesRepresentation(r *http.Request, writer *apiDownloadResponseWriter) bool {
+	if r == nil || r.Method != http.MethodGet || writer == nil {
+		return false
+	}
+	return writer.statusCode == http.StatusOK || writer.statusCode == http.StatusPartialContent
+}
+
+func validateOpenDownloadSnapshot(file *os.File, expected *storage.FileInfo) error {
+	if file == nil || expected == nil {
+		return errDownloadSnapshotChanged
+	}
+	actual, err := file.Stat()
+	if err != nil {
+		return errors.Join(errDownloadSnapshotChanged, err)
+	}
+	if !actual.Mode().IsRegular() ||
+		actual.Mode() != expected.Mode ||
+		actual.Size() != expected.Size ||
+		!actual.ModTime().Equal(expected.ModTime) {
+		return errDownloadSnapshotChanged
+	}
+	expectedIdentity := expected.DeleteIdentityToken
+	actualIdentity := workspace.DeleteIdentityTokenForFileInfo(actual)
+	if expectedIdentity != actualIdentity {
+		return errDownloadSnapshotChanged
+	}
+	return nil
 }
 
 func forceDownloadFromRequest(r *http.Request) (bool, error) {
@@ -6109,6 +6205,86 @@ type apiDownloadResponseWriter struct {
 	statusCode   int
 	bytesWritten int64
 	writeErr     error
+}
+
+const downloadIntegrityTailBytes = 32 * 1024
+
+type downloadIntegrityResponseWriter struct {
+	http.ResponseWriter
+	pending  []byte
+	writeErr error
+}
+
+func newDownloadIntegrityResponseWriter(w http.ResponseWriter) *downloadIntegrityResponseWriter {
+	return &downloadIntegrityResponseWriter{
+		ResponseWriter: w,
+		pending:        make([]byte, 0, downloadIntegrityTailBytes*2),
+	}
+}
+
+func (w *downloadIntegrityResponseWriter) Write(p []byte) (int, error) {
+	if w.writeErr != nil {
+		return 0, w.writeErr
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+
+	previousPending := len(w.pending)
+	w.pending = append(w.pending, p...)
+	if len(w.pending) <= downloadIntegrityTailBytes {
+		return len(p), nil
+	}
+
+	flushBytes := len(w.pending) - downloadIntegrityTailBytes
+	n, err := w.ResponseWriter.Write(w.pending[:flushBytes])
+	if err == nil && n != flushBytes {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		w.writeErr = err
+		currentWritten := n - previousPending
+		if currentWritten < 0 {
+			currentWritten = 0
+		}
+		if currentWritten > len(p) {
+			currentWritten = len(p)
+		}
+		return currentWritten, err
+	}
+
+	copy(w.pending, w.pending[flushBytes:])
+	w.pending = w.pending[:downloadIntegrityTailBytes]
+	return len(p), nil
+}
+
+func (w *downloadIntegrityResponseWriter) commit() error {
+	if w.writeErr != nil {
+		return w.writeErr
+	}
+	for len(w.pending) > 0 {
+		n, err := w.ResponseWriter.Write(w.pending)
+		if err == nil && n != len(w.pending) {
+			err = io.ErrShortWrite
+		}
+		if n > 0 {
+			copy(w.pending, w.pending[n:])
+			w.pending = w.pending[:len(w.pending)-n]
+		}
+		if err != nil {
+			w.writeErr = err
+			return err
+		}
+	}
+	return nil
+}
+
+func (w *downloadIntegrityResponseWriter) abort(err error) {
+	if err == nil {
+		err = errDownloadSnapshotChanged
+	}
+	w.writeErr = err
+	w.pending = w.pending[:0]
 }
 
 func (w *apiDownloadResponseWriter) WriteHeader(statusCode int) {

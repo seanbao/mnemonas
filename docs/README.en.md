@@ -39,6 +39,7 @@ This directory contains MnemoNAS usage guides, deployment notes, and reference m
 | [Architecture](architecture.en.md) | System architecture and technology choices |
 | [Design decisions](design-decisions.en.md) | Design rationale and competitive goals |
 | [Roadmap](roadmap.en.md) | Priorities and capability boundaries from private file cloud to home and small-team NAS |
+| [Client refactor log](refactor-log.en.md) | Flutter client refactor progress, completed scope, and remaining work |
 | [Development guide](development.en.md) | Local setup and gates for the server, Web UI, and Flutter client |
 | [Flutter client](../client/README.en.md) | Current Android-first client scope, gaps, and validation boundaries |
 | [Testing strategy](testing-strategy.en.md) | Unit, integration, E2E, and torture test strategy |

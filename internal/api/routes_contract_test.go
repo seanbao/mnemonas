@@ -40,6 +40,7 @@ func expectedRESTRouteContracts() []string {
 		"GET /api/v1/diagnostics-export",
 		"POST /api/v1/directories/*",
 		"GET /api/v1/download/*",
+		"HEAD /api/v1/download/*",
 		"GET /api/v1/favorites/",
 		"POST /api/v1/favorites/",
 		"GET /api/v1/favorites/check",
