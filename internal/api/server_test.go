@@ -2867,6 +2867,71 @@ func TestServer_Search_WhitespaceOnlyQueryReturnsBadRequest(t *testing.T) {
 	}
 }
 
+func TestServer_Search_QueryLengthCountsUnicodeCharacters(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+
+	tests := []struct {
+		name   string
+		query  string
+		status int
+	}{
+		{
+			name:   "one hundred Chinese characters",
+			query:  strings.Repeat("文", 100),
+			status: http.StatusOK,
+		},
+		{
+			name:   "one hundred emoji code points",
+			query:  strings.Repeat("😀", 100),
+			status: http.StatusOK,
+		},
+		{
+			name:   "one hundred and one Chinese characters",
+			query:  strings.Repeat("文", 101),
+			status: http.StatusBadRequest,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(
+				http.MethodGet,
+				"/api/v1/search?q="+url.QueryEscape(tc.query),
+				nil,
+			)
+			w := httptest.NewRecorder()
+
+			server.Router().ServeHTTP(w, req)
+
+			if w.Code != tc.status {
+				t.Fatalf(
+					"Search Unicode query status = %d, want %d; body=%s",
+					w.Code,
+					tc.status,
+					w.Body.String(),
+				)
+			}
+		})
+	}
+}
+
+func TestServer_Search_InvalidUTF8QueryReturnsBadRequest(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/search?q=%FF", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf(
+			"Search invalid UTF-8 query status = %d, want %d; body=%s",
+			w.Code,
+			http.StatusBadRequest,
+			w.Body.String(),
+		)
+	}
+}
+
 func TestServer_Search_TraversalErrorReturnsInternalServerError(t *testing.T) {
 	server, fs, tmpDir := setupTestServer(t)
 	ctx := context.Background()
