@@ -49,8 +49,6 @@ The current development branch focuses on stability, public-access safety bounda
 - Key disposition entry points in Shares, version history, Trash, and Maintenance write activity review records for share disable, deletion, re-enable, policy update, version restore, Trash restore, and backup restore execution results. Activity review history now immediately shows newly matching records after disposition when they match the current filter, making accidental sharing, deletion, and restore follow-up traceable.
 - Tightened the release readiness summary: after the recorded full-validation target, `release-readiness` fails by default on committed or uncommitted non-release-documentation changes and requires refreshed full validation or an explicit draft override. Draft overrides for non-release-documentation changes now print `validation-warning` so they are not mistaken for final release readiness.
 - `release-readiness` treats the bilingual Docker deployment guide as release documentation after the full-validation target, allowing final publication updates for the actual tag, Release workflow result, and artifact names while still rejecting ordinary documentation or code changes.
-- `release-readiness` now requires all four hardening evidence documents to exist and record the same full-validation target, preventing missing evidence from being skipped before release.
-- `release-readiness` also requires the bilingual hardening progress ledgers to record the same full-validation target on their `make release-readiness` rows, preventing the readiness summary from staying on an older target after full-validation evidence is refreshed.
 - `release-readiness` also checks that both release-notes drafts record the current full-validation target, so stale validation snapshots fail before release.
 - `release-readiness` requires the bilingual release-notes post-publish download and artifact-verifier examples to use `<tag>` placeholders, preventing fixed version numbers from entering copyable commands before the first release.
 - `release-readiness` requires the `CHANGELOG.md` and `CHANGELOG.en.md` release checklists to include documentation, dependency-security, Docker build/smoke, selected release tag validation, and release script regression commands, and to retain the development-stage, no-usable-release, and no-real-data boundaries, preventing future release verification from omitting key local gates or data-safety limits.
@@ -64,12 +62,12 @@ The current development branch focuses on stability, public-access safety bounda
 - `release-readiness` rejects a base ref that is not an ancestor of the current HEAD, preventing misleading release-readiness summaries from sibling branch ranges.
 - Go test entry points now keep a 30-minute package timeout and limit full race runs to three concurrent packages. CI uses the same parameters with a 60-minute Go job limit so resource contention and verbose logging do not cause false timeouts in heavy packages.
 - Documentation checks reject copyable raw `?path=/...` path queries in API examples, requiring restore and favorite-check `path` query examples to use `%2F...` encoding.
-- Documentation checks require the bilingual release-notes pre-release validation list to keep its Playwright E2E counts, frontend-unit-test counts, Docker image, and Docker smoke port aligned with the latest full-validation evidence in the hardening review summary, preventing stale local evidence after validation evidence refreshes.
+- The bilingual release notes record the Playwright E2E count, frontend-unit-test count, Docker image, and Docker smoke port together. Final publication must refresh these values from the same latest validation run.
 - Documentation checks require the bilingual Docker deployment guide to retain the post-publish `verify-published-release.sh` command, version and repository arguments, optional artifact directory, image-manifest retry settings, `--skip-image-check`, `--keep-artifacts`, `--keep-published-artifacts`, empty-directory requirements, dash-prefixed artifact directories, and pre-download repository validation guidance, preventing post-publish verification guidance from regressing.
 - Documentation checks require the security hardening guide's public-deployment checklist to retain the initial-password, WebDAV authentication, doctor, public firewall, anonymous WebDAV, direct-backend, and dataplane exposure review items.
 - Documentation checks require the backup guide to retain restore-drill commands, 30-day drill reminders, failure categories, retained drill artifacts, restore-summary export, and the guidance that backups are not proven until restored, preventing recovery-usability documentation from regressing.
 - Storage and configuration documentation clarify that the FastCDC API is a Rust dataplane capability, while current version history still uses whole-object CAS snapshots and does not reference-count CDC chunks; documentation checks reject overclaims that imply block-level version deduplication is enabled.
-- Streamlined and synchronized Chinese and English documentation, including deployment, configuration, FAQ, roadmap, security, hardening progress, and pre-release review entry points.
+- Streamlined and synchronized Chinese and English documentation, including deployment, configuration, FAQ, roadmap, security, client refactor records, and pre-release review entry points.
 
 ## Release Artifacts
 
@@ -84,9 +82,9 @@ Archives should include a top-level directory, `nasd`, `dataplane`, Web UI stati
 
 ## Pre-Release Validation
 
-The current hardening branch has the following validation evidence. Final publication should use the latest tag, Release workflow result, and required environment validation as the source of truth:
+The current development branch has the following validation evidence. Final publication should use the latest tag, Release workflow result, and required environment validation as the source of truth:
 
-Latest local full-validation snapshot: validation target `3f6a01524616`. `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` passed 23 diff-aware gates covering diff and secret scans, workflows, scripts, toolchains, dependency security, example configuration, Docker templates, protobuf regeneration stability, short tests for 27 Go packages, Rust fmt/test/clippy, frontend lint/typecheck/coverage/build, Playwright, Docker build/smoke, and bilingual documentation. Key Go package results were API in 636.884 seconds, storage in 809.027 seconds, and WebDAV in 27.551 seconds. The Rust data plane passed 59 tests. The frontend passed 3652 tests across 102 files, with statement, branch, function, and line coverage of 91.74%, 86.67%, 97.43%, and 92.27%, respectively. Playwright passed 409/409 without retry, failure, or skip. Docker image `sha256:1b005ff6838058f94341bfe25dd2ebe3c33f93ff47a4ce958cbe1a8982d5e1e7` passed health and frontend smoke at the Docker-assigned loopback address `http://127.0.0.1:32769`. A separate isolated `make fault-injection` run passed with 9 PASS, 0 FAIL, and 0 SKIP, covering crash-interrupted write recovery, concurrent ETag conflicts, an actual version restore, CAS corruption detection, and SQLite metadata quarantine and recovery.
+Latest local validation snapshot: validation target `7d62047f2267`. This target consists of the full-validation baseline `2efd41c03bae` and one subsequent Android signing-validation fix commit. The baseline used pinned Go, Flutter, Dart, and JDK 17 toolchains to run `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base b8968ca7399b50e5f20e6bccd397f3c65259e391`; all 10 diff-aware gates passed, covering diff and secret scans, workflows, scripts, YAML, full Go race tests, Rust fmt/test/clippy, frontend lint/typecheck/unit tests/build, Flutter checks, an Android Debug build, Docker build/smoke, and bilingual documentation. The Rust data plane passed 59 tests. The frontend passed 3652 tests across 102 files. Flutter passed 293 tests, with one live test requiring real credentials skipped as intended. After the signing fix, the client incremental gate and a fresh CI-order worktree validation passed on the validation target: 12 Release-policy regression tests, the Android Debug build, and Release APK/AAB builds with a temporary test certificate plus actual artifact signature verification all succeeded. The validation restored or removed `local.properties`, the Gradle wrapper, signing material, Release outputs, and reusable configuration-cache entries. All 409 Playwright E2E cases passed without retry, failure, or skip. Docker image `sha256:7687fd888870510171a116df1fa98a74f8a3538f8d8b1722cd52138e12676232` passed health and frontend smoke at the Docker-assigned loopback address `http://127.0.0.1:32770`.
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
@@ -114,9 +112,9 @@ Latest local full-validation snapshot: validation target `3f6a01524616`. `GOTOOL
 - Docker smoke safety test: `scripts/test-docker-smoke.sh`
 - WebDAV curl smoke safety test: `scripts/test-webdav-client-smoke.sh`
 - Release workflow incremental validation: `make workflows-check`, `make scripts-check`, `./scripts/check-secret-leaks.sh`, `make toolchains-check`, `git diff --check`
-- Playwright E2E: `379 passed`
-- Frontend unit tests: `3124 passed`
-- Docker build and `scripts/docker-smoke.sh`
+- Playwright E2E: `409 passed`
+- Frontend unit tests: `3652 passed`
+- Docker image `sha256:7687fd888870510171a116df1fa98a74f8a3538f8d8b1722cd52138e12676232`; Docker smoke used the Docker-assigned loopback port `http://127.0.0.1:32770`
 
 If code, scripts, configuration, documentation, or workflow files change again before release, rerun the matching validation.
 
@@ -165,6 +163,6 @@ To retain temporary downloaded artifacts while investigating a failure, omit `--
 - Confirm this draft is updated with the final tag, validation results, and artifact names.
 - Confirm `git status --short --branch` is clean.
 - Confirm `./scripts/plan-hardening-commits.sh --fail-on-manual` reports no paths left to group.
-- Run `make release-readiness` and confirm commit subjects, temporary `fixup!` / `squash!` commits, hardening validation evidence, release-documentation commands, public-deployment review commands, security policy, Dependabot baseline, CI/Release workflow baseline, Makefile core local gate target baseline, torture workflow baseline, development status, and Issue feedback entry points pass.
+- Run `make release-readiness` and confirm commit subjects, temporary `fixup!` / `squash!` commits, bilingual validation records, release-documentation commands, public-deployment review commands, security policy, Dependabot baseline, CI/Release workflow baseline, Makefile core local gate target baseline, torture workflow baseline, development status, and Issue feedback entry points pass.
 - After creating and pushing the tag, confirm the Release workflow succeeds.
 - After publication, run `./scripts/release-go-live-check.sh` and record the artifact verification, public smoke, and backup restore-drill results.

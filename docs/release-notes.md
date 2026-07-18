@@ -49,8 +49,6 @@
 - 分享、版本历史、回收站和维护页的关键处置入口会写入活动复核记录，覆盖分享停用、删除、重新启用、策略更新、版本恢复、回收站恢复和备份恢复执行结果；活动页复核历史在处置后会立即显示符合当前筛选的新记录，便于按记录时间复核误分享、误删和恢复处置结果。
 - 收紧发布就绪摘要：记录的完整验证目标之后如出现已提交或未提交的非发布文档变更，`release-readiness` 默认失败，并要求刷新完整验证或显式草稿放行；草稿放行非发布文档变更时会输出 `validation-warning`，避免被误读为正式发布就绪。
 - `release-readiness` 会把双语 Docker 部署说明视为完整验证目标后的发布文档，允许最终发布时按实际 tag、Release workflow 结果和产物名称刷新公开部署说明，同时继续拒绝普通文档或代码变更混入。
-- `release-readiness` 现在要求四份 hardening 证据文档都存在，并且都记录同一个完整验证目标，避免发布前证据缺失被静默跳过。
-- `release-readiness` 还会要求双语 hardening progress 台账在 `make release-readiness` 记录中写入同一个完整验证目标，避免完整验证证据刷新后发布就绪摘要仍停留在旧目标。
 - `release-readiness` 还会检查双语 release notes 草稿记录当前完整验证目标，避免发布说明中的验证快照滞后。
 - `release-readiness` 会要求双语 release notes 的发布后下载和 artifact verifier 示例使用 `<tag>` 占位，避免首次发布前把固定版本号写入可复制命令。
 - `release-readiness` 会要求 `CHANGELOG.md` 和 `CHANGELOG.en.md` 的发布清单包含文档检查、依赖安全检查、Docker 构建烟测、所选发布 tag 校验和发布脚本回归命令，并保留开发阶段、尚无可用版本、不得承载真实数据的边界，避免未来发布核验遗漏关键本地门禁或数据安全限制。
@@ -64,12 +62,12 @@
 - `release-readiness` 会拒绝不是当前 HEAD 祖先的 base ref，避免用旁支范围生成误导性的发布就绪摘要。
 - Go 测试入口现在保留 30 分钟包级超时，并将完整 race 测试的包级并发限制为 3；CI 使用相同参数且为 Go job 保留 60 分钟总时限，避免重负载包因资源竞争和详细日志开销误超时。
 - 文档检查会拒绝 API 示例中可复制的 `?path=/...` 裸路径查询，要求恢复和收藏检查等 `path` 查询示例使用 `%2F...` 编码形式。
-- 文档检查会要求双语 release notes 发布前验证清单中的 Playwright E2E、前端单测数量、Docker image 和 Docker smoke 端口与 hardening 审查摘要中的最新完整验证证据一致，避免验证证据刷新后发布说明局部数据滞后。
+- 双语 release notes 会同时记录 Playwright E2E、前端单测数量、Docker image 和 Docker smoke 端口；最终发布前应按同一次最新验证结果同步刷新这些数据。
 - 文档检查会要求双语 Docker 部署指南保留发布后 `verify-published-release.sh` 命令、版本和仓库参数、可选 artifact 目录、镜像 manifest 重试参数、`--skip-image-check`、`--keep-artifacts`、`--keep-published-artifacts`、空目录要求、dash-prefixed artifact 目录和仓库名下载前校验说明，避免发布后核验说明退化。
 - 文档检查会要求安全加固指南的公网部署清单保留初始密码、WebDAV 认证、doctor、公网防火墙、匿名 WebDAV、直连后端和 dataplane 暴露等关键复核项。
 - 文档检查会要求备份指南保留恢复演练命令、30 天演练提醒、失败分类、保留演练产物、恢复摘要导出和“未恢复过不算验证”的说明，避免恢复可用性文档退化。
 - 存储和配置文档明确 FastCDC API 属于 Rust 数据面能力，当前版本历史仍使用整对象 CAS 快照，不按 CDC 分块引用计数；文档检查会拒绝回退为块级版本去重的过度承诺。
-- 精简并同步中英文文档，补齐部署、配置、FAQ、路线图、安全、硬化进度和发布前审查入口。
+- 精简并同步中英文文档，补齐部署、配置、FAQ、路线图、安全、客户端重构记录和发布前审查入口。
 
 ## 发布产物
 
@@ -84,9 +82,9 @@ Release workflow 预期生成以下产物：
 
 ## 发布前验证
 
-当前硬化分支已有以下验证证据；最终发布前应以最新 tag、Release workflow 结果和必要的环境验证为准：
+当前开发分支已有以下验证证据；最终发布前应以最新 tag、Release workflow 结果和必要的环境验证为准：
 
-最近本地完整验证快照：验证目标 `3f6a01524616`。`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过 23 项变更感知门禁，覆盖 diff 与密钥扫描、workflow、脚本、工具链、依赖安全、示例配置、Docker 模板、protobuf 再生成稳定性、27 个 Go 包短测、Rust fmt/test/clippy、前端 lint/typecheck/覆盖率/构建、Playwright、Docker build/smoke 和双语文档。Go 关键包结果为 API 636.884 秒、storage 809.027 秒、WebDAV 27.551 秒；Rust 数据面 59 项测试通过；前端 102 个测试文件共 3652 项测试通过，语句、分支、函数和行覆盖率分别为 91.74%、86.67%、97.43% 和 92.27%；Playwright 409/409 通过，且无 retry、failure 或 skip。Docker image `sha256:1b005ff6838058f94341bfe25dd2ebe3c33f93ff47a4ce958cbe1a8982d5e1e7` 通过 Docker 自动分配的 loopback 地址 `http://127.0.0.1:32769` 的 health 与 frontend smoke。另行执行的隔离 `make fault-injection` 以 9 PASS、0 FAIL、0 SKIP 通过，覆盖崩溃写恢复、并发 ETag 冲突、真实版本恢复、CAS 损坏检测和 SQLite 元数据损坏隔离恢复。
+最近本地验证快照：验证目标 `7d62047f2267`。该目标由完整验证基线 `2efd41c03bae` 与其后的单个 Android 签名验证修复提交构成。完整基线以固定 Go、Flutter、Dart 和 JDK 17 工具链执行 `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base b8968ca7399b50e5f20e6bccd397f3c65259e391`，10 项变更感知门禁通过，覆盖 diff 与密钥扫描、workflow、脚本、YAML、完整 Go race、Rust fmt/test/clippy、前端 lint/typecheck/单测/构建、Flutter 检查、Android Debug 构建、Docker build/smoke 和双语文档。Rust 数据面 59 项测试通过；前端 102 个测试文件共 3652 项测试通过；Flutter 293 项测试通过，另有 1 项需要真实凭据的 live 测试按预期跳过。签名修复后，对验证目标执行客户端增量门禁和全新 CI 顺序工作树验证：12 项 Release 策略回归测试、Android Debug 构建，以及带临时测试证书的 Release APK/AAB 构建与实际验签均通过；`local.properties`、Gradle wrapper、签名材料、Release 产物和 configuration-cache 可复用条目均在验证后恢复或清理。Playwright 409 个 E2E 用例全部通过，无 retry、failure 或 skip。Docker image `sha256:7687fd888870510171a116df1fa98a74f8a3538f8d8b1722cd52138e12676232` 通过 Docker 自动分配的 loopback 地址 `http://127.0.0.1:32770` 的 health 与 frontend smoke。
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
@@ -114,9 +112,9 @@ Release workflow 预期生成以下产物：
 - Docker smoke safety test：`scripts/test-docker-smoke.sh`
 - WebDAV curl smoke safety test：`scripts/test-webdav-client-smoke.sh`
 - Release workflow 增量验证：`make workflows-check`、`make scripts-check`、`./scripts/check-secret-leaks.sh`、`make toolchains-check`、`git diff --check`
-- Playwright E2E：`379 passed`
-- 前端单测：`3124 passed`
-- Docker build 和 `scripts/docker-smoke.sh`
+- Playwright E2E：`409 passed`
+- 前端单测：`3652 passed`
+- Docker image `sha256:7687fd888870510171a116df1fa98a74f8a3538f8d8b1722cd52138e12676232`；Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32770`
 
 最终发布前如代码、脚本、配置、文档或 workflow 再次变更，应重跑对应验证。
 
@@ -165,6 +163,6 @@ mkdir -p dist/release-check
 - 确认本草稿已按最终 tag、验证结果和产物名称更新。
 - 确认 `git status --short --branch` 干净。
 - 确认 `./scripts/plan-hardening-commits.sh --fail-on-manual` 没有待分组路径。
-- 运行 `make release-readiness`，确认提交标题、临时 `fixup!` / `squash!` 提交、hardening 验证证据、发布文档命令、公网部署复核命令、安全策略、Dependabot 基线、CI/Release workflow 基线、Makefile 核心本地门禁目标基线、torture workflow 基线、开发状态和 Issue 反馈入口均通过检查。
+- 运行 `make release-readiness`，确认提交标题、临时 `fixup!` / `squash!` 提交、双语验证记录、发布文档命令、公网部署复核命令、安全策略、Dependabot 基线、CI/Release workflow 基线、Makefile 核心本地门禁目标基线、torture workflow 基线、开发状态和 Issue 反馈入口均通过检查。
 - 创建并推送 tag 后，确认 Release workflow 成功。
 - 发布后运行 `./scripts/release-go-live-check.sh`，并记录产物核验、公网 smoke 和备份恢复演练结果。
