@@ -2,7 +2,10 @@
 
 English | [简体中文](reverse-proxy-setup.md)
 
-This guide explains how to expose MnemoNAS through HTTPS with a reverse proxy.
+> [!WARNING]
+> MnemoNAS has not published a usable release. This guide only validates a future public-entry configuration. Do not expose the current development build to the public internet.
+
+This guide explains how to validate future HTTPS access through a reverse proxy.
 Public access should go through HTTPS on `80/443`, not by exposing the raw `8080` service directly.
 For a new public-server deployment, follow the [Public server quickstart](public-server-quickstart.en.md) first.
 This guide keeps the detailed Caddy, Nginx, and Traefik examples.
@@ -141,7 +144,7 @@ sudo systemctl status caddy
 
 Verify:
 
-Prefer `auth_type=users` for public or production WebDAV mounts.
+Future public-release WebDAV mounts should prefer `auth_type=users`.
 
 ```bash
 curl -I https://nas.example.com/health
@@ -404,7 +407,7 @@ ss -tlnp | grep -E '80|443|8080|9090|9091'
 
 WebDAV:
 
-Prefer `auth_type=users` for public or production WebDAV mounts.
+Future public-release WebDAV mounts should prefer `auth_type=users`.
 
 ```bash
 # Use a MnemoNAS username and password when auth_type=users.

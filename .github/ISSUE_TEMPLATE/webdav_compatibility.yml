@@ -7,6 +7,10 @@ body:
   - type: markdown
     attributes:
       value: |
+        MnemoNAS is still under development and has not published a usable release. This form records feedback against the current source tree.
+
+        MnemoNAS 仍处于开发阶段，尚未发布可用版本。本表单用于记录针对当前源码的 WebDAV 兼容性反馈。
+
         Use this form for WebDAV client compatibility reports, including successful validation, client-specific failures, and behavior that differs between clients. Remove passwords, tokens, cookies, private URLs, internal addresses, and private file names before posting logs or screenshots.
 
         本表单用于提交 WebDAV 客户端兼容性报告，包括验证通过、特定客户端失败，以及不同客户端之间行为不一致的问题。粘贴日志或截图前，应移除密码、Token、Cookie、私密 URL、内网地址和私有文件名。
@@ -54,11 +58,11 @@ body:
     validations:
       required: true
   - type: input
-    id: mnemonas_version
+    id: mnemonas_commit
     attributes:
-      label: MnemoNAS version or commit / MnemoNAS 版本或提交
-      description: Release version, container tag, or Git commit. Release 版本、容器标签或 Git commit。
-      placeholder: v0.1.0 or c037056c
+      label: Tested MnemoNAS Git commit / 测试所用 MnemoNAS 提交
+      description: Full or abbreviated Git commit used for the test. 实际测试所用的完整或缩写 Git commit。
+      placeholder: c037056c
     validations:
       required: true
   - type: dropdown

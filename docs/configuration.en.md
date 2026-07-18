@@ -2,6 +2,9 @@
 
 English | [简体中文](configuration.md)
 
+> [!WARNING]
+> MnemoNAS has not published a usable release. Configuration formats may still change during development, with no published-version compatibility guarantee.
+
 MnemoNAS uses TOML configuration. This reference covers config discovery, validation, complete examples, and all main config sections.
 
 ## Config File Locations
@@ -439,7 +442,7 @@ password = "" # leave empty to use generated credentials; use a password-manager
 
 ## `[smb]`
 
-The current release does not start an SMB/Samba listener. This section is a preview contract for a future SMB gateway sidecar. If `enabled = true`, `nasd --check-config` prints a preview warning, and the health page plus diagnostics export report SMB runtime as unavailable. Use WebDAV for current LAN mounts.
+The current development build does not start an SMB/Samba listener. This section is a preview contract for a future SMB gateway sidecar. If `enabled = true`, `nasd --check-config` prints a preview warning, and the health page plus diagnostics export report SMB runtime as unavailable. Use WebDAV for LAN validation.
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |

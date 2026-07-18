@@ -2,7 +2,10 @@
 
 English | [简体中文](cloud-firewall-checklist.md)
 
-Use this checklist before exposing MnemoNAS through a public domain. Cloud providers use different names such as security groups, network security groups, VPC firewall rules, or security lists, but the required inbound policy is the same.
+> [!WARNING]
+> MnemoNAS has not published a usable release. The current development build must not be exposed to the public internet. This checklist is only for environment validation before a future first public release.
+
+Use this checklist during future public-release preparation. Cloud providers use different names such as security groups, network security groups, VPC firewall rules, or security lists, but the required inbound policy is the same.
 
 ## Minimum Public Rules
 

@@ -4,19 +4,22 @@
 
 本目录包含 MnemoNAS 的使用指南、部署说明和参考文档。
 
+> [!WARNING]
+> MnemoNAS 仍处于开发阶段，尚未发布任何可用版本。本文档用于源码开发、测试和未来发布准备；问题与建议通过 [GitHub Issues](https://github.com/seanbao/mnemonas/issues) 提交。
+
 ## 文档索引
 
-### 快速入门
+### 开发验证与未来部署参考
 
 | 中文 | English | 说明 |
 |------|---------|------|
-| [README](../README.md) | [README](../README.en.md) | 项目介绍与快速开始 |
-| [Linux/systemd 部署指南](linux-systemd-deployment.md) | [Linux/systemd deployment](linux-systemd-deployment.en.md) | 在 Linux 服务器上用 systemd 长期运行 |
-| [公网服务器快速上线](public-server-quickstart.md) | [Public server quickstart](public-server-quickstart.en.md) | 公网域名、HTTPS、反向代理和安全检查的一条推荐路径 |
-| [Docker 部署指南](docker-deployment.md) | [Docker deployment](docker-deployment.en.md) | 使用 Docker 部署 MnemoNAS |
-| [挂载指南](mounting-guide.md) | [Mounting guide](mounting-guide.en.md) | 各平台 WebDAV 挂载教程 |
-| [反向代理配置](reverse-proxy-setup.md) | [Reverse proxy setup](reverse-proxy-setup.en.md) | HTTPS 外网访问配置（Caddy/Nginx/Traefik/Cloudflare Tunnel） |
-| [公网云防火墙复核清单](cloud-firewall-checklist.md) | [Public cloud firewall checklist](cloud-firewall-checklist.en.md) | 云安全组、VPC 防火墙和端口暴露复核 |
+| [README](../README.md) | [README](../README.en.md) | 项目状态与源码试运行入口 |
+| [Linux/systemd 部署指南](linux-systemd-deployment.md) | [Linux/systemd deployment](linux-systemd-deployment.en.md) | 未来 release 包的 systemd 验证流程 |
+| [公网服务器快速上线](public-server-quickstart.md) | [Public server quickstart](public-server-quickstart.en.md) | 未来公网发布前的 HTTPS 与安全验证流程 |
+| [Docker 部署指南](docker-deployment.md) | [Docker deployment](docker-deployment.en.md) | 源码构建与未来容器发布验证 |
+| [挂载指南](mounting-guide.md) | [Mounting guide](mounting-guide.en.md) | 开发环境中的 WebDAV 客户端验证 |
+| [反向代理配置](reverse-proxy-setup.md) | [Reverse proxy setup](reverse-proxy-setup.en.md) | 未来公网发布路径的反向代理验证 |
+| [公网云防火墙复核清单](cloud-firewall-checklist.md) | [Public cloud firewall checklist](cloud-firewall-checklist.en.md) | 未来公网发布的云防火墙复核 |
 
 ### 用户指南
 
@@ -37,17 +40,16 @@
 | [路线图](roadmap.md) | [Roadmap](roadmap.en.md) | 从私有文件云盘到家庭/小团队 NAS 的优先级和能力边界 |
 | [开发指南](development.md) | [Development guide](development.en.md) | 本地开发环境搭建 |
 | [测试策略](testing-strategy.md) | [Testing strategy](testing-strategy.en.md) | 多层测试方案：单元、集成、E2E、torture 与前端测试 |
-| [发布说明草稿](release-notes.md) | [Release notes draft](release-notes.en.md) | 下一次公开发布的说明草稿、验证证据和发布后核验入口 |
+| [开发阶段变更记录](release-notes.md) | [Development change record](release-notes.en.md) | 未发布开发分支的变更、验证证据和首次公开发布准备 |
 | [API 参考](api-reference.md) | [API reference](api-reference.en.md) | REST API 端点与请求/响应格式 |
 | [扩展点设计](extension-points.md) | [Extension points](extension-points.en.md) | 未来接口草案（S3/插件/Runner） |
 
-### 支持与安全
+### 反馈与安全
 
 | 中文 | English | 说明 |
 |------|---------|------|
-| [支持说明](../SUPPORT.md) | [Support](../SUPPORT.en.md) | 支持渠道、问题分流和支持边界 |
-| [贡献指南](../CONTRIBUTING.md) | [Contributing guide](../CONTRIBUTING.en.md) | 贡献流程、质量门禁和安全边界 |
-| [行为准则](../CODE_OF_CONDUCT.zh-CN.md) | [Code of Conduct](../CODE_OF_CONDUCT.md) | 社区空间行为预期和执行范围 |
+| [反馈说明](../SUPPORT.md) | [Feedback](../SUPPORT.en.md) | Issue 反馈渠道、所需信息和处理边界 |
+| [行为准则](../CODE_OF_CONDUCT.zh-CN.md) | [Code of Conduct](../CODE_OF_CONDUCT.md) | 问题反馈渠道的行为要求 |
 | [安全策略](../SECURITY.zh-CN.md) | [Security policy](../SECURITY.md) | 安全漏洞报告方式和部署安全提醒 |
 
 ### 配置参考
@@ -66,16 +68,17 @@
 
 ## 阅读建议
 
-**首次使用**：
+**开发验证**：
+
 1. 阅读 [README](../README.md) 了解项目
-2. 长期运行优先按 [Linux/systemd 部署指南](linux-systemd-deployment.md) 安装；临时试用可按 [Docker 部署指南](docker-deployment.md) 启动
-3. 需要公网访问时，按 [公网服务器快速上线](public-server-quickstart.md) 配置 HTTPS 入口
-4. 参考 [挂载指南](mounting-guide.md) 连接到 NAS
+2. 按 [开发指南](development.md) 搭建本地环境，或用 [Docker 部署指南](docker-deployment.md) 从源码构建开发镜像
+3. 使用非重要测试数据验证文件与 WebDAV 行为
+4. 不要把当前源码用于生产环境或公网服务
 
 **遇到问题**：
 1. 查看 [FAQ](faq.md) 寻找解决方案
 2. 检查 [WebDAV 兼容性](webdav-compatibility.md) 确认客户端支持
-3. 按 [支持说明](../SUPPORT.md) 选择 Issues 或安全报告渠道
+3. 按 [反馈说明](../SUPPORT.md) 选择 Issue 或私密安全报告渠道
 
 **开发参考**：
 1. 阅读 [架构设计](architecture.md) 了解系统结构

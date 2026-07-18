@@ -111,7 +111,7 @@ const readmeClientSummaries = [
     topForbiddenText: [
       '常见 WebDAV 客户端均可访问',
     ],
-    sectionStart: '### 客户端连接',
+    sectionStart: '### 客户端连接验证',
     sectionEnd: '## 项目结构',
     requiredText: [
       '[WebDAV 兼容性](docs/webdav-compatibility.md)',
@@ -119,7 +119,7 @@ const readmeClientSummaries = [
       '真实客户端 E2E 覆盖',
       '仍按矩阵继续跟踪',
       '根目录示例配置保留 `basic` 作为兼容基线',
-      '日常或生产挂载应改用 `users`',
+      '验证用户权限时应改用 `users`',
       '| 平台 | 常见客户端 | 连接地址 |',
     ],
     forbiddenText: [
@@ -135,7 +135,7 @@ const readmeClientSummaries = [
     topForbiddenText: [
       'common WebDAV clients are both supported',
     ],
-    sectionStart: '### WebDAV Clients',
+    sectionStart: '### WebDAV Client Validation',
     sectionEnd: '## Repository Layout',
     requiredText: [
       '[WebDAV Compatibility](docs/webdav-compatibility.en.md)',
@@ -143,7 +143,7 @@ const readmeClientSummaries = [
       'real-client E2E coverage',
       'remain tracked by the matrix',
       'root example config keeps `basic` as a compatibility baseline',
-      'Day-to-day or production mounts should switch to `users`',
+      'User-boundary validation should switch to `users`',
       '| Platform | Common Client | URL |',
     ],
     forbiddenText: [
@@ -162,7 +162,7 @@ const mountingGuides = [
       '真实客户端 E2E 覆盖',
       '仍按矩阵跟踪',
       '根目录示例配置保留 `basic` 作为兼容基线',
-      '日常或生产挂载应改用 `users`',
+      '开发验证挂载应改用 `users`',
     ],
   },
   {
@@ -174,7 +174,7 @@ const mountingGuides = [
       'real-client E2E coverage',
       'remain tracked by the matrix',
       'root example config keeps `basic` as a compatibility baseline',
-      'Day-to-day or production mounts should switch to `users`',
+      'Development validation mounts should switch to `users`',
     ],
   },
 ]
@@ -186,7 +186,7 @@ const faqAuthGuides = [
     sectionEnd: '### 是否支持 HTTPS？',
     requiredText: [
       'auth_type = "users"',
-      '日常或生产 WebDAV 挂载应优先使用 MnemoNAS 用户认证',
+      '开发验证中的 WebDAV 挂载应优先使用 MnemoNAS 用户认证',
       '旧客户端或专用服务凭据',
       'Basic Auth',
     ],
@@ -197,7 +197,7 @@ const faqAuthGuides = [
     sectionEnd: '### Is HTTPS supported?',
     requiredText: [
       'auth_type = "users"',
-      'Day-to-day or production WebDAV mounts should prefer MnemoNAS user authentication',
+      'WebDAV mounts used for development validation should prefer MnemoNAS user authentication',
       'legacy clients or dedicated service credentials',
       'Basic Auth',
     ],

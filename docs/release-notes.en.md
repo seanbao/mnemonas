@@ -1,12 +1,12 @@
-# Release Notes Draft
+# Development Change Record (Unreleased)
 
 English | [简体中文](release-notes.md)
 
-This document is the release-notes draft for the next public release. The final release notes should use the corresponding tag, CI result, Release artifacts, and deployment validation result as the source of truth.
+This document records changes and validation evidence for the current unreleased development branch while retaining preparation steps for a future first public release. It is not a release announcement; MnemoNAS has not published any usable release.
 
 ## Summary
 
-This release candidate focuses on improving MnemoNAS stability, public-access safety boundaries, deployment verifiability, and documentation maintainability as a self-hosted NAS. The current hardening branch is split into reviewable commits by risk area and has passed full branch-range validation.
+The current development branch focuses on stability, public-access safety boundaries, deployment verifiability, and documentation maintainability. Hardening changes are split by risk area and have passed full branch-range validation. Those results apply only to the recorded checkout and do not mean that a usable release exists.
 
 ## Major Changes
 
@@ -42,12 +42,12 @@ This release candidate focuses on improving MnemoNAS stability, public-access sa
 - `release-readiness` also requires the bilingual hardening progress ledgers to record the same full-validation target on their `make release-readiness` rows, preventing the readiness summary from staying on an older target after full-validation evidence is refreshed.
 - `release-readiness` also checks that both release-notes drafts record the current full-validation target, so stale validation snapshots fail before release.
 - `release-readiness` requires the bilingual release-notes post-publish download and artifact-verifier examples to use `<tag>` placeholders, preventing fixed version numbers from entering copyable commands before the first release.
-- `release-readiness` requires the `CHANGELOG.md` and `CHANGELOG.en.md` release checklists to include documentation, dependency-security, Docker build/smoke, selected release tag validation, and release script regression commands, and to retain the L1/L1+ release-candidate positioning, non-primary-copy, and external-backup boundaries, preventing final release verification from omitting key local gates or data-safety limits.
+- `release-readiness` requires the `CHANGELOG.md` and `CHANGELOG.en.md` release checklists to include documentation, dependency-security, Docker build/smoke, selected release tag validation, and release script regression commands, and to retain the development-stage, no-usable-release, and no-real-data boundaries, preventing future release verification from omitting key local gates or data-safety limits.
 - `release-readiness` requires the Dependabot configuration to cover Go, Rust dataplane, Rust proto generator, Web npm, GitHub Actions, and Docker dependency update entry points, preventing the release branch from losing its dependency-maintenance baseline.
 - `release-readiness` requires `.github/workflows/ci.yml` and `.github/workflows/release.yml` to retain key CI, E2E, Docker smoke, release-tag validation, release-artifact upload and download, checksum generation and publication, version- and repository-bound release-artifact verification, pre-publish image verification, release-job dependencies, and publication-permission baselines, preventing core automation paths from being lost before release.
 - `release-readiness` requires `Makefile` to retain core local gate targets such as `check`, `verify-changed`, `release-readiness`, `quick-check`, `security-check`, `docker-check`, and `test-torture`, preventing CI, release-checklist, and maintainer-documentation entry points from being lost before release.
 - `release-readiness` requires `.github/workflows/torture.yml` to retain manual and scheduled triggers, read-only permissions, the `RUN_LIVE_FAULTS: '0'` non-destructive guard, and the `make test-torture` entry point, preventing the long-running regression workflow from being lost before release.
-- `release-readiness` requires blank Issues to stay disabled and checks that the bug report, usage question, feature request, and WebDAV compatibility Issue Forms keep sensitive-data redaction, diagnostic, and security-impact guidance, preventing public collaboration entry points from bypassing safety prompts.
+- `release-readiness` requires blank Issues to stay disabled and checks that the bug report, usage question, feature request, and WebDAV compatibility Issue Forms keep sensitive-data redaction, diagnostic, and security-impact guidance, preventing public feedback entry points from bypassing safety prompts.
 - `release-readiness` checks that the security policy and support guide retain private vulnerability reporting, public-disclosure warnings, dataplane port exposure boundaries, dependency-security checks, and direct-public-exposure limitations.
 - `release-readiness` requires the release checklist and bilingual release notes to retain the `mnemonas-doctor --public-domain`, `scripts/public-go-live-smoke.sh`, `scripts/backup-restore-drill-smoke.sh`, `scripts/release-go-live-check.sh`, and `cloud-firewall-checklist` entry points, preventing public-deployment environment review, post-publication go-live verification, and the restore-drill entry point from being omitted during final release preparation.
 - `release-readiness` rejects a base ref that is not an ancestor of the current HEAD, preventing misleading release-readiness summaries from sibling branch ranges.
@@ -142,7 +142,7 @@ To retain temporary downloaded artifacts while investigating a failure, omit `--
 
 ## Known Limitations
 
-- This release candidate is positioned as a fully locally validated L1 private file cloud with an initial L1+ public-access safety baseline, not as the only long-term copy of important data. Production use should keep external backups and continue collecting real-media restore, remote-restore disposition, cross-version upgrade, and rollback records.
+- There is currently no release candidate and no usable release has been published. The validation evidence in this document applies only to the named development branch and checkout; it does not indicate production readiness. The current source tree must not hold real data or be used for production deployment.
 - The mountable SMB/Samba runtime is still not enabled. The current build only keeps configuration, diagnostics, and runtime-state notices.
 - `LOCK` / `UNLOCK` are virtual WebDAV compatibility behavior. Concurrent multi-client edits of the same file still require conflict control in the client or upper workflow.
 - Real public deployments depend on the specific DNS, firewall, TLS, reverse-proxy, and cloud security-group configuration. Templates and doctor checks do not replace environment-level review.
@@ -154,6 +154,6 @@ To retain temporary downloaded artifacts while investigating a failure, omit `--
 - Confirm this draft is updated with the final tag, validation results, and artifact names.
 - Confirm `git status --short --branch` is clean.
 - Confirm `./scripts/plan-hardening-commits.sh --fail-on-manual` reports no paths left to group.
-- Run `make release-readiness` and confirm commit subjects, temporary `fixup!` / `squash!` commits, hardening validation evidence, release-documentation commands, public-deployment review commands, security policy, Dependabot baseline, CI/Release workflow baseline, Makefile core local gate target baseline, torture workflow baseline, blank-Issue disablement and Issue Form safety guidance, and community health files pass.
+- Run `make release-readiness` and confirm commit subjects, temporary `fixup!` / `squash!` commits, hardening validation evidence, release-documentation commands, public-deployment review commands, security policy, Dependabot baseline, CI/Release workflow baseline, Makefile core local gate target baseline, torture workflow baseline, development status, and Issue feedback entry points pass.
 - After creating and pushing the tag, confirm the Release workflow succeeds.
 - After publication, run `./scripts/release-go-live-check.sh` and record the artifact verification, public smoke, and backup restore-drill results.

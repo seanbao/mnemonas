@@ -2,7 +2,10 @@
 
 English | [简体中文](docker-deployment.md)
 
-This guide explains how to run MnemoNAS with Docker Compose. Docker is a good fit for quick evaluation, existing container hosts, and setups where MnemoNAS is managed alongside other services.
+> [!WARNING]
+> MnemoNAS has not published a usable release. The current Docker path is only for source-built development images and future release-flow validation. Do not mount real data or use it in production.
+
+This guide explains how to build and run a MnemoNAS development image with Docker Compose.
 
 For long-running deployments that should auto-start on boot and use systemd logs, prefer [Linux/systemd deployment](linux-systemd-deployment.en.md).
 

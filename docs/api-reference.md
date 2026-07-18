@@ -2498,7 +2498,7 @@ http://localhost:8080/dav
 
 WebDAV 访问和方法语义：
 
-- 日常或生产挂载建议设置 `webdav.auth_type = "users"`，使用 MnemoNAS 用户账户挂载，并应用每个用户的 `home_dir` 边界。
+- 开发验证挂载建议设置 `webdav.auth_type = "users"`，使用 MnemoNAS 用户账户挂载，并应用每个用户的 `home_dir` 边界。
   普通用户在 WebDAV 根目录也能看到已授权共享目录的顶层导航入口。
 - `must_change_password=true` 的账号不能通过 `users` 模式挂载；完成自助改密后才恢复 WebDAV 认证。
 - 根目录示例配置保留旧全局 Basic Auth 作为兼容基线；该模式使用 `[webdav]` 中的服务凭据，或 `secrets.json` 中生成的凭据。

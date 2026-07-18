@@ -143,6 +143,16 @@ EOF
 	git -C "$repo" add README.md docs/README.md docs/README.en.md docs/install.md docs/install.en.md docs/usage.md docs/usage.en.md docs/api.md docs/api.en.md
 }
 
+write_tracked_deleted_doc() {
+	local repo="$1"
+	write_root_readme_pair "$repo"
+	cat > "$repo/obsolete.md" <<'EOF'
+# Obsolete
+EOF
+	git -C "$repo" add obsolete.md
+	rm -f "$repo/obsolete.md"
+}
+
 write_parenthesized_link_target_doc() {
 	local repo="$1"
 	write_root_readme_pair "$repo"
@@ -850,7 +860,7 @@ write_reverse_proxy_webdav_contract_missing_chmod_doc() {
 
 [English](reverse-proxy-setup.en.md) | 简体中文
 
-公网或生产 WebDAV 挂载建议优先使用 `auth_type=users`。
+未来公开发布的 WebDAV 挂载应优先使用 `auth_type=users`。
 auth_type=basic 时使用 WebDAV 用户名和密码。
 生成密码位于 /srv/mnemonas/secrets.json 的 webdav_password 字段。
 
@@ -865,7 +875,7 @@ EOF
 
 English | [简体中文](reverse-proxy-setup.md)
 
-Prefer `auth_type=users` for public or production WebDAV mounts.
+Future public-release WebDAV mounts should prefer `auth_type=users`.
 Use the WebDAV username and password when auth_type=basic.
 Custom Basic passwords are not echoed back; generated passwords use the webdav_password field in /srv/mnemonas/secrets.json.
 
@@ -1234,7 +1244,7 @@ EOF
 
 ## WebDAV
 
-- 日常或生产挂载建议设置 `webdav.auth_type = "users"`，使用 MnemoNAS 用户账户挂载。
+- 开发验证挂载建议设置 `webdav.auth_type = "users"`，使用 MnemoNAS 用户账户挂载。
 - 根目录示例配置保留旧全局 Basic Auth 作为兼容基线；该模式使用 `[webdav]` 中的服务凭据。
 EOF
 	cat > "$repo/docs/api-reference.en.md" <<'EOF'
@@ -1244,7 +1254,7 @@ English | [简体中文](api-reference.md)
 
 ## WebDAV
 
-- For day-to-day or production mounts, set `webdav.auth_type = "users"` to mount with MnemoNAS user accounts.
+- For development validation, set `webdav.auth_type = "users"` to mount with MnemoNAS user accounts.
 - The root example config keeps legacy global Basic Auth as a compatibility baseline; that mode uses service credentials from `[webdav]`.
 EOF
 	git -C "$repo" add docs/README.md docs/README.en.md docs/api-reference.md docs/api-reference.en.md
@@ -1253,14 +1263,14 @@ EOF
 write_api_reference_webdav_auth_contract_missing_users_doc() {
 	local repo="$1"
 	write_api_reference_webdav_auth_contract_valid_docs "$repo"
-	perl -0pi -e 's/For day-to-day or production mounts, set `webdav\.auth_type = "users"`/Choose an authentication mode/' "$repo/docs/api-reference.en.md"
+	perl -0pi -e 's/For development validation, set `webdav\.auth_type = "users"`/Choose an authentication mode/' "$repo/docs/api-reference.en.md"
 	git -C "$repo" add docs/api-reference.en.md
 }
 
 write_api_reference_webdav_auth_contract_legacy_first_doc() {
 	local repo="$1"
 	write_api_reference_webdav_auth_contract_valid_docs "$repo"
-	perl -0pi -e 's/- For day-to-day or production mounts, set `webdav\.auth_type = "users"` to mount with MnemoNAS user accounts\./- By default it uses the legacy global Basic Auth credentials from `[webdav]` or generated credentials in `secrets.json`.\n- For day-to-day or production mounts, set `webdav.auth_type = "users"` to mount with MnemoNAS user accounts./' "$repo/docs/api-reference.en.md"
+	perl -0pi -e 's/- For development validation, set `webdav\.auth_type = "users"` to mount with MnemoNAS user accounts\./- By default it uses the legacy global Basic Auth credentials from `[webdav]` or generated credentials in `secrets.json`.\n- For development validation, set `webdav.auth_type = "users"` to mount with MnemoNAS user accounts./' "$repo/docs/api-reference.en.md"
 	git -C "$repo" add docs/api-reference.en.md
 }
 
@@ -1355,7 +1365,7 @@ EOF
 
 | 状态项 | 当前结论 | 进入下一状态所需证据 |
 |------|----------|----------------------|
-| 工程内发布候选 | 已成立。 | 非发布文档变更后重新执行完整验证。 |
+| 工程内开发快照 | 已成立。 | 非发布文档变更后重新执行完整验证。 |
 | 最终可用目标 | 不能标记为最终完成。真实公网部署、正式 tag、Release workflow 结果和发布后产物核验仍缺少环境证据。 | 完成外部部署验证。 |
 | 后续功能边界 | 已确认推迟的边缘功能不阻塞当前硬化收尾。 | 维护者重新确认范围。 |
 EOF
@@ -1374,7 +1384,7 @@ English | [简体中文](hardening-progress.md)
 
 | Status item | Current conclusion | Evidence needed for the next state |
 | --- | --- | --- |
-| In-repository release candidate | Established. | Rerun validation after non-release-documentation changes. |
+| In-repository development snapshot | Established. | Rerun validation after non-release-documentation changes. |
 | Final usability objective | Not complete. Code, scripts, Web UI, Docker, local release-package fixtures, documentation, and the release-readiness summary have local evidence, but real public deployment, the official tag, Release workflow results, and post-publication artifact verification still lack environment evidence. | Complete external deployment verification. |
 | Follow-up feature boundary | Confirmed deferred edge features do not block the current hardening closeout and should not be repeatedly reopened in this ledger. | Reconfirm scope before implementation. |
 EOF
@@ -1718,7 +1728,7 @@ cat > "$repo/docs/api-reference.md" <<EOF
 
 ## WebDAV
 
-- 日常或生产挂载建议设置 \`webdav.auth_type = "users"\`，使用 MnemoNAS 用户账户挂载。
+- 开发验证挂载建议设置 \`webdav.auth_type = "users"\`，使用 MnemoNAS 用户账户挂载。
 - 根目录示例配置保留旧全局 Basic Auth 作为兼容基线；该模式使用 \`[webdav]\` 中的服务凭据。
 
 当前检查项 ID 包括 $chinese_ids。
@@ -1730,7 +1740,7 @@ English | [简体中文](api-reference.md)
 
 ## WebDAV
 
-- For day-to-day or production mounts, set \`webdav.auth_type = "users"\` to mount with MnemoNAS user accounts.
+- For development validation, set \`webdav.auth_type = "users"\` to mount with MnemoNAS user accounts.
 - The root example config keeps legacy global Basic Auth as a compatibility baseline; that mode uses service credentials from \`[webdav]\`.
 
 Current check IDs include $english_ids.
@@ -1764,6 +1774,7 @@ write_security_check_docs_unknown_chinese_id() {
 }
 
 run_accepts "valid-links" write_valid_docs
+run_accepts "tracked-deleted-doc" write_tracked_deleted_doc
 run_accepts "parenthesized-link-target" write_parenthesized_link_target_doc
 run_accepts "markdown-code-fence-link-example" write_markdown_code_fence_link_doc
 run_accepts "untracked-valid-link-target" write_untracked_valid_doc
@@ -1836,7 +1847,7 @@ run_rejects "storage-cdc-contract-missing-boundary" "docs/storage-internals.en.m
 run_rejects "configuration-cdc-contract-missing-boundary" "docs/configuration.en.md: missing storage CDC boundary text: Current Go version history still uses whole-object CAS snapshots" write_configuration_cdc_contract_missing_boundary_doc
 run_rejects "security-checklist-contract-missing-firewall" "docs/security.en.md: missing public deployment security checklist text: [Public cloud firewall checklist](cloud-firewall-checklist.en.md)" write_security_checklist_contract_missing_firewall_doc
 run_rejects "security-checklist-contract-missing-public-smoke" "docs/security.en.md: missing public deployment security checklist text: ./scripts/public-go-live-smoke.sh <domain>" write_security_checklist_contract_missing_public_smoke_doc
-run_rejects "api-reference-webdav-auth-contract-missing-users" "docs/api-reference.en.md: missing WebDAV auth guidance text: For day-to-day or production mounts, set \`webdav.auth_type = \"users\"\`" write_api_reference_webdav_auth_contract_missing_users_doc
+run_rejects "api-reference-webdav-auth-contract-missing-users" "docs/api-reference.en.md: missing WebDAV auth guidance text: For development validation, set \`webdav.auth_type = \"users\"\`" write_api_reference_webdav_auth_contract_missing_users_doc
 run_rejects "api-reference-webdav-auth-contract-legacy-first" "docs/api-reference.en.md: avoid leading WebDAV auth guidance with legacy Basic Auth: - By default it uses the legacy global Basic Auth credentials" write_api_reference_webdav_auth_contract_legacy_first_doc
 run_rejects "backup-restore-drill-contract-missing-history" "docs/backup-guide.en.md: missing backup restore drill guidance text: Restore-drill history and explicit restore history both keep the latest 20 entries" write_backup_restore_drill_contract_missing_history_doc
 run_rejects "hardening-progress-release-readiness-contract-missing-backup-smoke" "docs/hardening-progress.en.md: missing release-readiness hardening ledger text: release checklist and bilingual release notes to retain the public-deployment doctor, external-network smoke, backup restore-drill smoke, post-publication go-live verification, and cloud-firewall review entry points" write_hardening_progress_release_readiness_contract_missing_backup_smoke_doc

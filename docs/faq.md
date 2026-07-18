@@ -2,17 +2,20 @@
 
 [English](faq.en.md) | 简体中文
 
+> [!WARNING]
+> MnemoNAS 尚未发布可用版本。以下内容描述当前开发构建和未来发布流程，不构成稳定版本支持承诺。
+
 ## 安装与部署
 
 ### 支持哪些操作系统？
 
 | 平台 | 支持状态 |
 | --- | --- |
-| Linux x86_64 | 长期运行主路径 |
-| Linux ARM64 | 长期运行主路径 |
-| macOS Apple Silicon | 支持开发和本地运行 |
-| macOS Intel | 支持开发和本地运行 |
-| Windows | 通过 WSL2 支持 |
+| Linux x86_64 | 主要构建和测试目标 |
+| Linux ARM64 | 交叉构建和测试目标 |
+| macOS Apple Silicon | 开发和本地测试目标 |
+| macOS Intel | 开发和本地测试目标 |
+| Windows | WSL2 开发验证目标 |
 
 ### systemd、Docker 和手动二进制部署有什么区别？
 
@@ -22,9 +25,11 @@
 | Docker | 设置步骤少、运行环境隔离、升级路径明确 | 需要 Docker 环境，并正确映射数据卷 |
 | 手动二进制 | 适合调试，流程直接 | 需要手动管理进程 |
 
-长期运行的服务部署应参考 [Linux/systemd 部署指南](linux-systemd-deployment.md)。快速评估或已有容器平台时，可使用 [Docker 部署指南](docker-deployment.md)。
+当前只支持开发验证。源码环境见 [开发指南](development.md)，Docker 源码构建见 [Docker 部署指南](docker-deployment.md)；systemd 文档用于验证未来发布路径。
 
-### 升级流程是什么？
+### 如何更新开发 checkout？未来如何升级？
+
+当前没有可升级的发布版本。更新源码 checkout 后，应重新构建并运行完整验证。以下 release 镜像和 systemd 归档步骤仅描述未来首次公开发布后的预期流程。
 
 Docker 源码 checkout：
 
@@ -132,7 +137,7 @@ prefix = "/dav"
 auth_type = "users"
 ```
 
-日常或生产 WebDAV 挂载应优先使用 MnemoNAS 用户认证。
+开发验证中的 WebDAV 挂载应优先使用 MnemoNAS 用户认证。
 
 如旧客户端或专用服务凭据需要单独的全局 WebDAV 凭据，可使用 Basic Auth：
 

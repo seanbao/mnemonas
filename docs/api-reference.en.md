@@ -2487,7 +2487,7 @@ http://localhost:8080/dav
 
 WebDAV access and method semantics:
 
-- For day-to-day or production mounts, set `webdav.auth_type = "users"` to mount with MnemoNAS user accounts and per-user `home_dir` boundaries.
+- For development validation, set `webdav.auth_type = "users"` to mount with MnemoNAS user accounts and per-user `home_dir` boundaries.
   Top-level navigation entries for granted shared directories are also listed at the WebDAV root for regular users.
 - Accounts with `must_change_password=true` cannot mount through `users` mode; WebDAV authentication becomes available after self-service password change.
 - The root example config keeps legacy global Basic Auth as a compatibility baseline; that mode uses service credentials from `[webdav]` or generated credentials in `secrets.json`.

@@ -143,10 +143,10 @@ run_readme_top_overclaim_test() {
 run_readme_missing_auth_guidance_test() {
     local case_dir="$TMP_ROOT/readme-missing-auth-guidance"
     prepare_case_docs "$case_dir"
-    perl -0pi -e 's/Day-to-day or production mounts should switch to `users`/Manual deployments may choose another mode/' "$case_dir/README.en.md"
+    perl -0pi -e 's/User-boundary validation should switch to `users`/Manual deployments may choose another mode/' "$case_dir/README.en.md"
 
     run_expect_failure "$case_dir/out.log" run_case_checker "$case_dir"
-    assert_file_contains "$case_dir/out.log" "missing required README WebDAV client-summary text: Day-to-day or production mounts should switch to \`users\`"
+    assert_file_contains "$case_dir/out.log" "missing required README WebDAV client-summary text: User-boundary validation should switch to \`users\`"
 }
 
 run_mounting_guide_missing_matrix_note_test() {
@@ -161,19 +161,19 @@ run_mounting_guide_missing_matrix_note_test() {
 run_mounting_guide_missing_auth_guidance_test() {
     local case_dir="$TMP_ROOT/mounting-guide-missing-auth-guidance"
     prepare_case_docs "$case_dir"
-    perl -0pi -e 's/日常或生产挂载应改用 `users`/可按需要选择认证模式/' "$case_dir/docs/mounting-guide.md"
+    perl -0pi -e 's/开发验证挂载应改用 `users`/可按需要选择认证模式/' "$case_dir/docs/mounting-guide.md"
 
     run_expect_failure "$case_dir/out.log" run_case_checker "$case_dir"
-    assert_file_contains "$case_dir/out.log" "missing required WebDAV mounting-guide compatibility note: 日常或生产挂载应改用 \`users\`"
+    assert_file_contains "$case_dir/out.log" "missing required WebDAV mounting-guide compatibility note: 开发验证挂载应改用 \`users\`"
 }
 
 run_faq_missing_auth_guidance_test() {
     local case_dir="$TMP_ROOT/faq-missing-auth-guidance"
     prepare_case_docs "$case_dir"
-    perl -0pi -e 's/Day-to-day or production WebDAV mounts should prefer MnemoNAS user authentication/Operators can choose any authentication mode/' "$case_dir/docs/faq.en.md"
+    perl -0pi -e 's/WebDAV mounts used for development validation should prefer MnemoNAS user authentication/Operators can choose any authentication mode/' "$case_dir/docs/faq.en.md"
 
     run_expect_failure "$case_dir/out.log" run_case_checker "$case_dir"
-    assert_file_contains "$case_dir/out.log" "missing required WebDAV FAQ auth guidance: Day-to-day or production WebDAV mounts should prefer MnemoNAS user authentication"
+    assert_file_contains "$case_dir/out.log" "missing required WebDAV FAQ auth guidance: WebDAV mounts used for development validation should prefer MnemoNAS user authentication"
 }
 
 trap cleanup EXIT

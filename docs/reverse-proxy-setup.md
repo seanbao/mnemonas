@@ -2,7 +2,10 @@
 
 [English](reverse-proxy-setup.en.md) | 简体中文
 
-本文档介绍如何通过反向代理配置 MnemoNAS 的 HTTPS 外网访问。
+> [!WARNING]
+> MnemoNAS 尚未发布可用版本。本文仅用于验证未来公网入口配置；不要把当前开发构建暴露到公网。
+
+本文档介绍如何验证未来通过反向代理提供 HTTPS 外网访问的配置。
 公网访问应通过 `80/443` 上的 HTTPS 入口，不应直接暴露原始 `8080` 服务。
 如果从一台公网服务器开始部署，优先按 [公网服务器快速上线](public-server-quickstart.md) 走推荐路径。
 本文保留 Caddy、Nginx、Traefik 的细节配置。
@@ -141,7 +144,7 @@ sudo systemctl status caddy
 
 验证：
 
-公网或生产 WebDAV 挂载建议优先使用 `auth_type=users`。
+未来公开发布的 WebDAV 挂载应优先使用 `auth_type=users`。
 
 ```bash
 curl -I https://nas.example.com/health
@@ -401,7 +404,7 @@ ss -tlnp | grep -E '80|443|8080|9090|9091'
 
 WebDAV：
 
-公网或生产 WebDAV 挂载建议优先使用 `auth_type=users`。
+未来公开发布的 WebDAV 挂载应优先使用 `auth_type=users`。
 
 ```bash
 # auth_type=users 时使用 MnemoNAS 用户名和密码。

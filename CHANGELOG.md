@@ -8,6 +8,8 @@
 
 ## [Unreleased]
 
+MnemoNAS 仍处于开发阶段，尚未发布任何可用版本。当前源码仅用于开发和验证，不应承载真实数据或用于生产部署。问题与建议可通过 GitHub Issues 提交；当前不接收外部代码或文档提交。
+
 ### Added
 
 #### Web UI 功能
@@ -205,7 +207,7 @@
 - `scripts/release-readiness.sh` 会要求 `.github/workflows/ci.yml` 和 `.github/workflows/release.yml` 保留关键 CI、E2E、Docker smoke、release tag 校验、release artifact 上传/下载、checksums 生成与发布、带版本和仓库绑定的 release artifact 校验、发布前镜像校验、release job 依赖和发布权限基线，避免核心自动化路径在发布前失效
 - `scripts/release-readiness.sh` 会要求 `Makefile` 保留 `check`、`verify-changed`、`release-readiness`、`quick-check`、`security-check`、`docker-check` 和 `test-torture` 等核心本地门禁目标，避免 CI、发布清单和维护者文档引用的入口在发布前失效
 - `scripts/release-readiness.sh` 会要求 `.github/workflows/torture.yml` 保留手动入口、定时入口、只读权限、`RUN_LIVE_FAULTS: '0'` 非破坏性开关和 `make test-torture` 执行入口，避免长期回归工作流在发布前失效
-- `scripts/release-readiness.sh` 会要求关闭空白 Issue，并检查缺陷报告、使用问题、功能建议和 WebDAV 兼容性 Issue 表单保留敏感信息脱敏、诊断信息和安全影响提示，避免公开协作入口绕过安全提示
+- `scripts/release-readiness.sh` 会要求关闭空白 Issue，并检查缺陷报告、使用问题、功能建议和 WebDAV 兼容性 Issue 表单保留敏感信息脱敏、诊断信息和安全影响提示，避免公开反馈入口绕过安全提示
 - `scripts/release-readiness.sh` 会检查安全策略和支持说明保留私密漏洞报告入口、禁止公开漏洞细节、dataplane 端口不外露、依赖安全检查和公网直连限制等关键提示
 - `scripts/release-readiness.sh` 会要求发布清单和双语 release notes 保留 `mnemonas-doctor --public-domain`、`scripts/public-go-live-smoke.sh`、`scripts/backup-restore-drill-smoke.sh`、`scripts/release-go-live-check.sh` 和 `cloud-firewall-checklist` 入口，避免公网部署环境复核、发布后上线总核验和恢复演练入口从最终发布流程中遗漏
 - `scripts/release-readiness.sh` 会拒绝不是当前 HEAD 祖先的 base ref，避免用旁支范围生成误导性的发布就绪摘要
@@ -221,7 +223,7 @@
 - `.go-version`、`.nvmrc`、Go `toolchain` 与 Rust `rust-version` 共同记录本地开发工具链要求
 - `.gitattributes` 统一文本换行并标记提交的生成文件，降低跨平台和评审噪声
 - SECURITY.md 安全策略
-- SUPPORT.md 支持渠道与维护边界说明
+- SUPPORT.md 问题反馈渠道与处理边界说明
 - pre-commit 配置（代码格式化、lint 检查）
 - golangci-lint 配置
 - .gitignore 完善
@@ -345,7 +347,7 @@
 - Windows WebClient 需要修改注册表以支持 HTTP（非 HTTPS）连接
 - 已支持用户、角色和用户主目录范围，但暂不支持细粒度 per-file ACL
 - 不建议在没有 HTTPS 反向代理或 VPN 的情况下直接暴露到公网
-- 当前版本定位为 L1 私有文件云盘和 L1+ 公网安全入口基础，不应作为重要数据的唯一长期副本；生产使用应保留外部备份
+- 当前没有 release candidate，也未发布任何可用版本；开发源码不应承载真实数据或用于生产部署
 
 ### 兼容性
 

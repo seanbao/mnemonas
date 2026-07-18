@@ -2,7 +2,10 @@
 
 English | [简体中文](security.md)
 
-This guide describes recommended MnemoNAS security settings for LAN and public deployments.
+> [!WARNING]
+> MnemoNAS has not published a usable release, and the current source tree is not suitable for production or public deployment. This guide records development-validation boundaries and security requirements for a future release.
+
+This guide describes security settings for MnemoNAS development validation and future deployment paths.
 
 ## Web UI Authentication
 
@@ -296,7 +299,7 @@ Regular maintenance:
 - Run scrub periodically.
 - Back up the full storage root.
 - Check logs for unusual access.
-- Upgrade to current releases.
+- Record and review the tested Git commit and dependency state.
 
 ## Known Security Limits
 

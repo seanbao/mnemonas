@@ -1,10 +1,12 @@
-# Support
+# Issue Feedback
 
 English | [简体中文](SUPPORT.md)
 
-This document describes MnemoNAS support channels, issue triage, and support boundaries.
+MnemoNAS is still under development, has not published any usable release, and does not provide stable-version support. GitHub Issues currently accept defects, usage problems, compatibility results, and feature suggestions. External code and documentation submissions are not being accepted at this stage.
 
-## Support Channels
+Feedback must identify the tested Git commit. Maintainers triage reports according to project priorities without promising a response, fix, or release timeline.
+
+## Feedback Channels
 
 | Case | Recommended Channel | Notes |
 | --- | --- | --- |
@@ -16,7 +18,7 @@ This document describes MnemoNAS support channels, issue triage, and support bou
 Usage questions can also be recorded in Issues. The title and body should make clear whether the report is a question or a confirmed bug.
 For WebDAV client compatibility results, mount differences, or client-specific failures, use the WebDAV compatibility report form first.
 
-## Before Opening an Issue
+## Before Submitting Feedback
 
 Check:
 
@@ -27,9 +29,9 @@ Check:
 - Existing Issues for similar reports
 - Whether a WebDAV client issue is better suited for the [WebDAV compatibility report form](https://github.com/seanbao/mnemonas/issues/new?template=webdav_compatibility.yml)
 
-## What to Include in Bug Reports
+## What to Include in Defect Reports
 
-- MnemoNAS version or Git commit
+- Tested Git commit
 - Deployment method: Ubuntu/systemd, Docker, manual binary, or development environment
 - Operating system, filesystem, and client information
 - Reproduction steps, expected behavior, and actual behavior
@@ -39,22 +41,22 @@ Check:
 
 Remove passwords, tokens, cookies, sensitive internal addresses, and other private information before posting logs.
 
-## Support Boundary
+## Feedback Handling Boundary
 
-Maintainers try to address clear, reproducible, high-impact reports, but no fixed response time or commercial SLA is promised.
+Maintainers prioritize clear, reproducible, high-impact reports. Features, interfaces, data formats, and deployment paths may still change during development.
 
-Current focus:
+Current review focus:
 
 - Linux servers and common small-host/NAS scenarios
 - Docker Compose and Linux/systemd deployment paths
 - Browser Web UI and common WebDAV clients
 - Data migration, backup, restore, and security configuration
 
-Limited support may be available for:
+The following reports may not be handled:
 
 - Unofficial repackaging or heavily modified forks
 - Direct public internet exposure without reverse proxy, TLS, VPN, or firewall protection
 - Large-scale production capacity planning
 - Reports without reproduction details, logs, or diagnostics
 
-Commercial support, hosted services, and enterprise SLA are outside the current project scope.
+The project does not currently provide commercial support, hosted services, or a paid SLA.

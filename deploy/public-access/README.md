@@ -2,6 +2,9 @@
 
 [English](README.en.md) | 简体中文
 
+> [!WARNING]
+> MnemoNAS 尚未发布可用版本。当前开发构建不得暴露到公网；这些模板仅用于未来首次公开发布前的配置验证。
+
 这些模板提供未被 `mnemonas-public-setup` 完全自动化覆盖的公网 HTTPS 访问配置起点。
 
 - `traefik/`: Traefik file-provider 模板，适用于 MnemoNAS 与反向代理运行在同一台 Linux 主机的部署。
