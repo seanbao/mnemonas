@@ -92,7 +92,7 @@
     "happy-dom": "^20.9.0",
     "husky": "^9.1.7",
     "jsdom": "^27.4.0",
-    "lint-staged": "^16.2.7",
+    "lint-staged": "^17.1.0",
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.46.4",
     "vite": "^8.0.16",
