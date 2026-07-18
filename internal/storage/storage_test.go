@@ -12607,6 +12607,33 @@ func TestFileSystem_SearchWithinBase_RespectsLimitWithinRoot(t *testing.T) {
 	}
 }
 
+func TestFileSystem_SearchWithinBase_DoesNotReturnSearchRoot(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/tester/nested-tester"); err != nil {
+		t.Fatalf("Mkdir(/tester/nested-tester) error: %v", err)
+	}
+
+	results, err := fs.SearchWithinBase(ctx, "/tester", "tester", 10)
+	if err != nil {
+		t.Fatalf("SearchWithinBase() error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("SearchWithinBase() returned %d results, want 1", len(results))
+	}
+	if results[0].Path != "/tester/nested-tester" {
+		t.Fatalf(
+			"SearchWithinBase() result path = %q, want %q",
+			results[0].Path,
+			"/tester/nested-tester",
+		)
+	}
+}
+
 func TestFileSystem_SearchFiltered_AppliesFilterBeforeLimit(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()

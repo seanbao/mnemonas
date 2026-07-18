@@ -4758,8 +4758,13 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Limit query length to prevent abuse
-	if len(query) > 100 {
+	if !utf8.ValidString(query) {
+		BadRequest(w, "query must be valid UTF-8")
+		return
+	}
+
+	// Limit query length by Unicode code points, matching the API contract.
+	if utf8.RuneCountInString(query) > 100 {
 		BadRequest(w, "query too long (max 100 characters)")
 		return
 	}

@@ -4417,6 +4417,9 @@ func (fs *FileSystem) search(ctx context.Context, root, query string, limit int,
 
 	// Walk through workspace
 	err := walkStorageWorkspace(ctx, workspaceRef, root, func(filePath string, info *workspace.FileInfo) error {
+		if filePath == root {
+			return nil
+		}
 		if len(results) >= limit {
 			return io.EOF // Stop walking
 		}
