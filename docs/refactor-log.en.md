@@ -6,18 +6,18 @@ This document records Flutter-client refactor scope, verification evidence, and 
 
 ## Progress Baseline
 
-As of 2026-07-19, engineering readiness for the complete Android, Linux, and Windows client objective is estimated at **66%**. The value uses the fixed weights below to compare later changes; it is not a release-completion percentage.
+As of 2026-07-19, engineering readiness for the complete Android, Linux, and Windows client objective is estimated at **67%**. The value uses the fixed weights below to compare later changes; it is not a release-completion percentage.
 
 | Workstream | Weight | Current score | Current boundary |
 | --- | ---: | ---: | --- |
 | Cross-platform project and client structure | 12 | 10 | Flutter project, design system, and Android/Linux/Windows runners exist; native desktop validation is incomplete |
 | Authentication, sessions, and context isolation | 14 | 12 | Revision/CAS, secure storage, single-use refresh-token rotation, and server/account isolation are implemented; a background credential broker is not |
 | Files, search, Trash, and account workflows | 20 | 15 | Core file operations, bounded search, safe Trash workflows, and account flows are connected; version, sharing, and administration flows remain incomplete |
-| Transfer integrity and recovery | 20 | 17 | Download identity conditions and durable upload sessions are integrated with the client ledger; foreground transfers support pause, resume, authoritative offsets, idempotent commit, and restart recovery; native background execution and cross-process leases are incomplete |
+| Transfer integrity and recovery | 20 | 18 | Download identity conditions and durable upload sessions are integrated with the client ledger; foreground transfers support pause, resume, authoritative offsets, idempotent commit, restart recovery, and confirmed task cleanup; native background execution and cross-process leases are incomplete |
 | Android native capability and lifecycle | 16 | 8 | SAF import and export provide bounded streaming, progress, cancellation, and Activity-destruction cleanup; background execution, notification controls, lifecycle transitions, and the physical-device matrix are incomplete |
 | Release engineering and platform security | 10 | 3 | Debug APK and baseline policy checks are available; independent signing, release versioning, release HTTPS policy, and upgrade validation are incomplete |
 | Linux and Windows validation | 8 | 1 | Runners and shared-code boundaries remain; native build, runtime, and distribution evidence is absent |
-| **Total** | **100** | **66** | **Still under development, with no usable version** |
+| **Total** | **100** | **67** | **Still under development, with no usable version** |
 
 ## Completed Refactors
 
@@ -25,6 +25,7 @@ As of 2026-07-19, engineering readiness for the complete Android, Linux, and Win
 
 - Established one Flutter project, theme, and component boundary for Android, Linux, and Windows.
 - Connected server setup, sign-in, device overview, file browsing, filename search, Trash, and account workflows.
+- Extracted transfer records into a dedicated transfer center with state-based grouping and distinct pause, retry, destination-selection, cancel-and-delete, and history-clear actions. Destructive cleanup and unconfirmed-result removal require explicit confirmation.
 - Documentation retains only a GitHub Issues feedback entry. README and development records state that no usable version exists.
 
 ### Session and Destructive-Operation Safety
@@ -60,7 +61,7 @@ As of 2026-07-19, engineering readiness for the complete Android, Linux, and Win
 
 In current priority order:
 
-1. Implement the Android native background executor, progress notifications, cancel and retry actions, system stop-reason handling, and cross-process task leases.
+1. Replace the foreground JSON generation ledger with a transactional store that provides revision/CAS, durable task commands, and fencing tokens, then connect the Android native background executor, progress notifications, pause and retry actions, and system stop reasons.
 2. Tighten Android release cleartext policy and add independent signing, monotonic versioning, signature verification, upgrade installation, and API 24/33/34/36 validation.
 3. Complete physical Android-device acceptance for large files, network loss, permission revocation, process termination, foreground/background transitions, and upgrades, including provider-retained empty or partial documents after native-copy failure.
 4. Reduce the temporary duplicate storage between Android SAF import and the task-owned private payload, and expose a separate full-payload verification state.
