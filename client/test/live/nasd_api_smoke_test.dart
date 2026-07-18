@@ -8,6 +8,8 @@ import 'package:mnemonas_client/core/files/file_models.dart';
 import 'package:mnemonas_client/core/files/files_api.dart';
 import 'package:mnemonas_client/core/network/api_client.dart';
 import 'package:mnemonas_client/core/server/server_endpoint.dart';
+import 'package:mnemonas_client/core/trash/trash_api.dart';
+import 'package:mnemonas_client/core/trash/trash_models.dart';
 
 void main() {
   final serverUrl = Platform.environment['MNEMONAS_CLIENT_E2E_URL'];
@@ -34,6 +36,7 @@ void main() {
       final client = ApiClient(endpoint: endpoint, sessionStore: sessionStore);
       final auth = AuthApi(client);
       final files = FilesApi(client);
+      final trash = TrashApi(client);
       var activePassword = initialPassword;
       var loggedIn = false;
       final suffix = DateTime.now().microsecondsSinceEpoch;
@@ -57,13 +60,32 @@ void main() {
               break;
             }
           }
-          if (directory == null) {
-            return;
+          if (directory != null) {
+            final intent = await files.prepareDeleteIntent([directory]);
+            await files.delete(intent.data.confirmationForPath(directoryPath));
           }
-          final intent = await files.prepareDeleteIntent([directory]);
-          await files.delete(intent.data.confirmationForPath(directoryPath));
         } on Object {
           // Cleanup is best effort; the primary assertion reports the failure.
+        }
+        try {
+          final listing = await trash.list();
+          final ids = listing.data.items
+              .where((item) => item.originalPath == directoryPath)
+              .map((item) => item.id)
+              .toList(growable: false);
+          for (
+            var start = 0;
+            start < ids.length;
+            start += maxTrashSelectionIds
+          ) {
+            final candidateEnd = start + maxTrashSelectionIds;
+            final end = candidateEnd < ids.length ? candidateEnd : ids.length;
+            await trash.emptySelection(
+              TrashSelectionSnapshot.fromIds(ids.sublist(start, end)),
+            );
+          }
+        } on Object {
+          // Trash cleanup is also best effort during test teardown.
         }
       }
 
@@ -89,6 +111,7 @@ void main() {
           newPassword: nextPassword,
           expectedUserId: login.data.user.id,
         );
+        await auth.forgetSession();
         loggedIn = false;
         activePassword = nextPassword;
         login = await auth.login(
@@ -99,9 +122,11 @@ void main() {
       }
 
       expect(login.data.user.mustChangePassword, isFalse);
-      final beforeRefresh = (await sessionStore.load())!.tokens.refreshToken;
+      final beforeRefresh =
+          (await sessionStore.snapshot()).session!.tokens.refreshToken;
       await auth.refresh();
-      final afterRefresh = (await sessionStore.load())!.tokens.refreshToken;
+      final afterRefresh =
+          (await sessionStore.snapshot()).session!.tokens.refreshToken;
       expect(afterRefresh, isNot(beforeRefresh));
       expect((await auth.me()).data.username, liveUsername);
 
@@ -132,16 +157,61 @@ void main() {
         containsAll(<String>['renamed.txt', 'copied.txt']),
       );
 
-      await removeRemoteFixture();
+      final rootBeforeDelete = await files.list('/');
+      final remoteDirectory = rootBeforeDelete.data.entries.singleWhere(
+        (entry) => entry.path == directoryPath,
+      );
+      final deleteIntent = await files.prepareDeleteIntent([remoteDirectory]);
+      expect(deleteIntent.data.policy.mode, DeleteMode.trash);
+      await files.delete(deleteIntent.data.confirmationForPath(directoryPath));
       expect(
         (await files.list(
           '/',
         )).data.entries.any((entry) => entry.path == directoryPath),
         isFalse,
       );
+
+      var trashListing = await trash.list();
+      final trashed = trashListing.data.items.singleWhere(
+        (item) => item.originalPath == directoryPath,
+      );
+      await trash.restore(id: trashed.id);
+      expect(
+        (await files.list(
+          '/',
+        )).data.entries.any((entry) => entry.path == directoryPath),
+        isTrue,
+      );
+
+      final restoredDirectory = (await files.list(
+        '/',
+      )).data.entries.singleWhere((entry) => entry.path == directoryPath);
+      final secondDeleteIntent = await files.prepareDeleteIntent([
+        restoredDirectory,
+      ]);
+      expect(secondDeleteIntent.data.policy.mode, DeleteMode.trash);
+      await files.delete(
+        secondDeleteIntent.data.confirmationForPath(directoryPath),
+      );
+      trashListing = await trash.list();
+      final permanentlyDeleted = trashListing.data.items.singleWhere(
+        (item) => item.originalPath == directoryPath,
+      );
+      final purge = await trash.emptySelection(
+        TrashSelectionSnapshot.fromIds(<String>[permanentlyDeleted.id]),
+      );
+      expect(purge.data.deleted, <String>[permanentlyDeleted.id]);
+      expect(purge.data.remaining, isEmpty);
+      expect(purge.data.skipped, isEmpty);
+      expect(
+        (await trash.list()).data.items.any(
+          (item) => item.id == permanentlyDeleted.id,
+        ),
+        isFalse,
+      );
       await auth.logout();
       loggedIn = false;
-      expect(await sessionStore.load(), isNull);
+      expect((await sessionStore.snapshot()).session, isNull);
     },
     skip: skipReason,
   );

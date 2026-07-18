@@ -21,15 +21,20 @@ void main() {
     await source.writeAsBytes(List<int>.filled(64 * 1024, 0x5a));
 
     final store = MemoryAuthSessionStore();
-    await store.save(
-      AuthSession(
-        serverBaseUrl: 'https://nas.example.com',
-        tokens: AuthTokenPair(
-          accessToken: 'access-token',
-          refreshToken: 'refresh-token',
-          expiresAt: DateTime.now().toUtc().add(const Duration(hours: 1)),
+    final initialSnapshot = await store.snapshot();
+    expect(
+      await store.commitIfRevision(
+        initialSnapshot.revision,
+        AuthSession(
+          serverBaseUrl: 'https://nas.example.com',
+          tokens: AuthTokenPair(
+            accessToken: 'access-token',
+            refreshToken: 'refresh-token',
+            expiresAt: DateTime.now().toUtc().add(const Duration(hours: 1)),
+          ),
         ),
       ),
+      isTrue,
     );
     final adapter = _BlockingUploadAdapter();
     final dio = Dio()..httpClientAdapter = adapter;

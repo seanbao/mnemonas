@@ -1,3 +1,5 @@
+import 'package:dio/dio.dart';
+
 import '../network/api_client.dart';
 import '../network/api_error.dart';
 import 'system_models.dart';
@@ -75,9 +77,10 @@ final class SystemApi {
     );
   }
 
-  Future<ApiResponse<StorageStats>> stats() {
+  Future<ApiResponse<StorageStats>> stats({CancelToken? cancelToken}) {
     return _client.requestEnvelope<StorageStats>(
       '/api/v1/stats',
+      cancelToken: cancelToken,
       decode: (data) => StorageStats.fromJson(requireJsonMap(data)),
     );
   }

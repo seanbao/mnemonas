@@ -5,7 +5,7 @@ import '../../design_system/design_system.dart';
 enum AppDestination {
   home('首页', Icons.home_outlined, Icons.home_rounded),
   files('文件', Icons.folder_outlined, Icons.folder_rounded),
-  photos('相册', Icons.photo_library_outlined, Icons.photo_library_rounded),
+  trash('回收站', Icons.delete_outline_rounded, Icons.delete_rounded),
   account('我的', Icons.person_outline_rounded, Icons.person_rounded);
 
   const AppDestination(this.label, this.icon, this.selectedIcon);

@@ -2,6 +2,7 @@ import '../core/auth/auth_models.dart';
 import '../core/files/file_models.dart';
 import '../core/server/server_endpoint.dart';
 import '../core/system/system_models.dart';
+import '../core/trash/trash_models.dart';
 
 enum ClientStage {
   booting,
@@ -69,8 +70,12 @@ final class ClientState {
     this.currentPath = '/',
     this.directory,
     this.stats,
+    this.trash,
     this.isBusy = false,
+    this.isTrashBusy = false,
+    this.trashReconciliationRequired = false,
     this.errorMessage,
+    this.trashErrorMessage,
     this.notice,
     this.transfers = const <ClientTransfer>[],
   });
@@ -84,8 +89,12 @@ final class ClientState {
   final String currentPath;
   final DirectoryListing? directory;
   final StorageStats? stats;
+  final TrashListing? trash;
   final bool isBusy;
+  final bool isTrashBusy;
+  final bool trashReconciliationRequired;
   final String? errorMessage;
+  final String? trashErrorMessage;
   final String? notice;
   final List<ClientTransfer> transfers;
 
@@ -101,8 +110,12 @@ final class ClientState {
     String? currentPath,
     Object? directory = _unset,
     Object? stats = _unset,
+    Object? trash = _unset,
     bool? isBusy,
+    bool? isTrashBusy,
+    bool? trashReconciliationRequired,
     Object? errorMessage = _unset,
+    Object? trashErrorMessage = _unset,
     Object? notice = _unset,
     List<ClientTransfer>? transfers,
   }) {
@@ -118,10 +131,17 @@ final class ClientState {
           ? this.directory
           : directory as DirectoryListing?,
       stats: identical(stats, _unset) ? this.stats : stats as StorageStats?,
+      trash: identical(trash, _unset) ? this.trash : trash as TrashListing?,
       isBusy: isBusy ?? this.isBusy,
+      isTrashBusy: isTrashBusy ?? this.isTrashBusy,
+      trashReconciliationRequired:
+          trashReconciliationRequired ?? this.trashReconciliationRequired,
       errorMessage: identical(errorMessage, _unset)
           ? this.errorMessage
           : errorMessage as String?,
+      trashErrorMessage: identical(trashErrorMessage, _unset)
+          ? this.trashErrorMessage
+          : trashErrorMessage as String?,
       notice: identical(notice, _unset) ? this.notice : notice as String?,
       transfers: transfers ?? this.transfers,
     );

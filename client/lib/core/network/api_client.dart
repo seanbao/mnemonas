@@ -47,6 +47,7 @@ final class ApiClient {
   final Dio _dio;
   final Clock _clock;
   Future<_RefreshOutcome>? _refreshInFlight;
+  bool _closed = false;
 
   Dio get dio => _dio;
 
@@ -151,10 +152,39 @@ final class ApiClient {
     }
   }
 
-  Future<void> replaceSession(AuthSession session) =>
-      sessionStore.save(session);
+  Future<AuthSessionSnapshot> sessionSnapshot() => _readSessionSnapshot();
 
-  Future<void> clearSession() => sessionStore.clear();
+  Future<void> commitSession(int expectedRevision, AuthSession session) async {
+    if (_closed) {
+      throw _authContextChanged();
+    }
+    final committed = await _commitSessionIfRevision(expectedRevision, session);
+    if (!committed) {
+      throw _authContextChanged();
+    }
+    if (_closed) {
+      await _takeAndClearSessionIfRevision(expectedRevision + 1);
+      throw _authContextChanged();
+    }
+  }
+
+  Future<AuthSessionSnapshot> takeAndClearSession() => _takeAndClearSession();
+
+  Future<void> clearSessionIfRevision(int expectedRevision) async {
+    await _takeAndClearSessionIfRevision(expectedRevision);
+  }
+
+  Future<void> clearSession() async {
+    await _takeAndClearSession();
+  }
+
+  void close({bool force = true}) {
+    if (_closed) {
+      return;
+    }
+    _closed = true;
+    _dio.close(force: force);
+  }
 
   Future<ApiResponse<AuthSession>> refreshSession() async {
     final outcome = await _refreshSingleFlight();
@@ -167,7 +197,7 @@ final class ApiClient {
   }
 
   Future<AuthSession> requireSession() async {
-    final session = await sessionStore.load();
+    final session = (await _readSessionSnapshot()).session;
     if (session == null || session.serverBaseUrl != endpoint.baseUrl) {
       throw const ApiException(
         kind: ApiFailureKind.local,
@@ -199,25 +229,32 @@ final class ApiClient {
       return;
     }
 
-    final session = await sessionStore.load();
-    if (session == null || session.serverBaseUrl != endpoint.baseUrl) {
+    try {
+      var session = (await _readSessionSnapshot()).session;
+      final activeRefresh = _refreshInFlight;
+      if (session == null && activeRefresh != null) {
+        session = (await activeRefresh).session;
+      }
+      if (session == null || session.serverBaseUrl != endpoint.baseUrl) {
+        throw const ApiException(
+          kind: ApiFailureKind.local,
+          code: 'AUTH_SESSION_MISSING',
+          message: 'Sign in is required',
+        );
+      }
+
+      options.headers['Authorization'] =
+          '${session.tokens.tokenType} ${session.tokens.accessToken}';
+      handler.next(options);
+    } on Object catch (error) {
       handler.reject(
         DioException(
           requestOptions: options,
           type: DioExceptionType.unknown,
-          error: const ApiException(
-            kind: ApiFailureKind.local,
-            code: 'AUTH_SESSION_MISSING',
-            message: 'Sign in is required',
-          ),
+          error: error,
         ),
       );
-      return;
     }
-
-    options.headers['Authorization'] =
-        '${session.tokens.tokenType} ${session.tokens.accessToken}';
-    handler.next(options);
   }
 
   void _recoverUnauthorized(
@@ -231,20 +268,26 @@ final class ApiClient {
     }
 
     try {
-      final session = await sessionStore.load();
-      if (session == null || session.serverBaseUrl != endpoint.baseUrl) {
-        throw const ApiException(
-          kind: ApiFailureKind.local,
-          code: 'AUTH_SESSION_MISSING',
-          message: 'Sign in is required',
-        );
-      }
-
       final attemptedToken = _bearerToken(request.headers['Authorization']);
-      final outcome =
-          attemptedToken != null && attemptedToken != session.tokens.accessToken
-          ? _RefreshOutcome(session: session)
-          : await _refreshSingleFlight();
+      final activeRefresh = _refreshInFlight;
+      late final _RefreshOutcome outcome;
+      if (activeRefresh != null) {
+        outcome = await activeRefresh;
+      } else {
+        final session = (await _readSessionSnapshot()).session;
+        if (session == null || session.serverBaseUrl != endpoint.baseUrl) {
+          throw const ApiException(
+            kind: ApiFailureKind.local,
+            code: 'AUTH_SESSION_MISSING',
+            message: 'Sign in is required',
+          );
+        }
+        outcome =
+            attemptedToken != null &&
+                attemptedToken != session.tokens.accessToken
+            ? _RefreshOutcome(session: session)
+            : await _refreshSingleFlight();
+      }
       final retried = await _retry(request, outcome.session.tokens.accessToken);
       if (outcome.warnings.isNotEmpty) {
         retried.extra[_refreshWarningsKey] = outcome.warnings;
@@ -314,7 +357,8 @@ final class ApiClient {
   }
 
   Future<_RefreshOutcome> _performRefresh() async {
-    final current = await sessionStore.load();
+    final snapshot = await _readSessionSnapshot();
+    final current = snapshot.session;
     if (current == null || current.serverBaseUrl != endpoint.baseUrl) {
       throw const ApiException(
         kind: ApiFailureKind.local,
@@ -336,32 +380,35 @@ final class ApiClient {
       }
     }
 
-    try {
-      final response = await requestEnvelope<AuthTokenPair>(
-        '/api/v1/auth/refresh',
-        method: 'POST',
-        authenticated: false,
-        retryOnUnauthorized: false,
-        data: {'refresh_token': current.tokens.refreshToken},
-        decode: (data) {
-          final map = _requireMap(data);
-          return AuthTokenPair.fromJson(map);
-        },
-      );
-      final rotated = current.rotated(response.data, now);
-      await sessionStore.save(rotated);
-      return _RefreshOutcome(
-        session: rotated,
-        statusCode: response.statusCode,
-        message: response.message,
-        warnings: response.warnings,
-      );
-    } on ApiException catch (error) {
-      if (_invalidatesRefreshSession(error.code)) {
-        await sessionStore.clear();
-      }
-      rethrow;
+    final lease = await _takeAndClearSessionIfRevision(snapshot.revision);
+    if (lease == null ||
+        lease.session == null ||
+        lease.session!.serverBaseUrl != endpoint.baseUrl) {
+      throw _authContextChanged();
     }
+
+    // The old rotating token is durably removed before it is sent. Any
+    // unconfirmed refresh therefore fails closed instead of replaying a token
+    // that the server may already have consumed.
+    final response = await requestEnvelope<AuthTokenPair>(
+      '/api/v1/auth/refresh',
+      method: 'POST',
+      authenticated: false,
+      retryOnUnauthorized: false,
+      data: {'refresh_token': lease.session!.tokens.refreshToken},
+      decode: (data) {
+        final map = _requireMap(data);
+        return AuthTokenPair.fromJson(map);
+      },
+    );
+    final rotated = lease.session!.rotated(response.data, now);
+    await commitSession(lease.revision, rotated);
+    return _RefreshOutcome(
+      session: rotated,
+      statusCode: response.statusCode,
+      message: response.message,
+      warnings: response.warnings,
+    );
   }
 
   Future<Response<dynamic>> _retry(RequestOptions request, String accessToken) {
@@ -381,6 +428,43 @@ final class ApiClient {
       warnings.insertAll(0, refreshWarnings);
     }
     return List.unmodifiable(warnings);
+  }
+
+  Future<AuthSessionSnapshot> _readSessionSnapshot() async {
+    try {
+      return await sessionStore.snapshot();
+    } on AuthSessionStoreException catch (error) {
+      throw _sessionStorageFailure(error);
+    }
+  }
+
+  Future<bool> _commitSessionIfRevision(
+    int expectedRevision,
+    AuthSession session,
+  ) async {
+    try {
+      return await sessionStore.commitIfRevision(expectedRevision, session);
+    } on AuthSessionStoreException catch (error) {
+      throw _sessionStorageFailure(error);
+    }
+  }
+
+  Future<AuthSessionSnapshot?> _takeAndClearSessionIfRevision(
+    int expectedRevision,
+  ) async {
+    try {
+      return await sessionStore.takeAndClearIfRevision(expectedRevision);
+    } on AuthSessionStoreException catch (error) {
+      throw _sessionStorageFailure(error);
+    }
+  }
+
+  Future<AuthSessionSnapshot> _takeAndClearSession() async {
+    try {
+      return await sessionStore.takeAndClear();
+    } on AuthSessionStoreException catch (error) {
+      throw _sessionStorageFailure(error);
+    }
   }
 }
 
@@ -436,12 +520,15 @@ String? _bearerToken(Object? header) {
   return pieces.last;
 }
 
-bool _invalidatesRefreshSession(String? code) {
-  return const {
-    'INVALID_TOKEN',
-    'TOKEN_EXPIRED',
-    'TOKEN_REVOKED',
-    'USER_NOT_FOUND',
-    'USER_DISABLED',
-  }.contains(code);
-}
+ApiException _authContextChanged() => const ApiException(
+  kind: ApiFailureKind.local,
+  code: 'AUTH_CONTEXT_CHANGED',
+  message: 'The authentication context changed',
+);
+
+ApiException _sessionStorageFailure(Object cause) => ApiException(
+  kind: ApiFailureKind.local,
+  code: 'AUTH_SESSION_STORAGE_FAILED',
+  message: 'Unable to update the local authentication state',
+  cause: cause,
+);

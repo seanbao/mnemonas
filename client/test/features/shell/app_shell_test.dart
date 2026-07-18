@@ -25,7 +25,7 @@ void main() {
 
     expect(find.byType(NavigationBar), findsOneWidget);
     expect(find.byType(NavigationRail), findsNothing);
-    for (final String label in <String>['首页', '文件', '相册', '我的']) {
+    for (final String label in <String>['首页', '文件', '回收站', '我的']) {
       expect(find.text(label), findsWidgets);
     }
 
@@ -45,7 +45,7 @@ void main() {
     await tester.pumpWidget(
       _app(
         AppShell(
-          destination: AppDestination.photos,
+          destination: AppDestination.trash,
           onDestinationSelected: (_) {},
           onSearch: () {},
           child: const Center(child: Text('内容')),

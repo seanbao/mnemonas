@@ -21,6 +21,7 @@ final class AuthApi {
     required String username,
     required String password,
   }) async {
+    final snapshot = await _client.sessionSnapshot();
     final response = await _client
         .requestEnvelope<({AuthTokenPair tokens, AuthUser user})>(
           '/api/v1/auth/login',
@@ -42,7 +43,7 @@ final class AuthApi {
       serverBaseUrl: _client.endpoint.baseUrl,
       tokens: response.data.tokens,
     );
-    await _client.replaceSession(session);
+    await _client.commitSession(snapshot.revision, session);
     return ApiResponse(
       data: LoginResult(user: response.data.user, session: session),
       statusCode: response.statusCode,
@@ -64,9 +65,20 @@ final class AuthApi {
     );
   }
 
-  Future<ApiResponse<EmptyResponse>> logout() async {
-    final session = await _client.requireSession();
-    final response = await _client.requestEnvelope<EmptyResponse>(
+  Future<ApiResponse<EmptyResponse>> logout({
+    void Function()? onLocalSessionCleared,
+  }) async {
+    final cleared = await _client.takeAndClearSession();
+    onLocalSessionCleared?.call();
+    final session = cleared.session;
+    if (session == null || session.serverBaseUrl != _client.endpoint.baseUrl) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'AUTH_SESSION_MISSING',
+        message: 'Sign in is required',
+      );
+    }
+    return _client.requestEnvelope<EmptyResponse>(
       '/api/v1/auth/logout',
       method: 'POST',
       authenticated: false,
@@ -74,8 +86,6 @@ final class AuthApi {
       data: {'refresh_token': session.tokens.refreshToken},
       decode: (_) => const EmptyResponse(),
     );
-    await _client.clearSession();
-    return response;
   }
 
   Future<ApiResponse<PasswordChangeResult>> changePassword({
@@ -83,33 +93,33 @@ final class AuthApi {
     required String newPassword,
     required String expectedUserId,
   }) async {
-    try {
-      final response = await _client.requestEnvelope<PasswordChangeResult>(
-        '/api/v1/auth/password',
-        method: 'POST',
-        retryOnUnauthorized: false,
-        data: {
-          'old_password': currentPassword,
-          'new_password': newPassword,
-          'expected_user_id': expectedUserId,
-        },
-        decode: (data) {
-          final json = data == null
-              ? const <String, dynamic>{}
-              : _requireMap(data);
-          return PasswordChangeResult(
-            persistenceWarning: json['warning'] == true,
-          );
-        },
+    final snapshot = await _client.sessionSnapshot();
+    if (snapshot.session == null ||
+        snapshot.session!.serverBaseUrl != _client.endpoint.baseUrl) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'AUTH_SESSION_MISSING',
+        message: 'Sign in is required',
       );
-      await _client.clearSession();
-      return response;
-    } on ApiException catch (error) {
-      if (error.isUnconfirmedMutation) {
-        await _client.clearSession();
-      }
-      rethrow;
     }
+    return _client.requestEnvelope<PasswordChangeResult>(
+      '/api/v1/auth/password',
+      method: 'POST',
+      retryOnUnauthorized: false,
+      data: {
+        'old_password': currentPassword,
+        'new_password': newPassword,
+        'expected_user_id': expectedUserId,
+      },
+      decode: (data) {
+        final json = data == null
+            ? const <String, dynamic>{}
+            : _requireMap(data);
+        return PasswordChangeResult(
+          persistenceWarning: json['warning'] == true,
+        );
+      },
+    );
   }
 
   Future<void> forgetSession() => _client.clearSession();

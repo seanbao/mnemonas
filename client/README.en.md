@@ -12,9 +12,10 @@ This directory contains the Flutter client for Android, Linux, and Windows. Andr
 The current source tree implements:
 
 - server-address entry, service validation, and server switching;
-- sign-in, secure session storage, access-token refresh, required password changes, voluntary password changes, and sign-out;
+- sign-in, secure session storage, access-token refresh, required password changes, voluntary password changes, and sign-out; session updates use revision/CAS, and sign-out, server switching, or a new sign-in invalidates older requests;
 - device overview and file-directory browsing;
 - folder creation, upload, download, transfer progress and cancellation, open, rename, move, copy, and deletion confirmation based on the server deletion policy;
+- trash listing with per-item expiry, restore to the original or a custom path, and permanent deletion of a frozen exact ID selection; when a mutation result is unconfirmed, the client reloads Trash but does not infer restore or deletion success only because an item disappeared, and later mutations remain paused until an explicit refresh;
 - client and server version display, plus a GitHub Issues feedback entry.
 
 This list describes the implementation scope in the current source tree. It does not establish a usable client release.
@@ -22,7 +23,7 @@ This list describes the implementation scope in the current source tree. It does
 ## Current Gaps
 
 - Search and photo indexing are not connected.
-- Version history, trash management, sharing, and administrative workflows are not complete in the client.
+- Version history, sharing, and administrative workflows are not complete in the client.
 - Background transfers, resumable transfers, and transfer recovery after process restart are not complete.
 - Interface text is currently primarily Simplified Chinese; complete localization is not available.
 - Linux and Windows native build and runtime validation have not been completed.
