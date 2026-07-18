@@ -337,9 +337,7 @@ void main() {
         FilesPage(
           viewModel: FilesViewModel.ready(
             path: '/',
-            entries: <FileEntry>[
-              _entry(name: '记录.txt', path: '/记录.txt'),
-            ],
+            entries: <FileEntry>[_entry(name: '记录.txt', path: '/记录.txt')],
             canWrite: true,
           ),
           onRefresh: () async {},
