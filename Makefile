@@ -1,4 +1,4 @@
-.PHONY: all build web-build test test-torture fault-injection fault-injection-live clean deps dev proto proto-go proto-rust go-packages fmt lint workflows-check scripts-check toolchains-check docs-check security-check install-audit-tools docker docker-smoke docker-check e2e bench coverage rust-coverage check verify-changed release-readiness quick-check client-deps client-toolchain-check client-android-policy-check client-format client-format-check client-analyze client-test client-apk-debug client-check run help
+.PHONY: all build web-build test test-torture fault-injection fault-injection-live clean deps dev proto proto-go proto-rust go-packages fmt lint workflows-check scripts-check toolchains-check docs-check security-check install-audit-tools docker docker-smoke docker-check e2e bench coverage rust-coverage check verify-changed release-readiness quick-check client-deps client-toolchain-check client-android-policy-check client-android-release-signing-check client-format client-format-check client-analyze client-test client-apk-debug client-check run help
 
 # Version metadata
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -84,7 +84,8 @@ help:
 	@echo "  release-readiness - Summarize pre-release readiness"
 	@echo "  quick-check - Run fast local Go/Rust checks"
 	@echo "  client-check - Run Flutter client format, analyze, test, and debug APK gates"
-	@echo "  client-android-policy-check - Validate Android backup and transfer exclusions"
+	@echo "  client-android-policy-check - Validate Android backup, identity, and release policy"
+	@echo "  client-android-release-signing-check - Exercise fail-closed signing with temporary keys"
 	@echo "  client-format - Format Flutter client Dart sources"
 	@echo "  client-apk-debug - Build the Android client debug APK"
 	@echo "  lint       - Run linters (Go + Rust)"
@@ -418,9 +419,18 @@ client-toolchain-check:
 	fi
 
 client-android-policy-check:
-	@echo "🔐 Checking Android backup policy..."
+	@echo "🔐 Checking Android backup and release policy..."
 	PYTHONDONTWRITEBYTECODE=1 python3 client/tool/check_android_backup_policy.py
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s client/tool -p 'test_android_backup_policy.py'
+	PYTHONDONTWRITEBYTECODE=1 python3 client/tool/check_android_release_policy.py
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s client/tool -p 'test_android_release_policy.py'
+
+client-android-release-signing-check: client-toolchain-check client-android-policy-check client-deps
+	@echo "🔏 Exercising Android release signing policy..."
+	JAVA_HOME="$(CLIENT_JAVA_HOME)" PATH="$(CLIENT_JAVA_HOME)/bin:$$PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
+		python3 client/tool/test_android_release_signing.py \
+			--client-root client \
+			--java-home "$(CLIENT_JAVA_HOME)"
 
 client-format: client-deps
 	@echo "✨ Formatting Flutter client..."

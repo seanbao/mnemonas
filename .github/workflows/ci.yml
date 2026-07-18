@@ -286,7 +286,7 @@ jobs:
   client:
     name: Android Client
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: client
@@ -316,10 +316,19 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Check Android backup policy
+      - name: Check Android platform policy
         run: |
           PYTHONDONTWRITEBYTECODE=1 python3 tool/check_android_backup_policy.py
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tool -p 'test_android_backup_policy.py'
+          PYTHONDONTWRITEBYTECODE=1 python3 tool/check_android_release_policy.py
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tool -p 'test_android_release_policy.py'
+
+      - name: Exercise fail-closed release signing
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
+            python3 tool/test_android_release_signing.py \
+              --client-root . \
+              --java-home "$JAVA_HOME"
 
       - name: Format check
         run: dart format --output=none --set-exit-if-changed lib test
