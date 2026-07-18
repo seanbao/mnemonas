@@ -78,11 +78,13 @@ final class FilesApi {
     String logicalPath, {
     CancelToken? cancelToken,
   }) {
-    final encoded = encodeLogicalPath(logicalPath);
+    final path = normalizeLogicalPath(logicalPath);
+    final encoded = encodeLogicalPath(path);
     return _client.requestEnvelope<DirectoryListing>(
       '/api/v1/files/$encoded',
       cancelToken: cancelToken,
-      decode: (data) => DirectoryListing.fromJson(_requireMap(data)),
+      decode: (data) =>
+          DirectoryListing.fromJson(_requireMap(data), expectedPath: path),
     );
   }
 

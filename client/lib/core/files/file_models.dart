@@ -134,13 +134,23 @@ final class DirectoryListing {
     required this.entries,
   });
 
-  factory DirectoryListing.fromJson(Map<String, dynamic> json) {
+  factory DirectoryListing.fromJson(
+    Map<String, dynamic> json, {
+    String? expectedPath,
+  }) {
+    final path = _requiredString(json, 'path');
+    if (normalizeLogicalPath(path) != path) {
+      throw const FormatException('Directory path is not normalized');
+    }
+    if (expectedPath != null && path != normalizeLogicalPath(expectedPath)) {
+      throw const FormatException('Directory path does not match the request');
+    }
     final files = json['files'];
     if (files is! List) {
       throw const FormatException('Invalid directory entries');
     }
     return DirectoryListing(
-      path: _requiredString(json, 'path'),
+      path: path,
       capabilities: FileCapabilities.fromJson(
         _requireMap(json['capabilities']),
       ),

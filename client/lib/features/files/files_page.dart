@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../core/files/file_models.dart';
+import '../../core/files/file_path.dart';
 import '../../design_system/design_system.dart';
 
 enum FilesLoadState { loading, ready, error }
@@ -167,10 +168,12 @@ class _FilesPageState extends State<FilesPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
+    final String currentPath = normalizeLogicalPath(widget.viewModel.path);
+    final bool handlesBack = _selectedPaths.isNotEmpty || currentPath != '/';
+    final Widget content = Column(
       children: <Widget>[
         _FilesToolbar(
-          path: widget.viewModel.path,
+          path: currentPath,
           displayMode: _displayMode,
           selectedEntries: _selectedEntries,
           canWrite: widget.viewModel.canWrite,
@@ -219,6 +222,23 @@ class _FilesPageState extends State<FilesPage> {
           ),
         Expanded(child: _buildContent()),
       ],
+    );
+    return PopScope<Object?>(
+      key: const Key('files-back-scope'),
+      canPop: !handlesBack,
+      onPopInvokedWithResult: (bool didPop, Object? result) {
+        if (didPop) {
+          return;
+        }
+        if (_selectedPaths.isNotEmpty) {
+          _clearSelection();
+          return;
+        }
+        if (currentPath != '/') {
+          widget.onNavigatePath(_logicalParentPath(currentPath));
+        }
+      },
+      child: content,
     );
   }
 
@@ -937,3 +957,12 @@ String _formatModifiedAt(DateTime value) {
 }
 
 String _twoDigits(int value) => value.toString().padLeft(2, '0');
+
+String _logicalParentPath(String path) {
+  final String normalized = normalizeLogicalPath(path);
+  if (normalized == '/') {
+    return '/';
+  }
+  final int separator = normalized.lastIndexOf('/');
+  return separator <= 0 ? '/' : normalized.substring(0, separator);
+}
