@@ -6,18 +6,18 @@ This document records Flutter-client refactor scope, verification evidence, and 
 
 ## Progress Baseline
 
-As of 2026-07-18, engineering readiness for the complete Android, Linux, and Windows client objective is estimated at **60%**. The value uses the fixed weights below to compare later changes; it is not a release-completion percentage.
+As of 2026-07-19, engineering readiness for the complete Android, Linux, and Windows client objective is estimated at **66%**. The value uses the fixed weights below to compare later changes; it is not a release-completion percentage.
 
 | Workstream | Weight | Current score | Current boundary |
 | --- | ---: | ---: | --- |
 | Cross-platform project and client structure | 12 | 10 | Flutter project, design system, and Android/Linux/Windows runners exist; native desktop validation is incomplete |
 | Authentication, sessions, and context isolation | 14 | 12 | Revision/CAS, secure storage, single-use refresh-token rotation, and server/account isolation are implemented; a background credential broker is not |
 | Files, search, Trash, and account workflows | 20 | 15 | Core file operations, bounded search, safe Trash workflows, and account flows are connected; version, sharing, and administration flows remain incomplete |
-| Transfer integrity and recovery | 20 | 11 | Server identity conditions, the client ledger, foreground pause and resume, restart recovery, and deferred Android publication from a private payload are implemented; upload has no session, offset, idempotent commit, or result lookup |
+| Transfer integrity and recovery | 20 | 17 | Download identity conditions and durable upload sessions are integrated with the client ledger; foreground transfers support pause, resume, authoritative offsets, idempotent commit, and restart recovery; native background execution and cross-process leases are incomplete |
 | Android native capability and lifecycle | 16 | 8 | SAF import and export provide bounded streaming, progress, cancellation, and Activity-destruction cleanup; background execution, notification controls, lifecycle transitions, and the physical-device matrix are incomplete |
 | Release engineering and platform security | 10 | 3 | Debug APK and baseline policy checks are available; independent signing, release versioning, release HTTPS policy, and upgrade validation are incomplete |
 | Linux and Windows validation | 8 | 1 | Runners and shared-code boundaries remain; native build, runtime, and distribution evidence is absent |
-| **Total** | **100** | **60** | **Still under development, with no usable version** |
+| **Total** | **100** | **66** | **Still under development, with no usable version** |
 
 ## Completed Refactors
 
@@ -47,23 +47,26 @@ As of 2026-07-18, engineering readiness for the complete Android, Linux, and Win
 - The native layer copies one file at a time with a 64 KiB buffer, calls `flush` and `fd.sync`, and cleans partial files after failure.
 - Upload import and download publication use only temporary URI grants for the current foreground flow and do not retain shared grants. Recoverable state remains in the app-private payload and ledger. This boundary also avoids complete-file and multi-selection Java heap residency from the previous plugin path.
 
-### Upload Failure Semantics
+### Upload Recovery
 
-- The legacy `POST /api/v1/files/{path}` endpoint explicitly rejects `Content-Range`, preventing callers from treating it as a resumable protocol.
-- Once an upload enters the send phase, connection loss, timeout, or cancellation conservatively produces an unconfirmed-result state. The client does not automatically replay a request that may already have committed.
+- The server uses owner-isolated durable upload sessions with request-ID idempotency, status lookup, sequential chunks, authoritative offsets, chunk SHA-256, complete-payload BLAKE3, conditional commit, cancellation, expiry cleanup, and crash-result reconciliation.
+- Session storage uses a bounded two-snapshot state chain, retained-record limits, 20/100 GiB staged-byte limits, and host minimum-free-space admission. Overlapping commits converge on one terminal result, and server startup reconciles interrupted `committing` states.
+- The legacy `POST /api/v1/files/{path}` continues to reject `Content-Range`; recoverable clients use only the separate `/api/v1/upload-sessions` protocol.
+- The client creates a task-owned private payload and records its SHA-256 before persisting creation-attempt state, the session ID, server offset, and expiry in the ledger. It must persist the attempt before the first creation request. If the response is lost before a session ID is known, it only looks up an existing session by client request ID and does not repeat creation.
+- If a session is missing or expired, the client marks the task as unconfirmed rather than creating a session against a new target baseline. Server recovery must also pass the storage recovery gate instead of confirming publication from a visible target that has not been reconciled. For a successful upload, it deletes the private payload only after observing `committed`; startup retries payload cleanup for confirmed completed or cancelled tasks.
+- When Android file metadata contains a size, a source above 10 GiB is rejected before copying. If metadata omits the size, the native copy layer still enforces a 10 GiB hard limit and stops writing and removes the partial file when the limit is reached. Local preparation uses a separate visible state so it is not presented as network-upload progress.
 
 ## Remaining Work
 
 In current priority order:
 
-1. Implement durable server upload sessions: create, status lookup, sequential chunks, durable offset, chunk idempotency, atomic commit, cancellation, expiry cleanup, and terminal-state reconciliation.
-2. Connect upload to the same durable task state machine and retain either the Android SAF source URI or a safe app-private payload.
-3. Implement the Android native background executor, progress notifications, cancel and retry actions, system stop-reason handling, and cross-process task leases.
-4. Tighten Android release cleartext policy and add independent signing, monotonic versioning, signature verification, upgrade installation, and API 24/33/34/36 validation.
-5. Complete physical Android-device acceptance for large files, network loss, permission revocation, process termination, foreground/background transitions, and upgrades, including provider-retained empty or partial documents after native-copy failure.
-6. Add no-replace atomic primitives, a durable publication journal, and directory synchronization for desktop download destinations, and persist the overwrite decision across restart.
-7. Validate builds, file selection, destination publication, path replacement, and process recovery on native Linux and Windows hosts.
-8. Complete version history, sharing, administration, localization, and remaining interaction-consistency checks.
+1. Implement the Android native background executor, progress notifications, cancel and retry actions, system stop-reason handling, and cross-process task leases.
+2. Tighten Android release cleartext policy and add independent signing, monotonic versioning, signature verification, upgrade installation, and API 24/33/34/36 validation.
+3. Complete physical Android-device acceptance for large files, network loss, permission revocation, process termination, foreground/background transitions, and upgrades, including provider-retained empty or partial documents after native-copy failure.
+4. Reduce the temporary duplicate storage between Android SAF import and the task-owned private payload, and expose a separate full-payload verification state.
+5. Add no-replace atomic primitives, a durable publication journal, and directory synchronization for desktop download destinations, and persist the overwrite decision across restart.
+6. Validate builds, file selection, destination publication, path replacement, and process recovery on native Linux and Windows hosts.
+7. Complete version history, sharing, administration, localization, and remaining interaction-consistency checks.
 
 ## Record Locations
 

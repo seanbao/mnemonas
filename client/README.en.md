@@ -17,7 +17,8 @@ The current source tree implements:
 - filename search across files and directories visible to the current account; each request displays at most 100 results, a new query cancels the older request, and the target directory is reloaded before a result is opened;
 - folder creation, upload, download, open, rename, move, copy, and deletion confirmation based on the server deletion policy;
 - an app-private durable ledger and stable partial files for foreground downloads, with pause, resume, and client-restart recovery; resumed responses must match the server download identity, `206`, `Content-Range`, and total size;
-- Android upload selection through the Storage Access Framework, returning only URI metadata to Dart and streaming one file at a time into app-private storage without complete-file Java heap residency; an unconfirmed upload is not replayed automatically;
+- foreground uploads in the same durable ledger, using a task-owned private payload and a recoverable server session; the client persists a create-attempt marker before the first session request, and if the response is lost before the session ID is known, it only looks up the original session by client request ID instead of creating another target snapshot; the client writes 8 MiB chunks, resumes from the server-authoritative offset, and queries the idempotent commit result; a missing or expired original session becomes an unconfirmed result;
+- Android upload selection through the Storage Access Framework, returning only URI metadata to Dart and streaming one file at a time into app-private storage without complete-file Java heap residency; a known size above 10 GiB is rejected before copying, while native copying enforces the same hard limit and removes the partial file when metadata omits the size; preparation progress is shown separately, and the temporary import can be released after the task payload has been SHA-256 verified and committed to the ledger;
 - trash listing with per-item expiry, restore to the original or a custom path, and permanent deletion of a frozen exact ID selection; when a mutation result is unconfirmed, the client reloads Trash but does not infer restore or deletion success only because an item disappeared, and later mutations remain paused until an explicit refresh;
 - client and server version display, plus a GitHub Issues feedback entry.
 
@@ -27,8 +28,7 @@ This list describes the implementation scope in the current source tree. It does
 
 - Full-text and photo indexing are not connected, and filename search does not yet support cursor pagination.
 - Version history, sharing, and administrative workflows are not complete in the client.
-- The Android native background-transfer executor, notification controls, and cross-process task lease remain incomplete. Recoverable download execution currently runs only in the foreground coordinator.
-- Server-side resumable upload sessions, chunk offsets, idempotent commit, and result lookup are incomplete. Upload remains one complete-file request.
+- The Android native background-transfer executor, notification controls, and cross-process task lease remain incomplete. Recoverable upload and download execution currently run only in the foreground Dart coordinator.
 - Interface text is currently primarily Simplified Chinese; complete localization is not available.
 - Linux and Windows native build and runtime validation have not been completed.
 - Physical Android-device acceptance, upgrade validation, independent release signing, and formal release artifacts have not been completed.
