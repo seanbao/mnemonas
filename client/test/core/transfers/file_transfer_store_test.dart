@@ -163,6 +163,20 @@ void main() {
     expect(restored.tasks, <TransferTask>[original]);
   });
 
+  test('store never reverts an upload create-attempt marker', () async {
+    final store = _store(directory);
+    final attempted = _uploadTask('task-9', uploadSessionCreateAttempted: true);
+    await store.upsert(attempted);
+
+    await expectLater(
+      store.upsert(attempted.copyWith(uploadSessionCreateAttempted: false)),
+      throwsFormatException,
+    );
+
+    final restored = await _store(directory).load();
+    expect(restored.tasks.single.uploadSessionCreateAttempted, isTrue);
+  });
+
   test('strict ledger decoding rejects hidden token data', () async {
     final file = File(
       '${directory.path}/'
@@ -179,10 +193,7 @@ void main() {
       }),
     );
 
-    final restored = await _store(directory).load();
-
-    expect(restored.generation, 0);
-    expect(restored.tasks, isEmpty);
+    await expectLater(_store(directory).load(), throwsFormatException);
   });
 }
 
@@ -213,6 +224,28 @@ TransferTask _task(
     updatedAt: DateTime.utc(2026, 7, 19, 12, index),
     errorCode: errorCode,
     errorMessage: errorMessage,
+  );
+}
+
+TransferTask _uploadTask(String id, {bool? uploadSessionCreateAttempted}) {
+  final index = int.parse(id.split('-').last);
+  return TransferTask(
+    id: id,
+    direction: TransferDirection.upload,
+    phase: TransferPhase.running,
+    endpointBaseUrl: 'https://nas.example.com',
+    userId: 'user-1',
+    remotePath: '/documents/report-$index.pdf',
+    displayName: 'report-$index.pdf',
+    stagingPath: '${directorySafeRoot()}/task-$index.upload',
+    payloadSha256:
+        '0123456789abcdef0123456789abcdef'
+        '0123456789abcdef0123456789abcdef',
+    uploadSessionCreateAttempted: uploadSessionCreateAttempted,
+    durableOffset: 0,
+    totalBytes: 100,
+    createdAt: DateTime.utc(2026, 7, 19, 12, index),
+    updatedAt: DateTime.utc(2026, 7, 19, 12, index),
   );
 }
 

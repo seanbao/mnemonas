@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
 import 'package:dio/dio.dart';
 
 import '../network/api_client.dart';
@@ -16,6 +18,10 @@ typedef DownloadCheckpointCallback =
 
 const downloadIdentityHeader = 'X-MnemoNAS-Download-Identity';
 const downloadIdentityConditionHeader = 'X-MnemoNAS-If-Download-Identity';
+const uploadOffsetHeader = 'Upload-Offset';
+const uploadChunkIdHeader = 'Upload-Chunk-ID';
+const uploadChunkSha256Header = 'X-MnemoNAS-Chunk-SHA256';
+const maxUploadSessionChunkBytes = 8 * 1024 * 1024;
 
 final class DownloadCheckpoint {
   const DownloadCheckpoint({
@@ -208,6 +214,207 @@ final class FilesApi {
       onSendProgress: onProgress,
       cancelToken: cancelToken,
       decode: (data) => FileMutationResult.fromJson(_requireMap(data)),
+    );
+  }
+
+  Future<ApiResponse<UploadSessionSnapshot>> createUploadSession({
+    required String logicalPath,
+    required int totalBytes,
+    required String clientRequestId,
+    CancelToken? cancelToken,
+  }) {
+    final path = normalizeLogicalPath(logicalPath, allowRoot: false);
+    if (totalBytes < 0) {
+      throw ArgumentError.value(
+        totalBytes,
+        'totalBytes',
+        'Upload size cannot be negative',
+      );
+    }
+    _requireUploadIdentifier(clientRequestId, 'clientRequestId');
+
+    return _client.requestEnvelope<UploadSessionSnapshot>(
+      '/api/v1/upload-sessions',
+      method: 'POST',
+      data: <String, Object>{
+        'path': path,
+        'total_bytes': totalBytes,
+        'client_request_id': clientRequestId,
+      },
+      cancelToken: cancelToken,
+      decode: (data) {
+        final session = UploadSessionSnapshot.fromJson(_requireMap(data));
+        if (session.path != path || session.totalBytes != totalBytes) {
+          throw const FormatException(
+            'Upload session does not match the create request',
+          );
+        }
+        return session;
+      },
+    );
+  }
+
+  Future<ApiResponse<UploadSessionSnapshot>>
+  lookupUploadSessionByClientRequestId({
+    required String clientRequestId,
+    required String logicalPath,
+    required int totalBytes,
+    CancelToken? cancelToken,
+  }) {
+    final requestId = _requireUploadIdentifier(
+      clientRequestId,
+      'clientRequestId',
+    );
+    final path = normalizeLogicalPath(logicalPath, allowRoot: false);
+    if (totalBytes < 0) {
+      throw ArgumentError.value(
+        totalBytes,
+        'totalBytes',
+        'Upload size cannot be negative',
+      );
+    }
+
+    return _client.requestEnvelope<UploadSessionSnapshot>(
+      '/api/v1/upload-sessions/by-client-request/'
+      '${Uri.encodeComponent(requestId)}',
+      cancelToken: cancelToken,
+      decode: (data) {
+        final session = UploadSessionSnapshot.fromJson(_requireMap(data));
+        if (session.path != path || session.totalBytes != totalBytes) {
+          throw const FormatException(
+            'Upload session does not match the lookup request',
+          );
+        }
+        return session;
+      },
+    );
+  }
+
+  Future<ApiResponse<UploadSessionSnapshot>> getUploadSessionStatus({
+    required String sessionId,
+    CancelToken? cancelToken,
+  }) {
+    final id = _requireUploadIdentifier(sessionId, 'sessionId');
+    return _client.requestEnvelope<UploadSessionSnapshot>(
+      '/api/v1/upload-sessions/${Uri.encodeComponent(id)}',
+      cancelToken: cancelToken,
+      decode: (data) => _decodeUploadSession(data, expectedId: id),
+    );
+  }
+
+  Future<ApiResponse<UploadSessionSnapshot>> uploadSessionChunk({
+    required String sessionId,
+    required String sourcePath,
+    required int offset,
+    required int length,
+    required String chunkId,
+    TransferProgress? onProgress,
+    CancelToken? cancelToken,
+  }) async {
+    final id = _requireUploadIdentifier(sessionId, 'sessionId');
+    final normalizedChunkId = _requireUploadIdentifier(chunkId, 'chunkId');
+    if (offset < 0) {
+      throw ArgumentError.value(
+        offset,
+        'offset',
+        'Upload offset cannot be negative',
+      );
+    }
+    if (length <= 0 || length > maxUploadSessionChunkBytes) {
+      throw ArgumentError.value(
+        length,
+        'length',
+        'Upload chunk length must be between 1 byte and 8 MiB',
+      );
+    }
+
+    final source = File(sourcePath);
+    final before = await source.stat();
+    if (before.type != FileSystemEntityType.file ||
+        offset > before.size ||
+        length > before.size - offset) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'UPLOAD_CHUNK_SOURCE_INVALID',
+        message: 'The upload chunk source is unavailable or too short',
+      );
+    }
+
+    RandomAccessFile? input;
+    late final Uint8List bytes;
+    try {
+      input = await source.open();
+      await input.setPosition(offset);
+      bytes = await input.read(length);
+    } finally {
+      await input?.close();
+    }
+    final after = await source.stat();
+    if (bytes.length != length ||
+        after.type != FileSystemEntityType.file ||
+        after.size != before.size) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'UPLOAD_CHUNK_SOURCE_CHANGED',
+        message: 'The upload source changed while preparing a chunk',
+      );
+    }
+
+    final digest = sha256.convert(bytes).toString();
+    await _client.ensureSessionValidity();
+    final requiredOffset = offset + length;
+    return _client.requestEnvelope<UploadSessionSnapshot>(
+      '/api/v1/upload-sessions/${Uri.encodeComponent(id)}',
+      method: 'PATCH',
+      data: bytes,
+      headers: <String, Object>{
+        uploadOffsetHeader: '$offset',
+        uploadChunkIdHeader: normalizedChunkId,
+        uploadChunkSha256Header: digest,
+        Headers.contentLengthHeader: '$length',
+        Headers.contentTypeHeader: 'application/octet-stream',
+      },
+      retryOnUnauthorized: false,
+      cancelToken: cancelToken,
+      onSendProgress: onProgress == null
+          ? null
+          : (sent, _) => onProgress(offset + sent, before.size),
+      decode: (data) {
+        final session = _decodeUploadSession(data, expectedId: id);
+        if (session.totalBytes != before.size ||
+            session.durableOffset < requiredOffset) {
+          throw const FormatException(
+            'Upload session did not acknowledge the complete chunk',
+          );
+        }
+        return session;
+      },
+    );
+  }
+
+  Future<ApiResponse<UploadSessionSnapshot>> commitUploadSession({
+    required String sessionId,
+    CancelToken? cancelToken,
+  }) {
+    final id = _requireUploadIdentifier(sessionId, 'sessionId');
+    return _client.requestEnvelope<UploadSessionSnapshot>(
+      '/api/v1/upload-sessions/${Uri.encodeComponent(id)}/commit',
+      method: 'POST',
+      cancelToken: cancelToken,
+      decode: (data) => _decodeUploadSession(data, expectedId: id),
+    );
+  }
+
+  Future<ApiResponse<UploadSessionSnapshot>> cancelUploadSession({
+    required String sessionId,
+    CancelToken? cancelToken,
+  }) {
+    final id = _requireUploadIdentifier(sessionId, 'sessionId');
+    return _client.requestEnvelope<UploadSessionSnapshot>(
+      '/api/v1/upload-sessions/${Uri.encodeComponent(id)}',
+      method: 'DELETE',
+      cancelToken: cancelToken,
+      decode: (data) => _decodeUploadSession(data, expectedId: id),
     );
   }
 
@@ -468,6 +675,33 @@ final class FilesApi {
 }
 
 const _downloadCheckpointBytes = 4 * 1024 * 1024;
+final RegExp _uploadIdentifierPattern = RegExp(
+  r'^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$',
+);
+
+String _requireUploadIdentifier(String value, String argumentName) {
+  if (!_uploadIdentifierPattern.hasMatch(value)) {
+    throw ArgumentError.value(
+      value,
+      argumentName,
+      'A valid upload protocol identifier is required',
+    );
+  }
+  return value;
+}
+
+UploadSessionSnapshot _decodeUploadSession(
+  Object? data, {
+  required String expectedId,
+}) {
+  final session = UploadSessionSnapshot.fromJson(_requireMap(data));
+  if (session.id != expectedId) {
+    throw const FormatException(
+      'Upload session response has an unexpected identity',
+    );
+  }
+  return session;
+}
 
 final class _ContentRange {
   const _ContentRange({

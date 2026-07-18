@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -81,6 +82,8 @@ final contentUriMaterializationCancellerProvider =
 
 typedef ApiClientFactory =
     ApiClient Function(ServerEndpoint endpoint, AuthSessionStore sessionStore);
+
+const int maxDurableUploadBytes = 10 * 1024 * 1024 * 1024;
 
 final class TrashSelectionOutcome {
   TrashSelectionOutcome({
@@ -1180,101 +1183,223 @@ class ClientController extends Notifier<ClientState> {
   }) async {
     final epoch = _contextEpoch;
     final refreshPath = state.currentPath;
-    final files = _requireFiles();
-    final target = _joinLogicalPath(refreshPath, fileName);
+    final task = await _createDurableUploadTask(
+      sourcePath: sourcePath,
+      fileName: fileName,
+      remotePath: _joinLogicalPath(refreshPath, fileName),
+    );
+    final result = await _runDurableUpload(task);
+    if (!_isContextCurrent(epoch)) {
+      return;
+    }
+    try {
+      await loadDirectory(refreshPath);
+    } on Object {
+      state = state.copyWith(
+        isBusy: false,
+        errorMessage: null,
+        notice: result.persistenceWarning
+            ? '文件已确认上传，但服务器报告了持久化警告，且目录刷新失败。请手动刷新确认最新目录。'
+            : '文件已确认上传，但目录刷新失败。请手动刷新确认最新目录。',
+      );
+      return;
+    }
+    if (result.persistenceWarning) {
+      state = state.copyWith(notice: '文件已上传，但服务器报告了持久化警告。');
+    }
+  }
+
+  Future<transfer_core.TransferTask> _createDurableUploadTask({
+    required String sourcePath,
+    required String fileName,
+    required String remotePath,
+  }) async {
+    final epoch = _contextEpoch;
+    final endpoint = state.endpoint;
+    final user = state.user;
+    if (endpoint == null || user == null || state.stage != ClientStage.ready) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'AUTH_SESSION_MISSING',
+        message: 'Sign in is required',
+      );
+    }
+    final source = File(sourcePath);
+    final sourceInfo = await source.stat();
+    if (sourceInfo.type != FileSystemEntityType.file || sourceInfo.size < 0) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'UPLOAD_SOURCE_INVALID',
+        message: 'The upload source is not a supported regular file',
+      );
+    }
+    if (sourceInfo.size > maxDurableUploadBytes) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'UPLOAD_SOURCE_TOO_LARGE',
+        message: 'The upload source exceeds the 10 GiB limit',
+      );
+    }
+
+    final store = await _ensureTransferStore();
+    await _pruneCompletedTransferHistory(store);
     final id = _nextTransferId();
-    final cancelToken = CancelToken();
-    _transferCancellations[id] = cancelToken;
+    final payloadDirectory = Directory(
+      '${store.directoryPath}${Platform.pathSeparator}payloads',
+    );
+    await payloadDirectory.create(recursive: true);
+    final stagingPath =
+        '${payloadDirectory.path}${Platform.pathSeparator}$id.upload';
+    final cancellation = CancelToken();
+    _transferCancellations[id] = cancellation;
     _addTransfer(
       ClientTransfer(
         id: id,
         name: fileName,
         direction: TransferDirection.upload,
-        status: TransferStatus.running,
+        status: TransferStatus.preparing,
         transferred: 0,
-        total: -1,
+        total: sourceInfo.size,
       ),
       expectedEpoch: epoch,
     );
-    var requestStarted = false;
+
     try {
-      late final ApiResponse<FileMutationResult> result;
-      try {
-        result = await files.uploadFile(
-          logicalPath: target,
-          sourcePath: sourcePath,
-          cancelToken: cancelToken,
-          onRequestStarted: () {
-            requestStarted = true;
-          },
-          onProgress: (transferred, total) {
-            _updateTransfer(
-              id,
-              transferred: transferred,
-              total: total,
-              expectedEpoch: epoch,
-            );
-          },
-        );
-      } on Object catch (error) {
-        if (!_isContextCurrent(epoch)) {
-          return;
-        }
-        if (!await handleAuthenticationFailure(error, expectedEpoch: epoch)) {
-          final cancelled =
-              error is ApiException && error.kind == ApiFailureKind.cancelled;
-          final resultUnconfirmed =
-              requestStarted &&
-              error is ApiException &&
-              error.isUnconfirmedMutation;
+      final staged = await _stageUploadPayload(
+        source: source,
+        destination: File(stagingPath),
+        expectedBytes: sourceInfo.size,
+        cancellation: cancellation,
+        onProgress: (transferred) {
           _updateTransfer(
             id,
-            status: resultUnconfirmed
-                ? TransferStatus.resultUnconfirmed
-                : cancelled
-                ? TransferStatus.cancelled
-                : TransferStatus.failed,
-            errorMessage: resultUnconfirmed
-                ? '服务器可能已经完成上传，请刷新目录核对后再重试。'
-                : cancelled
-                ? null
-                : clientErrorMessage(error),
+            transferred: transferred,
+            total: sourceInfo.size,
             expectedEpoch: epoch,
           );
-        }
-        rethrow;
-      }
-      if (!_isContextCurrent(epoch)) {
-        return;
-      }
-      _updateTransfer(
-        id,
-        status: TransferStatus.completed,
-        expectedEpoch: epoch,
+        },
       );
-      try {
-        await loadDirectory(refreshPath);
-      } on Object {
-        if (!_isContextCurrent(epoch)) {
-          return;
-        }
-        state = state.copyWith(
-          isBusy: false,
-          errorMessage: null,
-          notice: result.hasWarnings || result.data.persistenceWarning
-              ? '文件已确认上传，但服务器报告了持久化警告，且目录刷新失败。请手动刷新确认最新目录。'
-              : '文件已确认上传，但目录刷新失败。请手动刷新确认最新目录。',
-        );
-        return;
-      }
       if (!_isContextCurrent(epoch)) {
-        return;
+        throw _operationSuperseded();
       }
-      if (result.hasWarnings || result.data.persistenceWarning) {
-        state = state.copyWith(notice: '文件已上传，但服务器报告了持久化警告。');
+      final now = DateTime.now().toUtc();
+      final task = transfer_core.TransferTask(
+        id: id,
+        direction: transfer_core.TransferDirection.upload,
+        phase: transfer_core.TransferPhase.queued,
+        endpointBaseUrl: endpoint.baseUrl,
+        userId: user.id,
+        remotePath: remotePath,
+        displayName: fileName,
+        stagingPath: stagingPath,
+        payloadSha256: staged.sha256,
+        durableOffset: 0,
+        totalBytes: staged.bytes,
+        createdAt: now,
+        updatedAt: now,
+      );
+      await _persistDurableTask(task);
+      return task;
+    } on Object catch (error) {
+      for (final path in <String>[stagingPath, '$stagingPath.part']) {
+        try {
+          final file = File(path);
+          if (await file.exists()) {
+            await file.delete();
+          }
+        } on FileSystemException {
+          // A later orphan-payload cleanup can retry this private file.
+        }
       }
+      if (_isContextCurrent(epoch)) {
+        final cancelled =
+            error is ApiException && error.kind == ApiFailureKind.cancelled;
+        _updateTransfer(
+          id,
+          status: cancelled ? TransferStatus.cancelled : TransferStatus.failed,
+          errorMessage: cancelled ? null : clientErrorMessage(error),
+          expectedEpoch: epoch,
+        );
+      }
+      rethrow;
     } finally {
-      _transferCancellations.remove(id);
+      if (identical(_transferCancellations[id], cancellation)) {
+        _transferCancellations.remove(id);
+      }
+    }
+  }
+
+  Future<_StagedUploadPayload> _stageUploadPayload({
+    required File source,
+    required File destination,
+    required int expectedBytes,
+    required CancelToken cancellation,
+    required ValueChanged<int> onProgress,
+  }) async {
+    final partial = File('${destination.path}.part');
+    if (await destination.exists() || await partial.exists()) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'UPLOAD_STAGING_CONFLICT',
+        message: 'The private upload staging path already exists',
+      );
+    }
+
+    RandomAccessFile? output;
+    final digestSink = _DigestCaptureSink();
+    final hashSink = sha256.startChunkedConversion(digestSink);
+    var written = 0;
+    var completed = false;
+    try {
+      output = await partial.open(mode: FileMode.writeOnly);
+      await for (final chunk in source.openRead()) {
+        if (cancellation.isCancelled) {
+          throw const ApiException(
+            kind: ApiFailureKind.cancelled,
+            code: 'UPLOAD_PREPARATION_CANCELLED',
+            message: 'Upload preparation was cancelled',
+          );
+        }
+        written += chunk.length;
+        if (written > expectedBytes) {
+          throw const ApiException(
+            kind: ApiFailureKind.local,
+            code: 'UPLOAD_SOURCE_CHANGED',
+            message: 'The upload source changed while it was copied',
+          );
+        }
+        await output.writeFrom(chunk);
+        hashSink.add(chunk);
+        onProgress(written);
+      }
+      if (written != expectedBytes) {
+        throw const ApiException(
+          kind: ApiFailureKind.local,
+          code: 'UPLOAD_SOURCE_CHANGED',
+          message: 'The upload source changed while it was copied',
+        );
+      }
+      hashSink.close();
+      await output.flush();
+      await output.close();
+      output = null;
+      await partial.rename(destination.path);
+      completed = true;
+      return _StagedUploadPayload(
+        bytes: written,
+        sha256: digestSink.value.toString(),
+      );
+    } finally {
+      await output?.close();
+      if (!completed) {
+        try {
+          if (await partial.exists()) {
+            await partial.delete();
+          }
+        } on FileSystemException {
+          // The caller records the failure and retries private cleanup.
+        }
+      }
     }
   }
 
@@ -1396,6 +1521,370 @@ class ClientController extends Notifier<ClientState> {
     );
     await _persistDurableTask(task);
     return task;
+  }
+
+  Future<UploadSessionSnapshot> _runDurableUpload(
+    transfer_core.TransferTask initialTask,
+  ) async {
+    if (!_transferLeases.add(initialTask.id)) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'TRANSFER_RUNNING',
+        message: 'The transfer is already running',
+      );
+    }
+    final cancellation = CancelToken();
+    _transferCancellations[initialTask.id] = cancellation;
+    try {
+      return await _runDurableUploadClaimed(
+        initialTask,
+        cancellation: cancellation,
+      );
+    } finally {
+      if (identical(_transferCancellations[initialTask.id], cancellation)) {
+        _transferCancellations.remove(initialTask.id);
+      }
+      _transferLeases.remove(initialTask.id);
+    }
+  }
+
+  Future<UploadSessionSnapshot> _runDurableUploadClaimed(
+    transfer_core.TransferTask initialTask, {
+    required CancelToken cancellation,
+  }) async {
+    var task = initialTask;
+    final epoch = _contextEpoch;
+    final endpoint = state.endpoint;
+    final user = state.user;
+    if (endpoint?.baseUrl != task.endpointBaseUrl ||
+        user?.id != task.userId ||
+        state.stage != ClientStage.ready) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'TRANSFER_SCOPE_MISMATCH',
+        message: 'The transfer belongs to another server or account',
+      );
+    }
+    if (task.direction != transfer_core.TransferDirection.upload) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'TRANSFER_DIRECTION_INVALID',
+        message: 'The transfer is not an upload',
+      );
+    }
+    if (task.isTerminal && task.phase != transfer_core.TransferPhase.failed) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'TRANSFER_NOT_RESUMABLE',
+        message: 'The transfer cannot be resumed',
+      );
+    }
+
+    final store = await _ensureTransferStore();
+    if (!_isTransferPayloadPath(
+      task.stagingPath,
+      '${store.directoryPath}${Platform.pathSeparator}payloads',
+    )) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'TRANSFER_STAGING_SCOPE_INVALID',
+        message: 'The transfer staging path is outside app storage',
+      );
+    }
+    final payload = File(task.stagingPath);
+    final payloadInfo = await payload.stat();
+    if (payloadInfo.type != FileSystemEntityType.file ||
+        payloadInfo.size != task.totalBytes) {
+      task = task.copyWith(
+        phase: transfer_core.TransferPhase.failed,
+        updatedAt: _nextTransferTimestamp(task),
+        errorCode: 'UPLOAD_PAYLOAD_MISSING',
+        errorMessage: '上传暂存文件不可用，无法安全继续。',
+      );
+      await _persistDurableTask(task);
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'UPLOAD_PAYLOAD_MISSING',
+        message: 'The private upload payload is unavailable',
+      );
+    }
+    final actualPayloadSHA256 = await _hashUploadPayload(
+      payload,
+      cancellation: cancellation,
+    );
+    if (actualPayloadSHA256 != task.payloadSha256) {
+      task = task.copyWith(
+        phase: transfer_core.TransferPhase.failed,
+        updatedAt: _nextTransferTimestamp(task),
+        errorCode: 'UPLOAD_PAYLOAD_CHANGED',
+        errorMessage: '上传暂存文件校验失败，无法安全继续。',
+      );
+      await _persistDurableTask(task);
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'UPLOAD_PAYLOAD_CHANGED',
+        message: 'The private upload payload changed',
+      );
+    }
+
+    task = task.copyWith(
+      phase: transfer_core.TransferPhase.running,
+      updatedAt: _nextTransferTimestamp(task),
+      errorCode: null,
+      errorMessage: null,
+    );
+    await _persistDurableTask(task);
+    final files = _requireFiles();
+    Future<Never> markUploadResultUnconfirmed() async {
+      task = task.copyWith(
+        phase: transfer_core.TransferPhase.resultUnconfirmed,
+        updatedAt: _nextTransferTimestamp(task),
+        errorCode: 'UPLOAD_RESULT_UNCONFIRMED',
+        errorMessage: '服务端已不再保留该上传会话，无法确认旧任务是否已经发布。请核对目标文件后移除记录。',
+      );
+      await _persistDurableTask(task);
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'UPLOAD_RESULT_UNCONFIRMED',
+        message: 'The server no longer retains the upload session result',
+      );
+    }
+
+    try {
+      UploadSessionSnapshot session;
+      if (task.uploadSessionId == null) {
+        if (!task.uploadSessionCreateAttempted) {
+          task = task.copyWith(
+            uploadSessionCreateAttempted: true,
+            updatedAt: _nextTransferTimestamp(task),
+          );
+          await _persistDurableTask(task);
+          try {
+            session = (await files.createUploadSession(
+              logicalPath: task.remotePath,
+              totalBytes: task.totalBytes,
+              clientRequestId: task.id,
+              cancelToken: cancellation,
+            )).data;
+          } on ApiException catch (error) {
+            if (_isStructuredUploadSessionExpired(error)) {
+              await markUploadResultUnconfirmed();
+            }
+            rethrow;
+          }
+        } else {
+          try {
+            session = (await files.lookupUploadSessionByClientRequestId(
+              clientRequestId: task.id,
+              logicalPath: task.remotePath,
+              totalBytes: task.totalBytes,
+              cancelToken: cancellation,
+            )).data;
+          } on ApiException catch (error) {
+            if (_isStructuredUploadSessionGone(error)) {
+              await markUploadResultUnconfirmed();
+            }
+            rethrow;
+          }
+        }
+      } else {
+        session = (await files.getUploadSessionStatus(
+          sessionId: task.uploadSessionId!,
+          cancelToken: cancellation,
+        )).data;
+      }
+      _validateUploadSessionForTask(session, task);
+      task = task.copyWith(
+        uploadSessionId: session.id,
+        uploadSessionCreateAttempted: true,
+        uploadSessionExpiresAt: session.expiresAt,
+        durableOffset: session.durableOffset,
+        updatedAt: _nextTransferTimestamp(task),
+      );
+      await _persistDurableTask(task);
+
+      while (true) {
+        switch (session.state) {
+          case UploadSessionState.committed:
+            return _completeDurableUpload(task, session);
+          case UploadSessionState.cancelled:
+            task = task.copyWith(
+              phase: transfer_core.TransferPhase.cancelled,
+              durableOffset: session.durableOffset,
+              uploadSessionExpiresAt: session.expiresAt,
+              updatedAt: _nextTransferTimestamp(task),
+              errorCode: null,
+              errorMessage: null,
+            );
+            await _persistDurableTask(task);
+            throw const ApiException(
+              kind: ApiFailureKind.local,
+              code: 'UPLOAD_SESSION_CANCELLED',
+              message: 'The upload session was cancelled',
+            );
+          case UploadSessionState.conflict:
+            task = task.copyWith(
+              phase: transfer_core.TransferPhase.failed,
+              durableOffset: session.durableOffset,
+              uploadSessionExpiresAt: session.expiresAt,
+              updatedAt: _nextTransferTimestamp(task),
+              errorCode: 'UPLOAD_TARGET_CONFLICT',
+              errorMessage: '目标文件已发生变化，上传未覆盖较新的内容。',
+            );
+            await _persistDurableTask(task);
+            throw const ApiException(
+              kind: ApiFailureKind.local,
+              code: 'UPLOAD_TARGET_CONFLICT',
+              message: 'The upload target changed',
+            );
+          case UploadSessionState.committing:
+          case UploadSessionState.ready:
+            try {
+              session = (await files.commitUploadSession(
+                sessionId: session.id,
+                cancelToken: cancellation,
+              )).data;
+            } on ApiException catch (error) {
+              if (error.statusCode != 409) {
+                rethrow;
+              }
+              session = (await files.getUploadSessionStatus(
+                sessionId: session.id,
+                cancelToken: cancellation,
+              )).data;
+            }
+            _validateUploadSessionForTask(session, task);
+            task = task.copyWith(
+              durableOffset: session.durableOffset,
+              uploadSessionExpiresAt: session.expiresAt,
+              updatedAt: _nextTransferTimestamp(task),
+            );
+            await _persistDurableTask(task);
+          case UploadSessionState.uploading:
+            final offset = session.durableOffset;
+            final remaining = task.totalBytes - offset;
+            if (remaining <= 0) {
+              throw const FormatException(
+                'Uploading session has no remaining payload',
+              );
+            }
+            final length = remaining > maxUploadSessionChunkBytes
+                ? maxUploadSessionChunkBytes
+                : remaining;
+            final chunkID =
+                '${task.id}-${offset.toRadixString(16)}-'
+                '${length.toRadixString(16)}';
+            session = (await files.uploadSessionChunk(
+              sessionId: session.id,
+              sourcePath: task.stagingPath,
+              offset: offset,
+              length: length,
+              chunkId: chunkID,
+              cancelToken: cancellation,
+              onProgress: (transferred, total) {
+                _updateTransfer(
+                  task.id,
+                  status: TransferStatus.running,
+                  transferred: transferred,
+                  total: total,
+                  expectedEpoch: epoch,
+                );
+              },
+            )).data;
+            _validateUploadSessionForTask(session, task);
+            task = task.copyWith(
+              durableOffset: session.durableOffset,
+              uploadSessionExpiresAt: session.expiresAt,
+              updatedAt: _nextTransferTimestamp(task),
+            );
+            await _persistDurableTask(task);
+        }
+      }
+    } on Object catch (error) {
+      if (task.uploadSessionId != null && _isUploadSessionGone(error)) {
+        await markUploadResultUnconfirmed();
+      }
+      if (task.phase == transfer_core.TransferPhase.completed ||
+          task.phase == transfer_core.TransferPhase.cancelled ||
+          task.phase == transfer_core.TransferPhase.resultUnconfirmed ||
+          (task.phase == transfer_core.TransferPhase.failed &&
+              task.errorCode == 'UPLOAD_TARGET_CONFLICT')) {
+        rethrow;
+      }
+      final phase = _uploadFailurePhase(error);
+      task = task.copyWith(
+        phase: phase,
+        updatedAt: _nextTransferTimestamp(task),
+        errorCode: _uploadFailureCode(error, phase),
+        errorMessage: clientErrorMessage(error),
+      );
+      await _persistDurableTask(task);
+      if (_isContextCurrent(epoch)) {
+        await handleAuthenticationFailure(error, expectedEpoch: epoch);
+      }
+      rethrow;
+    }
+  }
+
+  Future<String> _hashUploadPayload(
+    File payload, {
+    required CancelToken cancellation,
+  }) async {
+    final digestSink = _DigestCaptureSink();
+    final hashSink = sha256.startChunkedConversion(digestSink);
+    await for (final chunk in payload.openRead()) {
+      if (cancellation.isCancelled) {
+        throw const ApiException(
+          kind: ApiFailureKind.cancelled,
+          code: 'UPLOAD_HASH_CANCELLED',
+          message: 'Upload verification was cancelled',
+        );
+      }
+      hashSink.add(chunk);
+    }
+    hashSink.close();
+    return digestSink.value.toString();
+  }
+
+  void _validateUploadSessionForTask(
+    UploadSessionSnapshot session,
+    transfer_core.TransferTask task,
+  ) {
+    if (session.path != task.remotePath ||
+        session.totalBytes != task.totalBytes ||
+        (task.uploadSessionId != null && session.id != task.uploadSessionId)) {
+      throw const FormatException(
+        'Upload session does not match the durable transfer',
+      );
+    }
+  }
+
+  Future<UploadSessionSnapshot> _completeDurableUpload(
+    transfer_core.TransferTask task,
+    UploadSessionSnapshot session,
+  ) async {
+    task = task.copyWith(
+      phase: transfer_core.TransferPhase.completed,
+      durableOffset: task.totalBytes,
+      uploadSessionExpiresAt: session.expiresAt,
+      updatedAt: _nextTransferTimestamp(task),
+      errorCode: null,
+      errorMessage: null,
+    );
+    await _persistDurableTask(task);
+    try {
+      final payload = File(task.stagingPath);
+      if (await payload.exists()) {
+        await payload.delete();
+      }
+    } on FileSystemException {
+      if (!_disposed &&
+          state.endpoint?.baseUrl == task.endpointBaseUrl &&
+          state.user?.id == task.userId) {
+        state = state.copyWith(notice: '文件已上传，但应用暂存文件未能立即清理。');
+      }
+    }
+    return session;
   }
 
   Future<File> _downloadEphemeral({
@@ -1757,6 +2246,34 @@ class ClientController extends Notifier<ClientState> {
     if (_transferLeases.contains(id)) {
       return;
     }
+    if (task.direction == transfer_core.TransferDirection.upload) {
+      final epoch = _contextEpoch;
+      final result = await _runDurableUpload(task);
+      if (!_isContextCurrent(epoch)) {
+        return;
+      }
+      final parent = _logicalParentPath(task.remotePath);
+      if (state.currentPath == parent) {
+        try {
+          await loadDirectory(parent);
+        } on Object {
+          if (_isContextCurrent(epoch)) {
+            state = state.copyWith(
+              isBusy: false,
+              errorMessage: null,
+              notice: result.persistenceWarning
+                  ? '文件已确认上传，但服务器报告了持久化警告，且目录刷新失败。请手动刷新确认最新目录。'
+                  : '文件已确认上传，但目录刷新失败。请手动刷新确认最新目录。',
+            );
+          }
+          return;
+        }
+      }
+      if (_isContextCurrent(epoch) && result.persistenceWarning) {
+        state = state.copyWith(notice: '文件已上传，但服务器报告了持久化警告。');
+      }
+      return;
+    }
     await _runDurableDownload(task);
   }
 
@@ -1776,6 +2293,37 @@ class ClientController extends Notifier<ClientState> {
         ),
       );
       return;
+    }
+    if (state.endpoint?.baseUrl != task.endpointBaseUrl ||
+        state.user?.id != task.userId) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'TRANSFER_SCOPE_MISMATCH',
+        message: 'The transfer belongs to another server or account',
+      );
+    }
+    if (task.direction == transfer_core.TransferDirection.upload &&
+        task.uploadSessionId != null &&
+        task.phase != transfer_core.TransferPhase.completed &&
+        task.phase != transfer_core.TransferPhase.cancelled &&
+        task.phase != transfer_core.TransferPhase.resultUnconfirmed &&
+        task.errorCode != 'UPLOAD_TARGET_CONFLICT') {
+      try {
+        final result = await _requireFiles().cancelUploadSession(
+          sessionId: task.uploadSessionId!,
+        );
+        if (result.data.state != UploadSessionState.cancelled) {
+          throw const ApiException(
+            kind: ApiFailureKind.invalidResponse,
+            code: 'UPLOAD_CANCEL_UNCONFIRMED',
+            message: 'The server did not confirm upload cancellation',
+          );
+        }
+      } on ApiException catch (error) {
+        if (!_isUploadSessionGone(error)) {
+          rethrow;
+        }
+      }
     }
     final store = await _ensureTransferStore();
     final payloadDirectory =
@@ -2240,6 +2788,14 @@ class ClientController extends Notifier<ClientState> {
         '${store.directoryPath}${Platform.pathSeparator}payloads',
       );
       await payloadDirectory.create(recursive: true);
+      await _cleanupOrphanUploadPayloads(
+        payloadDirectory,
+        tasks: snapshot.tasks,
+      );
+      await _cleanupConfirmedUploadPayloads(
+        payloadDirectory,
+        tasks: snapshot.tasks,
+      );
       final restored = <transfer_core.TransferTask>[];
       for (var task in snapshot.tasks) {
         if (task.endpointBaseUrl != endpoint.baseUrl ||
@@ -2255,7 +2811,8 @@ class ClientController extends Notifier<ClientState> {
             errorMessage: '传输暂存路径不在应用私有目录中。',
           );
           changed = true;
-        } else if (task.phase == transfer_core.TransferPhase.running &&
+        } else if (task.direction == transfer_core.TransferDirection.download &&
+            task.phase == transfer_core.TransferPhase.running &&
             task.durableOffset == task.totalBytes &&
             !await File('${task.stagingPath}.part').exists()) {
           final payload = File(task.stagingPath);
@@ -2288,7 +2845,8 @@ class ClientController extends Notifier<ClientState> {
           changed = true;
         }
 
-        if (task.phase == transfer_core.TransferPhase.awaitingDestination &&
+        if (task.direction == transfer_core.TransferDirection.download &&
+            task.phase == transfer_core.TransferPhase.awaitingDestination &&
             task.destinationUri != null) {
           task = task.copyWith(
             destinationUri: null,
@@ -2298,7 +2856,8 @@ class ClientController extends Notifier<ClientState> {
           );
           changed = true;
         }
-        if (_isTransferPayloadPath(task.stagingPath, payloadDirectory.path) &&
+        if (task.direction == transfer_core.TransferDirection.download &&
+            _isTransferPayloadPath(task.stagingPath, payloadDirectory.path) &&
             !task.isTerminal &&
             task.phase != transfer_core.TransferPhase.awaitingDestination) {
           final partial = File('${task.stagingPath}.part');
@@ -2334,6 +2893,20 @@ class ClientController extends Notifier<ClientState> {
             changed = true;
           }
         }
+        if (task.direction == transfer_core.TransferDirection.upload &&
+            !task.isTerminal) {
+          final payload = File(task.stagingPath);
+          if (!await payload.exists() ||
+              await payload.length() != task.totalBytes) {
+            task = task.copyWith(
+              phase: transfer_core.TransferPhase.failed,
+              updatedAt: _nextTransferTimestamp(task),
+              errorCode: 'UPLOAD_PAYLOAD_MISSING',
+              errorMessage: '上传暂存文件不可用，无法安全继续。',
+            );
+            changed = true;
+          }
+        }
         if (changed) {
           await store.upsert(task);
         }
@@ -2354,6 +2927,60 @@ class ClientController extends Notifier<ClientState> {
     } on Object {
       if (_isContextCurrent(expectedEpoch)) {
         state = state.copyWith(notice: '传输记录暂时无法读取。现有传输未自动恢复，请检查应用存储。');
+      }
+    }
+  }
+
+  Future<void> _cleanupOrphanUploadPayloads(
+    Directory payloadDirectory, {
+    required List<transfer_core.TransferTask> tasks,
+  }) async {
+    final referenced = <String>{
+      for (final task in tasks) task.stagingPath,
+      for (final task in tasks) '${task.stagingPath}.part',
+    };
+    await for (final entity in payloadDirectory.list(followLinks: false)) {
+      if (referenced.contains(entity.path) ||
+          (!entity.path.endsWith('.upload') &&
+              !entity.path.endsWith('.upload.part'))) {
+        continue;
+      }
+      final type = await FileSystemEntity.type(entity.path, followLinks: false);
+      if (type != FileSystemEntityType.file ||
+          !_isTransferPayloadPath(entity.path, payloadDirectory.path)) {
+        continue;
+      }
+      try {
+        await File(entity.path).delete();
+      } on FileSystemException {
+        // A later startup can retry an unreferenced app-private upload file.
+      }
+    }
+  }
+
+  Future<void> _cleanupConfirmedUploadPayloads(
+    Directory payloadDirectory, {
+    required List<transfer_core.TransferTask> tasks,
+  }) async {
+    for (final task in tasks) {
+      if (task.direction != transfer_core.TransferDirection.upload ||
+          (task.phase != transfer_core.TransferPhase.completed &&
+              task.phase != transfer_core.TransferPhase.cancelled) ||
+          !_isTransferPayloadPath(task.stagingPath, payloadDirectory.path)) {
+        continue;
+      }
+      for (final path in <String>[
+        task.stagingPath,
+        '${task.stagingPath}.part',
+      ]) {
+        try {
+          final type = await FileSystemEntity.type(path, followLinks: false);
+          if (type == FileSystemEntityType.file) {
+            await File(path).delete();
+          }
+        } on FileSystemException {
+          // A later startup can retry cleanup after the server result is final.
+        }
       }
     }
   }
@@ -2428,7 +3055,7 @@ class ClientController extends Notifier<ClientState> {
     state = state.copyWith(
       transfers: List<ClientTransfer>.unmodifiable(<ClientTransfer>[
         transfer,
-        ...state.transfers.take(19),
+        ...state.transfers.take(99),
       ]),
     );
   }
@@ -2459,6 +3086,95 @@ class ClientController extends Notifier<ClientState> {
       ),
     );
   }
+}
+
+final class _StagedUploadPayload {
+  const _StagedUploadPayload({required this.bytes, required this.sha256});
+
+  final int bytes;
+  final String sha256;
+}
+
+final class _DigestCaptureSink implements Sink<Digest> {
+  Digest? _digest;
+
+  Digest get value {
+    final digest = _digest;
+    if (digest == null) {
+      throw StateError('Digest has not been finalized');
+    }
+    return digest;
+  }
+
+  @override
+  void add(Digest data) {
+    if (_digest != null) {
+      throw StateError('Digest was finalized more than once');
+    }
+    _digest = data;
+  }
+
+  @override
+  void close() {}
+}
+
+transfer_core.TransferPhase _uploadFailurePhase(Object error) {
+  if (_isTerminalAuthenticationFailure(error)) {
+    return transfer_core.TransferPhase.awaitingAuth;
+  }
+  if (error is ApiException) {
+    final status = error.statusCode;
+    if (error.kind == ApiFailureKind.cancelled ||
+        error.kind == ApiFailureKind.connection ||
+        error.kind == ApiFailureKind.timeout ||
+        status == 408 ||
+        status == 429 ||
+        (status != null && status >= 500)) {
+      return transfer_core.TransferPhase.paused;
+    }
+  }
+  return transfer_core.TransferPhase.failed;
+}
+
+String _uploadFailureCode(Object error, transfer_core.TransferPhase phase) {
+  if (phase == transfer_core.TransferPhase.awaitingAuth) {
+    return 'AUTH_REQUIRED';
+  }
+  if (phase == transfer_core.TransferPhase.paused) {
+    return error is ApiException && error.kind == ApiFailureKind.cancelled
+        ? 'PAUSED_BY_USER'
+        : 'RETRYABLE_UPLOAD_FAILURE';
+  }
+  return 'UPLOAD_FAILED';
+}
+
+bool _isUploadSessionGone(Object error) {
+  if (error is! ApiException) {
+    return false;
+  }
+  return error.statusCode == 404 ||
+      error.statusCode == 410 ||
+      error.code == 'UPLOAD_SESSION_NOT_FOUND' ||
+      error.code == 'UPLOAD_SESSION_EXPIRED';
+}
+
+bool _isStructuredUploadSessionGone(Object error) {
+  if (error is! ApiException ||
+      error.kind != ApiFailureKind.response ||
+      !error.hasStructuredServerError) {
+    return false;
+  }
+  return (error.statusCode == 404 &&
+          error.code == 'UPLOAD_SESSION_NOT_FOUND') ||
+      (error.statusCode == 410 && error.code == 'UPLOAD_SESSION_EXPIRED');
+}
+
+bool _isStructuredUploadSessionExpired(Object error) {
+  return error is ApiException &&
+      error.kind == ApiFailureKind.response &&
+      error.hasStructuredServerError &&
+      error.statusCode == 410 &&
+      error.code == 'UPLOAD_SESSION_EXPIRED';
 }
 
 transfer_core.TransferPhase _downloadFailurePhase(Object error) {
@@ -2581,6 +3297,9 @@ String clientErrorMessage(Object error) {
       'WRITE_BUSY' => '设备正在处理其他写入，请稍后重试。',
       'QUOTA_EXCEEDED' => '可用配额不足，无法完成操作。',
       'INSUFFICIENT_STORAGE' => '设备可用空间不足。',
+      'UPLOAD_SOURCE_TOO_LARGE' => '单个上传文件不能超过 10 GiB。',
+      'UPLOAD_STAGING_CAPACITY_EXCEEDED' => '设备可用空间不足，无法暂存上传内容。',
+      'UPLOAD_STAGING_LIMIT' => '服务器上传暂存空间繁忙，请稍后重试。',
       'CONFLICT' => '文件已发生变化，请刷新后重试。',
       'DELETE_TARGET_CHANGED' ||
       'DELETE_POLICY_CHANGED' => '文件或删除策略已变化，请刷新后重新确认。',
@@ -2603,6 +3322,7 @@ String clientErrorMessage(Object error) {
       'IMPORT_METADATA_CANCELLED' ||
       'EXPORT_CANCELLED' => '操作已取消。',
       'IMPORT_QUEUE_FULL' || 'EXPORT_QUEUE_FULL' => '正在处理的文件较多，请稍后重试。',
+      'IMPORT_TOO_LARGE' => '单个上传文件不能超过 10 GiB。',
       'IMPORT_COPY_FAILED' ||
       'IMPORT_METADATA_FAILED' => '无法读取所选文件，请检查文件权限和可用空间。',
       'EXPORT_FAILED' => '无法写入所选位置，请检查目标权限和可用空间。',
@@ -2620,4 +3340,10 @@ String clientErrorMessage(Object error) {
 String _joinLogicalPath(String parent, String name) {
   final prefix = parent == '/' ? '' : normalizeLogicalPath(parent);
   return normalizeLogicalPath('$prefix/$name', allowRoot: false);
+}
+
+String _logicalParentPath(String path) {
+  final normalized = normalizeLogicalPath(path, allowRoot: false);
+  final separator = normalized.lastIndexOf('/');
+  return separator <= 0 ? '/' : normalized.substring(0, separator);
 }

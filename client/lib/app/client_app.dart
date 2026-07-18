@@ -45,11 +45,13 @@ final class _UploadCandidate {
     materialize,
     Future<void> Function()? cancelPreparation,
     this.deleteMaterializedFile = false,
+    this.knownSize,
   }) : _materializer = materialize,
        _preparationCancellation = cancelPreparation;
 
   final String name;
   final bool deleteMaterializedFile;
+  final int? knownSize;
   final Future<File> Function(_UploadPreparationProgress? onProgress)
   _materializer;
   final Future<void> Function()? _preparationCancellation;
@@ -841,11 +843,13 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
         '${source.uri.hashCode.toUnsigned(32)}';
     return _UploadCandidate(
       name: source.displayName,
+      knownSize: source.size,
       deleteMaterializedFile: true,
       materialize: (onProgress) => FileImporter.copyDocumentToFile(
         uri: source.uri,
         destinationPath: localPath,
         expectedLength: source.size,
+        maxBytes: maxDurableUploadBytes,
         operationId: operationId,
         onProgress: onProgress,
       ),
@@ -854,6 +858,14 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
   }
 
   Future<File> _materializeUploadCandidate(_UploadCandidate candidate) async {
+    if (candidate.knownSize != null &&
+        candidate.knownSize! > maxDurableUploadBytes) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'UPLOAD_SOURCE_TOO_LARGE',
+        message: 'The upload source exceeds the 10 GiB limit',
+      );
+    }
     if (!candidate.hasCancellablePreparation) {
       return candidate.materialize();
     }
@@ -1454,7 +1466,8 @@ class _TransfersSheet extends StatelessWidget {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: <Widget>[
                               Text(_transferStatusLabel(transfer)),
-                              if (transfer.status == TransferStatus.running)
+                              if (transfer.status == TransferStatus.preparing ||
+                                  transfer.status == TransferStatus.running)
                                 Padding(
                                   padding: const EdgeInsets.only(
                                     top: MnemoSpacing.xxs,
@@ -1484,6 +1497,12 @@ class _TransfersSheet extends StatelessWidget {
 
 String _transferStatusLabel(ClientTransfer transfer) {
   return switch (transfer.status) {
+    TransferStatus.preparing =>
+      transfer.total > 0
+          ? '正在准备上传：'
+                '${_formatBytes(transfer.transferred)} / '
+                '${_formatBytes(transfer.total)}'
+          : '正在准备上传',
     TransferStatus.queued => '等待传输',
     TransferStatus.running =>
       transfer.total > 0
@@ -1517,7 +1536,7 @@ class _TransferAction extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return switch (transfer.status) {
-      TransferStatus.running => IconButton(
+      TransferStatus.preparing || TransferStatus.running => IconButton(
         onPressed: () => onCancel(transfer.id),
         tooltip: '暂停传输',
         icon: const Icon(Icons.pause_rounded),

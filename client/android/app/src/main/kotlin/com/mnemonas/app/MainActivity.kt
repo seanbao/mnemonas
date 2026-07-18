@@ -194,6 +194,27 @@ class MainActivity : FlutterActivity() {
             return
         }
         val expectedLength = parsedExpectedLength as Long?
+        val parsedMaxBytes = parseOptionalLength(call.argument<Any>("maxBytes"))
+        if (parsedMaxBytes === INVALID_LENGTH ||
+            parsedMaxBytes == null ||
+            (parsedMaxBytes as Long) <= 0
+        ) {
+            result.error(
+                "INVALID_IMPORT_LIMIT",
+                "A positive maximum import length is required.",
+                null,
+            )
+            return
+        }
+        val maxBytes = parsedMaxBytes
+        if (expectedLength != null && expectedLength > maxBytes) {
+            result.error(
+                "IMPORT_TOO_LARGE",
+                "The selected document exceeds the upload size limit.",
+                null,
+            )
+            return
+        }
 
         val operation = CopyOperation(
             id = operationId,
@@ -215,6 +236,7 @@ class MainActivity : FlutterActivity() {
                 source = source,
                 destination = destination,
                 expectedLength = expectedLength,
+                maxBytes = maxBytes,
                 operation = operation,
                 channel = importChannel,
                 operations = importOperations,
@@ -372,6 +394,16 @@ class MainActivity : FlutterActivity() {
                         success = false,
                         failureCode = cancelledCode,
                         failureMessage = cancelledMessage,
+                        cancelledCode = cancelledCode,
+                        cancelledMessage = cancelledMessage,
+                    )
+                } catch (error: OperationFailureException) {
+                    completeOperation(
+                        operations,
+                        operation,
+                        success = false,
+                        failureCode = error.code,
+                        failureMessage = error.publicMessage,
                         cancelledCode = cancelledCode,
                         cancelledMessage = cancelledMessage,
                     )
@@ -743,6 +775,7 @@ class MainActivity : FlutterActivity() {
         source: Uri,
         destination: File,
         expectedLength: Long?,
+        maxBytes: Long,
         operation: CopyOperation,
         channel: MethodChannel,
         operations: ConcurrentHashMap<String, CopyOperation>,
@@ -778,6 +811,13 @@ class MainActivity : FlutterActivity() {
                         }
                         if (count == 0) {
                             continue
+                        }
+                        if (count.toLong() > maxBytes - copied) {
+                            throw OperationFailureException(
+                                code = "IMPORT_TOO_LARGE",
+                                publicMessage =
+                                    "The selected document exceeds the upload size limit.",
+                            )
                         }
                         if (expectedLength != null &&
                             count.toLong() > expectedLength - copied
@@ -1149,6 +1189,11 @@ class MainActivity : FlutterActivity() {
     }
 
     private class OperationCancelledException : Exception()
+
+    private class OperationFailureException(
+        val code: String,
+        val publicMessage: String,
+    ) : Exception()
 }
 
 private val INVALID_LENGTH = Any()

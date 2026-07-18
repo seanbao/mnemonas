@@ -112,6 +112,7 @@ void main() {
       destinationPath: '/tmp/mnemonas-import',
       operationId: 'import-1',
       expectedLength: 12,
+      maxBytes: 1024,
     );
 
     expect(file.path, '/tmp/mnemonas-import');
@@ -121,10 +122,11 @@ void main() {
       'uri': 'content://documents/document/one',
       'destinationPath': '/tmp/mnemonas-import',
       'expectedLength': 12,
+      'maxBytes': 1024,
     });
   });
 
-  test('copyDocumentToFile rejects a negative expected length', () async {
+  test('copyDocumentToFile rejects invalid and oversized lengths', () async {
     var invoked = false;
     messenger.setMockMethodCallHandler(channel, (_) async {
       invoked = true;
@@ -137,10 +139,53 @@ void main() {
         destinationPath: '/tmp/mnemonas-import',
         operationId: 'import-negative',
         expectedLength: -1,
+        maxBytes: 1024,
+      ),
+      throwsArgumentError,
+    );
+    await expectLater(
+      FileImporter.copyDocumentToFile(
+        uri: 'content://documents/document/one',
+        destinationPath: '/tmp/mnemonas-import',
+        operationId: 'import-limit-invalid',
+        maxBytes: 0,
+      ),
+      throwsArgumentError,
+    );
+    await expectLater(
+      FileImporter.copyDocumentToFile(
+        uri: 'content://documents/document/one',
+        destinationPath: '/tmp/mnemonas-import',
+        operationId: 'import-too-large',
+        expectedLength: 1025,
+        maxBytes: 1024,
       ),
       throwsArgumentError,
     );
     expect(invoked, isFalse);
+  });
+
+  test('copyDocumentToFile forwards a hard limit for unknown sizes', () async {
+    MethodCall? receivedCall;
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      receivedCall = call;
+      return null;
+    });
+
+    await FileImporter.copyDocumentToFile(
+      uri: 'content://documents/document/unknown',
+      destinationPath: '/tmp/mnemonas-import-unknown',
+      operationId: 'import-unknown',
+      maxBytes: 10 * 1024 * 1024 * 1024,
+    );
+
+    expect(receivedCall?.arguments, <String, Object?>{
+      'operationId': 'import-unknown',
+      'uri': 'content://documents/document/unknown',
+      'destinationPath': '/tmp/mnemonas-import-unknown',
+      'expectedLength': null,
+      'maxBytes': 10 * 1024 * 1024 * 1024,
+    });
   });
 
   test('copyDocumentToFile delivers operation progress', () async {
@@ -160,6 +205,7 @@ void main() {
       destinationPath: '/tmp/mnemonas-import-progress',
       operationId: 'import-progress',
       expectedLength: 4096,
+      maxBytes: 8192,
       onProgress: (transferred, total) {
         progress.add((transferred, total));
       },
@@ -211,6 +257,7 @@ void main() {
         uri: 'content://documents/document/one',
         destinationPath: '/tmp/mnemonas-import',
         operationId: 'import-linux',
+        maxBytes: 1024,
       ),
       throwsUnsupportedError,
     );

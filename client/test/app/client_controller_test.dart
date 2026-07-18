@@ -32,6 +32,31 @@ void main() {
       clientErrorMessage(PlatformException(code: 'EXPORT_FAILED')),
       contains('目标权限'),
     );
+    expect(
+      clientErrorMessage(PlatformException(code: 'IMPORT_TOO_LARGE')),
+      contains('10 GiB'),
+    );
+    expect(
+      clientErrorMessage(
+        const ApiException(
+          kind: ApiFailureKind.local,
+          code: 'UPLOAD_SOURCE_TOO_LARGE',
+          message: 'source exceeds the limit',
+        ),
+      ),
+      contains('10 GiB'),
+    );
+    expect(
+      clientErrorMessage(
+        const ApiException(
+          kind: ApiFailureKind.response,
+          statusCode: 507,
+          code: 'UPLOAD_STAGING_CAPACITY_EXCEEDED',
+          message: 'staging capacity exhausted',
+        ),
+      ),
+      contains('可用空间不足'),
+    );
   });
 
   group('terminal authentication failures', () {
@@ -571,18 +596,254 @@ void main() {
     });
   });
 
-  test('disconnected upload is retained as an unconfirmed result', () async {
+  test(
+    'disconnected upload resumes from server durable offset after restart',
+    () async {
+      final endpoint = ServerEndpoint.parse('https://nas.example.com');
+      final adapter = _ControllerAdapter()..disconnectNextUpload = true;
+      final root = await Directory.systemTemp.createTemp(
+        'mnemonas-controller-upload-resume-',
+      );
+      addTearDown(() => root.delete(recursive: true));
+      final transferDirectory = Directory('${root.path}/store');
+      final first = await _ControllerHarness.start(
+        adapters: {endpoint.baseUrl: adapter},
+        transferDirectory: transferDirectory,
+      );
+      var firstDisposed = false;
+      addTearDown(() {
+        if (!firstDisposed) {
+          first.container.dispose();
+        }
+      });
+      final source = File('${root.path}/payload.bin');
+      await source.writeAsBytes(<int>[1, 2, 3], flush: true);
+      await first.connectAndLogin(endpoint, username: 'owner');
+
+      await expectLater(
+        first.controller.uploadFile(
+          sourcePath: source.path,
+          fileName: 'payload.bin',
+        ),
+        throwsA(isA<ApiException>()),
+      );
+
+      final interrupted = first.container
+          .read(clientControllerProvider)
+          .transfers
+          .single;
+      expect(interrupted.status, TransferStatus.paused);
+      expect(interrupted.transferred, 0);
+      expect(adapter.uploadSessions.single.durableOffset, 3);
+      expect(adapter.uploadSessions.single.state, 'ready');
+
+      first.container.dispose();
+      firstDisposed = true;
+      await source.delete();
+
+      final second = await _ControllerHarness.start(
+        adapters: {endpoint.baseUrl: adapter},
+        transferDirectory: transferDirectory,
+      );
+      addTearDown(second.container.dispose);
+      await second.connectAndLogin(endpoint, username: 'owner');
+
+      final restored = second.container
+          .read(clientControllerProvider)
+          .transfers
+          .single;
+      expect(restored.id, interrupted.id);
+      expect(restored.status, TransferStatus.paused);
+      expect(restored.transferred, 0);
+
+      await second.controller.resumeTransfer(restored.id);
+
+      final completed = second.container
+          .read(clientControllerProvider)
+          .transfers
+          .single;
+      expect(completed.status, TransferStatus.completed);
+      expect(completed.transferred, 3);
+      expect(adapter.uploadSessions.single.state, 'committed');
+      final payloadDirectory = Directory(
+        '${transferDirectory.path}${Platform.pathSeparator}payloads',
+      );
+      expect(
+        payloadDirectory.listSync().whereType<File>().where(
+          (file) => file.path.endsWith('.upload'),
+        ),
+        isEmpty,
+      );
+    },
+  );
+
+  test('a lost create response is recovered by lookup after restart', () async {
     final endpoint = ServerEndpoint.parse('https://nas.example.com');
-    final adapter = _ControllerAdapter()..disconnectNextUpload = true;
+    final adapter = _ControllerAdapter()..disconnectNextUploadCreate = true;
+    final root = await Directory.systemTemp.createTemp(
+      'mnemonas-controller-upload-create-recovery-',
+    );
+    addTearDown(() => root.delete(recursive: true));
+    final transferDirectory = Directory('${root.path}/store');
+    final first = await _ControllerHarness.start(
+      adapters: {endpoint.baseUrl: adapter},
+      transferDirectory: transferDirectory,
+    );
+    var firstDisposed = false;
+    addTearDown(() {
+      if (!firstDisposed) {
+        first.container.dispose();
+      }
+    });
+    final source = File('${root.path}/payload.bin');
+    await source.writeAsBytes(<int>[1, 2, 3], flush: true);
+    await first.connectAndLogin(endpoint, username: 'owner');
+
+    await expectLater(
+      first.controller.uploadFile(
+        sourcePath: source.path,
+        fileName: 'payload.bin',
+      ),
+      throwsA(isA<ApiException>()),
+    );
+
+    final interrupted = first.container
+        .read(clientControllerProvider)
+        .transfers
+        .single;
+    final persisted = (await FileTransferStore(
+      directoryPath: transferDirectory.path,
+    ).load()).tasks.single;
+    expect(interrupted.status, TransferStatus.paused);
+    expect(persisted.uploadSessionCreateAttempted, isTrue);
+    expect(persisted.uploadSessionId, isNull);
+    expect(adapter.uploadSessions, hasLength(1));
+
+    first.container.dispose();
+    firstDisposed = true;
+    await source.delete();
+
+    final second = await _ControllerHarness.start(
+      adapters: {endpoint.baseUrl: adapter},
+      transferDirectory: transferDirectory,
+    );
+    addTearDown(second.container.dispose);
+    await second.connectAndLogin(endpoint, username: 'owner');
+    final restored = second.container
+        .read(clientControllerProvider)
+        .transfers
+        .single;
+
+    await second.controller.resumeTransfer(restored.id);
+
+    final completed = second.container
+        .read(clientControllerProvider)
+        .transfers
+        .single;
+    expect(completed.status, TransferStatus.completed);
+    expect(
+      adapter.requests.where(
+        (request) =>
+            request.method == 'POST' &&
+            request.path == '/api/v1/upload-sessions',
+      ),
+      hasLength(1),
+    );
+    expect(
+      adapter.requests.where(
+        (request) =>
+            request.method == 'GET' &&
+            request.path.startsWith(
+              '/api/v1/upload-sessions/by-client-request/',
+            ),
+      ),
+      hasLength(1),
+    );
+  });
+
+  for (final goneStatus in <int>[404, 410]) {
+    test('a create lookup $goneStatus never posts another session', () async {
+      final endpoint = ServerEndpoint.parse('https://nas.example.com');
+      final adapter = _ControllerAdapter()..disconnectNextUploadCreate = true;
+      final root = await Directory.systemTemp.createTemp(
+        'mnemonas-controller-upload-create-lookup-gone-',
+      );
+      addTearDown(() => root.delete(recursive: true));
+      final transferDirectory = Directory('${root.path}/store');
+      final harness = await _ControllerHarness.start(
+        adapters: {endpoint.baseUrl: adapter},
+        transferDirectory: transferDirectory,
+      );
+      addTearDown(harness.container.dispose);
+      final source = File('${root.path}/payload.bin');
+      await source.writeAsBytes(<int>[1, 2, 3], flush: true);
+      await harness.connectAndLogin(endpoint, username: 'owner');
+
+      await expectLater(
+        harness.controller.uploadFile(
+          sourcePath: source.path,
+          fileName: 'payload.bin',
+        ),
+        throwsA(isA<ApiException>()),
+      );
+      final interrupted = harness.container
+          .read(clientControllerProvider)
+          .transfers
+          .single;
+      adapter.goneNextUploadLookupStatus = goneStatus;
+
+      await expectLater(
+        harness.controller.resumeTransfer(interrupted.id),
+        throwsA(
+          isA<ApiException>().having(
+            (error) => error.code,
+            'code',
+            'UPLOAD_RESULT_UNCONFIRMED',
+          ),
+        ),
+      );
+
+      final task = (await FileTransferStore(
+        directoryPath: transferDirectory.path,
+      ).load()).tasks.single;
+      expect(task.phase, transfer_core.TransferPhase.resultUnconfirmed);
+      expect(task.uploadSessionCreateAttempted, isTrue);
+      expect(task.uploadSessionId, isNull);
+      expect(
+        adapter.requests.where(
+          (request) =>
+              request.method == 'POST' &&
+              request.path == '/api/v1/upload-sessions',
+        ),
+        hasLength(1),
+      );
+      expect(
+        adapter.requests.where(
+          (request) =>
+              request.method == 'GET' &&
+              request.path.startsWith(
+                '/api/v1/upload-sessions/by-client-request/',
+              ),
+        ),
+        hasLength(1),
+      );
+    });
+  }
+
+  test('a first create 410 is immediately result unconfirmed', () async {
+    final endpoint = ServerEndpoint.parse('https://nas.example.com');
+    final adapter = _ControllerAdapter()..expireNextUploadCreate = true;
+    final root = await Directory.systemTemp.createTemp(
+      'mnemonas-controller-upload-create-expired-',
+    );
+    addTearDown(() => root.delete(recursive: true));
+    final transferDirectory = Directory('${root.path}/store');
     final harness = await _ControllerHarness.start(
       adapters: {endpoint.baseUrl: adapter},
+      transferDirectory: transferDirectory,
     );
     addTearDown(harness.container.dispose);
-    final directory = await Directory.systemTemp.createTemp(
-      'mnemonas-controller-upload-',
-    );
-    addTearDown(() => directory.delete(recursive: true));
-    final source = File('${directory.path}/payload.bin');
+    final source = File('${root.path}/payload.bin');
     await source.writeAsBytes(<int>[1, 2, 3], flush: true);
     await harness.connectAndLogin(endpoint, username: 'owner');
 
@@ -591,15 +852,38 @@ void main() {
         sourcePath: source.path,
         fileName: 'payload.bin',
       ),
-      throwsA(isA<ApiException>()),
+      throwsA(
+        isA<ApiException>().having(
+          (error) => error.code,
+          'code',
+          'UPLOAD_RESULT_UNCONFIRMED',
+        ),
+      ),
     );
 
-    final transfer = harness.container
-        .read(clientControllerProvider)
-        .transfers
-        .single;
-    expect(transfer.status, TransferStatus.resultUnconfirmed);
-    expect(transfer.errorMessage, contains('可能已经完成上传'));
+    final task = (await FileTransferStore(
+      directoryPath: transferDirectory.path,
+    ).load()).tasks.single;
+    expect(task.phase, transfer_core.TransferPhase.resultUnconfirmed);
+    expect(task.uploadSessionCreateAttempted, isTrue);
+    expect(task.uploadSessionId, isNull);
+    expect(adapter.uploadSessions, isEmpty);
+    expect(
+      adapter.requests.where(
+        (request) =>
+            request.method == 'POST' &&
+            request.path == '/api/v1/upload-sessions',
+      ),
+      hasLength(1),
+    );
+    expect(
+      adapter.requests.where(
+        (request) => request.path.startsWith(
+          '/api/v1/upload-sessions/by-client-request/',
+        ),
+      ),
+      isEmpty,
+    );
   });
 
   test(
@@ -632,6 +916,429 @@ void main() {
       expect(state.errorMessage, isNull);
       expect(state.notice, contains('文件已确认上传'));
       expect(state.notice, contains('目录刷新失败'));
+    },
+  );
+
+  test(
+    'a missing known upload session is not recreated and can be removed locally',
+    () async {
+      final endpoint = ServerEndpoint.parse('https://nas.example.com');
+      final adapter = _ControllerAdapter()..disconnectNextUpload = true;
+      final root = await Directory.systemTemp.createTemp(
+        'mnemonas-controller-upload-missing-session-',
+      );
+      addTearDown(() => root.delete(recursive: true));
+      final transferDirectory = Directory('${root.path}/store');
+      final harness = await _ControllerHarness.start(
+        adapters: {endpoint.baseUrl: adapter},
+        transferDirectory: transferDirectory,
+      );
+      addTearDown(harness.container.dispose);
+      final source = File('${root.path}/payload.bin');
+      await source.writeAsBytes(<int>[1, 2, 3], flush: true);
+      await harness.connectAndLogin(endpoint, username: 'owner');
+
+      await expectLater(
+        harness.controller.uploadFile(
+          sourcePath: source.path,
+          fileName: 'payload.bin',
+        ),
+        throwsA(isA<ApiException>()),
+      );
+      final interrupted = harness.container
+          .read(clientControllerProvider)
+          .transfers
+          .single;
+      adapter.forgetUploadSessions();
+
+      await expectLater(
+        harness.controller.resumeTransfer(interrupted.id),
+        throwsA(
+          isA<ApiException>().having(
+            (error) => error.code,
+            'code',
+            'UPLOAD_RESULT_UNCONFIRMED',
+          ),
+        ),
+      );
+
+      final unconfirmed = harness.container
+          .read(clientControllerProvider)
+          .transfers
+          .single;
+      expect(unconfirmed.status, TransferStatus.resultUnconfirmed);
+      expect(
+        adapter.requests
+            .where(
+              (request) =>
+                  request.method == 'POST' &&
+                  request.path == '/api/v1/upload-sessions',
+            )
+            .length,
+        1,
+      );
+
+      await harness.controller.removeTransfer(unconfirmed.id);
+      expect(
+        harness.container.read(clientControllerProvider).transfers,
+        isEmpty,
+      );
+      final payloadDirectory = Directory(
+        '${transferDirectory.path}${Platform.pathSeparator}payloads',
+      );
+      expect(
+        payloadDirectory.listSync().whereType<File>().where(
+          (file) => file.path.endsWith('.upload'),
+        ),
+        isEmpty,
+      );
+    },
+  );
+
+  test(
+    'an expired known upload session is never recreated implicitly',
+    () async {
+      final endpoint = ServerEndpoint.parse('https://nas.example.com');
+      final adapter = _ControllerAdapter()..disconnectNextUpload = true;
+      final root = await Directory.systemTemp.createTemp(
+        'mnemonas-controller-upload-expired-session-',
+      );
+      addTearDown(() => root.delete(recursive: true));
+      final harness = await _ControllerHarness.start(
+        adapters: {endpoint.baseUrl: adapter},
+        transferDirectory: Directory('${root.path}/store'),
+      );
+      addTearDown(harness.container.dispose);
+      final source = File('${root.path}/payload.bin');
+      await source.writeAsBytes(<int>[1, 2, 3], flush: true);
+      await harness.connectAndLogin(endpoint, username: 'owner');
+
+      await expectLater(
+        harness.controller.uploadFile(
+          sourcePath: source.path,
+          fileName: 'payload.bin',
+        ),
+        throwsA(isA<ApiException>()),
+      );
+      final interrupted = harness.container
+          .read(clientControllerProvider)
+          .transfers
+          .single;
+      adapter.expireUploadSessionStatus = true;
+
+      await expectLater(
+        harness.controller.resumeTransfer(interrupted.id),
+        throwsA(
+          isA<ApiException>().having(
+            (error) => error.code,
+            'code',
+            'UPLOAD_RESULT_UNCONFIRMED',
+          ),
+        ),
+      );
+
+      expect(
+        harness.container
+            .read(clientControllerProvider)
+            .transfers
+            .single
+            .status,
+        TransferStatus.resultUnconfirmed,
+      );
+      expect(
+        adapter.requests
+            .where(
+              (request) =>
+                  request.method == 'POST' &&
+                  request.path == '/api/v1/upload-sessions',
+            )
+            .length,
+        1,
+      );
+    },
+  );
+
+  final goneSessionScenarios =
+      <({String name, void Function(_ControllerAdapter adapter) configure})>[
+        (
+          name: 'chunk 410',
+          configure: (adapter) {
+            adapter.goneNextUploadChunkStatus = 410;
+          },
+        ),
+        (
+          name: 'commit 404',
+          configure: (adapter) {
+            adapter.goneNextUploadCommitStatus = 404;
+          },
+        ),
+        (
+          name: 'commit conflict follow-up 410',
+          configure: (adapter) {
+            adapter.conflictNextUploadCommit = true;
+            adapter.expireUploadSessionStatus = true;
+          },
+        ),
+      ];
+  for (final scenario in goneSessionScenarios) {
+    test(
+      'a known upload session ${scenario.name} becomes result unconfirmed',
+      () async {
+        final endpoint = ServerEndpoint.parse('https://nas.example.com');
+        final adapter = _ControllerAdapter();
+        scenario.configure(adapter);
+        final root = await Directory.systemTemp.createTemp(
+          'mnemonas-controller-upload-gone-stage-',
+        );
+        addTearDown(() => root.delete(recursive: true));
+        final transferDirectory = Directory('${root.path}/store');
+        final harness = await _ControllerHarness.start(
+          adapters: {endpoint.baseUrl: adapter},
+          transferDirectory: transferDirectory,
+        );
+        addTearDown(harness.container.dispose);
+        final source = File('${root.path}/payload.bin');
+        await source.writeAsBytes(<int>[1, 2, 3], flush: true);
+        await harness.connectAndLogin(endpoint, username: 'owner');
+
+        await expectLater(
+          harness.controller.uploadFile(
+            sourcePath: source.path,
+            fileName: 'payload.bin',
+          ),
+          throwsA(
+            isA<ApiException>().having(
+              (error) => error.code,
+              'code',
+              'UPLOAD_RESULT_UNCONFIRMED',
+            ),
+          ),
+        );
+
+        final transfer = harness.container
+            .read(clientControllerProvider)
+            .transfers
+            .single;
+        expect(transfer.status, TransferStatus.resultUnconfirmed);
+        expect(transfer.errorMessage, contains('无法确认'));
+        expect(
+          adapter.requests
+              .where(
+                (request) =>
+                    request.method == 'POST' &&
+                    request.path == '/api/v1/upload-sessions',
+              )
+              .length,
+          1,
+        );
+        final payloadDirectory = Directory(
+          '${transferDirectory.path}${Platform.pathSeparator}payloads',
+        );
+        expect(
+          payloadDirectory.listSync().whereType<File>().where(
+            (file) => file.path.endsWith('.upload'),
+          ),
+          hasLength(1),
+        );
+      },
+    );
+  }
+
+  for (final goneStatus in <int>[404, 410]) {
+    test(
+      'removing an upload ignores cancellation status $goneStatus',
+      () async {
+        final endpoint = ServerEndpoint.parse('https://nas.example.com');
+        final adapter = _ControllerAdapter()..disconnectNextUpload = true;
+        final root = await Directory.systemTemp.createTemp(
+          'mnemonas-controller-upload-gone-cancel-',
+        );
+        addTearDown(() => root.delete(recursive: true));
+        final transferDirectory = Directory('${root.path}/store');
+        final harness = await _ControllerHarness.start(
+          adapters: {endpoint.baseUrl: adapter},
+          transferDirectory: transferDirectory,
+        );
+        addTearDown(harness.container.dispose);
+        final source = File('${root.path}/payload.bin');
+        await source.writeAsBytes(<int>[1, 2, 3], flush: true);
+        await harness.connectAndLogin(endpoint, username: 'owner');
+
+        await expectLater(
+          harness.controller.uploadFile(
+            sourcePath: source.path,
+            fileName: 'payload.bin',
+          ),
+          throwsA(isA<ApiException>()),
+        );
+        final interrupted = harness.container
+            .read(clientControllerProvider)
+            .transfers
+            .single;
+        adapter.goneNextUploadSessionCancelStatus = goneStatus;
+
+        await harness.controller.removeTransfer(interrupted.id);
+
+        expect(
+          harness.container.read(clientControllerProvider).transfers,
+          isEmpty,
+        );
+        expect(
+          adapter.requests.where(
+            (request) =>
+                request.method == 'DELETE' &&
+                request.path.startsWith('/api/v1/upload-sessions/'),
+          ),
+          hasLength(1),
+        );
+        final payloadDirectory = Directory(
+          '${transferDirectory.path}${Platform.pathSeparator}payloads',
+        );
+        expect(
+          payloadDirectory.listSync().whereType<File>().where(
+            (file) => file.path.endsWith('.upload'),
+          ),
+          isEmpty,
+        );
+      },
+    );
+  }
+
+  test('upload commit conflict never overwrites the target state', () async {
+    final endpoint = ServerEndpoint.parse('https://nas.example.com');
+    final adapter = _ControllerAdapter()..conflictNextUploadCommit = true;
+    final harness = await _ControllerHarness.start(
+      adapters: {endpoint.baseUrl: adapter},
+    );
+    addTearDown(harness.container.dispose);
+    final directory = await Directory.systemTemp.createTemp(
+      'mnemonas-controller-upload-conflict-',
+    );
+    addTearDown(() => directory.delete(recursive: true));
+    final source = File('${directory.path}/payload.bin');
+    await source.writeAsBytes(<int>[1, 2, 3], flush: true);
+    await harness.connectAndLogin(endpoint, username: 'owner');
+
+    await expectLater(
+      harness.controller.uploadFile(
+        sourcePath: source.path,
+        fileName: 'payload.bin',
+      ),
+      throwsA(
+        isA<ApiException>().having(
+          (error) => error.code,
+          'code',
+          'UPLOAD_TARGET_CONFLICT',
+        ),
+      ),
+    );
+
+    final transfer = harness.container
+        .read(clientControllerProvider)
+        .transfers
+        .single;
+    expect(transfer.status, TransferStatus.failed);
+    expect(transfer.errorMessage, contains('目标文件已发生变化'));
+    expect(adapter.uploadSessions.single.state, 'conflict');
+  });
+
+  test('startup removes unreferenced private upload payloads', () async {
+    final endpoint = ServerEndpoint.parse('https://nas.example.com');
+    final root = await Directory.systemTemp.createTemp(
+      'mnemonas-controller-upload-orphans-',
+    );
+    addTearDown(() => root.delete(recursive: true));
+    final transferDirectory = Directory('${root.path}/store');
+    final payloadDirectory = Directory('${transferDirectory.path}/payloads');
+    await payloadDirectory.create(recursive: true);
+    final ready = File('${payloadDirectory.path}/orphan.upload');
+    final partial = File('${payloadDirectory.path}/orphan.upload.part');
+    await ready.writeAsBytes(<int>[1, 2, 3], flush: true);
+    await partial.writeAsBytes(<int>[4, 5, 6], flush: true);
+    final harness = await _ControllerHarness.start(
+      adapters: {endpoint.baseUrl: _ControllerAdapter()},
+      transferDirectory: transferDirectory,
+    );
+    addTearDown(harness.container.dispose);
+
+    await harness.connectAndLogin(endpoint, username: 'owner');
+
+    expect(await ready.exists(), isFalse);
+    expect(await partial.exists(), isFalse);
+  });
+
+  test(
+    'startup retries confirmed upload cleanup but preserves uncertain payloads',
+    () async {
+      final endpoint = ServerEndpoint.parse('https://nas.example.com');
+      final root = await Directory.systemTemp.createTemp(
+        'mnemonas-controller-upload-terminal-cleanup-',
+      );
+      addTearDown(() => root.delete(recursive: true));
+      final transferDirectory = Directory('${root.path}/store');
+      final payloadDirectory = Directory('${transferDirectory.path}/payloads');
+      await payloadDirectory.create(recursive: true);
+      final completedPath = '${payloadDirectory.path}/completed.upload';
+      final uncertainPath = '${payloadDirectory.path}/uncertain.upload';
+      await File(completedPath).writeAsBytes(<int>[1, 2, 3], flush: true);
+      await File(uncertainPath).writeAsBytes(<int>[4, 5, 6], flush: true);
+      final now = DateTime.now().toUtc().subtract(const Duration(hours: 1));
+      final expiresAt = now.add(const Duration(hours: 72));
+      final store = FileTransferStore(directoryPath: transferDirectory.path);
+      await store.upsert(
+        transfer_core.TransferTask(
+          id: 'upload-completed',
+          direction: transfer_core.TransferDirection.upload,
+          phase: transfer_core.TransferPhase.completed,
+          endpointBaseUrl: endpoint.baseUrl,
+          userId: 'user-owner',
+          remotePath: '/completed.bin',
+          displayName: 'completed.bin',
+          stagingPath: completedPath,
+          payloadSha256: '0' * 64,
+          uploadSessionId: 'session-completed',
+          uploadSessionExpiresAt: expiresAt,
+          durableOffset: 3,
+          totalBytes: 3,
+          createdAt: now,
+          updatedAt: now,
+        ),
+      );
+      await store.upsert(
+        transfer_core.TransferTask(
+          id: 'upload-uncertain',
+          direction: transfer_core.TransferDirection.upload,
+          phase: transfer_core.TransferPhase.resultUnconfirmed,
+          endpointBaseUrl: endpoint.baseUrl,
+          userId: 'user-owner',
+          remotePath: '/uncertain.bin',
+          displayName: 'uncertain.bin',
+          stagingPath: uncertainPath,
+          payloadSha256: '1' * 64,
+          uploadSessionId: 'session-uncertain',
+          uploadSessionExpiresAt: expiresAt,
+          durableOffset: 3,
+          totalBytes: 3,
+          createdAt: now,
+          updatedAt: now,
+          errorCode: 'UPLOAD_RESULT_UNCONFIRMED',
+          errorMessage: 'The upload result cannot be confirmed',
+        ),
+      );
+      final harness = await _ControllerHarness.start(
+        adapters: {endpoint.baseUrl: _ControllerAdapter()},
+        transferDirectory: transferDirectory,
+      );
+      addTearDown(harness.container.dispose);
+
+      await harness.connectAndLogin(endpoint, username: 'owner');
+
+      expect(await File(completedPath).exists(), isFalse);
+      expect(await File(uncertainPath).exists(), isTrue);
+      expect(
+        harness.container.read(clientControllerProvider).transfers,
+        hasLength(2),
+      );
     },
   );
 
@@ -2190,11 +2897,29 @@ final class _ControllerAdapter implements HttpClientAdapter {
   Set<String> failedTrashEmptyDeletedIds = const <String>{};
   bool failNextTrashList = false;
   bool failNextSearch = false;
+  bool disconnectNextUploadCreate = false;
   bool disconnectNextUpload = false;
+  bool expireNextUploadCreate = false;
+  int? goneNextUploadLookupStatus;
+  bool expireUploadSessionStatus = false;
+  int? goneNextUploadSessionCancelStatus;
+  int? goneNextUploadChunkStatus;
+  int? goneNextUploadCommitStatus;
+  bool conflictNextUploadCommit = false;
   bool disconnectNextDirectory = false;
   bool interruptNextDownload = false;
   List<int> downloadPayload = <int>[1, 2, 3, 4, 5, 6];
   final List<String?> downloadRanges = <String?>[];
+  final Map<String, _UploadSessionFixture> _uploadSessions =
+      <String, _UploadSessionFixture>{};
+  int _nextUploadSession = 1;
+
+  List<_UploadSessionFixture> get uploadSessions =>
+      _uploadSessions.values.toList(growable: false);
+
+  void forgetUploadSessions() {
+    _uploadSessions.clear();
+  }
 
   List<_ControllerRequest> get trashRequests => requests
       .where((request) => request.path.startsWith('/api/v1/trash/'))
@@ -2429,6 +3154,170 @@ final class _ControllerAdapter implements HttpClientAdapter {
         },
       );
     }
+    if (path == '/api/v1/upload-sessions' && options.method == 'POST') {
+      if (expireNextUploadCreate) {
+        expireNextUploadCreate = false;
+        return _json(410, {
+          'code': 'UPLOAD_SESSION_EXPIRED',
+          'message': 'upload session expired',
+        });
+      }
+      final body = Map<String, dynamic>.from(options.data! as Map);
+      final clientRequestId = body['client_request_id']! as String;
+      final replay = _uploadSessions.values
+          .where((session) => session.clientRequestId == clientRequestId)
+          .firstOrNull;
+      if (replay != null) {
+        return _envelope(replay.toJson());
+      }
+      final id = 'upload-session-${_nextUploadSession++}';
+      final session = _UploadSessionFixture(
+        id: id,
+        clientRequestId: clientRequestId,
+        path: body['path']! as String,
+        totalBytes: body['total_bytes']! as int,
+      );
+      _uploadSessions[id] = session;
+      if (disconnectNextUploadCreate) {
+        disconnectNextUploadCreate = false;
+        throw DioException(
+          requestOptions: options,
+          type: DioExceptionType.connectionError,
+          error: 'upload create response interrupted',
+        );
+      }
+      return _envelope(session.toJson());
+    }
+    if (path.startsWith('/api/v1/upload-sessions/by-client-request/') &&
+        options.method == 'GET') {
+      final goneStatus = goneNextUploadLookupStatus;
+      goneNextUploadLookupStatus = null;
+      if (goneStatus != null) {
+        return _json(goneStatus, {
+          'code': goneStatus == 404
+              ? 'UPLOAD_SESSION_NOT_FOUND'
+              : 'UPLOAD_SESSION_EXPIRED',
+          'message': goneStatus == 404
+              ? 'upload session not found'
+              : 'upload session expired',
+        });
+      }
+      final clientRequestId = options.uri.pathSegments.last;
+      final session = _uploadSessions.values
+          .where((candidate) => candidate.clientRequestId == clientRequestId)
+          .firstOrNull;
+      if (session == null) {
+        return _json(404, {
+          'code': 'UPLOAD_SESSION_NOT_FOUND',
+          'message': 'upload session not found',
+        });
+      }
+      return _envelope(session.toJson());
+    }
+    if (path.startsWith('/api/v1/upload-sessions/')) {
+      final segments = options.uri.pathSegments;
+      final id = segments[3];
+      final session = _uploadSessions[id];
+      if (session == null) {
+        return _json(404, {
+          'code': 'UPLOAD_SESSION_NOT_FOUND',
+          'message': 'upload session not found',
+        });
+      }
+      if (segments.length == 5 &&
+          segments[4] == 'commit' &&
+          options.method == 'POST') {
+        final goneStatus = goneNextUploadCommitStatus;
+        goneNextUploadCommitStatus = null;
+        if (goneStatus != null) {
+          return _json(goneStatus, {
+            'code': goneStatus == 404
+                ? 'UPLOAD_SESSION_NOT_FOUND'
+                : 'UPLOAD_SESSION_EXPIRED',
+            'message': goneStatus == 404
+                ? 'upload session not found'
+                : 'upload session expired',
+          });
+        }
+        if (conflictNextUploadCommit) {
+          conflictNextUploadCommit = false;
+          session.state = 'conflict';
+          return _json(409, {
+            'code': 'CONFLICT',
+            'message': 'upload target changed',
+          });
+        }
+        if (session.state == 'ready' || session.state == 'committing') {
+          session.state = 'committed';
+        }
+        return _envelope(session.toJson());
+      }
+      if (segments.length == 4 && options.method == 'GET') {
+        if (expireUploadSessionStatus) {
+          return _json(410, {
+            'code': 'UPLOAD_SESSION_EXPIRED',
+            'message': 'upload session expired',
+          });
+        }
+        return _envelope(session.toJson());
+      }
+      if (segments.length == 4 && options.method == 'DELETE') {
+        final goneStatus = goneNextUploadSessionCancelStatus;
+        goneNextUploadSessionCancelStatus = null;
+        if (goneStatus != null) {
+          return _json(goneStatus, {
+            'code': goneStatus == 404
+                ? 'UPLOAD_SESSION_NOT_FOUND'
+                : 'UPLOAD_SESSION_EXPIRED',
+            'message': goneStatus == 404
+                ? 'upload session not found'
+                : 'upload session expired',
+          });
+        }
+        session.state = 'cancelled';
+        return _envelope(session.toJson());
+      }
+      if (segments.length == 4 && options.method == 'PATCH') {
+        final goneStatus = goneNextUploadChunkStatus;
+        goneNextUploadChunkStatus = null;
+        if (goneStatus != null) {
+          return _json(goneStatus, {
+            'code': goneStatus == 404
+                ? 'UPLOAD_SESSION_NOT_FOUND'
+                : 'UPLOAD_SESSION_EXPIRED',
+            'message': goneStatus == 404
+                ? 'upload session not found'
+                : 'upload session expired',
+          });
+        }
+        final offset = int.parse(
+          options.headers[uploadOffsetHeader]!.toString(),
+        );
+        final length = int.parse(
+          options.headers[Headers.contentLengthHeader]!.toString(),
+        );
+        if (offset != session.durableOffset) {
+          return _json(409, {
+            'code': 'UPLOAD_OFFSET_MISMATCH',
+            'message': 'upload offset mismatch',
+            'details': {'durable_offset': session.durableOffset},
+          });
+        }
+        session.durableOffset += length;
+        if (session.durableOffset == session.totalBytes) {
+          session.state = 'ready';
+        }
+        if (disconnectNextUpload) {
+          disconnectNextUpload = false;
+          throw DioException(
+            requestOptions: options,
+            type: DioExceptionType.connectionError,
+            error: 'upload connection interrupted',
+          );
+        }
+        return _envelope(session.toJson());
+      }
+    }
     if (path == '/api/v1/trash/' && options.method == 'GET') {
       final snapshot = trashItems
           .map((item) => Map<String, dynamic>.from(item))
@@ -2506,22 +3395,6 @@ final class _ControllerAdapter implements HttpClientAdapter {
       return _envelope(result);
     }
     if (path.startsWith('/api/v1/files/')) {
-      if (options.method == 'POST') {
-        if (disconnectNextUpload) {
-          disconnectNextUpload = false;
-          throw DioException(
-            requestOptions: options,
-            type: DioExceptionType.connectionError,
-            error: 'upload connection interrupted',
-          );
-        }
-        return _envelope({
-          'path': '/${path.substring('/api/v1/files/'.length)}',
-          'isDir': false,
-          'size': 0,
-          'persistenceWarning': false,
-        });
-      }
       final suffix = path.substring('/api/v1/files/'.length);
       final logicalPath = suffix.isEmpty ? '/' : '/${Uri.decodeFull(suffix)}';
       final gate = _directoryGates[logicalPath];
@@ -2605,6 +3478,43 @@ final class _ControllerRequest {
   final String path;
   final Map<String, dynamic> query;
   final Object? data;
+}
+
+final class _UploadSessionFixture {
+  _UploadSessionFixture({
+    required this.id,
+    required this.clientRequestId,
+    required this.path,
+    required this.totalBytes,
+  });
+
+  final String id;
+  final String clientRequestId;
+  final String path;
+  final int totalBytes;
+  int durableOffset = 0;
+  String state = 'uploading';
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'id': id,
+      'path': path,
+      'state': state,
+      'durable_offset': durableOffset,
+      'total_bytes': totalBytes,
+      'created_at': '2026-07-19T12:00:00Z',
+      'updated_at': '2026-07-19T12:01:00Z',
+      'expires_at': '2026-07-22T12:00:00Z',
+      'content_blake3':
+          state == 'ready' ||
+              state == 'committing' ||
+              state == 'committed' ||
+              state == 'conflict'
+          ? List<String>.filled(64, 'b').join()
+          : null,
+      'persistence_warning': false,
+    };
+  }
 }
 
 List<Map<String, dynamic>> _defaultTrashItems() {

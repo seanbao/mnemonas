@@ -1,3 +1,5 @@
+import 'file_path.dart';
+
 final class FileCapabilities {
   const FileCapabilities({
     required this.read,
@@ -167,6 +169,138 @@ final class FileMutationResult {
 
   final String path;
   final bool persistenceWarning;
+}
+
+enum UploadSessionState {
+  uploading,
+  ready,
+  committing,
+  committed,
+  conflict,
+  cancelled;
+
+  static UploadSessionState parse(String value) {
+    return switch (value) {
+      'uploading' => UploadSessionState.uploading,
+      'ready' => UploadSessionState.ready,
+      'committing' => UploadSessionState.committing,
+      'committed' => UploadSessionState.committed,
+      'conflict' => UploadSessionState.conflict,
+      'cancelled' => UploadSessionState.cancelled,
+      _ => throw const FormatException('Invalid upload session state'),
+    };
+  }
+}
+
+final class UploadSessionSnapshot {
+  UploadSessionSnapshot({
+    required this.id,
+    required this.path,
+    required this.state,
+    required this.durableOffset,
+    required this.totalBytes,
+    required DateTime createdAt,
+    required DateTime updatedAt,
+    required DateTime expiresAt,
+    required this.contentBlake3,
+    required this.persistenceWarning,
+  }) : createdAt = createdAt.toUtc(),
+       updatedAt = updatedAt.toUtc(),
+       expiresAt = expiresAt.toUtc() {
+    _validate();
+  }
+
+  factory UploadSessionSnapshot.fromJson(Map<String, dynamic> json) {
+    const expectedKeys = <String>{
+      'id',
+      'path',
+      'state',
+      'durable_offset',
+      'total_bytes',
+      'created_at',
+      'updated_at',
+      'expires_at',
+      'content_blake3',
+      'persistence_warning',
+    };
+    if (json.length != expectedKeys.length ||
+        expectedKeys.any((key) => !json.containsKey(key))) {
+      throw const FormatException(
+        'Upload session contains missing or unknown fields',
+      );
+    }
+
+    return UploadSessionSnapshot(
+      id: _requiredString(json, 'id'),
+      path: _requiredString(json, 'path'),
+      state: UploadSessionState.parse(_requiredString(json, 'state')),
+      durableOffset: _requiredInt(json, 'durable_offset'),
+      totalBytes: _requiredInt(json, 'total_bytes'),
+      createdAt: _requiredTimestamp(json, 'created_at'),
+      updatedAt: _requiredTimestamp(json, 'updated_at'),
+      expiresAt: _requiredTimestamp(json, 'expires_at'),
+      contentBlake3: _optionalBlake3(json, 'content_blake3'),
+      persistenceWarning: _requiredBool(json, 'persistence_warning'),
+    );
+  }
+
+  final String id;
+  final String path;
+  final UploadSessionState state;
+  final int durableOffset;
+  final int totalBytes;
+  final DateTime createdAt;
+  final DateTime updatedAt;
+  final DateTime expiresAt;
+  final String? contentBlake3;
+  final bool persistenceWarning;
+
+  bool get isTerminal =>
+      state == UploadSessionState.committed ||
+      state == UploadSessionState.conflict ||
+      state == UploadSessionState.cancelled;
+
+  void _validate() {
+    if (!_uploadSessionIdPattern.hasMatch(id)) {
+      throw const FormatException('Invalid upload session id');
+    }
+    if (normalizeLogicalPath(path, allowRoot: false) != path) {
+      throw const FormatException('Upload session path is not normalized');
+    }
+    if (durableOffset < 0 || totalBytes < 0 || durableOffset > totalBytes) {
+      throw const FormatException('Invalid upload session byte range');
+    }
+    if (updatedAt.isBefore(createdAt) || expiresAt.isBefore(updatedAt)) {
+      throw const FormatException('Invalid upload session timestamps');
+    }
+
+    final hasCompletePayload =
+        state == UploadSessionState.ready ||
+        state == UploadSessionState.committing ||
+        state == UploadSessionState.committed ||
+        state == UploadSessionState.conflict;
+    if (hasCompletePayload &&
+        (durableOffset != totalBytes || contentBlake3 == null)) {
+      throw const FormatException(
+        'Completed upload payload state is inconsistent',
+      );
+    }
+    if (state == UploadSessionState.uploading && durableOffset == totalBytes) {
+      throw const FormatException(
+        'Uploading state requires an incomplete payload',
+      );
+    }
+    if (contentBlake3 != null && durableOffset != totalBytes) {
+      throw const FormatException(
+        'Upload content digest requires a complete payload',
+      );
+    }
+    if (persistenceWarning && state != UploadSessionState.committed) {
+      throw const FormatException(
+        'Upload persistence warning requires a committed session',
+      );
+    }
+  }
 }
 
 final class PathMutationResult {
@@ -395,3 +529,70 @@ String? _optionalString(Object? value) {
   }
   return value;
 }
+
+int _requiredInt(Map<String, dynamic> json, String key) {
+  final value = json[key];
+  if (value is! int) {
+    throw FormatException('Missing or invalid $key');
+  }
+  return value;
+}
+
+bool _requiredBool(Map<String, dynamic> json, String key) {
+  final value = json[key];
+  if (value is! bool) {
+    throw FormatException('Missing or invalid $key');
+  }
+  return value;
+}
+
+DateTime _requiredTimestamp(Map<String, dynamic> json, String key) {
+  final value = json[key];
+  if (value is! String) {
+    throw FormatException('Missing or invalid $key');
+  }
+  final match = _rfc3339TimestampPattern.firstMatch(value);
+  if (match == null) {
+    throw FormatException('Missing or invalid $key');
+  }
+  final year = int.parse(match.group(1)!);
+  final month = int.parse(match.group(2)!);
+  final day = int.parse(match.group(3)!);
+  final hour = int.parse(match.group(4)!);
+  final minute = int.parse(match.group(5)!);
+  final second = int.parse(match.group(6)!);
+  if (month < 1 ||
+      month > 12 ||
+      day < 1 ||
+      day > DateTime.utc(year, month + 1, 0).day ||
+      hour > 23 ||
+      minute > 59 ||
+      second > 59) {
+    throw FormatException('Missing or invalid $key');
+  }
+  final parsed = DateTime.tryParse(value);
+  if (parsed == null) {
+    throw FormatException('Missing or invalid $key');
+  }
+  return parsed.toUtc();
+}
+
+String? _optionalBlake3(Map<String, dynamic> json, String key) {
+  final value = json[key];
+  if (value == null) {
+    return null;
+  }
+  if (value is! String || !_lowercaseDigestPattern.hasMatch(value)) {
+    throw FormatException('Invalid $key');
+  }
+  return value;
+}
+
+final RegExp _uploadSessionIdPattern = RegExp(
+  r'^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$',
+);
+final RegExp _lowercaseDigestPattern = RegExp(r'^[0-9a-f]{64}$');
+final RegExp _rfc3339TimestampPattern = RegExp(
+  r'^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})'
+  r'(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$',
+);
