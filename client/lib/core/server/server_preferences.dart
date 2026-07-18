@@ -2,7 +2,18 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'server_endpoint.dart';
 
-final class ServerPreferences {
+abstract interface class ServerPreferencesStore {
+  Future<ServerEndpoint?> load();
+
+  Future<void> save(
+    ServerEndpoint endpoint, {
+    bool allowInsecurePublicHttp = false,
+  });
+
+  Future<void> clear();
+}
+
+final class ServerPreferences implements ServerPreferencesStore {
   ServerPreferences({SharedPreferencesAsync? preferences})
     : _preferences = preferences ?? SharedPreferencesAsync();
 
@@ -11,6 +22,7 @@ final class ServerPreferences {
 
   final SharedPreferencesAsync _preferences;
 
+  @override
   Future<ServerEndpoint?> load() async {
     final value = await _preferences.getString(_serverUrlKey);
     if (value == null || value.isEmpty) {
@@ -29,6 +41,7 @@ final class ServerPreferences {
     }
   }
 
+  @override
   Future<void> save(
     ServerEndpoint endpoint, {
     bool allowInsecurePublicHttp = false,
@@ -44,6 +57,7 @@ final class ServerPreferences {
     await _preferences.setBool(_allowPublicHttpKey, allowInsecurePublicHttp);
   }
 
+  @override
   Future<void> clear() async {
     await _preferences.remove(_serverUrlKey);
     await _preferences.remove(_allowPublicHttpKey);

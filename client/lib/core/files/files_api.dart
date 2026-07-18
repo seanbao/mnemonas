@@ -28,10 +28,14 @@ final class FilesApi {
 
   final ApiClient _client;
 
-  Future<ApiResponse<DirectoryListing>> list(String logicalPath) {
+  Future<ApiResponse<DirectoryListing>> list(
+    String logicalPath, {
+    CancelToken? cancelToken,
+  }) {
     final encoded = encodeLogicalPath(logicalPath);
     return _client.requestEnvelope<DirectoryListing>(
       '/api/v1/files/$encoded',
+      cancelToken: cancelToken,
       decode: (data) => DirectoryListing.fromJson(_requireMap(data)),
     );
   }

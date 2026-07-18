@@ -28,6 +28,11 @@ FLUTTER ?= flutter
 DART ?= dart
 JAVA ?= java
 JAVAC ?= javac
+CLIENT_JAVA_HOME ?= $(shell \
+	javac_bin="$$(command -v "$(JAVAC)" 2>/dev/null || true)"; \
+	if [ -n "$$javac_bin" ]; then \
+		python3 -c 'import os, sys; print(os.path.dirname(os.path.dirname(os.path.realpath(sys.argv[1]))))' "$$javac_bin"; \
+	fi)
 FLUTTER_VERSION ?= 3.44.4
 GO_COVERAGE_MIN ?= 75
 RUST_COVERAGE_MIN ?= 70
@@ -394,12 +399,17 @@ client-deps:
 
 client-toolchain-check:
 	@echo "🔧 Checking Flutter client toolchain..."
-	@command -v "$(JAVA)" >/dev/null 2>&1 || { echo "❌ A full JDK 17 is required; java was not found" >&2; exit 1; }
 	@command -v "$(JAVAC)" >/dev/null 2>&1 || { echo "❌ A full JDK 17 is required; javac was not found" >&2; exit 1; }
+	@test -n "$(CLIENT_JAVA_HOME)" && test -x "$(CLIENT_JAVA_HOME)/bin/java" && test -x "$(CLIENT_JAVA_HOME)/bin/javac" || { echo "❌ Unable to derive a complete JDK from $(JAVAC)" >&2; exit 1; }
 	@javac_version="$$("$(JAVAC)" -version 2>&1 | awk '{print $$2}')"; \
 	case "$$javac_version" in \
 		17|17.*) ;; \
 		*) echo "❌ JDK 17 is required; found javac $$javac_version" >&2; exit 1 ;; \
+	esac
+	@java_version="$$("$(CLIENT_JAVA_HOME)/bin/java" -version 2>&1 | awk -F '\"' 'NR == 1 { print $$2 }')"; \
+	case "$$java_version" in \
+		17|17.*) ;; \
+		*) echo "❌ JDK 17 is required; derived JAVA_HOME contains java $$java_version" >&2; exit 1 ;; \
 	esac
 	@actual_version="$$("$(FLUTTER)" --version --machine | python3 -c 'import json, sys; print(json.load(sys.stdin)["frameworkVersion"])')"; \
 	if [ "$$actual_version" != "$(FLUTTER_VERSION)" ]; then \
@@ -430,7 +440,7 @@ client-test: client-deps
 
 client-apk-debug: client-deps
 	@echo "🤖 Building Android client debug APK..."
-	cd client && "$(FLUTTER)" build apk --debug
+	cd client && JAVA_HOME="$(CLIENT_JAVA_HOME)" PATH="$(CLIENT_JAVA_HOME)/bin:$$PATH" "$(FLUTTER)" build apk --debug
 
 client-check: client-toolchain-check client-android-policy-check client-format-check client-analyze client-test client-apk-debug
 	@echo "✅ Flutter client checks passed"

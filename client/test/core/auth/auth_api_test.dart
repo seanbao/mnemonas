@@ -11,34 +11,10 @@ import 'package:mnemonas_client/core/network/api_error.dart';
 import 'package:mnemonas_client/core/server/server_endpoint.dart';
 
 void main() {
-  test(
-    'logout revokes by refresh-token body without requiring bearer',
-    () async {
-      final store = MemoryAuthSessionStore();
-      await store.save(_session());
-      final adapter = _LogoutAdapter();
-      final dio = Dio()..httpClientAdapter = adapter;
-      final api = AuthApi(
-        ApiClient(
-          endpoint: ServerEndpoint.parse('https://nas.example.com'),
-          sessionStore: store,
-          dio: dio,
-        ),
-      );
-
-      final response = await api.logout();
-
-      expect(response.statusCode, 200);
-      expect(adapter.authorization, isNull);
-      expect(adapter.refreshToken, 'refresh-token');
-      expect(await store.load(), isNull);
-    },
-  );
-
-  test('logout keeps local session when server revocation fails', () async {
+  test('logout clears locally before revoking by refresh-token body', () async {
     final store = MemoryAuthSessionStore();
-    await store.save(_session());
-    final adapter = _LogoutAdapter(fail: true);
+    await _seedSession(store, _session());
+    final adapter = _LogoutAdapter();
     final dio = Dio()..httpClientAdapter = adapter;
     final api = AuthApi(
       ApiClient(
@@ -48,9 +24,56 @@ void main() {
       ),
     );
 
-    await expectLater(api.logout(), throwsA(isA<ApiException>()));
-    expect(await store.load(), isNotNull);
+    var localClearCount = 0;
+    final response = await api.logout(
+      onLocalSessionCleared: () {
+        localClearCount++;
+      },
+    );
+
+    expect(response.statusCode, 200);
+    expect(adapter.authorization, isNull);
+    expect(adapter.refreshToken, 'refresh-token');
+    expect(localClearCount, 1);
+    expect((await store.snapshot()).session, isNull);
   });
+
+  test(
+    'logout keeps the local session cleared when revocation fails',
+    () async {
+      final store = MemoryAuthSessionStore();
+      await _seedSession(store, _session());
+      final adapter = _LogoutAdapter(fail: true);
+      final dio = Dio()..httpClientAdapter = adapter;
+      final api = AuthApi(
+        ApiClient(
+          endpoint: ServerEndpoint.parse('https://nas.example.com'),
+          sessionStore: store,
+          dio: dio,
+        ),
+      );
+
+      var localClearCount = 0;
+      await expectLater(
+        api.logout(
+          onLocalSessionCleared: () {
+            localClearCount++;
+          },
+        ),
+        throwsA(isA<ApiException>()),
+      );
+      expect(localClearCount, 1);
+      expect((await store.snapshot()).session, isNull);
+    },
+  );
+}
+
+Future<void> _seedSession(
+  MemoryAuthSessionStore store,
+  AuthSession session,
+) async {
+  final snapshot = await store.snapshot();
+  expect(await store.commitIfRevision(snapshot.revision, session), isTrue);
 }
 
 AuthSession _session() {

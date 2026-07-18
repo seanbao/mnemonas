@@ -14,6 +14,8 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../core/files/file_models.dart';
 import '../core/files/file_path.dart';
+import '../core/network/api_error.dart';
+import '../core/trash/trash_models.dart';
 import '../design_system/design_system.dart';
 import '../features/account/account_page.dart';
 import '../features/auth/force_password_change_page.dart';
@@ -21,8 +23,8 @@ import '../features/auth/login_page.dart';
 import '../features/connection/connection_page.dart';
 import '../features/files/files_page.dart';
 import '../features/home/home_page.dart';
-import '../features/photos/photos_page.dart';
 import '../features/shell/app_shell.dart';
+import '../features/trash/trash_page.dart';
 import '../platform/file_exporter.dart';
 import 'client_controller.dart';
 import 'client_state.dart';
@@ -228,10 +230,21 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
         onAddAction: (action) => unawaited(_handleAddAction(action)),
         onFileAction: (request) => unawaited(_handleFileAction(request)),
       ),
-      AppDestination.photos => PhotosPage(
-        viewModel: const PhotosViewModel.unavailable(),
-        onBrowseImageFiles: () =>
-            setState(() => _destination = AppDestination.files),
+      AppDestination.trash => TrashPage(
+        viewModel: _trashViewModel(widget.state),
+        onRefresh: _refreshTrash,
+        onRestore: _restoreTrashItem,
+        showSuccessMessages: false,
+        onDeletePermanently: (selection) async {
+          final outcome = await widget.controller.deleteTrashSelection(
+            selection,
+          );
+          return TrashDeleteOutcome(
+            deletedIds: outcome.deletedIds,
+            skippedIds: outcome.skippedIds,
+            remainingIds: outcome.remainingIds,
+          );
+        },
       ),
       AppDestination.account => AccountPage(
         viewModel: AccountViewModel(
@@ -251,9 +264,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
     };
     return AppShell(
       destination: _destination,
-      onDestinationSelected: (destination) {
-        setState(() => _destination = destination);
-      },
+      onDestinationSelected: _selectDestination,
       onSearch: () => _showSearchUnavailable(context),
       actions: <Widget>[
         IconButton(
@@ -283,6 +294,73 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
       path: state.currentPath,
       message: state.errorMessage ?? '目录加载失败',
     );
+  }
+
+  TrashViewModel _trashViewModel(ClientState state) {
+    final listing = state.trash;
+    if (listing != null) {
+      if (listing.items.isEmpty &&
+          state.trashErrorMessage != null &&
+          !state.trashReconciliationRequired) {
+        return TrashViewModel.error(state.trashErrorMessage!);
+      }
+      return TrashViewModel.ready(
+        listing: listing,
+        canWrite:
+            state.user?.role != 'guest' &&
+            !state.isTrashBusy &&
+            state.trashErrorMessage == null &&
+            !state.trashReconciliationRequired,
+        mutationBlockedMessage: state.trashReconciliationRequired
+            ? state.trashErrorMessage ?? '刷新回收站成功前，已暂停恢复和永久删除操作。'
+            : null,
+        refreshErrorMessage:
+            state.trashErrorMessage != null &&
+                !state.trashReconciliationRequired
+            ? state.trashErrorMessage
+            : null,
+      );
+    }
+    if (state.isTrashBusy) {
+      return const TrashViewModel.loading();
+    }
+    if (state.trashErrorMessage case final message?) {
+      return TrashViewModel.error(message);
+    }
+    return const TrashViewModel.loading();
+  }
+
+  void _selectDestination(AppDestination destination) {
+    setState(() => _destination = destination);
+    if (destination == AppDestination.trash && widget.state.trash == null) {
+      unawaited(_refreshTrash());
+    }
+  }
+
+  Future<void> _refreshTrash() async {
+    try {
+      await widget.controller.loadTrash();
+    } on Object {
+      // The controller exposes the loading error through TrashViewModel.
+    }
+  }
+
+  Future<TrashRestoreOutcome> _restoreTrashItem(
+    TrashItem item,
+    String? destinationPath,
+  ) async {
+    try {
+      await widget.controller.restoreTrashItem(
+        item,
+        destinationPath: destinationPath,
+      );
+      return TrashRestoreOutcome.restored;
+    } on ApiException catch (error) {
+      if (error.statusCode == 409) {
+        return TrashRestoreOutcome.pathConflict;
+      }
+      rethrow;
+    }
   }
 
   Future<void> _handleAddAction(FilesAddAction action) async {

@@ -183,15 +183,20 @@ final class _Harness {
     bool responseIdentityMismatch = false,
   }) async {
     final store = MemoryAuthSessionStore();
-    await store.save(
-      AuthSession(
-        serverBaseUrl: 'https://nas.example.com',
-        tokens: AuthTokenPair(
-          accessToken: 'access-token',
-          refreshToken: 'refresh-token',
-          expiresAt: DateTime.utc(2026, 7, 19, 13),
+    final initialSnapshot = await store.snapshot();
+    expect(
+      await store.commitIfRevision(
+        initialSnapshot.revision,
+        AuthSession(
+          serverBaseUrl: 'https://nas.example.com',
+          tokens: AuthTokenPair(
+            accessToken: 'access-token',
+            refreshToken: 'refresh-token',
+            expiresAt: DateTime.utc(2026, 7, 19, 13),
+          ),
         ),
       ),
+      isTrue,
     );
     final adapter = _FilesMutationAdapter(
       responseIdentityMismatch: responseIdentityMismatch,
