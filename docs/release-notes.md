@@ -10,8 +10,10 @@
 
 ## 主要变化
 
+- 流式上传、WebDAV PUT 和版本恢复现在使用跨命名空间、CAS 与 SQLite 的持久写入决策日志。启动恢复只前滚 `committed` 事务，其余事务回滚；无法确认终态时保留证据并阻断后续写入。写入目标的直接父目录必须先通过目录创建操作建立。
 - 加强路径、归档下载、WebDAV、公开分享、工作区、CAS 和备份恢复相关边界检查，覆盖符号链接、路径穿越、百分号编码点段、编码后的查询或片段标记、百分号编码敏感参数名、控制字符和回滚错误情况。
 - 升级 `golang.org/x/image` 到 `v0.43.0`，修复缩略图解码路径命中的 TIFF/WebP 依赖安全告警；同步刷新间接 `golang.org/x/text` 版本。
+- 将 Rust 数据面与 protobuf 生成工具锁定的 `anyhow` 升级到 `1.0.103`，修复 `RUSTSEC-2026-0190` 所述的 `Error::downcast_mut()` 内存安全问题。
 - 完善认证、用户、主目录、目录配额、目录访问规则、分享策略和会话安全默认值的后端与前端覆盖。
 - 新增面向全部认证用户的“账户安全”页面，可从用户菜单修改本人密码；管理员设置页提供同一入口。自助改密与强制改密共用校验和错误处理，成功后会退出该账户在所有设备上的登录并要求重新登录；客户端能够观察到请求终态无法确认时，会清除本地认证状态，避免继续使用可能已撤销的会话。`POST /api/v1/auth/password` 请求现在必须提供与认证上下文一致的 `expected_user_id`；旧调用方缺少该字段时会收到 `400 MISSING_EXPECTED_USER_ID`。
 - 文件页的单项与批量删除共用同一流程会话，准备、确认和提交阶段相互排斥，避免不同入口并发打开或提交删除。删除目标确认期间会显示可取消的进度提示；取消会立即中止请求、忽略迟到响应、保留当前选择，并把焦点恢复到原操作入口。原入口已移除时，焦点会回退到稳定的文件区域。目录切换或页面卸载只会使旧会话失效，不会把焦点移回旧目录。
@@ -31,7 +33,7 @@
 - 新增发布后上线总核验入口 `scripts/release-go-live-check.sh`，按顺序执行发布就绪摘要、GitHub Release/GHCR 产物核验、公网 `mnemonas-doctor --public-domain`、外部网络 go-live smoke，以及备份恢复演练 smoke；脚本会在任何 helper 启动前校验 release tag、仓库名、公网域名、备份演练 API URL、任务 ID 和可选 cookie 文件，把大写或单个尾点域名规范化后传给公网检查，并拒绝重复尾点域名；备份演练需要显式 API URL 和任务 ID，或显式跳过并在发布记录中保留该事实。
 - 新增 WebDAV 兼容性报告表单，用于收集 Finder、Windows File Explorer、移动端文件管理器、媒体播放器和命令行客户端的验证结果或客户端特定失败。
 - 维护页恢复完成后可复制恢复切换记录，内容包含恢复目标、只读校验、切换步骤、切换前确认和回滚清单；恢复报告会基于原始恢复目标匹配结果，在最近一次恢复已完成但匹配只读校验缺失、只读校验早于恢复完成、只读校验不属于当前恢复目标或只读校验状态不能作为当前目标证据时给出明确 findings，避免把陈旧、跨目标或不可用校验误读为当前恢复已验证；批量恢复结果会列出跨目录切换候选和冲突处置记录，并在可复制结果记录中写入任务名称、备份目标、保留策略状态、候选目录、只读校验复核结论、校验错误详情、冲突处置建议和配置文件保留要求，便于记录到工单或值班流程。
-- 设置页目录权限用户矩阵和未保存规则预览可复制权限复核记录，内容包含路径、用户读写判定、命中规则和相关分享影响，并会保留后端持久化近期复核历史；服务端历史不可用时回退当前浏览器记录。
+- 目录配额与目录权限集中到“用户管理 > 目录与访问”。该视图使用独立载荷保存目录策略，并提供用户权限矩阵、未保存规则预览和可复制权限复核记录；记录包含路径、用户读写判定、命中规则和相关分享影响，并保留后端持久化近期复核历史，服务端历史不可用时回退当前浏览器记录。存在未保存草稿时，应用内跳转、浏览器前进后退、登出和页面卸载均执行统一离开确认。
 - 分享路径策略可按用户、用户组或角色限制允许创建和维护分享链接的认证调用方；管理员保留修复既有分享的管理权限。
 - 分享、版本历史、回收站和维护页的关键处置入口会写入活动复核记录，覆盖分享停用、删除、重新启用、策略更新、版本恢复、回收站恢复和备份恢复执行结果；活动页复核历史在处置后会立即显示符合当前筛选的新记录，便于按记录时间复核误分享、误删和恢复处置结果。
 - 收紧发布就绪摘要：记录的完整验证目标之后如出现已提交或未提交的非发布文档变更，`release-readiness` 默认失败，并要求刷新完整验证或显式草稿放行；草稿放行非发布文档变更时会输出 `validation-warning`，避免被误读为正式发布就绪。
@@ -73,7 +75,7 @@ Release workflow 预期生成以下产物：
 
 当前硬化分支已有以下验证证据；最终发布前应以最新 tag、Release workflow 结果和必要的环境验证为准：
 
-最近本地完整验证快照：验证目标 `2a40b9624170`，`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过，覆盖 diff 空白、密钥泄漏扫描、workflow/YAML/脚本门禁、恢复报告基于原始恢复目标匹配结果，在最近一次恢复已完成但匹配只读校验缺失、只读校验早于恢复完成、只读校验不属于当前恢复目标或只读校验状态不能作为当前目标证据时给出明确 findings、首页首次部署检查和登录页基于 setup 状态提示认证关闭、分享启用且认证关闭、WebDAV 匿名访问和 `allow_unsafe_no_auth` 开启的部署安全风险、Activity 复核处置后把符合当前历史筛选的更新记录即时并入列表缓存、反向代理 WebDAV 验证文档契约门禁、hardening progress 整体状态边界文档契约门禁、发布后核验入口对以 `-` 开头的显式 artifact 目录和非法仓库名下载前失败的回归、`--keep-artifacts` 失败保留临时下载目录增量、`--keep-published-artifacts` 透传 published artifact 临时下载目录保留增量、Docker 部署指南发布后核验文档契约扩展、发布后上线总核验入口、备份恢复演练参数 helper 启动前输入校验、重复尾点域名拒绝和模拟回归、release-readiness 发布清单摘要范围门禁、release-readiness 双语 Docker 部署说明发布文档分类门禁、CHANGELOG 已知限制保留 L1/L1+ 发布候选定位、非唯一长期副本和外部备份边界的 release-readiness 门禁增量、Release workflow 结构门禁、hardening progress 中 `make release-readiness` 行级验证目标门禁、`make release-readiness` 入口基线、历史最小配置加载后回填当前默认值的配置兼容性回归、分享创建执行结果记录增量、分享策略更新执行结果记录增量、`make check`、工具链一致性、Go/Rust/frontend 依赖安全扫描、示例配置、public-access 模板、proto 再生成稳定性、Rust fmt/test/clippy、proto-gen fmt/test/clippy、前端 lint/typecheck/unit/build、Playwright 379 个 E2E 用例、Docker build、Docker image `sha256:2627520ecc18f3bc7f9a5847b4d73050251150a9d4b0169a30b8f463823bfe3f` 和 Docker smoke。Docker smoke 使用 Docker 自动分配的 loopback 端口 `http://127.0.0.1:32813`。
+最近本地完整验证快照：验证目标 `3f6a01524616`。`GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master` 通过 23 项变更感知门禁，覆盖 diff 与密钥扫描、workflow、脚本、工具链、依赖安全、示例配置、Docker 模板、protobuf 再生成稳定性、27 个 Go 包短测、Rust fmt/test/clippy、前端 lint/typecheck/覆盖率/构建、Playwright、Docker build/smoke 和双语文档。Go 关键包结果为 API 636.884 秒、storage 809.027 秒、WebDAV 27.551 秒；Rust 数据面 59 项测试通过；前端 102 个测试文件共 3652 项测试通过，语句、分支、函数和行覆盖率分别为 91.74%、86.67%、97.43% 和 92.27%；Playwright 409/409 通过，且无 retry、failure 或 skip。Docker image `sha256:1b005ff6838058f94341bfe25dd2ebe3c33f93ff47a4ce958cbe1a8982d5e1e7` 通过 Docker 自动分配的 loopback 地址 `http://127.0.0.1:32769` 的 health 与 frontend smoke。另行执行的隔离 `make fault-injection` 以 9 PASS、0 FAIL、0 SKIP 通过，覆盖崩溃写恢复、并发 ETag 冲突、真实版本恢复、CAS 损坏检测和 SQLite 元数据损坏隔离恢复。
 
 - `GOTOOLCHAIN=local ./scripts/verify-changed.sh`
 - `GOTOOLCHAIN=local timeout 90m ./scripts/verify-changed.sh --base master`
@@ -81,6 +83,7 @@ Release workflow 预期生成以下产物：
 - `make docs-check`
 - `make security-check NPM_AUDIT=1`
 - `make docker-check`
+- `make fault-injection`
 - `make release-readiness`
 - `sudo mnemonas-doctor --public-domain <domain>`
 - `./scripts/public-go-live-smoke.sh <domain>`
