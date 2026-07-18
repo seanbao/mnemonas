@@ -1069,12 +1069,14 @@ A hard journal, participant, receipt, outbox, source, or destination failure ret
 | --- | --- | --- |
 | `GET` | `/api/v1/search?q={query}` | Search files by name |
 
-Search results are scoped by configured `home_dir`.
+Search results are scoped by configured `home_dir`. The search root itself is not returned as a result.
 
 Query parameters:
 
-- `q`: Required search term, up to 100 characters. It must appear exactly once.
+- `q`: Required search term. It must be valid UTF-8, contain at most 100 Unicode code points after surrounding whitespace is removed, and appear exactly once.
 - `limit`: Maximum result count. The default is 50 and the maximum is 100. It may appear at most once.
+
+`count` is the number of results in the current response, not the total number of matches. The endpoint does not currently provide a cursor, a total, or a subsequent page. When `limit` is reached, clients should narrow the query instead of treating the result set as complete.
 
 Search response:
 
