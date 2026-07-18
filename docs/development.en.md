@@ -270,6 +270,7 @@ Repository-level entry points:
 ```bash
 make client-toolchain-check
 make client-android-policy-check
+make client-android-release-signing-check
 make client-format
 make client-analyze
 make client-test
@@ -277,7 +278,7 @@ make client-apk-debug
 make client-check
 ```
 
-`make client-check` verifies the Flutter version, Dart formatting, static analysis, unit/widget tests, and the Android debug APK build in sequence. The debug APK is written to `client/build/app/outputs/flutter-apk/app-debug.apk`. `make client-format` changes Dart source files; the other gates do not format code automatically.
+`make client-check` verifies the Flutter version, Android backup and application-identity policy, Dart formatting, static analysis, unit/widget tests, and the Android debug APK build in sequence. The debug APK is written to `client/build/app/outputs/flutter-apk/app-debug.apk`. `make client-format` changes Dart source files; the other gates do not format code automatically.
 
 Direct Flutter commands:
 
@@ -296,11 +297,25 @@ flutter build apk --debug
 - The Linux runner must build on a Linux host with `clang`, `cmake`, `ninja-build`, `pkg-config`, and GTK 3 development packages.
 - The Windows runner must build on a Windows host with the Visual Studio 2022 "Desktop development with C++" workload and a Windows SDK.
 
-CI currently builds only the Android debug APK. Linux and Windows builds require gates on their corresponding native runners; the Android CI result does not replace desktop-platform validation.
+CI builds the Android debug APK and exercises fail-closed release APK/AAB signing with a temporary test key. Linux and Windows builds require gates on their corresponding native runners; the Android CI result does not replace desktop-platform validation.
 
 ### Android Signing and Device-Validation Boundary
 
-The debug APK is limited to development and test use and is not a distributable artifact. A release APK or AAB must never use the Android debug key. Release signing material must remain outside the repository, enter through protected CI secrets or restricted local files, and must not commit the keystore, alias, or passwords. `flutter build appbundle --release` can be treated as a release-candidate build only after independent release signing is configured.
+The debug APK is limited to development and test use and is not a distributable artifact. Release retains application ID `com.mnemonas.app`. Debug and Profile use `com.mnemonas.app.debug` and `com.mnemonas.app.profile`, respectively, and their display names identify the development or profiling purpose so a development installation does not occupy the release identity.
+
+A release APK or AAB must never use the Android debug key. A release build must load `storeFile`, `storePassword`, `keyAlias`, `keyPassword`, and `certificateSha256` from a `key.properties` file outside the source checkout; `storeType` is optional, and the referenced keystore must also remain outside the source checkout. There is no repository-local fallback. `certificateSha256` is the 64-character hexadecimal SHA-256 digest of the signing certificate's DER content. Supply the file through the environment:
+
+```bash
+export MNEMONAS_ANDROID_KEY_PROPERTIES=/secure/mnemonas-android-key.properties
+cd client
+flutter build appbundle --release
+```
+
+A direct Gradle invocation may instead use `-Pmnemonas.android.keyProperties=/secure/mnemonas-android-key.properties`. The build fails if both selectors exist and resolve to different files. Missing configuration, blank fields, unreadable files, non-private-key aliases, invalid credentials, certificates outside their validity period, Android Debug certificates, and fingerprint mismatches all prevent release artifact generation. Failure output does not include signing passwords. All `android.injected.signing.*` overrides are forbidden. The gate inspects Gradle's resolved task graph for release artifact tasks, so task abbreviation or exclusion of the standalone validation task cannot bypass signing-material validation.
+
+`make client-android-release-signing-check` creates a test certificate in a temporary directory, covers those rejection paths plus injected-signing and abbreviated-task-with-exclusion bypass regressions, builds and verifies a release APK and AAB, and then removes the temporary key and release test artifacts. This gate validates build logic only. It does not establish production-key custody, rotation, recovery, or release approval, and it does not produce a distributable candidate.
+
+The gate assumes a trusted source checkout, a pinned Gradle/AGP toolchain, and a controlled build host. It cannot stop a local principal that can replace build scripts, inject a Gradle init script, or re-sign an artifact after the build. An AGP upgrade, a new flavor, or a custom publication task requires the protected release-task set to be reviewed again. A formal candidate must also be signed from a read-only key source in an isolated build environment, followed by independent verification of the final APK/AAB digest, application identity, and certificate fingerprint.
 
 Formatting, analysis, tests, and a debug APK build prove only the host-side gates. They do not establish usability on physical hardware. A release candidate requires physical Android-device evidence for installation and upgrade, session recovery after process restart, HTTPS connectivity, login and token rotation, file selection and transfer, opening downloads, foreground/background transitions, network-interruption recovery, and permission-denial paths. Emulator results and CI artifacts do not replace this evidence; the client remains under development until physical-device validation is recorded.
 
@@ -308,7 +323,7 @@ Formatting, analysis, tests, and a debug APK build prove only the host-side gate
 
 The Android client stores session material through platform secure storage. To prevent encrypted `SharedPreferences` from being restored without the original device's Android Keystore key, the client does not participate in Android cloud backup, device-to-device migration, or app-data restore. `AndroidManifest.xml` disables `allowBackup` and references both the `full-backup-content` rules for Android 11 and earlier and the `data-extraction-rules` rules for Android 12 and later. Both rule sets exclude every app-controlled storage domain. A new login after reinstalling the app or moving to another device is the expected behavior under this security policy.
 
-Run `make client-android-policy-check` when the manifest or backup rules change. This static gate parses the manifest and both XML rule sets, verifies that neither cloud backup nor device transfer has been re-enabled, and runs regression tests for unsafe configurations.
+Run `make client-android-policy-check` when the manifest, backup rules, application identity, or signing build logic changes. This static gate parses the manifest, both backup XML rule sets, variant names, and Gradle signing constraints; it verifies that neither cloud backup nor device transfer has been re-enabled and runs regression tests for unsafe configurations. Signing-logic changes must also run `make client-android-release-signing-check`.
 
 ## Ports
 

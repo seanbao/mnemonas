@@ -57,7 +57,7 @@ Activity rows also link to related versions, trash entries, shares, and review r
 
 [`client/`](client/README.en.md) contains the Flutter project for Android, Linux, and Windows, with Android as the first usable-platform target. The current source covers server connection, Bearer sessions and refresh-token rotation isolated by revision/CAS, file browsing, bounded filename search, version history and safe administrator restore, recoverable upload and download, durable-task pausing and transient-task cancellation on background entry, rename, move, copy, two-phase safe deletion, trash restore and exact permanent deletion, account management, and issue feedback.
 
-No usable client version has been published. Full-text and photo indexing, search pagination, Android native background transfer, cross-process task leases, native desktop validation, physical Android-device acceptance, and release signing remain incomplete. The Linux and Windows runners currently preserve only the cross-platform project boundary.
+No usable client version has been published. Release builds now have a fail-closed signing gate, and an API 35 emulator and API 36 physical device cover basic back behavior, session recovery, and a same-signature Debug update. Full-text and photo indexing, search pagination, Android native background transfer, cross-process task leases, production-key custody, a controlled Release candidate, the complete device/failure matrix, and native desktop validation remain incomplete. The Linux and Windows runners currently preserve only the cross-platform project boundary.
 
 ## Architecture
 

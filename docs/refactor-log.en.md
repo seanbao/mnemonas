@@ -6,7 +6,7 @@ This document records Flutter-client refactor scope, verification evidence, and 
 
 ## Progress Baseline
 
-As of 2026-07-19, engineering readiness for the complete Android, Linux, and Windows client objective is estimated at **70%**. The value uses the fixed weights below to compare later changes; it is not a release-completion percentage.
+As of 2026-07-19, engineering readiness for the complete Android, Linux, and Windows client objective is estimated at **74%**. The value uses the fixed weights below to compare later changes; it is not a release-completion percentage. Scores are rounded from the current source implementation, automated gates, and platform-validation evidence; they do not represent schedule completion, a stability service level, or the proportion of a usable release.
 
 | Workstream | Weight | Current score | Current boundary |
 | --- | ---: | ---: | --- |
@@ -14,10 +14,10 @@ As of 2026-07-19, engineering readiness for the complete Android, Linux, and Win
 | Authentication, sessions, and context isolation | 14 | 12 | Revision/CAS, secure storage, single-use refresh-token rotation, and server/account isolation are implemented; a background credential broker is not |
 | Files, search, Trash, and account workflows | 20 | 17 | Core file operations, bounded search, version history, safe Trash workflows, and account flows are connected; sharing and the remaining administration flows are incomplete |
 | Transfer integrity and recovery | 20 | 18 | Download identity conditions and durable upload sessions are integrated with the client ledger; durable foreground tasks support pause, resume, authoritative offsets, idempotent commit, restart recovery, and confirmed task cleanup; native background execution and cross-process leases are incomplete |
-| Android native capability and lifecycle | 16 | 9 | SAF import and export provide bounded streaming, progress, cancellation, and Activity-destruction cleanup; on background entry, durable transfers pause safely while transient previews, historical downloads, and SAF preparation cancel safely, but background execution, notification controls, and the physical-device matrix remain incomplete |
-| Release engineering and platform security | 10 | 3 | Debug APK and baseline policy checks are available; independent signing, release versioning, release HTTPS policy, and upgrade validation are incomplete |
+| Android native capability and lifecycle | 16 | 11 | SAF import/export and safe foreground/background boundaries are implemented; an API 35 emulator and an API 36 physical device cover installation, sign-in, system-back hierarchy, session recovery after process restart, and a Debug update, while background execution, notification controls, and the full device matrix remain incomplete |
+| Release engineering and platform security | 10 | 5 | Release builds have fail-closed signing validation, certificate-fingerprint constraints, and isolated Debug/Profile identities; temporary-key APK/AAB build and signature verification run in CI, while production-key custody, monotonic release versioning, release HTTPS policy, and a formal candidate remain incomplete |
 | Linux and Windows validation | 8 | 1 | Runners and shared-code boundaries remain; native build, runtime, and distribution evidence is absent |
-| **Total** | **100** | **70** | **Still under development, with no usable version** |
+| **Total** | **100** | **74** | **Still under development, with no usable version** |
 
 ## Completed Refactors
 
@@ -27,6 +27,7 @@ As of 2026-07-19, engineering readiness for the complete Android, Linux, and Win
 - Connected server setup, sign-in, device overview, file browsing, filename search, Trash, and account workflows.
 - The Home and Files views distinguish initial loading, same-directory refresh, and cached data after a failed refresh. Stale directory content remains readable and is labelled explicitly instead of being presented as newly online data.
 - File mutations use a controller-level single-flight lease and immediate presentation-layer debouncing. A confirmed mutation is not rewritten as a failure when the subsequent directory refresh fails, an unconfirmed result directs the operator to inspect the directory, and navigation is not pulled back to an older path by a late refresh.
+- Directory responses must return a canonical path matching the requested path. An untrusted path is rejected as an invalid response before it reaches Widget construction. System back on the Files page handles selection cancellation, parent-directory navigation, and then root-route exit in that order.
 - Extracted transfer records into a dedicated transfer center with state-based grouping and distinct pause, retry, destination-selection, cancel-and-delete, and history-clear actions. Destructive cleanup and unconfirmed-result removal require explicit confirmation.
 - Entering the background synchronously claims active transfer-center tasks. Durable downloads, uploads, and Android document exports retain app-private payloads and resumable state; transient file previews, historical-version previews or downloads, and SAF upload preparation are cancelled with partial-file cleanup. No task resumes automatically on return.
 - Documentation retains only a GitHub Issues feedback entry. README and development records state that no usable version exists.
@@ -58,6 +59,21 @@ As of 2026-07-19, engineering readiness for the complete Android, Linux, and Win
 - The native layer copies one file at a time with a 64 KiB buffer, calls `flush` and `fd.sync`, and cleans partial files after failure.
 - Upload import and download publication use only temporary URI grants for the current foreground flow and do not retain shared grants. Recoverable state remains in the app-private payload and ledger. This boundary also avoids complete-file and multi-selection Java heap residency from the previous plugin path.
 
+### Android Release and Device Evidence
+
+- Release retains `com.mnemonas.app`; Debug and Profile use separate package IDs, version suffixes, and display names. Signing configuration and keystore material outside the source checkout are mandatory before a release APK/AAB is generated, with checks for a private-key alias, certificate validity, Android Debug certificates, and the certificate SHA-256 fingerprint.
+- The gate rejects `android.injected.signing.*` overrides and identifies release artifact tasks from Gradle's resolved task graph, so task abbreviation or exclusion of the standalone validation task cannot skip validation. A temporary PKCS12 test key covers rejection of missing configuration, blank fields, unreadable files, key material inside the checkout, invalid aliases or credentials, certificate validity failures, Debug certificates, fingerprint mismatches, and both bypass regressions. The generated APK and AAB pass actual signature verification. The script removes the test key and release outputs, and CI runs the same gate.
+- This local manual acceptance pass separately exercised connection, sign-in, selection-first back handling, `/e2e-folder-share/subdir → /e2e-folder-share → /` navigation, session recovery after force-stop, and session retention across a same-Debug-signature `versionCode 1 → 2` update on an API 35 emulator and an OPPO PLP120 running Android 16 (API 36). This record does not replace acceptance of a candidate signed with controlled production material.
+
+#### Android Manual Validation Record for This Pass
+
+| Environment | Installation and update | Session and back behavior | Evidence boundary |
+| --- | --- | --- | --- |
+| Temporary Android API 35 emulator | Same-Debug-signature `versionCode 1 → 2` update passed | Sign-in, selection cancellation, parent-directory back navigation, and session recovery after force-stop passed | The temporary AVD, test applications, and local backend were removed after validation |
+| OPPO PLP120, Android 16 (API 36) | Same-Debug-signature `versionCode 1 → 2` update passed | Sign-in, selection cancellation, parent-directory back navigation, and session recovery after force-stop passed | Test applications, ADB reverse forwarding, and the local backend were removed after validation |
+
+This table is a local manual execution summary. Test credentials, screenshots, and UI XML may contain local-environment or session information and are not stored in the repository. No remote device-farm run, controlled Release artifact, or downloadable device log exists yet. Formal candidate acceptance must retain sanitized command records, artifact digests, the signing fingerprint, and the device-matrix result.
+
 ### Upload Recovery
 
 - The server uses owner-isolated durable upload sessions with request-ID idempotency, status lookup, sequential chunks, authoritative offsets, chunk SHA-256, complete-payload BLAKE3, conditional commit, cancellation, expiry cleanup, and crash-result reconciliation.
@@ -72,12 +88,13 @@ As of 2026-07-19, engineering readiness for the complete Android, Linux, and Win
 In current priority order:
 
 1. Replace the foreground JSON generation ledger with a transactional store that provides revision/CAS, durable task commands, and fencing tokens, then connect the Android native background executor, progress notifications, pause and retry actions, and system stop reasons.
-2. Tighten Android release cleartext policy and add independent signing, monotonic versioning, signature verification, upgrade installation, and API 24/33/34/36 validation.
-3. Complete physical Android-device acceptance for large files, network loss, permission revocation, process termination, foreground/background pause and recovery, and upgrades, including provider-retained empty or partial documents after native-copy failure.
+2. Tighten Android release cleartext policy; establish an isolated build, read-only production-key custody, rotation, and recovery; implement monotonic release versioning; and complete candidate upgrade acceptance after independently checking the final APK/AAB digest, application identity, and certificate fingerprint. Review the protected signing-task set whenever AGP, flavors, or publication tasks change.
+3. Add API 24/33/34 and broader vendor-device coverage for large files, network loss, permission revocation, and foreground/background pause and recovery, including provider-retained empty or partial documents after native-copy failure.
 4. Reduce the temporary duplicate storage between Android SAF import and the task-owned private payload, and expose a separate full-payload verification state.
 5. Add no-replace atomic primitives, a durable publication journal, and directory synchronization for desktop download destinations, and persist the overwrite decision across restart.
 6. Validate builds, file selection, destination publication, path replacement, and process recovery on native Linux and Windows hosts.
-7. Complete sharing, the remaining administration flows, localization, and interaction-consistency checks, and close the version-restore submit-time race after the server exposes current-identity CAS.
+7. Complete full-text and photo indexing, cursor-based search pagination, directory archive download, sharing, and the remaining administration flows. Replace absolute-path text input for move, copy, and conflict restore with a browsable destination-directory selector, then complete localization and the remaining interaction-consistency checks.
+8. Close the version-restore submit-time race after the server exposes current-identity CAS.
 
 ## Record Locations
 
@@ -90,4 +107,4 @@ In current priority order:
 
 ## Validation Rule
 
-Each refactor slice starts with the narrowest targeted tests and then runs `make verify-changed` and `make client-check`. Android changes additionally require Kotlin compilation, a debug APK, emulator workflows, and physical-device evidence. A debug APK is a development artifact, not a distributable release.
+Each refactor slice starts with the narrowest targeted tests and then runs `make verify-changed` and `make client-check`. Android signing changes must also run `make client-android-release-signing-check`; Android behavior changes require Kotlin compilation, a Debug APK, emulator workflows, and physical-device evidence. A Debug APK is a development artifact, not a distributable release.
