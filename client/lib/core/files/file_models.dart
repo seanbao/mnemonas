@@ -50,7 +50,7 @@ final class FileEntry {
       size: size.toInt(),
       modifiedAt: modifiedAt.toUtc(),
       deleteIdentityToken: _optionalSha256Token(json, 'deleteIdentityToken'),
-      contentHash: _optionalString(json['hash']),
+      contentHash: _optionalBlake3(json, 'hash'),
       versioned: json['versioned'] == true,
       capabilities: FileCapabilities.fromJson(
         _requireMap(json['capabilities']),
@@ -71,6 +71,9 @@ final class FileEntry {
   bool get canPrepareDelete =>
       deleteIdentityToken != null &&
       isLowercaseSha256Token(deleteIdentityToken!);
+
+  bool get hasVerifiableContentIdentity =>
+      contentHash != null && _lowercaseDigestPattern.hasMatch(contentHash!);
 }
 
 enum DeleteMode {
@@ -168,6 +171,177 @@ final class FileMutationResult {
   }
 
   final String path;
+  final bool persistenceWarning;
+}
+
+final class FileVersion {
+  FileVersion({
+    required this.path,
+    required this.sequence,
+    required this.hash,
+    required this.size,
+    required DateTime timestamp,
+    this.comment,
+  }) : timestamp = timestamp.toUtc() {
+    if (normalizeLogicalPath(path, allowRoot: false) != path) {
+      throw const FormatException('File version path is not normalized');
+    }
+    if (sequence <= 0) {
+      throw const FormatException('Invalid file version sequence');
+    }
+    if (!_lowercaseDigestPattern.hasMatch(hash)) {
+      throw const FormatException('Invalid file version hash');
+    }
+    if (size < 0) {
+      throw const FormatException('Invalid file version size');
+    }
+    if (comment != null &&
+        (comment!.isEmpty ||
+            comment!.length > 256 ||
+            comment!.runes.any(
+              (rune) =>
+                  rune < 0x20 ||
+                  rune == 0x7f ||
+                  (rune >= 0x202a && rune <= 0x202e) ||
+                  (rune >= 0x2066 && rune <= 0x2069),
+            ))) {
+      throw const FormatException('Invalid file version comment');
+    }
+  }
+
+  factory FileVersion.fromJson(
+    Map<String, dynamic> json, {
+    required String path,
+    required int expectedSequence,
+  }) {
+    const requiredKeys = <String>{'version', 'hash', 'size', 'timestamp'};
+    const supportedKeys = <String>{...requiredKeys, 'comment'};
+    if (requiredKeys.any((key) => !json.containsKey(key)) ||
+        json.keys.any((key) => !supportedKeys.contains(key))) {
+      throw const FormatException(
+        'File version contains missing or unknown fields',
+      );
+    }
+
+    final sequence = _requiredInt(json, 'version');
+    if (sequence != expectedSequence) {
+      throw const FormatException('File versions are not in sequence');
+    }
+    final size = _requiredInt(json, 'size');
+    final comment = json.containsKey('comment')
+        ? _requiredString(json, 'comment')
+        : null;
+    return FileVersion(
+      path: path,
+      sequence: sequence,
+      hash: _requiredBlake3(json, 'hash'),
+      size: size,
+      timestamp: _requiredTimestamp(json, 'timestamp'),
+      comment: comment,
+    );
+  }
+
+  final String path;
+  final int sequence;
+  final String hash;
+  final int size;
+  final DateTime timestamp;
+  final String? comment;
+
+  bool get isCurrent => sequence == 1;
+}
+
+final class FileVersionHistory {
+  FileVersionHistory._({
+    required this.path,
+    required List<FileVersion> versions,
+  }) : versions = List.unmodifiable(versions);
+
+  factory FileVersionHistory.fromJson(
+    Map<String, dynamic> json, {
+    required String expectedPath,
+  }) {
+    const expectedKeys = <String>{'path', 'versions'};
+    if (json.length != expectedKeys.length ||
+        expectedKeys.any((key) => !json.containsKey(key))) {
+      throw const FormatException(
+        'File version history contains missing or unknown fields',
+      );
+    }
+
+    final path = _requiredString(json, 'path');
+    if (path != expectedPath ||
+        normalizeLogicalPath(path, allowRoot: false) != path) {
+      throw const FormatException(
+        'File version history path does not match request',
+      );
+    }
+    final encodedVersions = json['versions'];
+    if (encodedVersions is! List || encodedVersions.isEmpty) {
+      throw const FormatException('File version history is empty or invalid');
+    }
+    final versions = <FileVersion>[];
+    for (var index = 0; index < encodedVersions.length; index++) {
+      versions.add(
+        FileVersion.fromJson(
+          _requireMap(encodedVersions[index]),
+          path: path,
+          expectedSequence: index + 1,
+        ),
+      );
+    }
+    return FileVersionHistory._(path: path, versions: versions);
+  }
+
+  final String path;
+  final List<FileVersion> versions;
+
+  FileVersion get current => versions.first;
+}
+
+final class VersionRestoreResult {
+  const VersionRestoreResult._({
+    required this.path,
+    required this.restoredHash,
+    required this.persistenceWarning,
+  });
+
+  factory VersionRestoreResult.fromJson(
+    Map<String, dynamic> json, {
+    required String expectedPath,
+    required String expectedHash,
+  }) {
+    const requiredKeys = <String>{'path', 'restored'};
+    const supportedKeys = <String>{...requiredKeys, 'warning'};
+    if (requiredKeys.any((key) => !json.containsKey(key)) ||
+        json.keys.any((key) => !supportedKeys.contains(key))) {
+      throw const FormatException(
+        'Version restore result contains missing or unknown fields',
+      );
+    }
+
+    final warning = json['warning'];
+    if (warning != null && warning is! bool) {
+      throw const FormatException('Invalid version restore warning');
+    }
+    final path = _requiredString(json, 'path');
+    final restoredHash = _requiredBlake3(json, 'restored');
+    if (path != expectedPath ||
+        normalizeLogicalPath(path, allowRoot: false) != path ||
+        restoredHash != expectedHash) {
+      throw const FormatException(
+        'Version restore result does not match request',
+      );
+    }
+    return VersionRestoreResult._(
+      path: path,
+      restoredHash: restoredHash,
+      persistenceWarning: warning == true,
+    );
+  }
+
+  final String path;
+  final String restoredHash;
   final bool persistenceWarning;
 }
 
@@ -507,6 +681,14 @@ String _requiredString(Map<String, dynamic> json, String key) {
 String _requiredSha256Token(Map<String, dynamic> json, String key) {
   final value = _requiredString(json, key);
   if (!isLowercaseSha256Token(value)) {
+    throw FormatException('Invalid $key');
+  }
+  return value;
+}
+
+String _requiredBlake3(Map<String, dynamic> json, String key) {
+  final value = _requiredString(json, key);
+  if (!_lowercaseDigestPattern.hasMatch(value)) {
     throw FormatException('Invalid $key');
   }
   return value;

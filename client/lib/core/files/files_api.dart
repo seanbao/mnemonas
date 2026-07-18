@@ -21,6 +21,8 @@ const downloadIdentityConditionHeader = 'X-MnemoNAS-If-Download-Identity';
 const uploadOffsetHeader = 'Upload-Offset';
 const uploadChunkIdHeader = 'Upload-Chunk-ID';
 const uploadChunkSha256Header = 'X-MnemoNAS-Chunk-SHA256';
+const versionRestorePersistenceWarningHeader =
+    '199 MnemoNAS "workspace mutation persistence incomplete"';
 const maxUploadSessionChunkBytes = 8 * 1024 * 1024;
 
 final class DownloadCheckpoint {
@@ -51,6 +53,22 @@ final class DownloadResult {
   final List<ApiWarning> warnings;
 }
 
+final class VersionDownloadResult {
+  const VersionDownloadResult({
+    required this.file,
+    required this.bytesWritten,
+    required this.contentHash,
+    required this.totalBytes,
+    required this.warnings,
+  });
+
+  final File file;
+  final int bytesWritten;
+  final String contentHash;
+  final int totalBytes;
+  final List<ApiWarning> warnings;
+}
+
 final class FilesApi {
   const FilesApi(this._client);
 
@@ -66,6 +84,73 @@ final class FilesApi {
       cancelToken: cancelToken,
       decode: (data) => DirectoryListing.fromJson(_requireMap(data)),
     );
+  }
+
+  Future<ApiResponse<FileVersionHistory>> listVersions(
+    String logicalPath, {
+    CancelToken? cancelToken,
+  }) async {
+    final path = normalizeLogicalPath(logicalPath, allowRoot: false);
+    final encoded = encodeLogicalPath(path, allowRoot: false);
+    final response = await _client.requestEnvelope<FileVersionHistory>(
+      '/api/v1/versions/$encoded',
+      cancelToken: cancelToken,
+      decode: (data) =>
+          FileVersionHistory.fromJson(_requireMap(data), expectedPath: path),
+    );
+    _requireStatus(
+      response.statusCode,
+      HttpStatus.ok,
+      response.warnings,
+      'The server returned an unexpected version history status',
+    );
+    return response;
+  }
+
+  Future<ApiResponse<VersionRestoreResult>> restoreVersion({
+    required String logicalPath,
+    required String hash,
+    CancelToken? cancelToken,
+  }) async {
+    final path = normalizeLogicalPath(logicalPath, allowRoot: false);
+    final canonicalHash = _requireVersionHash(hash);
+    await _client.ensureSessionValidity();
+    final response = await _client.requestEnvelope<VersionRestoreResult>(
+      '/api/v1/versions/${Uri.encodeComponent(canonicalHash)}/restore',
+      method: 'POST',
+      queryParameters: {'path': path},
+      retryOnUnauthorized: false,
+      cancelToken: cancelToken,
+      decode: (data) => VersionRestoreResult.fromJson(
+        _requireMap(data),
+        expectedPath: path,
+        expectedHash: canonicalHash,
+      ),
+    );
+    _requireStatus(
+      response.statusCode,
+      HttpStatus.ok,
+      response.warnings,
+      'The server returned an unexpected version restore status',
+    );
+
+    final hasPersistenceWarning = response.warnings.any(
+      (warning) => warning.value == versionRestorePersistenceWarningHeader,
+    );
+    final expectedMessage = response.data.persistenceWarning
+        ? 'version restored with persistence warning'
+        : 'version restored successfully';
+    if (hasPersistenceWarning != response.data.persistenceWarning ||
+        response.message != expectedMessage) {
+      throw ApiException(
+        kind: ApiFailureKind.invalidResponse,
+        statusCode: response.statusCode,
+        code: 'INVALID_RESPONSE',
+        message: 'The server returned an inconsistent version restore result',
+        warnings: response.warnings,
+      );
+    }
+    return response;
   }
 
   Future<ApiResponse<FileMutationResult>> createDirectory(String logicalPath) {
@@ -418,6 +503,128 @@ final class FilesApi {
     );
   }
 
+  Future<VersionDownloadResult> downloadVersion({
+    required String logicalPath,
+    required FileVersion version,
+    required String destinationPath,
+    bool overwrite = false,
+    TransferProgress? onProgress,
+    CancelToken? cancelToken,
+  }) async {
+    final path = normalizeLogicalPath(logicalPath, allowRoot: false);
+    if (version.path != path) {
+      throw const FormatException('File version belongs to a different path');
+    }
+    if (version.isCurrent) {
+      throw const FormatException(
+        'Historical download requires a non-current version',
+      );
+    }
+    final hash = _requireVersionHash(version.hash);
+    final encoded = encodeLogicalPath(path, allowRoot: false);
+    final destination = File(destinationPath);
+    if (!overwrite && await destination.exists()) {
+      throw const ApiException(
+        kind: ApiFailureKind.local,
+        code: 'DOWNLOAD_DESTINATION_EXISTS',
+        message: 'The download destination already exists',
+      );
+    }
+    if (!await destination.parent.exists()) {
+      await destination.parent.create(recursive: true);
+    }
+
+    final random = Random.secure().nextInt(1 << 32);
+    final temporary = File(
+      '${destination.path}.mnemonas-version-'
+      '${DateTime.now().microsecondsSinceEpoch}-$random.part',
+    );
+    RandomAccessFile? output;
+    try {
+      final response = await _client.request(
+        '/api/v1/download/$encoded',
+        queryParameters: {'version': hash},
+        responseType: ResponseType.stream,
+        cancelToken: cancelToken,
+      );
+      final body = response.data;
+      if (body is! ResponseBody) {
+        throw const ApiException(
+          kind: ApiFailureKind.invalidResponse,
+          code: 'INVALID_VERSION_DOWNLOAD_RESPONSE',
+          message: 'The server returned an invalid version download stream',
+        );
+      }
+
+      final statusCode = response.statusCode ?? 0;
+      final contentLength = int.tryParse(
+        response.headers.value(Headers.contentLengthHeader) ?? '',
+      );
+      final expectedETag = '"$hash"';
+      if (statusCode != HttpStatus.ok ||
+          response.headers.value(HttpHeaders.etagHeader) != expectedETag ||
+          contentLength == null ||
+          contentLength < 0 ||
+          contentLength != version.size) {
+        throw ApiException(
+          kind: ApiFailureKind.invalidResponse,
+          statusCode: statusCode,
+          code: 'VERSION_DOWNLOAD_IDENTITY_MISMATCH',
+          message:
+              'The downloaded version does not match the requested identity',
+          warnings: parseWarnings(response.headers),
+        );
+      }
+
+      output = await temporary.open(mode: FileMode.write);
+      var received = 0;
+      await for (final chunk in body.stream) {
+        if (chunk.length > version.size - received) {
+          throw const ApiException(
+            kind: ApiFailureKind.invalidResponse,
+            code: 'VERSION_DOWNLOAD_LENGTH_MISMATCH',
+            message: 'The version download exceeded its declared length',
+          );
+        }
+        await output.writeFrom(chunk);
+        received += chunk.length;
+        onProgress?.call(received, version.size);
+      }
+      await output.flush();
+      await output.close();
+      output = null;
+
+      if (received != version.size ||
+          await temporary.length() != version.size) {
+        throw const ApiException(
+          kind: ApiFailureKind.invalidResponse,
+          code: 'VERSION_DOWNLOAD_LENGTH_MISMATCH',
+          message: 'The version download ended at an unexpected length',
+        );
+      }
+
+      final materialized = await _materializeDownload(
+        source: temporary,
+        destination: destination,
+        overwrite: overwrite,
+      );
+      return VersionDownloadResult(
+        file: materialized,
+        bytesWritten: received,
+        contentHash: hash,
+        totalBytes: version.size,
+        warnings: parseWarnings(response.headers),
+      );
+    } on DioException catch (error) {
+      throw ApiException.fromDio(error);
+    } finally {
+      await output?.close();
+      if (await temporary.exists()) {
+        await temporary.delete();
+      }
+    }
+  }
+
   Future<DownloadResult> downloadFile({
     required String logicalPath,
     required String destinationPath,
@@ -675,9 +882,37 @@ final class FilesApi {
 }
 
 const _downloadCheckpointBytes = 4 * 1024 * 1024;
+final RegExp _versionHashPattern = RegExp(r'^[0-9a-f]{64}$');
 final RegExp _uploadIdentifierPattern = RegExp(
   r'^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$',
 );
+
+String _requireVersionHash(String value) {
+  if (!_versionHashPattern.hasMatch(value)) {
+    throw const FormatException(
+      'Version hash must be 64 lowercase hexadecimal characters',
+    );
+  }
+  return value;
+}
+
+void _requireStatus(
+  int actual,
+  int expected,
+  List<ApiWarning> warnings,
+  String message,
+) {
+  if (actual == expected) {
+    return;
+  }
+  throw ApiException(
+    kind: ApiFailureKind.invalidResponse,
+    statusCode: actual,
+    code: 'INVALID_RESPONSE',
+    message: message,
+    warnings: warnings,
+  );
+}
 
 String _requireUploadIdentifier(String value, String argumentName) {
   if (!_uploadIdentifierPattern.hasMatch(value)) {

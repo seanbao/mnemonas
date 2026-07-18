@@ -12,7 +12,7 @@ enum FilesDisplayMode { list, grid }
 
 enum FilesAddAction { createFolder, uploadFiles }
 
-enum FileItemAction { download, rename, move, copy, delete, details }
+enum FileItemAction { download, versions, rename, move, copy, delete, details }
 
 final class FileActionRequest {
   const FileActionRequest({required this.action, required this.entries});
@@ -27,6 +27,10 @@ final class FilesViewModel {
     required this.path,
     this.entries = const <FileEntry>[],
     this.canWrite = false,
+    this.isMutating = false,
+    this.isRefreshing = false,
+    this.mutationsEnabled = true,
+    this.staleMessage,
     this.errorMessage,
   });
 
@@ -37,21 +41,39 @@ final class FilesViewModel {
     required String path,
     required List<FileEntry> entries,
     required bool canWrite,
+    bool isMutating = false,
+    bool isRefreshing = false,
+    bool mutationsEnabled = true,
+    String? staleMessage,
   }) : this._(
          state: FilesLoadState.ready,
          path: path,
          entries: entries,
          canWrite: canWrite,
+         isMutating: isMutating,
+         isRefreshing: isRefreshing,
+         mutationsEnabled: mutationsEnabled,
+         staleMessage: staleMessage,
        );
 
   const FilesViewModel.error({required String path, required String message})
     : this._(state: FilesLoadState.error, path: path, errorMessage: message);
 
-  factory FilesViewModel.fromListing(DirectoryListing listing) {
+  factory FilesViewModel.fromListing(
+    DirectoryListing listing, {
+    bool isMutating = false,
+    bool isRefreshing = false,
+    bool mutationsEnabled = true,
+    String? staleMessage,
+  }) {
     return FilesViewModel.ready(
       path: listing.path,
       entries: listing.entries,
       canWrite: listing.capabilities.write,
+      isMutating: isMutating,
+      isRefreshing: isRefreshing,
+      mutationsEnabled: mutationsEnabled,
+      staleMessage: staleMessage,
     );
   }
 
@@ -59,6 +81,10 @@ final class FilesViewModel {
   final String path;
   final List<FileEntry> entries;
   final bool canWrite;
+  final bool isMutating;
+  final bool isRefreshing;
+  final bool mutationsEnabled;
+  final String? staleMessage;
   final String? errorMessage;
 }
 
@@ -148,6 +174,8 @@ class _FilesPageState extends State<FilesPage> {
           displayMode: _displayMode,
           selectedEntries: _selectedEntries,
           canWrite: widget.viewModel.canWrite,
+          isMutating: widget.viewModel.isMutating,
+          mutationsEnabled: widget.viewModel.mutationsEnabled,
           onNavigatePath: (String path) {
             _clearSelection();
             widget.onNavigatePath(path);
@@ -161,6 +189,34 @@ class _FilesPageState extends State<FilesPage> {
             _dispatchAction(action, entries);
           },
         ),
+        if (widget.viewModel.isMutating)
+          Semantics(
+            liveRegion: true,
+            label: '正在处理文件操作',
+            child: const LinearProgressIndicator(),
+          ),
+        if (widget.viewModel.isRefreshing && !widget.viewModel.isMutating)
+          Semantics(
+            liveRegion: true,
+            label: '正在刷新目录',
+            child: const LinearProgressIndicator(),
+          ),
+        if (widget.viewModel.staleMessage case final message?)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              MnemoSpacing.md,
+              MnemoSpacing.xs,
+              MnemoSpacing.md,
+              MnemoSpacing.xs,
+            ),
+            child: MnemoErrorNotice(
+              key: const Key('files-stale-notice'),
+              title: '目录内容需要核对',
+              message: message,
+              retryLabel: '刷新目录',
+              onRetry: () => unawaited(widget.onRefresh()),
+            ),
+          ),
         Expanded(child: _buildContent()),
       ],
     );
@@ -176,6 +232,8 @@ class _FilesPageState extends State<FilesPage> {
       FilesLoadState.ready => _FilesReady(
         entries: widget.viewModel.entries,
         canWrite: widget.viewModel.canWrite,
+        isMutating: widget.viewModel.isMutating,
+        mutationsEnabled: widget.viewModel.mutationsEnabled,
         displayMode: _displayMode,
         selectedPaths: _selectedPaths,
         onRefresh: widget.onRefresh,
@@ -195,6 +253,8 @@ class _FilesToolbar extends StatelessWidget {
     required this.displayMode,
     required this.selectedEntries,
     required this.canWrite,
+    required this.isMutating,
+    required this.mutationsEnabled,
     required this.onNavigatePath,
     required this.onDisplayModeChanged,
     required this.onClearSelection,
@@ -206,6 +266,8 @@ class _FilesToolbar extends StatelessWidget {
   final FilesDisplayMode displayMode;
   final List<FileEntry> selectedEntries;
   final bool canWrite;
+  final bool isMutating;
+  final bool mutationsEnabled;
   final ValueChanged<String> onNavigatePath;
   final ValueChanged<FilesDisplayMode> onDisplayModeChanged;
   final VoidCallback onClearSelection;
@@ -257,15 +319,19 @@ class _FilesToolbar extends StatelessWidget {
                       ),
                     if (canMutateSelected)
                       IconButton(
-                        onPressed: () => onSelectionAction(FileItemAction.move),
+                        key: const Key('files-move-selection'),
+                        onPressed: isMutating || !mutationsEnabled
+                            ? null
+                            : () => onSelectionAction(FileItemAction.move),
                         tooltip: '移动',
                         icon: const Icon(Icons.drive_file_move_outline),
                       ),
                     if (canMutateSelected)
                       IconButton(
                         key: const Key('files-delete-selection'),
-                        onPressed: () =>
-                            onSelectionAction(FileItemAction.delete),
+                        onPressed: isMutating || !mutationsEnabled
+                            ? null
+                            : () => onSelectionAction(FileItemAction.delete),
                         tooltip: '删除',
                         icon: const Icon(Icons.delete_outline_rounded),
                       ),
@@ -286,6 +352,7 @@ class _FilesToolbar extends StatelessWidget {
                     if (canWrite)
                       PopupMenuButton<FilesAddAction>(
                         key: const Key('files-add-menu'),
+                        enabled: mutationsEnabled && !isMutating,
                         tooltip: '添加',
                         icon: const Icon(Icons.add_rounded),
                         onSelected: onAddAction,
@@ -396,6 +463,8 @@ class _FilesReady extends StatelessWidget {
   const _FilesReady({
     required this.entries,
     required this.canWrite,
+    required this.isMutating,
+    required this.mutationsEnabled,
     required this.displayMode,
     required this.selectedPaths,
     required this.onRefresh,
@@ -407,6 +476,8 @@ class _FilesReady extends StatelessWidget {
 
   final List<FileEntry> entries;
   final bool canWrite;
+  final bool isMutating;
+  final bool mutationsEnabled;
   final FilesDisplayMode displayMode;
   final Set<String> selectedPaths;
   final Future<void> Function() onRefresh;
@@ -430,16 +501,18 @@ class _FilesReady extends StatelessWidget {
                 message: canWrite ? '可以新建文件夹或从当前设备上传文件。' : '当前账户没有写入此目录的权限。',
                 primaryAction: canWrite
                     ? FilledButton.icon(
-                        onPressed: () =>
-                            onAddAction(FilesAddAction.uploadFiles),
+                        onPressed: isMutating || !mutationsEnabled
+                            ? null
+                            : () => onAddAction(FilesAddAction.uploadFiles),
                         icon: const Icon(Icons.upload_file_outlined),
                         label: const Text('上传文件'),
                       )
                     : null,
                 secondaryAction: canWrite
                     ? OutlinedButton.icon(
-                        onPressed: () =>
-                            onAddAction(FilesAddAction.createFolder),
+                        onPressed: isMutating || !mutationsEnabled
+                            ? null
+                            : () => onAddAction(FilesAddAction.createFolder),
                         icon: const Icon(Icons.create_new_folder_outlined),
                         label: const Text('新建文件夹'),
                       )
@@ -471,6 +544,8 @@ class _FilesReady extends StatelessWidget {
                   entry: entry,
                   selected: selectedPaths.contains(entry.path),
                   selectionMode: selectedPaths.isNotEmpty,
+                  actionsEnabled: !isMutating,
+                  mutationsEnabled: mutationsEnabled,
                   onTap: () => onActivate(entry),
                   onLongPress: () => onLongPress(entry),
                   onAction: (FileItemAction action) =>
@@ -495,6 +570,8 @@ class _FilesReady extends StatelessWidget {
                   entry: entry,
                   selected: selectedPaths.contains(entry.path),
                   selectionMode: selectedPaths.isNotEmpty,
+                  actionsEnabled: !isMutating,
+                  mutationsEnabled: mutationsEnabled,
                   onTap: () => onActivate(entry),
                   onLongPress: () => onLongPress(entry),
                   onAction: (FileItemAction action) =>
@@ -511,6 +588,8 @@ class _FileListTile extends StatelessWidget {
     required this.entry,
     required this.selected,
     required this.selectionMode,
+    required this.actionsEnabled,
+    required this.mutationsEnabled,
     required this.onTap,
     required this.onLongPress,
     required this.onAction,
@@ -519,6 +598,8 @@ class _FileListTile extends StatelessWidget {
   final FileEntry entry;
   final bool selected;
   final bool selectionMode;
+  final bool actionsEnabled;
+  final bool mutationsEnabled;
   final VoidCallback onTap;
   final VoidCallback onLongPress;
   final ValueChanged<FileItemAction> onAction;
@@ -551,7 +632,12 @@ class _FileListTile extends StatelessWidget {
           ),
           trailing: selectionMode
               ? null
-              : _FileActionsMenu(entry: entry, onSelected: onAction),
+              : _FileActionsMenu(
+                  entry: entry,
+                  onSelected: onAction,
+                  enabled: actionsEnabled,
+                  mutationsEnabled: mutationsEnabled,
+                ),
         ),
       ),
     );
@@ -563,6 +649,8 @@ class _FileGridTile extends StatelessWidget {
     required this.entry,
     required this.selected,
     required this.selectionMode,
+    required this.actionsEnabled,
+    required this.mutationsEnabled,
     required this.onTap,
     required this.onLongPress,
     required this.onAction,
@@ -571,6 +659,8 @@ class _FileGridTile extends StatelessWidget {
   final FileEntry entry;
   final bool selected;
   final bool selectionMode;
+  final bool actionsEnabled;
+  final bool mutationsEnabled;
   final VoidCallback onTap;
   final VoidCallback onLongPress;
   final ValueChanged<FileItemAction> onAction;
@@ -611,6 +701,8 @@ class _FileGridTile extends StatelessWidget {
                         entry: entry,
                         onSelected: onAction,
                         compact: true,
+                        enabled: actionsEnabled,
+                        mutationsEnabled: mutationsEnabled,
                       ),
                   ],
                 ),
@@ -644,15 +736,20 @@ class _FileActionsMenu extends StatelessWidget {
     required this.entry,
     required this.onSelected,
     this.compact = false,
+    this.enabled = true,
+    this.mutationsEnabled = true,
   });
 
   final FileEntry entry;
   final ValueChanged<FileItemAction> onSelected;
   final bool compact;
+  final bool enabled;
+  final bool mutationsEnabled;
 
   @override
   Widget build(BuildContext context) {
     return PopupMenuButton<FileItemAction>(
+      enabled: enabled,
       tooltip: '文件操作',
       padding: EdgeInsets.zero,
       constraints: compact
@@ -661,12 +758,19 @@ class _FileActionsMenu extends StatelessWidget {
       icon: const Icon(Icons.more_vert_rounded),
       onSelected: onSelected,
       itemBuilder: (BuildContext context) => <PopupMenuEntry<FileItemAction>>[
-        if (!entry.isDirectory && entry.capabilities.concreteRead)
+        if (!entry.isDirectory && entry.capabilities.concreteRead) ...[
           const PopupMenuItem<FileItemAction>(
             value: FileItemAction.download,
             child: _MenuLabel(icon: Icons.download_rounded, label: '下载'),
           ),
-        if (entry.capabilities.write) ...<PopupMenuEntry<FileItemAction>>[
+          if (entry.versioned)
+            const PopupMenuItem<FileItemAction>(
+              value: FileItemAction.versions,
+              child: _MenuLabel(icon: Icons.history_rounded, label: '版本历史'),
+            ),
+        ],
+        if (entry.capabilities.write &&
+            mutationsEnabled) ...<PopupMenuEntry<FileItemAction>>[
           const PopupMenuItem<FileItemAction>(
             value: FileItemAction.rename,
             child: _MenuLabel(icon: Icons.edit_outlined, label: '重命名'),

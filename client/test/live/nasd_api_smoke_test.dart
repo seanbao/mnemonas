@@ -54,8 +54,11 @@ void main() {
       );
       addTearDown(() => sourceDirectory.delete(recursive: true));
       final source = File('${sourceDirectory.path}/payload.txt');
+      final replacementSource = File('${sourceDirectory.path}/replacement.txt');
       const payload = 'MnemoNAS native client live transfer\n';
+      const replacementPayload = 'MnemoNAS native client version replacement\n';
       await source.writeAsString(payload, flush: true);
+      await replacementSource.writeAsString(replacementPayload, flush: true);
 
       Future<void> removeRemoteFixture() async {
         try {
@@ -145,6 +148,8 @@ void main() {
       var listing = await files.list(directoryPath);
       final uploaded = _entryAt(listing.data, uploadedName);
       expect(uploaded.size, utf8.encode(payload).length);
+      final originalHistory = await files.listVersions(uploaded.path);
+      final originalHash = originalHistory.data.current.hash;
       expect(
         (await search.search(
           uploadedName,
@@ -158,6 +163,41 @@ void main() {
         destinationPath: downloadedPath,
       );
       expect(await downloaded.file.readAsString(), payload);
+
+      await files.uploadFile(
+        logicalPath: uploaded.path,
+        sourcePath: replacementSource.path,
+      );
+      listing = await files.list(directoryPath);
+      expect(
+        _entryAt(listing.data, uploadedName).size,
+        utf8.encode(replacementPayload).length,
+      );
+      final history = await files.listVersions(uploaded.path);
+      expect(history.data.current.hash, isNot(originalHash));
+      final historical = history.data.versions.singleWhere(
+        (version) => !version.isCurrent && version.hash == originalHash,
+      );
+      final historicalDownload = await files.downloadVersion(
+        logicalPath: uploaded.path,
+        version: historical,
+        destinationPath: '${sourceDirectory.path}/historical.txt',
+      );
+      expect(await historicalDownload.file.readAsString(), payload);
+      if (login.data.user.role == 'admin') {
+        final restored = await files.restoreVersion(
+          logicalPath: uploaded.path,
+          hash: historical.hash,
+        );
+        expect(restored.data.restoredHash, historical.hash);
+        final restoredHistory = await files.listVersions(uploaded.path);
+        expect(restoredHistory.data.current.hash, historical.hash);
+        final restoredDownload = await files.downloadFile(
+          logicalPath: uploaded.path,
+          destinationPath: '${sourceDirectory.path}/restored.txt',
+        );
+        expect(await restoredDownload.file.readAsString(), payload);
+      }
 
       await files.rename(logicalPath: uploaded.path, newName: renamedName);
       expect((await search.search(uploadedName)).data.results, isEmpty);

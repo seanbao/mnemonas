@@ -89,14 +89,20 @@ final class ClientState {
     this.search,
     this.trash,
     this.isBusy = false,
+    this.isDirectoryBusy = false,
+    this.isFileMutationBusy = false,
     this.isSearchBusy = false,
     this.isTrashBusy = false,
     this.trashReconciliationRequired = false,
+    this.fileReconciliationRequired = false,
     this.errorMessage,
+    this.directoryErrorMessage,
+    this.fileReconciliationMessage,
     this.searchErrorMessage,
     this.trashErrorMessage,
     this.notice,
     this.searchQuery = '',
+    this.directoryUpdatedAt,
     this.transfers = const <ClientTransfer>[],
   });
 
@@ -112,14 +118,20 @@ final class ClientState {
   final SearchListing? search;
   final TrashListing? trash;
   final bool isBusy;
+  final bool isDirectoryBusy;
+  final bool isFileMutationBusy;
   final bool isSearchBusy;
   final bool isTrashBusy;
   final bool trashReconciliationRequired;
+  final bool fileReconciliationRequired;
   final String? errorMessage;
+  final String? directoryErrorMessage;
+  final String? fileReconciliationMessage;
   final String? searchErrorMessage;
   final String? trashErrorMessage;
   final String? notice;
   final String searchQuery;
+  final DateTime? directoryUpdatedAt;
   final List<ClientTransfer> transfers;
 
   bool get isAuthenticated =>
@@ -137,14 +149,20 @@ final class ClientState {
     Object? search = _unset,
     Object? trash = _unset,
     bool? isBusy,
+    bool? isDirectoryBusy,
+    bool? isFileMutationBusy,
     bool? isSearchBusy,
     bool? isTrashBusy,
     bool? trashReconciliationRequired,
+    bool? fileReconciliationRequired,
     Object? errorMessage = _unset,
+    Object? directoryErrorMessage = _unset,
+    Object? fileReconciliationMessage = _unset,
     Object? searchErrorMessage = _unset,
     Object? trashErrorMessage = _unset,
     Object? notice = _unset,
     String? searchQuery,
+    Object? directoryUpdatedAt = _unset,
     List<ClientTransfer>? transfers,
   }) {
     return ClientState(
@@ -164,13 +182,23 @@ final class ClientState {
           : search as SearchListing?,
       trash: identical(trash, _unset) ? this.trash : trash as TrashListing?,
       isBusy: isBusy ?? this.isBusy,
+      isDirectoryBusy: isDirectoryBusy ?? this.isDirectoryBusy,
+      isFileMutationBusy: isFileMutationBusy ?? this.isFileMutationBusy,
       isSearchBusy: isSearchBusy ?? this.isSearchBusy,
       isTrashBusy: isTrashBusy ?? this.isTrashBusy,
       trashReconciliationRequired:
           trashReconciliationRequired ?? this.trashReconciliationRequired,
+      fileReconciliationRequired:
+          fileReconciliationRequired ?? this.fileReconciliationRequired,
       errorMessage: identical(errorMessage, _unset)
           ? this.errorMessage
           : errorMessage as String?,
+      directoryErrorMessage: identical(directoryErrorMessage, _unset)
+          ? this.directoryErrorMessage
+          : directoryErrorMessage as String?,
+      fileReconciliationMessage: identical(fileReconciliationMessage, _unset)
+          ? this.fileReconciliationMessage
+          : fileReconciliationMessage as String?,
       searchErrorMessage: identical(searchErrorMessage, _unset)
           ? this.searchErrorMessage
           : searchErrorMessage as String?,
@@ -179,6 +207,9 @@ final class ClientState {
           : trashErrorMessage as String?,
       notice: identical(notice, _unset) ? this.notice : notice as String?,
       searchQuery: searchQuery ?? this.searchQuery,
+      directoryUpdatedAt: identical(directoryUpdatedAt, _unset)
+          ? this.directoryUpdatedAt
+          : directoryUpdatedAt as DateTime?,
       transfers: transfers ?? this.transfers,
     );
   }

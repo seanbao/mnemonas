@@ -28,6 +28,7 @@ import '../features/search/search_page.dart';
 import '../features/shell/app_shell.dart';
 import '../features/transfers/transfer_center.dart';
 import '../features/trash/trash_page.dart';
+import '../features/versions/version_history_sheet.dart';
 import '../platform/file_exporter.dart';
 import '../platform/file_importer.dart';
 import 'client_controller.dart';
@@ -36,8 +37,72 @@ import 'client_state.dart';
 enum _UploadConflictChoice { replace, keepBoth, skip, cancel }
 
 const int _largePreviewThresholdBytes = 128 * 1024 * 1024;
+const Duration _transientDownloadOrphanGrace = Duration(minutes: 1);
+const Duration _previewCacheRetention = Duration(hours: 24);
 
 typedef _UploadPreparationProgress = void Function(int transferred, int? total);
+
+@visibleForTesting
+Future<void> cleanupTransientFileCacheForTesting({
+  required Future<Directory> Function() temporaryDirectoryProvider,
+  required DateTime cleanupStartedAt,
+}) {
+  return _cleanupTransientFileCache(
+    temporaryDirectoryProvider: temporaryDirectoryProvider,
+    cleanupStartedAt: cleanupStartedAt,
+  );
+}
+
+Future<void> _cleanupTransientFileCache({
+  Future<Directory> Function()? temporaryDirectoryProvider,
+  DateTime? cleanupStartedAt,
+}) async {
+  final startedAt = (cleanupStartedAt ?? DateTime.now()).toUtc();
+  try {
+    final loadTemporaryDirectory =
+        temporaryDirectoryProvider ?? getTemporaryDirectory;
+    final root = await loadTemporaryDirectory();
+    final cacheRoot = Directory('${root.path}/mnemonas');
+    await _removeCacheFilesLastModifiedBy(
+      Directory('${cacheRoot.path}/version-downloads'),
+      startedAt.subtract(_transientDownloadOrphanGrace),
+    );
+    for (final folder in <String>['previews', 'version-previews']) {
+      await _removeCacheFilesLastModifiedBy(
+        Directory('${cacheRoot.path}/$folder'),
+        startedAt.subtract(_previewCacheRetention),
+      );
+    }
+  } on Exception {
+    // Transient-cache cleanup must not block the authenticated shell.
+  }
+}
+
+Future<void> _removeCacheFilesLastModifiedBy(
+  Directory directory,
+  DateTime cutoff,
+) async {
+  try {
+    if (!await directory.exists()) {
+      return;
+    }
+    await for (final entity in directory.list(followLinks: false)) {
+      if (entity is! File) {
+        continue;
+      }
+      try {
+        final modifiedAt = (await entity.lastModified()).toUtc();
+        if (!modifiedAt.isAfter(cutoff)) {
+          await entity.delete();
+        }
+      } on Exception {
+        // One inaccessible cache entry must not stop the remaining cleanup.
+      }
+    }
+  } on Exception {
+    // Cache enumeration is best effort on transient-storage platforms.
+  }
+}
 
 final class _UploadCandidate {
   _UploadCandidate({
@@ -96,6 +161,26 @@ final class _UploadCandidate {
   }
 }
 
+@visibleForTesting
+Widget buildUploadPreparationDialogForTesting({
+  required String name,
+  required Future<File> Function(
+    void Function(int transferred, int? total) onProgress,
+  )
+  materialize,
+  required Future<void> Function() cancel,
+}) {
+  return _UploadPreparationDialog(
+    candidate: _UploadCandidate(
+      name: name,
+      materialize: (onProgress) => materialize(
+        (transferred, total) => onProgress?.call(transferred, total),
+      ),
+      cancelPreparation: cancel,
+    ),
+  );
+}
+
 sealed class _UploadPreparationResult {
   const _UploadPreparationResult();
 }
@@ -123,17 +208,40 @@ class _UploadPreparationDialog extends StatefulWidget {
       _UploadPreparationDialogState();
 }
 
-class _UploadPreparationDialogState extends State<_UploadPreparationDialog> {
+class _UploadPreparationDialogState extends State<_UploadPreparationDialog>
+    with WidgetsBindingObserver {
   int _transferred = 0;
   int? _total;
   bool _cancelling = false;
   bool _finished = false;
+  bool _lifecycleCancellationRequested = false;
   String? _cancellationError;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     unawaited(_start());
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.resumed:
+        if (!_finished && !_cancelling) {
+          _lifecycleCancellationRequested = false;
+        }
+      case AppLifecycleState.inactive:
+        break;
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.paused:
+      case AppLifecycleState.detached:
+        if (_finished || _lifecycleCancellationRequested) {
+          return;
+        }
+        _lifecycleCancellationRequested = true;
+        unawaited(_cancel());
+    }
   }
 
   Future<void> _start() async {
@@ -169,6 +277,7 @@ class _UploadPreparationDialogState extends State<_UploadPreparationDialog> {
       if (mounted && !_finished) {
         setState(() {
           _cancelling = false;
+          _lifecycleCancellationRequested = false;
           _cancellationError = '无法取消文件准备，请等待当前操作结束。';
         });
       }
@@ -193,7 +302,8 @@ class _UploadPreparationDialogState extends State<_UploadPreparationDialog> {
 
   @override
   void dispose() {
-    if (!_finished) {
+    WidgetsBinding.instance.removeObserver(this);
+    if (!_finished && !_cancelling) {
       unawaited(_cancelBestEffort());
     }
     super.dispose();
@@ -271,11 +381,55 @@ class MnemoNasClientApp extends StatelessWidget {
   }
 }
 
-class _ClientRoot extends ConsumerWidget {
+class _ClientRoot extends ConsumerStatefulWidget {
   const _ClientRoot();
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_ClientRoot> createState() => _ClientRootState();
+}
+
+class _ClientRootState extends ConsumerState<_ClientRoot>
+    with WidgetsBindingObserver {
+  bool _backgroundPauseRequested = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    unawaited(_cleanupTransientFileCache());
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.resumed:
+        _backgroundPauseRequested = false;
+      case AppLifecycleState.inactive:
+        break;
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.paused:
+      case AppLifecycleState.detached:
+        if (_backgroundPauseRequested ||
+            ref.read(clientControllerProvider).stage != ClientStage.ready) {
+          return;
+        }
+        _backgroundPauseRequested = true;
+        unawaited(
+          ref
+              .read(clientControllerProvider.notifier)
+              .pauseActiveTransfersForAppBackground(),
+        );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final state = ref.watch(clientControllerProvider);
     final controller = ref.read(clientControllerProvider.notifier);
     ref.listen<String?>(
@@ -410,6 +564,8 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
   AppDestination _destination = AppDestination.home;
   bool _searchOpen = false;
   int _searchPresentationGeneration = 0;
+  bool _fileActionPending = false;
+  bool _uploadFlowPending = false;
   String? _clientVersion;
 
   @override
@@ -433,7 +589,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
   Widget build(BuildContext context) {
     final destinationChild = switch (_destination) {
       AppDestination.home => HomePage(
-        viewModel: HomeViewModel.ready(_homeSummary(widget.state)),
+        viewModel: _homeViewModel(widget.state),
         onRefresh: widget.controller.refreshOverview,
         onOpenFiles: () => setState(() => _destination = AppDestination.files),
       ),
@@ -444,8 +600,8 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
         onNavigatePath: (path) =>
             unawaited(widget.controller.loadDirectory(path)),
         onOpenFile: (entry) => unawaited(_openEntry(entry)),
-        onAddAction: (action) => unawaited(_handleAddAction(action)),
-        onFileAction: (request) => unawaited(_handleFileAction(request)),
+        onAddAction: _requestAddAction,
+        onFileAction: _requestFileAction,
       ),
       AppDestination.trash => TrashPage(
         viewModel: _trashViewModel(widget.state),
@@ -514,15 +670,40 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
   FilesViewModel _filesViewModel(ClientState state) {
     final directory = state.directory;
     if (directory != null) {
-      return FilesViewModel.fromListing(directory);
+      final staleMessages = <String>[
+        ?state.directoryErrorMessage,
+        ?state.fileReconciliationMessage,
+      ];
+      return FilesViewModel.fromListing(
+        directory,
+        isMutating: state.isFileMutationBusy,
+        isRefreshing: state.isDirectoryBusy,
+        mutationsEnabled:
+            !state.isDirectoryBusy &&
+            state.directoryErrorMessage == null &&
+            !state.fileReconciliationRequired,
+        staleMessage: staleMessages.isEmpty ? null : staleMessages.join(' '),
+      );
     }
-    if (state.isBusy) {
+    if (state.isDirectoryBusy ||
+        (state.directoryErrorMessage == null && state.errorMessage == null)) {
       return FilesViewModel.loading(path: state.currentPath);
     }
     return FilesViewModel.error(
       path: state.currentPath,
-      message: state.errorMessage ?? '目录加载失败',
+      message: state.directoryErrorMessage ?? state.errorMessage ?? '目录加载失败',
     );
+  }
+
+  HomeViewModel _homeViewModel(ClientState state) {
+    if (state.directory == null) {
+      final error = state.directoryErrorMessage;
+      if (error != null) {
+        return HomeViewModel.error(error);
+      }
+      return const HomeViewModel.loading();
+    }
+    return HomeViewModel.ready(_homeSummary(state));
   }
 
   SearchViewModel _searchViewModel(ClientState state) {
@@ -706,6 +887,54 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
     }
   }
 
+  void _requestAddAction(FilesAddAction action) {
+    if (action == FilesAddAction.uploadFiles) {
+      unawaited(_runUploadInteraction());
+      return;
+    }
+    unawaited(_runFileInteraction(() => _handleAddAction(action)));
+  }
+
+  void _requestFileAction(FileActionRequest request) {
+    if (request.action == FileItemAction.download ||
+        request.action == FileItemAction.versions ||
+        request.action == FileItemAction.details) {
+      unawaited(_handleFileAction(request));
+      return;
+    }
+    unawaited(_runFileInteraction(() => _handleFileAction(request)));
+  }
+
+  Future<void> _runUploadInteraction() async {
+    if (_uploadFlowPending) {
+      _showMessage('已有一批上传正在准备或传输，请在传输记录中查看进度。');
+      return;
+    }
+    setState(() => _uploadFlowPending = true);
+    try {
+      await _handleAddAction(FilesAddAction.uploadFiles);
+    } finally {
+      if (mounted) {
+        setState(() => _uploadFlowPending = false);
+      }
+    }
+  }
+
+  Future<void> _runFileInteraction(Future<void> Function() action) async {
+    if (_fileActionPending || widget.state.isFileMutationBusy) {
+      _showMessage('另一项文件操作仍在进行中，请等待其完成。');
+      return;
+    }
+    setState(() => _fileActionPending = true);
+    try {
+      await action();
+    } finally {
+      if (mounted) {
+        setState(() => _fileActionPending = false);
+      }
+    }
+  }
+
   Future<void> _handleAddAction(FilesAddAction action) async {
     switch (action) {
       case FilesAddAction.createFolder:
@@ -720,6 +949,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
         }
         await _runAction(() => widget.controller.createDirectory(name));
       case FilesAddAction.uploadFiles:
+        final targetDirectory = widget.state.currentPath;
         late final List<_UploadCandidate> selected;
         try {
           selected = await _selectUploadCandidates();
@@ -732,13 +962,18 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
         }
         try {
           try {
-            await widget.controller.loadDirectory(widget.state.currentPath);
+            await widget.controller.loadDirectory(targetDirectory);
           } on Object catch (error) {
             _showMessage(clientErrorMessage(error));
             return;
           }
           final listing = widget.controller.currentDirectory;
-          if (listing == null) {
+          if (listing == null ||
+              listing.path != targetDirectory ||
+              widget.state.currentPath != targetDirectory ||
+              widget.state.isDirectoryBusy ||
+              widget.state.directoryErrorMessage != null ||
+              widget.state.fileReconciliationRequired) {
             _showMessage('无法确认当前目录状态，请刷新后重试。');
             return;
           }
@@ -775,6 +1010,7 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
                 await widget.controller.uploadFile(
                   sourcePath: localFile.path,
                   fileName: targetName,
+                  targetDirectory: targetDirectory,
                 );
               } finally {
                 await candidate.releaseBestEffort();
@@ -971,6 +1207,10 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
       case FileItemAction.details:
         if (request.entries.length == 1) {
           await _showFileDetails(request.entries.single);
+        }
+      case FileItemAction.versions:
+        if (request.entries.length == 1) {
+          await _showVersionHistory(request.entries.single);
         }
     }
   }
@@ -1184,6 +1424,148 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
     }
   }
 
+  Future<void> _showVersionHistory(FileEntry entry) {
+    return showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      showDragHandle: true,
+      builder: (context) => VersionHistorySheet(
+        entry: entry,
+        onLoad: () => widget.controller.listVersionHistory(entry),
+        onPreview: (version) => _previewFileVersion(entry, version),
+        onDownload: (version) => _downloadFileVersion(entry, version),
+        errorMessageBuilder: clientErrorMessage,
+        onRestore: widget.state.user?.role == 'admin'
+            ? (version, expectedCurrentHash) async {
+                final history = await widget.controller.restoreFileVersion(
+                  entry: entry,
+                  version: version,
+                  expectedCurrentHash: expectedCurrentHash,
+                );
+                return history;
+              }
+            : null,
+      ),
+    );
+  }
+
+  Future<void> _previewFileVersion(FileEntry entry, FileVersion version) async {
+    if (version.isCurrent) {
+      throw StateError('Current file actions belong to the Files page');
+    }
+    if (version.size >= _largePreviewThresholdBytes) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('下载后打开大文件？'),
+          content: Text(
+            '历史版本大小为 ${_formatBytes(version.size)}。'
+            '文件会先完整下载到应用缓存，下载期间请保持应用在前台。',
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('继续下载'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted) {
+        return;
+      }
+    }
+
+    final file = await _stagingFile('version-previews', entry.name);
+    await _removeOldPreviewFiles(file.parent);
+    final downloaded = await widget.controller.downloadFileVersion(
+      entry: entry,
+      version: version,
+      destinationPath: file.path,
+      overwrite: true,
+    );
+    if (Platform.isAndroid) {
+      final result = await OpenFilex.open(
+        downloaded.path,
+        type: lookupMimeType(entry.name),
+      );
+      if (result.type != ResultType.done) {
+        throw StateError(result.message);
+      }
+      return;
+    }
+    final opened = await launchUrl(
+      Uri.file(downloaded.path),
+      mode: LaunchMode.externalApplication,
+    );
+    if (!opened) {
+      throw StateError('No application can open this file');
+    }
+  }
+
+  Future<void> _downloadFileVersion(
+    FileEntry entry,
+    FileVersion version,
+  ) async {
+    if (version.isCurrent) {
+      throw StateError('Current file actions belong to the Files page');
+    }
+    final mimeType = lookupMimeType(entry.name) ?? 'application/octet-stream';
+    if (!Platform.isAndroid) {
+      final target = await FileExporter.chooseTarget(
+        suggestedName: entry.name,
+        mimeType: mimeType,
+      );
+      if (target?.path == null) {
+        return;
+      }
+      await widget.controller.downloadFileVersion(
+        entry: entry,
+        version: version,
+        destinationPath: target!.path!,
+        overwrite: true,
+      );
+      _showMessage('历史版本已保存。');
+      return;
+    }
+
+    final staged = await _stagingFile('version-downloads', entry.name);
+    try {
+      await widget.controller.downloadFileVersion(
+        entry: entry,
+        version: version,
+        destinationPath: staged.path,
+        overwrite: true,
+      );
+      final target = await FileExporter.chooseTarget(
+        suggestedName: entry.name,
+        mimeType: mimeType,
+      );
+      if (target == null) {
+        return;
+      }
+      await FileExporter.exportStagedFile(
+        sourcePath: staged.path,
+        target: target,
+        operationId:
+            'version-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}',
+      );
+      _showMessage('历史版本已保存。');
+    } finally {
+      try {
+        if (await staged.exists()) {
+          await staged.delete();
+        }
+      } on FileSystemException {
+        // Private staging cleanup is best effort after export.
+      }
+    }
+  }
+
   Future<File> _stagingFile(String folder, String name) async {
     final root = await getTemporaryDirectory();
     final directory = Directory('${root.path}/mnemonas/$folder');
@@ -1194,20 +1576,11 @@ class _AuthenticatedHomeState extends State<_AuthenticatedHome> {
     );
   }
 
-  Future<void> _removeOldPreviewFiles(Directory directory) async {
-    final cutoff = DateTime.now().subtract(const Duration(hours: 24));
-    await for (final entity in directory.list()) {
-      if (entity is! File) {
-        continue;
-      }
-      try {
-        if ((await entity.lastModified()).isBefore(cutoff)) {
-          await entity.delete();
-        }
-      } on FileSystemException {
-        // Cache cleanup is best effort and must not block opening a file.
-      }
-    }
+  Future<void> _removeOldPreviewFiles(Directory directory) {
+    return _removeCacheFilesLastModifiedBy(
+      directory,
+      DateTime.now().toUtc().subtract(_previewCacheRetention),
+    );
   }
 
   Future<void> _showFileDetails(FileEntry entry) {
@@ -1355,10 +1728,14 @@ HomeSummary _homeSummary(ClientState state) {
   return HomeSummary(
     deviceName: state.probe?.version.name ?? 'MnemoNAS',
     serverAddress: state.endpoint?.baseUrl ?? '',
-    connectionStatus: NasConnectionStatus.online,
+    connectionStatus: state.isDirectoryBusy
+        ? NasConnectionStatus.connecting
+        : state.directoryErrorMessage != null
+        ? NasConnectionStatus.stale
+        : NasConnectionStatus.online,
     storage: storage,
     alerts: alerts,
-    updatedAt: state.probe?.health.timestamp,
+    updatedAt: state.directoryUpdatedAt,
   );
 }
 

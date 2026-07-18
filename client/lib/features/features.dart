@@ -8,3 +8,4 @@ export 'photos/photos_page.dart';
 export 'search/search_page.dart';
 export 'shell/app_shell.dart';
 export 'trash/trash_page.dart';
+export 'versions/version_history_sheet.dart';
