@@ -29,6 +29,10 @@ final class TransferTask {
     this.destinationPath,
     this.destinationUri,
     this.validator,
+    this.payloadSha256,
+    this.uploadSessionId,
+    bool? uploadSessionCreateAttempted,
+    DateTime? uploadSessionExpiresAt,
     required this.durableOffset,
     required this.totalBytes,
     required DateTime createdAt,
@@ -36,17 +40,35 @@ final class TransferTask {
     this.errorCode,
     this.errorMessage,
   }) : createdAt = createdAt.toUtc(),
-       updatedAt = updatedAt.toUtc() {
+       updatedAt = updatedAt.toUtc(),
+       uploadSessionCreateAttempted =
+           uploadSessionCreateAttempted ?? (uploadSessionId != null),
+       uploadSessionExpiresAt = uploadSessionExpiresAt?.toUtc() {
     _validate();
   }
 
   factory TransferTask.fromJson(Object? value) {
-    final json = _requireExactMap(value, _jsonKeys, 'transfer task');
+    if (value is! Map) {
+      throw const FormatException('transfer task must be a JSON object');
+    }
+    if (value.keys.any((key) => key is! String)) {
+      throw const FormatException('transfer task contains a non-string key');
+    }
+    final encoded = Map<String, dynamic>.from(value);
+    final encodedSchemaVersion = _requireInt(encoded, 'schema_version');
+    final json = _requireExactMap(encoded, switch (encodedSchemaVersion) {
+      2 => _jsonKeysV2,
+      currentSchemaVersion => _jsonKeys,
+      _ => throw const FormatException('Unsupported transfer task schema'),
+    }, 'transfer task');
+    final direction = _parseDirection(_requireString(json, 'direction'));
+    final phase = _parsePhase(_requireString(json, 'phase'));
+    final uploadSessionId = _optionalString(json, 'upload_session_id');
     return TransferTask(
-      schemaVersion: _requireInt(json, 'schema_version'),
+      schemaVersion: currentSchemaVersion,
       id: _requireString(json, 'id'),
-      direction: _parseDirection(_requireString(json, 'direction')),
-      phase: _parsePhase(_requireString(json, 'phase')),
+      direction: direction,
+      phase: phase,
       endpointBaseUrl: _requireString(json, 'endpoint_base_url'),
       userId: _requireString(json, 'user_id'),
       remotePath: _requireString(json, 'remote_path'),
@@ -55,6 +77,19 @@ final class TransferTask {
       destinationPath: _optionalString(json, 'destination_path'),
       destinationUri: _optionalString(json, 'destination_uri'),
       validator: _optionalString(json, 'validator'),
+      payloadSha256: _optionalString(json, 'payload_sha256'),
+      uploadSessionId: uploadSessionId,
+      uploadSessionCreateAttempted: encodedSchemaVersion == 2
+          ? _migrateUploadSessionCreateAttempted(
+              direction: direction,
+              phase: phase,
+              uploadSessionId: uploadSessionId,
+            )
+          : _requireBool(json, 'upload_session_create_attempted'),
+      uploadSessionExpiresAt: _optionalUtcTimestamp(
+        json,
+        'upload_session_expires_at',
+      ),
       durableOffset: _requireInt(json, 'durable_offset'),
       totalBytes: _requireInt(json, 'total_bytes'),
       createdAt: _parseUtcTimestamp(
@@ -70,9 +105,9 @@ final class TransferTask {
     );
   }
 
-  static const int currentSchemaVersion = 1;
+  static const int currentSchemaVersion = 3;
 
-  static const Set<String> _jsonKeys = <String>{
+  static const Set<String> _jsonKeysV2 = <String>{
     'schema_version',
     'id',
     'direction',
@@ -85,12 +120,19 @@ final class TransferTask {
     'destination_path',
     'destination_uri',
     'validator',
+    'payload_sha256',
+    'upload_session_id',
+    'upload_session_expires_at',
     'durable_offset',
     'total_bytes',
     'created_at',
     'updated_at',
     'error_code',
     'error_message',
+  };
+  static const Set<String> _jsonKeys = <String>{
+    ..._jsonKeysV2,
+    'upload_session_create_attempted',
   };
 
   final int schemaVersion;
@@ -105,6 +147,10 @@ final class TransferTask {
   final String? destinationPath;
   final String? destinationUri;
   final String? validator;
+  final String? payloadSha256;
+  final String? uploadSessionId;
+  final bool uploadSessionCreateAttempted;
+  final DateTime? uploadSessionExpiresAt;
   final int durableOffset;
   final int totalBytes;
   final DateTime createdAt;
@@ -131,6 +177,10 @@ final class TransferTask {
     'destination_path': destinationPath,
     'destination_uri': destinationUri,
     'validator': validator,
+    'payload_sha256': payloadSha256,
+    'upload_session_id': uploadSessionId,
+    'upload_session_create_attempted': uploadSessionCreateAttempted,
+    'upload_session_expires_at': uploadSessionExpiresAt?.toIso8601String(),
     'durable_offset': durableOffset,
     'total_bytes': totalBytes,
     'created_at': createdAt.toIso8601String(),
@@ -144,6 +194,9 @@ final class TransferTask {
     Object? destinationPath = _unset,
     Object? destinationUri = _unset,
     Object? validator = _unset,
+    Object? uploadSessionId = _unset,
+    bool? uploadSessionCreateAttempted,
+    Object? uploadSessionExpiresAt = _unset,
     int? durableOffset,
     DateTime? updatedAt,
     Object? errorCode = _unset,
@@ -168,6 +221,15 @@ final class TransferTask {
       validator: identical(validator, _unset)
           ? this.validator
           : validator as String?,
+      payloadSha256: payloadSha256,
+      uploadSessionId: identical(uploadSessionId, _unset)
+          ? this.uploadSessionId
+          : uploadSessionId as String?,
+      uploadSessionCreateAttempted:
+          uploadSessionCreateAttempted ?? this.uploadSessionCreateAttempted,
+      uploadSessionExpiresAt: identical(uploadSessionExpiresAt, _unset)
+          ? this.uploadSessionExpiresAt
+          : uploadSessionExpiresAt as DateTime?,
       durableOffset: durableOffset ?? this.durableOffset,
       totalBytes: totalBytes,
       createdAt: createdAt,
@@ -190,6 +252,7 @@ final class TransferTask {
         remotePath == other.remotePath &&
         displayName == other.displayName &&
         stagingPath == other.stagingPath &&
+        payloadSha256 == other.payloadSha256 &&
         totalBytes == other.totalBytes &&
         createdAt == other.createdAt;
   }
@@ -213,6 +276,33 @@ final class TransferTask {
     if (validator case final value?) {
       _validateCleanText(value, 'validator', maxLength: 2048);
     }
+    if (payloadSha256 case final value?) {
+      if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(value)) {
+        throw const FormatException(
+          'Transfer payload_sha256 must be lowercase hexadecimal',
+        );
+      }
+    }
+    if (uploadSessionId case final value?) {
+      _validateIdentifier(value, 'upload_session_id', maxLength: 256);
+    }
+    if (uploadSessionExpiresAt case final expiresAt?) {
+      if (expiresAt.isBefore(createdAt)) {
+        throw const FormatException(
+          'Transfer upload_session_expires_at must not precede created_at',
+        );
+      }
+    }
+    if ((uploadSessionId == null) != (uploadSessionExpiresAt == null)) {
+      throw const FormatException(
+        'Upload session id and expiry must appear together',
+      );
+    }
+    if (uploadSessionId != null && !uploadSessionCreateAttempted) {
+      throw const FormatException(
+        'Upload session id requires a prior create attempt',
+      );
+    }
     if (durableOffset < 0 || totalBytes < 0 || durableOffset > totalBytes) {
       throw const FormatException('Invalid transfer byte range');
     }
@@ -234,10 +324,23 @@ final class TransferTask {
       _validateCleanText(errorMessage!, 'error_message', maxLength: 4096);
     }
 
-    if (direction == TransferDirection.upload &&
-        (destinationPath != null || destinationUri != null)) {
+    if (direction == TransferDirection.upload) {
+      if (payloadSha256 == null) {
+        throw const FormatException('Upload tasks require a payload_sha256');
+      }
+      if (destinationPath != null ||
+          destinationUri != null ||
+          validator != null) {
+        throw const FormatException(
+          'Upload tasks must not contain a destination or validator',
+        );
+      }
+    } else if (payloadSha256 != null ||
+        uploadSessionId != null ||
+        uploadSessionCreateAttempted ||
+        uploadSessionExpiresAt != null) {
       throw const FormatException(
-        'Upload tasks must not contain a destination',
+        'Download tasks must not contain upload fields',
       );
     }
     if (destinationPath != null && destinationUri != null) {
@@ -292,6 +395,10 @@ final class TransferTask {
         destinationPath == other.destinationPath &&
         destinationUri == other.destinationUri &&
         validator == other.validator &&
+        payloadSha256 == other.payloadSha256 &&
+        uploadSessionId == other.uploadSessionId &&
+        uploadSessionCreateAttempted == other.uploadSessionCreateAttempted &&
+        uploadSessionExpiresAt == other.uploadSessionExpiresAt &&
         durableOffset == other.durableOffset &&
         totalBytes == other.totalBytes &&
         createdAt == other.createdAt &&
@@ -301,7 +408,7 @@ final class TransferTask {
   }
 
   @override
-  int get hashCode => Object.hash(
+  int get hashCode => Object.hashAll(<Object?>[
     schemaVersion,
     id,
     direction,
@@ -314,13 +421,17 @@ final class TransferTask {
     destinationPath,
     destinationUri,
     validator,
+    payloadSha256,
+    uploadSessionId,
+    uploadSessionCreateAttempted,
+    uploadSessionExpiresAt,
     durableOffset,
     totalBytes,
     createdAt,
     updatedAt,
     errorCode,
     errorMessage,
-  );
+  ]);
 }
 
 const Object _unset = Object();
@@ -360,12 +471,41 @@ String? _optionalString(Map<String, dynamic> json, String key) {
   return value as String?;
 }
 
+DateTime? _optionalUtcTimestamp(Map<String, dynamic> json, String key) {
+  final value = _optionalString(json, key);
+  return value == null ? null : _parseUtcTimestamp(value, key);
+}
+
 int _requireInt(Map<String, dynamic> json, String key) {
   final value = json[key];
   if (value is! int) {
     throw FormatException('$key must be an integer');
   }
   return value;
+}
+
+bool _requireBool(Map<String, dynamic> json, String key) {
+  final value = json[key];
+  if (value is! bool) {
+    throw FormatException('$key must be a boolean');
+  }
+  return value;
+}
+
+bool _migrateUploadSessionCreateAttempted({
+  required TransferDirection direction,
+  required TransferPhase phase,
+  required String? uploadSessionId,
+}) {
+  if (direction != TransferDirection.upload) {
+    return false;
+  }
+  if (uploadSessionId != null) {
+    return true;
+  }
+  // Schema 2 persisted running before create. Treat any non-queued task as
+  // attempted so recovery never creates a second target snapshot.
+  return phase != TransferPhase.queued;
 }
 
 TransferDirection _parseDirection(String value) {

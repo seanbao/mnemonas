@@ -17,6 +17,7 @@ enum ClientStage {
 enum TransferDirection { upload, download }
 
 enum TransferStatus {
+  preparing,
   queued,
   running,
   paused,

@@ -73,11 +73,8 @@ final class FileTransferStore {
         final existingIndex = current.indexWhere(
           (candidate) => candidate.id == task.id,
         );
-        if (existingIndex >= 0 &&
-            !current[existingIndex].hasSameIdentityAs(task)) {
-          throw const FormatException(
-            'A transfer task cannot change its stable identity',
-          );
+        if (existingIndex >= 0) {
+          _validateTaskUpdate(current[existingIndex], task);
         }
         final next = <TransferTask>[
           for (final candidate in current)
@@ -204,6 +201,11 @@ final class FileTransferStore {
       throw FileSystemException(
         'No readable transfer ledger generation is available',
         _directory.path,
+      );
+    }
+    if (candidates.isNotEmpty) {
+      throw const FormatException(
+        'No valid transfer ledger generation is available',
       );
     }
     return _StoreScan(
@@ -346,11 +348,23 @@ void _validateStableIdentities(
   };
   for (final task in next) {
     final previous = currentById[task.id];
-    if (previous != null && !previous.hasSameIdentityAs(task)) {
-      throw const FormatException(
-        'A transfer task cannot change its stable identity',
-      );
+    if (previous != null) {
+      _validateTaskUpdate(previous, task);
     }
+  }
+}
+
+void _validateTaskUpdate(TransferTask previous, TransferTask next) {
+  if (!previous.hasSameIdentityAs(next)) {
+    throw const FormatException(
+      'A transfer task cannot change its stable identity',
+    );
+  }
+  if (previous.uploadSessionCreateAttempted &&
+      !next.uploadSessionCreateAttempted) {
+    throw const FormatException(
+      'An upload session create attempt cannot be reverted',
+    );
   }
 }
 

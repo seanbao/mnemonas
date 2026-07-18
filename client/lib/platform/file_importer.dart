@@ -86,6 +86,7 @@ abstract final class FileImporter {
     required String uri,
     required String destinationPath,
     required String operationId,
+    required int maxBytes,
     int? expectedLength,
     FileImportProgressCallback? onProgress,
   }) async {
@@ -107,6 +108,20 @@ abstract final class FileImporter {
         'Expected length cannot be negative',
       );
     }
+    if (maxBytes <= 0) {
+      throw ArgumentError.value(
+        maxBytes,
+        'maxBytes',
+        'Maximum length must be positive',
+      );
+    }
+    if (expectedLength != null && expectedLength > maxBytes) {
+      throw ArgumentError.value(
+        expectedLength,
+        'expectedLength',
+        'Expected length cannot exceed the maximum length',
+      );
+    }
     if (!_activeOperationIds.add(normalizedOperationId)) {
       throw StateError('An import operation with this ID is already active');
     }
@@ -120,6 +135,7 @@ abstract final class FileImporter {
         'uri': normalizedUri,
         'destinationPath': destinationPath,
         'expectedLength': expectedLength,
+        'maxBytes': maxBytes,
       });
       return File(destinationPath);
     } finally {
