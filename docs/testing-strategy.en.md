@@ -393,7 +393,7 @@ Both regression tests are included in `make scripts-check`.
 
 ## Flutter Client Testing
 
-`make client-check` is the host-side Flutter-client gate and requires the repository-pinned Flutter version and JDK 17. It checks the Android backup policy, Dart formatting, static analysis, all Flutter tests, and a debug APK build. The tests cover session and context isolation, file and Trash flows, download identity and resume behavior, the durable transfer ledger, Android platform-channel arguments, progress and cancellation contracts, and primary page states.
+`make client-check` is the host-side Flutter-client gate and requires the repository-pinned Flutter version and JDK 17. It checks the Android backup policy, Dart formatting, static analysis, all Flutter tests, and a debug APK build. The tests cover session and context isolation, file and Trash flows, directory freshness and file-mutation single flight, version-history contracts and unconfirmed administrator-restore outcomes, download identity and resume behavior, the durable transfer ledger, durable-task pausing and transient-task cancellation on background entry, Android platform-channel arguments, progress and cancellation contracts, and primary page states.
 
 Host-side gates do not replace device acceptance. Changes involving the Storage Access Framework, Activity destruction, system cancellation, permission denial, different DocumentsProvider implementations, large files, network loss, process termination, foreground/background transitions, or upgrades also require Android-emulator and physical-device validation. A debug APK is only a development artifact and does not provide signing, upgrade-compatibility, or release-readiness evidence.
 
