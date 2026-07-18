@@ -3,6 +3,11 @@
 
 set -euo pipefail
 
+# The isolated backend exercises the same single-writer state locks as a
+# production process. Keep every runner-owned directory private even when the
+# caller uses a collaborative umask such as 0002.
+umask 077
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
@@ -479,6 +484,7 @@ trap 'exit 143' TERM
 
 rm -rf -- "$BACKEND_ROOT"
 mkdir -p "$STORAGE_ROOT" "$LOG_DIR"
+chmod 0700 "$FAULT_ROOT" "$BACKEND_ROOT" "$STORAGE_ROOT" "$LOG_DIR"
 write_config
 build_nasd
 start_dataplane
@@ -496,6 +502,8 @@ log "Running destructive fault-injection tests against isolated backend: $BASE_U
   env \
     MNEMONAS_LIVE_FAULTS=1 \
     FAULT_INJECTION_ASSUME_YES=1 \
+    FAULT_INJECTION_REQUIRE_ADMIN_AUTH=1 \
+    FAULT_INJECTION_CHANGE_BOOTSTRAP_PASSWORD=1 \
     RUN_CORRUPTION_TESTS="${RUN_CORRUPTION_TESTS:-1}" \
     FAULT_UPLOAD_SIZE_MB="${FAULT_UPLOAD_SIZE_MB:-16}" \
     BASE_URL="$BASE_URL" \

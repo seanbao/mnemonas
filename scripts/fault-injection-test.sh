@@ -43,6 +43,8 @@ ALLOW_REAL_STORAGE="${ALLOW_REAL_STORAGE:-0}"
 RUN_CORRUPTION_TESTS="${RUN_CORRUPTION_TESTS:-prompt}"
 FAULT_UPLOAD_SIZE_MB="${FAULT_UPLOAD_SIZE_MB:-50}"
 FAULT_UPLOAD_LIMIT_RATE="${FAULT_UPLOAD_LIMIT_RATE:-512k}"
+FAULT_INJECTION_REQUIRE_ADMIN_AUTH="${FAULT_INJECTION_REQUIRE_ADMIN_AUTH:-0}"
+FAULT_INJECTION_CHANGE_BOOTSTRAP_PASSWORD="${FAULT_INJECTION_CHANGE_BOOTSTRAP_PASSWORD:-0}"
 NASD_PID="${NASD_PID:-}"
 FAULT_KILL_PATTERN="${FAULT_KILL_PATTERN:-}"
 SERVICE_WAS_KILLED=0
@@ -323,6 +325,14 @@ kill_target_nasd() {
 
     log_warn "Killing nasd PID ${pids[0]}"
     kill -9 "${pids[0]}" || true
+    local retries=100
+    while kill -0 "${pids[0]}" 2>/dev/null; do
+        ((retries--))
+        if [[ $retries -le 0 ]]; then
+            die "nasd PID ${pids[0]} did not terminate after SIGKILL"
+        fi
+        sleep 0.05
+    done
     SERVICE_WAS_KILLED=1
 }
 
@@ -508,6 +518,17 @@ json_login_payload() {
     printf '{"username":%s,"password":%s}' "$(json_escape_string "$username")" "$(json_escape_string "$password")"
 }
 
+json_password_change_payload() {
+    local expected_user_id=$1
+    local old_password=$2
+    local new_password=$3
+
+    printf '{"expected_user_id":%s,"old_password":%s,"new_password":%s}' \
+        "$(json_escape_string "$expected_user_id")" \
+        "$(json_escape_string "$old_password")" \
+        "$(json_escape_string "$new_password")"
+}
+
 read_json_field() {
     local json=$1
     local field=$2
@@ -546,6 +567,95 @@ if isinstance(found, str):
     fi
 
     printf '%s' "$json" | sed -n "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"
+}
+
+read_json_number_field() {
+    local json=$1
+    local field=$2
+
+    if command -v python3 >/dev/null 2>&1; then
+        printf '%s' "$json" | python3 -c '
+import json
+import sys
+
+field = sys.argv[1]
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+
+def find_value(value):
+    if isinstance(value, dict):
+        if field in value:
+            return value[field]
+        for child in value.values():
+            found = find_value(child)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = find_value(child)
+            if found is not None:
+                return found
+    return None
+
+found = find_value(data)
+if isinstance(found, int) and not isinstance(found, bool):
+    sys.stdout.write(str(found))
+' "$field" 2>/dev/null
+        return 0
+    fi
+
+    printf '%s' "$json" | sed -n "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p"
+}
+
+read_historical_version_hash() {
+    local json=$1
+
+    if command -v python3 >/dev/null 2>&1; then
+        printf '%s' "$json" | python3 -c '
+import json
+import re
+import sys
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+
+def find_versions(value):
+    if isinstance(value, dict):
+        versions = value.get("versions")
+        if isinstance(versions, list):
+            return versions
+        for child in value.values():
+            found = find_versions(child)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = find_versions(child)
+            if found is not None:
+                return found
+    return None
+
+for version in find_versions(data) or []:
+    if not isinstance(version, dict) or version.get("comment") == "(current)":
+        continue
+    value = version.get("hash")
+    if isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{64}", value):
+        sys.stdout.write(value)
+        break
+' 2>/dev/null
+        return 0
+    fi
+
+    printf '%s' "$json" |
+        sed 's/},{/}\
+{/g' |
+        grep -v '"comment"[[:space:]]*:[[:space:]]*"(current)"' |
+        sed -n 's/.*"hash"[[:space:]]*:[[:space:]]*"\([0-9a-fA-F]\{64\}\)".*/\1/p' |
+        head -n1
 }
 
 normalize_webdav_auth_type() {
@@ -669,27 +779,89 @@ load_initial_admin_password() {
 
 configure_admin_auth() {
     if [[ ! -f "$INITIAL_PASSWORD_FILE" ]]; then
+        if [[ "$FAULT_INJECTION_REQUIRE_ADMIN_AUTH" == "1" ]]; then
+            die "protected fault checks require INITIAL_PASSWORD_FILE"
+        fi
         return 0
     fi
 
-    local password=$(load_initial_admin_password)
+    local password
+    local login_response
+    local login_status
+    local resp
+    password=$(load_initial_admin_password)
     if [[ -z "$password" ]]; then
+        if [[ "$FAULT_INJECTION_REQUIRE_ADMIN_AUTH" == "1" ]]; then
+            die "could not extract bootstrap admin password"
+        fi
         log_warn "Could not extract bootstrap admin password; protected API checks may be skipped"
         return 0
     fi
 
-    local resp=$(command curl -sf -X POST "$BASE_URL/api/v1/auth/login" \
-        -H "Content-Type: application/json" \
-        -d "$(json_login_payload "admin" "$password")" 2>/dev/null || echo "")
+    login_response=$(
+        printf '%s' "$(json_login_payload "admin" "$password")" |
+            command curl -sS -X POST "$BASE_URL/api/v1/auth/login" \
+                -H "Content-Type: application/json" \
+                --data-binary @- \
+                -w $'\n%{http_code}' 2>/dev/null || true
+    )
+    login_status="${login_response##*$'\n'}"
+    resp="${login_response%$'\n'*}"
 
     ADMIN_ACCESS_TOKEN=$(read_json_field "$resp" access_token)
-    if [[ -n "$ADMIN_ACCESS_TOKEN" ]]; then
-        write_admin_auth_config "$ADMIN_ACCESS_TOKEN"
+    if [[ "$login_status" != "200" || -z "$ADMIN_ACCESS_TOKEN" ]]; then
+        if [[ "$FAULT_INJECTION_REQUIRE_ADMIN_AUTH" == "1" ]]; then
+            die "bootstrap admin login failed with status $login_status"
+        fi
+        log_warn "Bootstrap admin login failed; protected API checks may be skipped"
+        return 0
+    fi
+    write_admin_auth_config "$ADMIN_ACCESS_TOKEN"
+
+    if [[ "$FAULT_INJECTION_CHANGE_BOOTSTRAP_PASSWORD" != "1" ]]; then
         log_info "Using bootstrap admin token for protected API checks"
         return 0
     fi
 
-    log_warn "Bootstrap admin login failed; protected API checks may be skipped"
+    local user_id
+    local new_password
+    local change_response
+    local change_status
+    local change_body
+    user_id=$(read_json_field "$resp" id)
+    if [[ -z "$user_id" ]]; then
+        die "bootstrap admin login response did not include a user id"
+    fi
+    new_password="MnemoNAS-fault-${PPID}-${BASHPID:-$$}-changed"
+
+    change_response=$(
+        printf '%s' "$(json_password_change_payload "$user_id" "$password" "$new_password")" |
+            command curl "${ADMIN_AUTH_ARGS[@]}" -sS -X POST "$BASE_URL/api/v1/auth/password" \
+                -H "Content-Type: application/json" \
+                --data-binary @- \
+                -w $'\n%{http_code}' 2>/dev/null || true
+    )
+    change_status="${change_response##*$'\n'}"
+    change_body="${change_response%$'\n'*}"
+    if [[ "$change_status" != "200" ]]; then
+        die "bootstrap admin password change failed with status $change_status: $(printf '%s' "$change_body" | head -c 200)"
+    fi
+
+    login_response=$(
+        printf '%s' "$(json_login_payload "admin" "$new_password")" |
+            command curl -sS -X POST "$BASE_URL/api/v1/auth/login" \
+                -H "Content-Type: application/json" \
+                --data-binary @- \
+                -w $'\n%{http_code}' 2>/dev/null || true
+    )
+    login_status="${login_response##*$'\n'}"
+    resp="${login_response%$'\n'*}"
+    ADMIN_ACCESS_TOKEN=$(read_json_field "$resp" access_token)
+    if [[ "$login_status" != "200" || -z "$ADMIN_ACCESS_TOKEN" ]]; then
+        die "bootstrap admin re-login failed with status $login_status"
+    fi
+    write_admin_auth_config "$ADMIN_ACCESS_TOKEN"
+    log_info "Completed bootstrap password change for protected API checks"
 }
 
 authenticated_api_curl() {
@@ -841,7 +1013,7 @@ test_object_corruption() {
     local object_file=$(find "$OBJECTS_DIR" -type f ! -name "*.tmp" 2>/dev/null | head -1)
     
     if [[ -z "$object_file" ]]; then
-        log_warn "No object files found, skipping corruption test"
+        log_skip "No object files found for corruption verification"
         return
     fi
     
@@ -855,13 +1027,17 @@ test_object_corruption() {
     local scrub_response=$(authenticated_api_curl -s -X POST "$BASE_URL/api/v1/maintenance/scrub" -w $'\n%{http_code}' 2>/dev/null || true)
     local scrub_status="${scrub_response##*$'\n'}"
     local scrub_result="${scrub_response%$'\n'*}"
+    local corrupted_objects
+    corrupted_objects=$(read_json_number_field "$scrub_result" corrupted_objects)
 
     if [[ -z "$ADMIN_ACCESS_TOKEN" && ( "$scrub_status" == "401" || "$scrub_status" == "403" ) ]]; then
         log_skip "Scrub verification requires admin authentication"
-    elif echo "$scrub_result" | grep -qi "corrupt\|error\|failed"; then
-        log_ok "Scrub detected corruption"
+    elif [[ "$scrub_status" != "200" ]]; then
+        log_fail "Scrub request failed with status $scrub_status"
+    elif [[ "$corrupted_objects" =~ ^[0-9]+$ ]] && (( corrupted_objects > 0 )); then
+        log_ok "Scrub reported $corrupted_objects corrupted object(s)"
     else
-        log_warn "Scrub may not have detected corruption: $scrub_result"
+        log_fail "Scrub did not report a positive corrupted_objects count"
     fi
     
     # Check diagnostics
@@ -870,6 +1046,8 @@ test_object_corruption() {
     local diag="${diag_response%$'\n'*}"
     if [[ -z "$ADMIN_ACCESS_TOKEN" && ( "$diag_status" == "401" || "$diag_status" == "403" ) ]]; then
         log_skip "Diagnostics export requires admin authentication"
+    elif [[ "$diag_status" != "200" ]]; then
+        log_fail "Diagnostics export failed with status $diag_status"
     else
         log_info "Diagnostics after corruption: $(echo "$diag" | head -c 200)..."
     fi
@@ -884,33 +1062,45 @@ test_object_corruption() {
 # ==============================================================================
 
 test_metadata_corruption() {
-    log_info "Test 3: Metadata corruption handling..."
+    log_info "Test 3: Metadata corruption recovery..."
     
     # Create a test file
     echo "metadata corruption test" | curl -sf -X PUT "$WEBDAV_URL/fault-test/meta-test.txt" -T - > /dev/null
     
-    # Find and corrupt metadata file
     if [[ ! -f "$INDEX_DB" ]]; then
-        log_warn "Index database not found, skipping test"
+        log_skip "Index database not found for corruption verification"
         return
     fi
 
-    # Backup and corrupt
+    # Stop the only writer before replacing the SQLite database. The isolated
+    # root is disposable, so startup recovery becomes the state under test.
+    kill_target_nasd
     cp "$INDEX_DB" "$TEST_DIR/index-backup.db"
-    printf 'CORRUPTED' >> "$INDEX_DB"
+    printf 'not a sqlite database' > "$INDEX_DB"
+    rm -f -- "$INDEX_DB-wal" "$INDEX_DB-shm"
 
-    log_info "Index database corrupted: $INDEX_DB"
-    
-    # Try to access files - should handle gracefully
-    local status=$(curl -s -w "%{http_code}" -o /dev/null -X PROPFIND "$WEBDAV_URL/fault-test/" -H "Depth: 1")
-    
-    # Restore metadata
-    cp "$TEST_DIR/index-backup.db" "$INDEX_DB"
-    
-    if [[ "$status" == "500" || "$status" == "404" || "$status" == "207" ]]; then
-        log_ok "Service handled corrupted metadata gracefully (status: $status)"
+    log_info "Index database replaced with invalid content: $INDEX_DB"
+    restart_target_nasd
+
+    local retries=20
+    while ! curl -sf "$BASE_URL/health" > /dev/null 2>&1; do
+        ((retries--))
+        if [[ $retries -le 0 ]]; then
+            log_fail "Service did not recover from corrupted metadata"
+            return
+        fi
+        sleep 0.5
+    done
+
+    local corrupt_backups
+    local status
+    corrupt_backups=$(find "$(dirname "$INDEX_DB")" -maxdepth 1 -type f -name "$(basename "$INDEX_DB").corrupt.*" ! -name "*-wal" ! -name "*-shm" | wc -l)
+    status=$(curl -s -w "%{http_code}" -o /dev/null -X PROPFIND "$WEBDAV_URL/fault-test/" -H "Depth: 1")
+
+    if [[ "$corrupt_backups" -ge 1 && "$status" == "207" ]]; then
+        log_ok "Service quarantined corrupted metadata and recovered (PROPFIND: $status)"
     else
-        log_fail "Unexpected response to corrupted metadata: $status"
+        log_fail "Metadata recovery evidence incomplete (backups: $corrupt_backups, PROPFIND: $status)"
     fi
 }
 
@@ -975,8 +1165,10 @@ test_recovery_verification() {
     local history_response=$(authenticated_api_curl -s "$BASE_URL/api/v1/versions/fault-test/versioned.txt" -w $'\n%{http_code}' 2>/dev/null || true)
     local history_status="${history_response##*$'\n'}"
     local history="${history_response%$'\n'*}"
+    local historical_hash
+    historical_hash=$(read_historical_version_hash "$history")
     
-    if [[ "$history_status" == "200" ]] && echo "$history" | grep -q "versions\|hash"; then
+    if [[ "$history_status" == "200" && -n "$historical_hash" ]]; then
         log_ok "Version history available"
         
         # Current should be version 3
@@ -985,11 +1177,30 @@ test_recovery_verification() {
             log_ok "Current version is correct"
         else
             log_fail "Current version mismatch: $current"
+            return
+        fi
+
+        local restore_response
+        local restore_status
+        restore_response=$(authenticated_api_curl -s -X POST \
+            "$BASE_URL/api/v1/versions/$historical_hash/restore?path=%2Ffault-test%2Fversioned.txt" \
+            -w $'\n%{http_code}' 2>/dev/null || true)
+        restore_status="${restore_response##*$'\n'}"
+        if [[ "$restore_status" != "200" ]]; then
+            log_fail "Historical version restore failed with status $restore_status"
+            return
+        fi
+
+        current=$(curl -sf "$WEBDAV_URL/fault-test/versioned.txt")
+        if [[ "$current" == "version 1 content" || "$current" == "version 2 content" ]]; then
+            log_ok "Historical version restored with expected content"
+        else
+            log_fail "Historical version restore produced unexpected content: $current"
         fi
     elif [[ -z "$ADMIN_ACCESS_TOKEN" && ( "$history_status" == "401" || "$history_status" == "403" ) ]]; then
         log_skip "Version history verification requires admin authentication"
     else
-        log_warn "Version history not available: $history"
+        log_fail "Version history unavailable or lacks a historical hash (status: $history_status)"
     fi
 }
 

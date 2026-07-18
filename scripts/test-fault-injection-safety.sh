@@ -38,6 +38,22 @@ assert_not_exists() {
 	[[ ! -e "$path" ]] || fail "$path unexpectedly exists"
 }
 
+assert_directory_mode() {
+	local path="$1"
+	local expected="$2"
+	local actual
+
+	[[ -d "$path" ]] || fail "$path is not a directory"
+	if actual="$(stat -c '%a' "$path" 2>/dev/null)"; then
+		:
+	elif actual="$(stat -f '%Lp' "$path" 2>/dev/null)"; then
+		:
+	else
+		fail "cannot inspect directory mode for $path"
+	fi
+	[[ "$actual" == "$expected" ]] || fail "$path mode is $actual, want $expected"
+}
+
 make_fake_nasd() {
 	local path="$1"
 	write_executable "$path" \
@@ -530,6 +546,36 @@ run_isolated_runner_refuse_non_loopback_host_test() {
 	assert_not_exists "$fault_root"
 }
 
+run_isolated_runner_creates_private_backend_test() {
+	local case_dir="$TMP_ROOT/isolated-private-backend"
+	local fake_bin="$case_dir/bin"
+	local fault_root="$case_dir/fault-root"
+	local path
+
+	mkdir -p "$fake_bin"
+	write_executable "$fake_bin/go" \
+		'#!/usr/bin/env bash' \
+		'exit 23'
+
+	(
+		umask 0002
+		run_expect_failure "$case_dir/out.log" env \
+			PATH="$fake_bin:$PATH" \
+			MNEMONAS_FAULT_ROOT="$fault_root" \
+			bash "$REPO_ROOT/scripts/run-fault-injection-isolated.sh"
+	)
+
+	assert_file_contains "$case_dir/out.log" "Building isolated nasd binary"
+	for path in \
+		"$fault_root" \
+		"$fault_root/backend" \
+		"$fault_root/backend/storage" \
+		"$fault_root/backend/logs" \
+		"$fault_root/backend/bin"; do
+		assert_directory_mode "$path" "700"
+	done
+}
+
 run_fault_injection_docs_use_isolated_runner_test() {
 	assert_file_contains "$REPO_ROOT/Makefile" "./scripts/run-fault-injection-isolated.sh"
 	assert_file_contains "$REPO_ROOT/README.md" "make fault-injection"
@@ -541,9 +587,25 @@ run_fault_injection_docs_use_isolated_runner_test() {
 }
 
 run_fault_injection_webdav_users_requires_explicit_credentials_test() {
-	assert_file_contains "$REPO_ROOT/scripts/fault-injection-test.sh" 'MNEMONAS_WEBDAV_AUTH_TYPE:-$(read_config_value webdav auth_type)'
-	assert_file_contains "$REPO_ROOT/scripts/fault-injection-test.sh" 'WebDAV users auth requires MNEMONAS_WEBDAV_USERNAME and MNEMONAS_WEBDAV_PASSWORD'
-	assert_file_contains "$REPO_ROOT/scripts/fault-injection-test.sh" 'Using WebDAV $auth_type auth credentials for user'
+    assert_file_contains "$REPO_ROOT/scripts/fault-injection-test.sh" 'MNEMONAS_WEBDAV_AUTH_TYPE:-$(read_config_value webdav auth_type)'
+    assert_file_contains "$REPO_ROOT/scripts/fault-injection-test.sh" 'WebDAV users auth requires MNEMONAS_WEBDAV_USERNAME and MNEMONAS_WEBDAV_PASSWORD'
+    assert_file_contains "$REPO_ROOT/scripts/fault-injection-test.sh" 'Using WebDAV $auth_type auth credentials for user'
+}
+
+run_fault_injection_protected_checks_are_strict_test() {
+	local runner="$REPO_ROOT/scripts/run-fault-injection-isolated.sh"
+	local script="$REPO_ROOT/scripts/fault-injection-test.sh"
+
+	assert_file_contains "$runner" "FAULT_INJECTION_REQUIRE_ADMIN_AUTH=1"
+	assert_file_contains "$runner" "FAULT_INJECTION_CHANGE_BOOTSTRAP_PASSWORD=1"
+	assert_file_contains "$script" 'Completed bootstrap password change for protected API checks'
+	assert_file_contains "$script" 'read_json_number_field "$scrub_result" corrupted_objects'
+	assert_file_contains "$script" 'Scrub did not report a positive corrupted_objects count'
+	assert_file_contains "$script" 'read_historical_version_hash "$history"'
+	assert_file_contains "$script" '/restore?path=%2Ffault-test%2Fversioned.txt'
+	assert_file_contains "$script" 'Service quarantined corrupted metadata and recovered'
+	assert_file_not_contains "$script" 'grep -qi "corrupt\|error\|failed"'
+	assert_file_not_contains "$script" '-d "$(json_login_payload "admin" "$password")"'
 }
 
 run_fault_injection_webdav_users_missing_credentials_test() {
@@ -715,8 +777,10 @@ run_noninteractive_confirmation_test
 run_health_failure_does_not_restart_test
 run_isolated_runner_refuse_untrusted_root_test
 run_isolated_runner_refuse_non_loopback_host_test
+run_isolated_runner_creates_private_backend_test
 run_fault_injection_docs_use_isolated_runner_test
 run_fault_injection_webdav_users_requires_explicit_credentials_test
+run_fault_injection_protected_checks_are_strict_test
 run_fault_injection_webdav_users_missing_credentials_test
 run_fault_injection_webdav_users_env_credentials_test
 run_fault_injection_webdav_credentials_reject_newlines_test
